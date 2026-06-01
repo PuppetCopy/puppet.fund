@@ -1,0 +1,218 @@
+import { FLOAT_PRECISION } from '@puppet/contracts/const'
+import { abs, delta } from '../core/math.js'
+
+export interface IMinMax {
+  min: bigint
+  max: bigint
+}
+
+export function getPriceImpactUsd(
+  currentLongUsd: bigint,
+  currentShortUsd: bigint,
+  nextLongUsd: bigint,
+  nextShortUsd: bigint,
+  factorPositive: bigint,
+  factorNegative: bigint,
+  exponentFactor: bigint
+) {
+  if (nextLongUsd < 0n || nextShortUsd < 0n) {
+    return 0n
+  }
+
+  const currentDiff = delta(currentLongUsd, currentShortUsd)
+  const nextDiff = delta(nextLongUsd, nextShortUsd)
+
+  const isSameSideRebalance = currentLongUsd < currentShortUsd === nextLongUsd < nextShortUsd
+
+  if (isSameSideRebalance) {
+    const hasPositiveImpact = nextDiff < currentDiff
+    const factor = hasPositiveImpact ? factorPositive : factorNegative
+
+    return calculateImpactForSameSideRebalance(currentDiff, nextDiff, hasPositiveImpact, factor, exponentFactor)
+  }
+
+  return calculateImpactForCrossoverRebalance(currentDiff, nextDiff, factorPositive, factorNegative, exponentFactor)
+}
+
+export function calculateImpactForSameSideRebalance(
+  currentDiff: bigint,
+  nextDiff: bigint,
+  hasPositiveImpact: boolean,
+  factor: bigint,
+  exponentFactor: bigint
+) {
+  const currentImpact = applyImpactFactor(currentDiff, factor, exponentFactor)
+  const nextImpact = applyImpactFactor(nextDiff, factor, exponentFactor)
+
+  const deltaDiff = abs(currentImpact - nextImpact)
+
+  return hasPositiveImpact ? deltaDiff : 0n - deltaDiff
+}
+
+export function calculateImpactForCrossoverRebalance(
+  currentDiff: bigint,
+  nextDiff: bigint,
+  factorPositive: bigint,
+  factorNegative: bigint,
+  exponentFactor: bigint
+) {
+  const positiveImpact = applyImpactFactor(currentDiff, factorPositive, exponentFactor)
+  const negativeImpactUsd = applyImpactFactor(nextDiff, factorNegative, exponentFactor)
+
+  const deltaDiffUsd = abs(positiveImpact - negativeImpactUsd)
+
+  return positiveImpact > negativeImpactUsd ? deltaDiffUsd : 0n - deltaDiffUsd
+}
+
+// export function getCappedPositionImpactUsd(
+//   marketPrice: IMarketPrice,
+//   marketPoolInfo: IMarketInfo,
+//   sizeDeltaUsd: bigint,
+//   isLong: boolean
+// ) {
+//   const priceImpactDeltaUsd = getPriceImpactForPosition(marketPoolInfo, sizeDeltaUsd, isLong)
+
+//   if (priceImpactDeltaUsd < 0n) return priceImpactDeltaUsd
+
+//   const impactPoolAmount = marketPoolInfo.usage.positionImpactPoolAmount
+
+//   const maxPriceImpactUsdBasedOnImpactPool = getTokenUsd(marketPrice.indexTokenPrice.min, impactPoolAmount)
+
+//   let cappedImpactUsd = priceImpactDeltaUsd
+
+//   if (cappedImpactUsd > maxPriceImpactUsdBasedOnImpactPool) {
+//     cappedImpactUsd = maxPriceImpactUsdBasedOnImpactPool
+//   }
+
+//   const maxPriceImpactFactor = marketPoolInfo.config.maxPositionImpactFactorPositive
+//   const maxPriceImpactUsdBasedOnMaxPriceImpactFactor = applyFactor(abs(sizeDeltaUsd), maxPriceImpactFactor)
+
+//   if (cappedImpactUsd > maxPriceImpactUsdBasedOnMaxPriceImpactFactor) {
+//     cappedImpactUsd = maxPriceImpactUsdBasedOnMaxPriceImpactFactor
+//   }
+
+//   return cappedImpactUsd
+// }
+
+// export function getPriceImpactForPosition(marketInfo: IMarketInfo, sizeDeltaUsd: bigint, isLong: boolean) {
+//   const longInterestInUsd = marketInfo.usage.longInterestUsd
+//   const shortInterestInUsd = marketInfo.usage.shortInterestUsd
+
+//   const nextLongUsd = longInterestInUsd + (isLong ? sizeDeltaUsd : 0n)
+//   const nextShortUsd = shortInterestInUsd + (isLong ? 0n : sizeDeltaUsd)
+
+//   const priceImpactUsd = getPriceImpactUsd(
+//     longInterestInUsd,
+//     shortInterestInUsd,
+//     nextLongUsd,
+//     nextShortUsd,
+//     marketInfo.config.positionImpactFactorPositive,
+//     marketInfo.config.positionImpactFactorNegative,
+//     marketInfo.config.positionImpactExponentFactor
+//   )
+
+//   if (priceImpactUsd > 0n) {
+//     return priceImpactUsd
+//   }
+
+//   if (!(abs(marketInfo.fees.virtualInventory.virtualInventoryForPositions) > 0n)) {
+//     return priceImpactUsd
+//   }
+
+//   const virtualInventoryParams = getNextOpenInterestForVirtualInventory(
+//     marketInfo.fees.virtualInventory.virtualInventoryForPositions,
+//     sizeDeltaUsd,
+//     isLong
+//   )
+
+//   const priceImpactUsdForVirtualInventory = getPriceImpactUsd(
+//     longInterestInUsd,
+//     shortInterestInUsd,
+//     virtualInventoryParams.nextLongUsd,
+//     virtualInventoryParams.nextShortUsd,
+//     marketInfo.config.positionImpactFactorPositive,
+//     marketInfo.config.positionImpactFactorNegative,
+//     marketInfo.config.positionImpactExponentFactor
+//   )
+
+//   return priceImpactUsdForVirtualInventory < priceImpactUsd ? priceImpactUsdForVirtualInventory : priceImpactUsd
+// }
+
+export function getMarkPrice(price: IMinMax | { price: bigint }, isIncrease: boolean, isLong: boolean) {
+  // If using simplified price interface, return the single price
+  if ('price' in price) {
+    return price.price
+  }
+
+  const shouldUseMaxPrice = getShouldUseMaxPrice(isIncrease, isLong)
+  return shouldUseMaxPrice ? price.max : price.min
+}
+
+export function getNextOpenInterestForVirtualInventory(virtualInventory: bigint, deltaUsd: bigint, isLong: boolean) {
+  let currentLongUsd = 0n
+  let currentShortUsd = 0n
+
+  if (virtualInventory > 0n) {
+    currentShortUsd = virtualInventory
+  } else {
+    currentLongUsd = virtualInventory * -1n
+  }
+
+  if (deltaUsd < 0n) {
+    const offset = abs(deltaUsd)
+    currentLongUsd = currentLongUsd + offset
+    currentShortUsd = currentShortUsd + offset
+  }
+
+  return getNextOpenInterestParams(currentLongUsd, currentShortUsd, deltaUsd, isLong)
+}
+
+function getNextOpenInterestParams(currentLongUsd: bigint, currentShortUsd: bigint, usdDelta: bigint, isLong: boolean) {
+  let nextLongUsd = currentLongUsd
+  let nextShortUsd = currentShortUsd
+
+  if (isLong) {
+    nextLongUsd = currentLongUsd + usdDelta
+  } else {
+    nextShortUsd = currentShortUsd + usdDelta
+  }
+
+  return {
+    currentLongUsd,
+    currentShortUsd,
+    nextLongUsd,
+    nextShortUsd
+  }
+}
+
+export function getPriceImpactByAcceptablePrice(
+  sizeDeltaUsd: bigint,
+  acceptablePrice: bigint,
+  indexPrice: bigint,
+  isLong: boolean,
+  isIncrease: boolean
+) {
+  const shouldFlipPriceDiff = isIncrease ? !isLong : isLong
+  const priceDiff = (indexPrice - acceptablePrice) * (shouldFlipPriceDiff ? -1n : 1n)
+  const priceImpactDeltaUsd = (sizeDeltaUsd * priceDiff) / acceptablePrice
+  const priceImpactDeltaAmount = priceImpactDeltaUsd / indexPrice
+
+  return {
+    priceImpactDeltaUsd,
+    priceImpactDeltaAmount
+  }
+}
+
+export function getShouldUseMaxPrice(isIncrease: boolean, isLong: boolean) {
+  return isIncrease ? isLong : !isLong
+}
+
+function applyImpactFactor(diff: bigint, factor: bigint, exponent: bigint): bigint {
+  const _diff = Number(diff) / 10 ** 30
+  const _exponent = Number(exponent) / 10 ** 30
+
+  // Pow and convert back to BigNumber with 30 decimals
+  const result = BigInt(Math.round(_diff ** _exponent * 10 ** 30))
+
+  return (result * factor) / FLOAT_PRECISION
+}

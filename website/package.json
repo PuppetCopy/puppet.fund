@@ -1,0 +1,48 @@
+{
+  "name": "website",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "VITE_PWA_DEV=true bun --bun vite",
+    "dev:generate-pwa-assets": "bun --bun pwa-assets-generator",
+    "build": "bun --bun vite build",
+    "clean": "bun run clean:rimraf && tsgo -build --clean",
+    "clean:rimraf": "rimraf dist && tsgo -build --clean",
+    "preview": "bun --bun vite preview",
+    "build:tsc:all": "bun --filter '*' build:tsc",
+    "build:clean:all": "bun --filter '*' clean:tsc",
+    "tsgo:check": "tsgo --noEmit",
+    "start": "bun --bun serve dist -s -l $PORT"
+  },
+  "dependencies": {
+    "@puppet/contracts": "workspace:*",
+    "@puppet/sdk": "workspace:*",
+    "@wagmi/connectors": "8.0.15",
+    "@wagmi/core": "3.5.0",
+    "abitype": "catalog:",
+    "aelea": "catalog:",
+    "color": "5.0.3",
+    "graphql-ws": "catalog:",
+    "lightweight-charts": "catalog:",
+    "mersenne-twister": "1.1.0",
+    "viem": "catalog:"
+  },
+  "devDependencies": {
+    "@puppet/indexer-graphql": "workspace:*",
+    "@types/bun": "catalog:",
+    "@rollup/plugin-replace": "6.0.3",
+    "@vite-pwa/assets-generator": "1.0.2",
+    "dotenv": "catalog:",
+    "rimraf": "6.1.3",
+    "vite": "catalog:",
+    "vite-plugin-pwa": "1.3.0",
+    "workbox-core": "7.4.1",
+    "workbox-precaching": "7.4.1",
+    "workbox-routing": "7.4.1",
+    "workbox-window": "7.4.1"
+  },
+  "resolutions": {
+    "sharp": "0.32.6",
+    "sharp-ico": "0.1.5"
+  }
+}

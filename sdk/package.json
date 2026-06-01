@@ -1,0 +1,45 @@
+{
+  "name": "@puppet/sdk",
+  "private": true,
+  "license": "BUSL-1.1",
+  "description": "Puppet SDK",
+  "version": "1.0.0",
+  "type": "module",
+  "sideEffects": false,
+  "scripts": {
+    "build": "bun run clean && tsgo -b",
+    "clean": "rm -rf dist",
+    "tsgo:check": "tsgo --noEmit"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    "./*": {
+      "types": "./dist/types/*/index.d.ts",
+      "import": "./dist/esm/*/index.js"
+    }
+  },
+  "dependencies": {
+    "@noble/curves": "2.2.0",
+    "@noble/hashes": "2.2.0",
+    "@puppet/contracts": "workspace:*",
+    "@puppet/indexer-graphql": "workspace:*",
+    "aelea": "catalog:",
+    "graphql-ws": "catalog:",
+    "viem": "catalog:"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:",
+    "abitype": "catalog:"
+  },
+  "keywords": [
+    "puppet",
+    "puppet-sdk",
+    "defi",
+    "trading",
+    "ethereum",
+    "dapp",
+    "wallet"
+  ]
+}

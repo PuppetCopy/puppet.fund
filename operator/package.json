@@ -1,0 +1,49 @@
+{
+  "name": "@puppet.fund/operator",
+  "version": "0.0.1",
+  "license": "BUSL-1.1",
+  "description": "Build autonomous trading operators on Puppet",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./gmx": {
+      "types": "./dist/gmx.d.ts",
+      "import": "./dist/gmx.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "clean": "rm -rf dist",
+    "tsgo:check": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@noble/curves": "2.2.0",
+    "@noble/hashes": "2.2.0",
+    "aelea": "catalog:",
+    "graphql-ws": "catalog:",
+    "viem": "catalog:"
+  },
+  "devDependencies": {
+    "@puppet/contracts": "workspace:*",
+    "@puppet/sdk": "workspace:*",
+    "@types/bun": "catalog:",
+    "typescript": "catalog:",
+    "vite": "catalog:",
+    "vite-plugin-dts": "5.0.1"
+  },
+  "keywords": [
+    "puppet",
+    "operator",
+    "trading",
+    "defi",
+    "gmx",
+    "ethereum"
+  ]
+}

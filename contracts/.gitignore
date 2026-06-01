@@ -1,0 +1,20 @@
+node_modules/
+.DS_Store
+.docgen
+
+dist
+.env
+coverage
+coverage.json
+broadcast
+cache/
+/CLAUDE.md
+lib/
+
+*.local.*
+
+# foundry files
+forge-artifacts/
+forge-artifacts-prod/
+forge-cache/
+forge-cache-prod/

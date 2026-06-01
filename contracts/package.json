@@ -1,0 +1,39 @@
+{
+  "name": "@puppet/contracts",
+  "private": true,
+  "license": "BUSL-1.1",
+  "version": "0.1.0",
+  "type": "module",
+  "sideEffects": false,
+  "scripts": {
+    "test": "forge test -vvv",
+    "test:fork": "forge test -vvvv --fork-url=arbitrum",
+    "coverage": "forge coverage --report lcov",
+    "build": "tsgo -b",
+    "clean": "rm -rf dist forge-cache forge-cache-prod forge-artifacts forge-artifacts-prod src-ts broadcast .docgen cache",
+    "build:forge": "forge build",
+    "build:prod": "FOUNDRY_PROFILE=prod forge build",
+    "generate": "forge build && bun run script/generate/run.ts",
+    "tsgo:check": "tsgo --noEmit",
+    "docgen": "forge doc --out '.docgen' --build",
+    "lint": "forge fmt --check",
+    "lint:fmt": "forge fmt"
+  },
+  "files": ["dist"],
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js"
+    },
+    "./*": {
+      "types": "./dist/types/*/index.d.ts",
+      "import": "./dist/esm/*/index.js"
+    }
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:",
+    "smol-toml": "1.6.0",
+    "viem": "catalog:"
+  }
+}
+ 

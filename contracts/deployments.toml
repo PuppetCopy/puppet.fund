@@ -1,0 +1,76 @@
+[core.Dictate]
+address = "0x8639B4483f070794eAe35cb46DdE5Cc7bFb4Cb02"
+
+[core.Dictate.chainBlockMap]
+42161 = 467927965
+8453 = 46638130
+
+[core.AccountModule]
+address = "0x58e9600293F1538533dd327C218AFBB27B718603"
+
+[core.AccountModule.chainBlockMap]
+42161 = 467927982
+8453 = 46638132
+
+[core.PuppetAccount]
+address = "0x7CDA7524F9561EDD1F2c48C2c5B33a13bd3Eb159"
+
+[core.PuppetAccount.chainBlockMap]
+42161 = 467927968
+8453 = 46638131
+
+[core.TransientRoute]
+address = "0x3C31528B8447014893F678b233941AC41505476B"
+
+[core.TransientRoute.chainBlockMap]
+42161 = 467927974
+8453 = 46638131
+
+[core.RegisterModule]
+address = "0x7a848aa85473deF75e0BCF26Be67A0C08922Cae7"
+
+[core.RegisterModule.chainBlockMap]
+42161 = 467927966
+8453 = 46638131
+
+[core.WalletDepositModule]
+address = "0xB2a541e7eCFa251295F520d938290Be4e89Dc0D1"
+
+[core.WalletDepositModule.chainBlockMap]
+42161 = 467927984
+8453 = 46638132
+
+[core.MasterAccount]
+address = "0x438B0d4eb02A94C5b5A79b1f59ed637bAB74E8A0"
+
+[core.MasterAccount.chainBlockMap]
+42161 = 467927974
+8453 = 46638131
+
+[core.Attest]
+address = "0xD643D37401c75eD5Cace7a20c21B2970ab1D0d7a"
+
+[core.Attest.chainBlockMap]
+42161 = 467927981
+8453 = 46638131
+
+[chain.arbitrum]
+ShareToken = "0x4Bc2933DC8aFF99AB0715a7d3241f690aad8Dd10"
+ShareModule = "0xAb453057a84B5D35713e50e08CE9BAfd6Ba7B09e"
+RedeemStore = "0xF2d04d7544c85bDa089C37B70247133Bc23e7d36"
+RedeemModule = "0x54A93D860B3e8335cf6D091313E311E9c2D44621"
+AllocateStore = "0xe642cc7c56037C51624Bd70CCbCbfaF7D242dD00"
+SubscribeModule = "0x7cE9dbbf3c6607051c09D1166fD14871f39b00c5"
+AllocateModule = "0x1e7313EB93A9c9130eC45F089AcfDD283f998565"
+CoreGate = "0x5C71b01F2f6f17B12d53513538c353e42D3b2cFF"
+CoreGateImpl = "0x7A550A951e13175fab0B9A6EEe80FBa67d059979"
+HubGate = "0xF5c8Ea0d163d05671F05176af3a5380Cc78c7581"
+HubGateImpl = "0xE623a03E30b0823f29E839209b6c4A9E88c0c7d1"
+SpokeGate = "0xd838467d992E29C76038dA7c678E57Bd31184949"
+SpokeGateImpl = "0x5e61BEc89152dc34Bd2d2FB6A81710590A320f17"
+
+[chain.base]
+CoreGate = "0x5C71b01F2f6f17B12d53513538c353e42D3b2cFF"
+CoreGateImpl = "0xCBcffb7E045486fA57f4A818A187073b6Da7d9C8"
+SpokeGate = "0xd838467d992E29C76038dA7c678E57Bd31184949"
+SpokeGateImpl = "0xf21eb78C818b6237541E48170Af98c5F8cBeBECc"

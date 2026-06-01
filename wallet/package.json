@@ -1,0 +1,40 @@
+{
+  "name": "@puppet/wallet",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "dev:firefox": "wxt -b firefox",
+    "build": "wxt build && bun run build:client",
+    "clean": "rm -rf .wxt dist",
+    "build:firefox": "wxt build -b firefox",
+    "build:client": "tsgo -b tsconfig-client.json",
+    "tsgo:check": "tsgo --noEmit && tsgo --noEmit -p tsconfig-client.json",
+    "zip": "wxt zip",
+    "zip:firefox": "wxt zip -b firefox",
+    "postinstall": "wxt prepare"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    "./client": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@puppet/contracts": "workspace:*",
+    "@puppet/sdk": "workspace:*",
+    "viem": "catalog:"
+  },
+  "devDependencies": {
+    "@resvg/resvg-js": "2.6.2",
+    "@types/bun": "catalog:",
+    "@types/chrome": "catalog:",
+    "typescript": "catalog:",
+    "wxt": "0.20.26"
+  }
+}

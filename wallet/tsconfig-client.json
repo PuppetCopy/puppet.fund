@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.base.json",
+  "include": ["./src/client"],
+  "compilerOptions": {
+    "outDir": "dist/esm",
+    "rootDir": "./src/client",
+    "declaration": true,
+    "declarationDir": "dist/types",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "tsBuildInfoFile": "dist/tsconfig-client.tsbuildinfo"
+  }
+}

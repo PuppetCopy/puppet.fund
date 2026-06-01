@@ -1,0 +1,25 @@
+{
+  "name": "@puppet.fund/templates",
+  "version": "0.1.0",
+  "license": "BUSL-1.1",
+  "description": "Scaffold an autonomous trading operator on Puppet",
+  "type": "module",
+  "bin": {
+    "create-operator": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "scaffolds"
+  ],
+  "scripts": {
+    "tsgo:check": "tsgo --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:"
+  },
+  "keywords": [
+    "puppet",
+    "templates",
+    "scaffold"
+  ]
+}

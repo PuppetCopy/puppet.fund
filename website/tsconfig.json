@@ -1,0 +1,32 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "isolatedModules": true,
+    "useDefineForClassFields": true,
+    "lib": ["ESNext", "DOM", "WebWorker"],
+    "types": [
+      "@types/bun",
+      "vite/client",
+      "vite-plugin-pwa/client",
+      "vite-plugin-pwa/vanillajs",
+      "vite-plugin-pwa/info",
+      "vite-plugin-pwa/pwa-assets"
+    ],
+    "paths": {
+      "@/ui-components": ["./src/ui-components/index.ts"],
+      "@/ui-components/*": ["./src/ui-components/*"],
+      "@/ui-storage": ["./src/app/storage/index.ts"],
+      "@/ui-storage/*": ["./src/app/storage/*"],
+      "@/utils/*": ["./src/utils/*"]
+    }
+  },
+  "references": [{ "path": "../sdk" }],
+  "include": ["src", "vite.config.ts"]
+}

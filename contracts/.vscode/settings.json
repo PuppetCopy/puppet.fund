@@ -1,0 +1,8 @@
+{
+  "solidity.formatter": "forge",
+  "solidity.packageDefaultDependenciesContractsDirectory": "src",
+  "solidity.packageDefaultDependenciesDirectory": "lib",
+  "security.olympix.project.includePath": "/src",
+  "npm.packageManager": "bun",
+  "npm.scriptRunner": "bun"
+}

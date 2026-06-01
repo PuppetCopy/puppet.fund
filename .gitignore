@@ -1,0 +1,20 @@
+node_modules
+.env
+.env*.*
+!.env.example
+dist
+*.tsbuildinfo
+.tsbuildinfo
+*.local.*
+
+# This repo uses bun.lock as the authoritative lockfile.
+yarn.lock
+package-lock.json
+pnpm-lock.yaml
+
+# Akash SDL deploy files (keep templates only)
+sdl-*.yml
+!sdl-*.tmpl.yml
+
+.DS_Store
+.claude/

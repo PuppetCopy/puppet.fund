@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <base href="/">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>__APP_NAME__</title>
+    <meta name="description" content="__APP_DESC_LONG__">
+    <meta name="theme-color" content="__THEME_BACKGROUND__">
+    <link rel="preload" href="/assets/font/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+
+    <style>
+        :root {
+            --font: 'Geist', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            --text-sm: 1rem;
+            --text-xxl: 1.45rem;
+            --text-display: 3rem;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html {
+            text-rendering: geometricPrecision;
+        }
+
+        body {
+            margin: 0;
+            background-color: __THEME_BACKGROUND__;
+        }
+
+        input[type=number]::-webkit-inner-spin-button,
+        input[type=number]::-webkit-outer-spin-button {
+            appearance: none;
+        }
+
+        input[type="number"] {
+            appearance: none;
+        }
+
+        html {
+            font-family: var(--font);
+            font-feature-settings: "tnum" on, "lnum" on, "calt" off;
+            font-variant-ligatures: no-contextual;
+            font-synthesis: none;
+        }
+
+        button,
+        input,
+        select,
+        textarea {
+            font: inherit;
+            color: inherit;
+        }
+
+        @font-face {
+            font-family: 'Geist';
+            src: url("/assets/font/Geist-Variable.woff2") format('woff2-variations');
+            font-weight: 100 900;
+            font-style: normal;
+            font-display: swap;
+        }
+
+        @keyframes rotate {
+            from {
+                transform: rotate(0deg);
+            }
+
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        @keyframes spinnerSpring {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            25% {
+                transform: rotate(100deg);
+            }
+
+            50% {
+                transform: rotate(170deg);
+            }
+
+            75% {
+                transform: rotate(280deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+
+    <style id="aelea-theme-config">
+        body.light {
+            --name: 'light';
+            --primary: #b02a42;
+            --message: #171B1F;
+            --background: #f7faff;
+            --horizon: #ebf1f8;
+            --middleground: #ffffff;
+            --foreground: #51585f;
+            --positive: #0cab00;
+            --negative: #ea004c;
+            --indeterminate: #F6964C;
+            --shade-pole: var(--background);
+            --card-shadow: rgb(0 0 0 / 25%) 0px 0px 1px, rgb(59 60 74 / 15%) 0px 15px 20px, rgb(0 0 0 / 8%) 0px 1px 12px;
+        }
+
+        body.dark {
+            --name: 'dark';
+            --primary: #964565;
+            --message: #ffffff;
+            --background: #101217;
+            --horizon: #292c37;
+            --middleground: #1d202b;
+            --foreground: #94a4c2;
+            --positive: #38E567;
+            --negative: #ff6050;
+            --indeterminate: #ffc000;
+            --shade-pole: var(--background);
+            --card-shadow: rgb(0 0 0 / 25%) 0px 0px 1px, rgb(0 0 0 / 15%) 0px 15px 20px, rgb(0 0 0 / 8%) 0px 1px 12px;
+        }
+    </style>
+
+
+    <meta property="og:url" content="__WEBSITE__">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="__APP_DESC_SHORT__">
+    <meta property="og:description" content="__APP_DESC_LONG__">
+    <meta property="og:image" content="__OG_IMAGE__">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="1200">
+
+    <meta name="twitter:image:src" content="__OG_IMAGE__">
+    <meta name="twitter:site" content="__TWITTER_ID__" />
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="__APP_DESC_SHORT__">
+    <meta name="twitter:description" content="__APP_DESC_LONG__">
+
+</head>
+
+<body>
+    <script type="module" src="/src/main.ts"></script>
+</body>
+
+</html>

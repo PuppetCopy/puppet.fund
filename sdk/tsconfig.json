@@ -1,0 +1,20 @@
+{
+  "extends": "../tsconfig.base.json",
+  "include": [
+    "src"
+  ],
+  "compilerOptions": {
+    "outDir": "dist/esm",
+    "rootDir": "./src",
+    "declarationDir": "dist/types",
+    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo",
+    "lib": [
+      "DOM",
+      "ESNext"
+    ],
+    "types": ["@types/bun"]
+  },
+  "references": [
+    { "path": "../contracts" }
+  ]
+}

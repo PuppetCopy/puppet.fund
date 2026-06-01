@@ -1,0 +1,12 @@
+# WXT
+.wxt
+.output
+node_modules
+
+# Build output
+dist
+
+# Environment
+.env
+.env.local
+.env.*.local
