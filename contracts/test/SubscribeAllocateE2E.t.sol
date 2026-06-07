@@ -5,20 +5,17 @@ import {Test} from "forge-std/src/Test.sol";
 import {grantGate} from "./util/grantGate.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {AccountModule, CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH} from "src/core/module/AccountModule.sol";
+import {AccountModule} from "src/core/module/AccountModule.sol";
 import {AccountLib, ACCOUNT_TYPEHASH} from "src/core/AccountLib.sol";
 import {Attest} from "src/core/Attest.sol";
 import {TransientRoute} from "src/core/TransientRoute.sol";
-import {IAccount} from "src/core/interface/IAccount.sol";
 import {PuppetAccount} from "src/core/PuppetAccount.sol";
 import {MasterAccount} from "src/core/MasterAccount.sol";
 
 import {Dictate} from "src/core/Dictate.sol";
 import {RegisterModule} from "src/core/module/RegisterModule.sol";
 
-import {WalletDepositModule} from "src/core/module/WalletDepositModule.sol";
-import {SpokeGate} from "src/spoke/SpokeGate.sol";
-import {ACROSS_SPOKE_POOL_ARBITRUM} from "./shared/Across.t.sol";
+import {Bridge} from "src/utils/Bridge.sol";
 import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "src/hub/module/AllocateModule.sol";
 import {AllocateStore} from "src/hub/AllocateStore.sol";
 import {RedeemModule} from "src/hub/module/RedeemModule.sol";
@@ -29,7 +26,6 @@ import {ShareToken} from "src/hub/ShareToken.sol";
 import {SubscribeModule, SUBSCRIBE_INTENT_TYPEHASH} from "src/hub/module/SubscribeModule.sol";
 
 import {HubGate} from "src/hub/HubGate.sol";
-import {Error} from "src/utils/Error.sol";
 
 import {MockERC20} from "./mock/MockERC20.t.sol";
 
@@ -63,11 +59,10 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
     RedeemModule redeem;
     RedeemStore redeemStore;
     HubGate router;
-    SpokeGate walletGate;
 
     MasterAccount master;
     address masterAccount;
-    address masterTR;
+    address masterDepositRoute;
     PuppetAccount puppetA;
     PuppetAccount puppetB;
     PuppetAccount puppetC;
@@ -115,31 +110,28 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         redeem = new RedeemModule(dictate);
         redeemStore = new RedeemStore(dictate);
 
+        Bridge bridge = new Bridge(address(0), bytes32(0));
+
         router = new HubGate(
-            dictate, accountGate, shareGate, allocate, allocateStore, subscribe, redeem, redeemStore, register,
+            dictate,
+            accountGate,
+            shareGate,
+            allocate,
+            allocateStore,
+            subscribe,
+            redeem,
+            redeemStore,
+            register,
+            bridge,
             HubGate.Config({
                 attestor: attestor,
                 feeReceiver: feeReceiver,
                 transferGasLimit: TRANSFER_GAS_LIMIT,
                 maxBlockDelay: 5,
-                acrossSpokePool: ACROSS_SPOKE_POOL_ARBITRUM,
                 maxRelayFeeBps: 1000
             })
         );
 
-        WalletDepositModule walletDeposit = new WalletDepositModule(dictate, register);
-        walletGate = new SpokeGate(
-            dictate, accountGate, register, HUB_CHAIN_ID,
-            SpokeGate.Config({
-                attestor: attestor,
-                feeReceiver: feeReceiver,
-                transferGasLimit: TRANSFER_GAS_LIMIT,
-                maxBlockDelay: 5,
-                acrossSpokePool: ACROSS_SPOKE_POOL_ARBITRUM,
-                maxRelayFeeBps: 1000
-            })
-        );
-        dictate.setAccess(walletDeposit, address(walletGate));
         dictate.setAccess(allocateStore, address(subscribe));
         dictate.setAccess(allocateStore, address(allocate));
         dictate.setAccess(redeemStore, address(redeem));
@@ -153,7 +145,6 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         grantGate(dictate, accountGate, address(subscribe));
         grantGate(dictate, accountGate, address(allocate));
         grantGate(dictate, accountGate, address(redeem));
-        grantGate(dictate, accountGate, address(walletGate));
         grantGate(dictate, accountGate, address(router));
         grantGate(dictate, accountGate, address(this));
 
@@ -167,8 +158,8 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
 
         master = MasterAccount(payable(accountGate.predictMasterAccount(_masterParams())));
         masterAccount = address(master);
-        masterTR = accountGate.predictTransientRoute(masterAccount);
-        _createMaster(10e6);
+        masterDepositRoute = accountGate.predictDepositRoute(masterAccount);
+        _seedMasterAccount(10e6);
         puppetA = _bootstrapPuppet(userA, keyA, "PuppetA");
         puppetB = _bootstrapPuppet(userB, keyB, "PuppetB");
         puppetC = _bootstrapPuppet(userC, keyC, "PuppetC");
@@ -206,9 +197,7 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
 
         _subscribePuppet(puppetA, userA, keyA, "");
         assertEq(
-            allocateStore.mandateMap(address(puppetA), address(master)),
-            bytes32(0),
-            "empty body zeros the mandate"
+            allocateStore.mandateMap(address(puppetA), address(master)), bytes32(0), "empty body zeros the mandate"
         );
     }
 
@@ -218,7 +207,7 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         _subscribePuppet(puppetA, userA, keyA, "");
 
         _matched[address(puppetA)][address(master)] = 100e6;
-        usdc.mint(masterTR, 50e6);
+        usdc.mint(masterDepositRoute, 50e6);
         address[] memory _onlyA = new address[](1);
         _onlyA[0] = address(puppetA);
         _allocate(50e6, _onlyA);
@@ -232,7 +221,7 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         _subscribePuppet(puppetA, userA, keyA, _encodeBody(0, 0));
         _matched[address(puppetA)][address(master)] = 60e6;
 
-        usdc.mint(masterTR, 50e6);
+        usdc.mint(masterDepositRoute, 50e6);
         address[] memory _onlyA = new address[](1);
         _onlyA[0] = address(puppetA);
         _allocate(50e6, _onlyA);
@@ -246,7 +235,7 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         _subscribePuppet(puppetA, userA, keyA, _encodeBody(0, 30e6)); // rateLimit 30e6
         _matched[address(puppetA)][address(master)] = 100e6; // attested over the cap
 
-        usdc.mint(masterTR, 100e6);
+        usdc.mint(masterDepositRoute, 100e6);
         address[] memory _onlyA = new address[](1);
         _onlyA[0] = address(puppetA);
         _allocate(100e6, _onlyA);
@@ -261,17 +250,17 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         address[] memory _onlyA = new address[](1);
         _onlyA[0] = address(puppetA);
 
-        usdc.mint(masterTR, 50e6);
+        usdc.mint(masterDepositRoute, 50e6);
         _allocate(50e6, _onlyA);
         assertEq(puppetA.signedBalance(), 150e6, "first round debits 50e6");
 
         vm.warp(block.timestamp + 1 minutes);
-        usdc.mint(masterTR, 50e6);
+        usdc.mint(masterDepositRoute, 50e6);
         _allocate(50e6, _onlyA);
         assertEq(puppetA.signedBalance(), 150e6, "within throttle: round skipped");
 
         vm.warp(block.timestamp + 1 hours);
-        usdc.mint(masterTR, 50e6);
+        usdc.mint(masterDepositRoute, 50e6);
         _allocate(50e6, _onlyA);
         assertEq(puppetA.signedBalance(), 100e6, "after throttle window: allocates again");
     }
@@ -286,7 +275,7 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         _body[address(puppetA)][address(master)] = _staleBody;
         _sig[address(puppetA)][address(master)] = _staleSig;
 
-        usdc.mint(masterTR, 50e6);
+        usdc.mint(masterDepositRoute, 50e6);
         address[] memory _onlyA = new address[](1);
         _onlyA[0] = address(puppetA);
         _allocate(50e6, _onlyA);
@@ -306,7 +295,7 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         _sig[address(puppetA)][address(master)] = _sign(_foreignKey, _mandateDigest);
 
         _matched[address(puppetA)][address(master)] = 50e6;
-        usdc.mint(masterTR, 50e6);
+        usdc.mint(masterDepositRoute, 50e6);
         address[] memory _onlyA = new address[](1);
         _onlyA[0] = address(puppetA);
         _allocate(50e6, _onlyA);
@@ -324,7 +313,7 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         assertEq(usdc.balanceOf(address(puppetA)), 100e6, "actual reflects donation");
 
         _matched[address(puppetA)][address(master)] = 75e6;
-        usdc.mint(masterTR, 100e6);
+        usdc.mint(masterDepositRoute, 100e6);
         address[] memory _onlyA = new address[](1);
         _onlyA[0] = address(puppetA);
         _allocate(100e6, _onlyA);
@@ -344,7 +333,7 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         _matched[address(puppetA)][address(master)] = 100e6;
         _matched[address(puppetB)][address(master)] = 100e6;
         _matched[address(puppetC)][address(master)] = 100e6;
-        usdc.mint(masterTR, 100e6);
+        usdc.mint(masterDepositRoute, 100e6);
         address[] memory _sorted = _sortedTriple(address(puppetA), address(puppetB), address(puppetC));
         _allocate(100e6, _sorted);
 
@@ -521,10 +510,10 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         return AccountLib.AccountInitParams({user: _u, name: _name, baseTokenId: USDC_ID, signer: address(0)});
     }
 
-    function _createMaster(
+    function _seedMasterAccount(
         uint _genesisSeed
     ) internal {
-        usdc.mint(masterTR, _genesisSeed);
+        usdc.mint(masterDepositRoute, _genesisSeed);
         AllocateModule.AllocateIntent memory _intent = AllocateModule.AllocateIntent({
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -558,7 +547,7 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
                 )
             )
         );
-        router.createMaster(
+        router.seedMasterAccount(
             _intent,
             new bytes[](0),
             new bytes[](0),

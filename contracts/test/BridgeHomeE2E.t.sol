@@ -15,13 +15,11 @@ import {PuppetAccount} from "src/core/PuppetAccount.sol";
 import {MasterAccount} from "src/core/MasterAccount.sol";
 import {RegisterModule} from "src/core/module/RegisterModule.sol";
 import {
-    SpokeGate,
-    BRIDGE_HUB_INTENT_TYPEHASH,
-    BRIDGE_INTENT_TYPEHASH as MASTER_BRIDGE_INTENT_TYPEHASH,
-    OPERATE_INTENT_TYPEHASH,
-    MASTER_SIGN_RECORDED_BALANCE_INTENT_TYPEHASH
-} from "src/spoke/SpokeGate.sol";
-import {CoreGate, SIGN_TRANSIENT_ROUTE_BALANCE_INTENT_TYPEHASH} from "src/core/CoreGate.sol";
+    CoreGate,
+    BRIDGE_INTENT_TYPEHASH,
+    RECOGNIZE_INTENT_TYPEHASH,
+    OPERATE_INTENT_TYPEHASH
+} from "src/core/CoreGate.sol";
 import {Attest} from "src/core/Attest.sol";
 import {IAccount} from "src/core/interface/IAccount.sol";
 import {ACCOUNT_TYPEHASH, AccountLib} from "src/core/AccountLib.sol";
@@ -29,50 +27,14 @@ import {Error} from "src/utils/Error.sol";
 
 import {MockERC20} from "./mock/MockERC20.t.sol";
 import {MockWNT} from "./mock/MockWNT.t.sol";
+import {MockInputSettlerEscrow} from "./mock/MockInputSettlerEscrow.t.sol";
+import {Bridge} from "src/utils/Bridge.sol";
 import {IWNT} from "src/utils/interfaces/IWNT.sol";
 
-contract MockSpokePool {
-    address public lastDepositor;
-    address public lastRecipient;
-    address public lastInputToken;
-    address public lastOutputToken;
-    uint public lastInputAmount;
-    uint public lastOutputAmount;
-    uint public lastDestinationChainId;
-    uint public depositCount;
-
-    function depositV3(
-        address _depositor,
-        address _recipient,
-        address _inputToken,
-        address _outputToken,
-        uint _inputAmount,
-        uint _outputAmount,
-        uint _destinationChainId,
-        address,
-        /*_exclusiveRelayer*/
-        uint32,
-        /*_quoteTimestamp*/
-        uint32,
-        /*_fillDeadline*/
-        uint32,
-        /*_exclusivityDeadline*/
-        bytes calldata /*_message*/
-    ) external payable {
-        SafeERC20.safeTransferFrom(IERC20(_inputToken), msg.sender, address(this), _inputAmount);
-        lastDepositor = _depositor;
-        lastRecipient = _recipient;
-        lastInputToken = _inputToken;
-        lastOutputToken = _outputToken;
-        lastInputAmount = _inputAmount;
-        lastOutputAmount = _outputAmount;
-        lastDestinationChainId = _destinationChainId;
-        depositCount++;
-    }
-}
-
-contract BridgeHubE2ETest is Test {
+contract BridgeHomeE2ETest is Test {
     bytes32 constant USDC_ID = keccak256("USDC");
+    bytes32 constant OUTPUT_ORACLE = bytes32(uint(0xACE));
+    address constant INPUT_ORACLE = address(0xACE);
     uint constant TRANSFER_GAS_LIMIT = 200_000;
     uint constant HUB_CHAIN_ID = 42_161;
     uint constant ORIGIN_CHAIN_ID = 8453;
@@ -90,11 +52,10 @@ contract BridgeHubE2ETest is Test {
     AccountModule accountGate;
     RegisterModule register;
     CoreGate coreGate;
-    SpokeGate walletGate;
     WalletDepositModule walletDeposit;
-    MockSpokePool spokePool;
+    MockInputSettlerEscrow mockSettler;
+    Bridge bridge;
     address depositPuppetAccountAddr;
-    bytes32 walletDomainSeparator;
 
     PuppetAccount puppet;
     TransientRoute transientRoute;
@@ -123,12 +84,18 @@ contract BridgeHubE2ETest is Test {
         );
         dictate.setAccess(attest, address(accountGate));
 
-        walletDeposit = new WalletDepositModule(dictate, register);
+        walletDeposit = new WalletDepositModule(dictate);
 
-        spokePool = new MockSpokePool();
+        mockSettler = new MockInputSettlerEscrow();
+        bridge = new Bridge(address(mockSettler), bytes32(0));
 
         coreGate = new CoreGate(
-            dictate, accountGate, walletDeposit, register,
+            dictate,
+            accountGate,
+            walletDeposit,
+            register,
+            bridge,
+            HUB_CHAIN_ID,
             CoreGate.Config({
                 attestor: attestor,
                 feeReceiver: feeReceiver,
@@ -137,21 +104,9 @@ contract BridgeHubE2ETest is Test {
                 maxRelayFeeBps: 1000
             })
         );
-        walletGate = new SpokeGate(
-            dictate, accountGate, register, HUB_CHAIN_ID,
-            SpokeGate.Config({
-                attestor: attestor,
-                feeReceiver: feeReceiver,
-                transferGasLimit: TRANSFER_GAS_LIMIT,
-                maxBlockDelay: 5,
-                acrossSpokePool: address(spokePool),
-                maxRelayFeeBps: 1000
-            })
-        );
         dictate.setAccess(walletDeposit, address(coreGate));
         dictate.setAccess(walletDeposit, address(this));
         grantGate(dictate, accountGate, address(coreGate));
-        grantGate(dictate, accountGate, address(walletGate));
         grantGate(dictate, accountGate, address(this));
         dictate.setAccess(register, address(this));
         vm.stopPrank();
@@ -165,9 +120,7 @@ contract BridgeHubE2ETest is Test {
         });
 
         (puppet,) = accountGate.createPuppetAccount(params, _signDeployAuth(userKey), "");
-        transientRoute = TransientRoute(payable(accountGate.predictTransientRoute(address(puppet))));
-
-        walletDomainSeparator = _domainSeparator("SpokeGate", address(walletGate));
+        transientRoute = TransientRoute(payable(accountGate.predictDepositRoute(address(puppet))));
     }
 
     function test_registerToken_revertsOnSelfHubTokenOnSpoke() public {
@@ -190,61 +143,65 @@ contract BridgeHubE2ETest is Test {
         uint inputAmount = 100e6;
         uint bridgeFee = 1e6;
         uint relayFee = 1e6;
-        uint acrossInputAmount = inputAmount - relayFee;
-        uint expectedOutputAmount = acrossInputAmount - bridgeFee;
+        uint settlerInputAmount = inputAmount - relayFee;
+        uint expectedOutputAmount = settlerInputAmount - bridgeFee;
 
         vm.chainId(ORIGIN_CHAIN_ID);
         _seedAccounted(puppet, inputAmount);
 
-        SpokeGate.BridgeHubIntent memory intent =
+        CoreGate.BridgeIntent memory intent =
             _buildBridge({_inputAmount: inputAmount, _bridgeFee: bridgeFee, _relayFee: relayFee});
         bytes32 digest = _bridgeDigest(intent);
         nonce++;
-        walletGate.bridgeHub(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), relayFee);
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), relayFee);
 
         assertEq(usdc.balanceOf(address(puppet)), 0, "origin puppet fully swept");
-        assertEq(usdc.balanceOf(address(spokePool)), acrossInputAmount, "bridge pool received input minus relayFee");
+        assertEq(usdc.balanceOf(address(mockSettler)), settlerInputAmount, "bridge pool received input minus relayFee");
         assertEq(usdc.balanceOf(feeReceiver), relayFee, "feeReceiver paid origin relayFee");
         assertEq(puppet.signedBalance(), 0, "origin puppet signedBalance net zero");
 
-        assertEq(spokePool.depositCount(), 1);
-        assertEq(spokePool.lastInputAmount(), acrossInputAmount);
-        assertEq(spokePool.lastOutputAmount(), expectedOutputAmount);
-        assertEq(spokePool.lastDestinationChainId(), HUB_CHAIN_ID);
-        assertEq(spokePool.lastDepositor(), address(puppet));
-        assertEq(spokePool.lastRecipient(), address(transientRoute), "Across recipient = hub TransientRoute");
-        assertEq(spokePool.lastInputToken(), address(usdc));
-        assertEq(spokePool.lastOutputToken(), address(usdc));
+        assertEq(mockSettler.openCount(), 1);
+        assertEq(mockSettler.lastInputAmount(), settlerInputAmount);
+        assertEq(mockSettler.lastOutputAmount(), expectedOutputAmount);
+        assertEq(mockSettler.lastDestinationChainId(), HUB_CHAIN_ID);
+        assertEq(mockSettler.lastUser(), address(puppet));
+        assertEq(mockSettler.lastRecipient(), address(transientRoute), "OIF recipient = hub TransientRoute");
+        assertEq(mockSettler.lastInputToken(), address(usdc));
+        assertEq(mockSettler.lastOutputToken(), address(usdc));
 
         vm.chainId(HUB_CHAIN_ID);
         usdc.mint(address(transientRoute), expectedOutputAmount);
-        assertEq(usdc.balanceOf(address(transientRoute)), expectedOutputAmount, "TR credited via Across fill");
+        assertEq(usdc.balanceOf(address(transientRoute)), expectedOutputAmount, "TR credited via OIF fill");
 
-        CoreGate.SignTransientRouteBalanceIntent memory recognizeIntent = CoreGate.SignTransientRouteBalanceIntent({
+        CoreGate.RecognizeIntent memory recognizeIntent = CoreGate.RecognizeIntent({
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             params: params,
             amount: expectedOutputAmount,
             acceptableRelayFee: 0,
             nonce: nonce,
-            chainId: block.chainid
+            chainId: block.chainid,
+            isMaster: false,
+            fromTransientRoute: true
         });
         bytes32 recognizeStructHash = keccak256(
             abi.encode(
-                SIGN_TRANSIENT_ROUTE_BALANCE_INTENT_TYPEHASH,
+                RECOGNIZE_INTENT_TYPEHASH,
                 _hashAccount(recognizeIntent.params),
                 recognizeIntent.blockNumber,
                 recognizeIntent.deadline,
                 recognizeIntent.acceptableRelayFee,
                 recognizeIntent.nonce,
                 recognizeIntent.chainId,
+                recognizeIntent.isMaster,
+                recognizeIntent.fromTransientRoute,
                 recognizeIntent.amount
             )
         );
         bytes32 recognizeDigest = keccak256(
             abi.encodePacked("\x19\x01", _domainSeparator("CoreGate", address(coreGate)), recognizeStructHash)
         );
-        coreGate.signTransientRouteBalance(
+        coreGate.recognize(
             recognizeIntent, _signDigest(userKey, recognizeDigest), _signDigest(attestorKey, recognizeDigest), 0
         );
 
@@ -256,11 +213,11 @@ contract BridgeHubE2ETest is Test {
     function test_e2e_universal_create2_address_matches_across_chains() public {
         vm.chainId(ORIGIN_CHAIN_ID);
         address originPrediction =
-            AccountLib.predictTransientRoute(depositPuppetAccountAddr, address(accountGate), address(puppet));
+            AccountLib.predictDepositRoute(depositPuppetAccountAddr, address(accountGate), address(puppet));
 
         vm.chainId(HUB_CHAIN_ID);
         address hubPrediction =
-            AccountLib.predictTransientRoute(depositPuppetAccountAddr, address(accountGate), address(puppet));
+            AccountLib.predictDepositRoute(depositPuppetAccountAddr, address(accountGate), address(puppet));
 
         assertEq(originPrediction, hubPrediction, "transientRoute address universal across chains");
         assertEq(originPrediction, address(transientRoute), "matches deployed instance");
@@ -270,98 +227,98 @@ contract BridgeHubE2ETest is Test {
         vm.chainId(ORIGIN_CHAIN_ID);
         _seedAccounted(puppet, 200e6);
 
-        SpokeGate.BridgeHubIntent memory intent = _buildBridge({_inputAmount: 100e6, _bridgeFee: 1e6, _relayFee: 1e6});
+        CoreGate.BridgeIntent memory intent = _buildBridge({_inputAmount: 100e6, _bridgeFee: 1e6, _relayFee: 1e6});
         bytes32 digest = _bridgeDigest(intent);
         nonce++;
-        walletGate.bridgeHub(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 1e6);
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 1e6);
 
         assertEq(usdc.balanceOf(address(puppet)), 100e6, "surplus stays in origin account");
-        assertEq(usdc.balanceOf(address(spokePool)), 99e6);
+        assertEq(usdc.balanceOf(address(mockSettler)), 99e6);
         assertEq(usdc.balanceOf(feeReceiver), 1e6);
         assertEq(puppet.signedBalance(), 100e6, "remainder still signed");
     }
 
     function test_bridge_zero_balance_reverts() public {
         vm.chainId(ORIGIN_CHAIN_ID);
-        SpokeGate.BridgeHubIntent memory intent = _buildBridge({_inputAmount: 0, _bridgeFee: 0, _relayFee: 0});
+        CoreGate.BridgeIntent memory intent = _buildBridge({_inputAmount: 0, _bridgeFee: 0, _relayFee: 0});
         bytes32 digest = _bridgeDigest(intent);
 
         vm.expectRevert(Error.Deposit__NothingToBridge.selector);
-        walletGate.bridgeHub(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
     }
 
     function test_bridge_bridgeFee_eq_input_reverts() public {
         vm.chainId(ORIGIN_CHAIN_ID);
         _seedAccounted(puppet, 50e6);
-        SpokeGate.BridgeHubIntent memory intent = _buildBridge({_inputAmount: 50e6, _bridgeFee: 50e6, _relayFee: 0});
+        CoreGate.BridgeIntent memory intent = _buildBridge({_inputAmount: 50e6, _bridgeFee: 50e6, _relayFee: 0});
         bytes32 digest = _bridgeDigest(intent);
 
-        vm.expectRevert(abi.encodeWithSelector(Error.Deposit__BridgeFeeExceedsInput.selector, 50e6, 50e6));
-        walletGate.bridgeHub(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
+        vm.expectRevert(Error.Deposit__ZeroBridgeOutput.selector);
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
     }
 
     function test_bridge_underfunded_reverts() public {
         vm.chainId(ORIGIN_CHAIN_ID);
         _seedAccounted(puppet, 40e6);
 
-        SpokeGate.BridgeHubIntent memory intent = _buildBridge({_inputAmount: 50e6, _bridgeFee: 1e6, _relayFee: 1e6});
+        CoreGate.BridgeIntent memory intent = _buildBridge({_inputAmount: 50e6, _bridgeFee: 1e6, _relayFee: 1e6});
         bytes32 digest = _bridgeDigest(intent);
 
         vm.expectRevert(abi.encodeWithSelector(Error.Deposit__InsufficientBalance.selector, 40e6, 50e6));
-        walletGate.bridgeHub(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 1e6);
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 1e6);
     }
 
     function test_bridge_requires_auth() public {
         vm.chainId(ORIGIN_CHAIN_ID);
         _seedAccounted(puppet, 50e6);
-        SpokeGate.BridgeHubIntent memory intent = _buildBridge({_inputAmount: 50e6, _bridgeFee: 1e6, _relayFee: 0});
+        CoreGate.BridgeIntent memory intent = _buildBridge({_inputAmount: 50e6, _bridgeFee: 1e6, _relayFee: 0});
         bytes32 digest = _bridgeDigest(intent);
         bytes memory sig = _signDigest(userKey, digest);
         (, uint attackerKey) = makeAddrAndKey("Attacker");
         bytes memory att = _signDigest(attackerKey, digest);
 
         vm.expectRevert(Error.Account__InvalidSignature.selector);
-        walletGate.bridgeHub(intent, sig, att, 0);
+        coreGate.bridge(intent, sig, att, 0);
     }
 
     function test_bridge_wrong_signer_reverts() public {
         vm.chainId(ORIGIN_CHAIN_ID);
         _seedAccounted(puppet, 100e6);
-        SpokeGate.BridgeHubIntent memory intent = _buildBridge({_inputAmount: 50e6, _bridgeFee: 1e6, _relayFee: 0});
+        CoreGate.BridgeIntent memory intent = _buildBridge({_inputAmount: 50e6, _bridgeFee: 1e6, _relayFee: 0});
         bytes32 digest = _bridgeDigest(intent);
         (, uint attackerKey) = makeAddrAndKey("Attacker");
         bytes memory sig = _signDigest(attackerKey, digest);
         bytes memory att = _signDigest(attestorKey, digest);
 
         vm.expectRevert(Error.Account__InvalidSignature.selector);
-        walletGate.bridgeHub(intent, sig, att, 0);
+        coreGate.bridge(intent, sig, att, 0);
     }
 
     function test_bridge_nonce_reuse_reverts() public {
         vm.chainId(ORIGIN_CHAIN_ID);
         _seedAccounted(puppet, 200e6);
 
-        SpokeGate.BridgeHubIntent memory intent = _buildBridge({_inputAmount: 50e6, _bridgeFee: 1e6, _relayFee: 0});
+        CoreGate.BridgeIntent memory intent = _buildBridge({_inputAmount: 50e6, _bridgeFee: 1e6, _relayFee: 0});
         bytes32 digest1 = _bridgeDigest(intent);
         nonce++;
-        walletGate.bridgeHub(intent, _signDigest(userKey, digest1), _signDigest(attestorKey, digest1), 0);
+        coreGate.bridge(intent, _signDigest(userKey, digest1), _signDigest(attestorKey, digest1), 0);
 
         bytes32 digest2 = _bridgeDigest(intent);
         vm.expectRevert();
-        walletGate.bridgeHub(intent, _signDigest(userKey, digest2), _signDigest(attestorKey, digest2), 0);
+        coreGate.bridge(intent, _signDigest(userKey, digest2), _signDigest(attestorKey, digest2), 0);
     }
 
     function test_bridge_no_relayFee_passthrough() public {
         vm.chainId(ORIGIN_CHAIN_ID);
         _seedAccounted(puppet, 100e6);
 
-        SpokeGate.BridgeHubIntent memory intent = _buildBridge({_inputAmount: 100e6, _bridgeFee: 1e6, _relayFee: 0});
+        CoreGate.BridgeIntent memory intent = _buildBridge({_inputAmount: 100e6, _bridgeFee: 1e6, _relayFee: 0});
         bytes32 digest = _bridgeDigest(intent);
         nonce++;
-        walletGate.bridgeHub(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
 
         assertEq(usdc.balanceOf(address(puppet)), 0);
-        assertEq(usdc.balanceOf(address(spokePool)), 100e6);
+        assertEq(usdc.balanceOf(address(mockSettler)), 100e6);
         assertEq(usdc.balanceOf(feeReceiver), 0);
         assertEq(puppet.signedBalance(), 0);
     }
@@ -372,26 +329,26 @@ contract BridgeHubE2ETest is Test {
         vm.chainId(ORIGIN_CHAIN_ID);
         _seedAccounted(puppet, 100e6);
 
-        SpokeGate.BridgeHubIntent memory intent = _buildBridge({_inputAmount: 100e6, _bridgeFee: 1e6, _relayFee: 0});
+        CoreGate.BridgeIntent memory intent = _buildBridge({_inputAmount: 100e6, _bridgeFee: 1e6, _relayFee: 0});
         intent.outputToken = IERC20(wrongHubToken);
         bytes32 digest = _bridgeDigest(intent);
 
         vm.expectRevert(
             abi.encodeWithSelector(Error.Deposit__BaseTokenMismatch.selector, USDC_ID, address(usdc), wrongHubToken)
         );
-        walletGate.bridgeHub(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
     }
 
     function test_bridge_non_hub_destination_reverts() public {
         vm.chainId(ORIGIN_CHAIN_ID);
         _seedAccounted(puppet, 100e6);
 
-        SpokeGate.BridgeHubIntent memory intent = _buildBridge({_inputAmount: 100e6, _bridgeFee: 1e6, _relayFee: 0});
+        CoreGate.BridgeIntent memory intent = _buildBridge({_inputAmount: 100e6, _bridgeFee: 1e6, _relayFee: 0});
         intent.destinationChainId = 1;
         bytes32 digest = _bridgeDigest(intent);
 
         vm.expectRevert(abi.encodeWithSelector(Error.Deposit__InvalidDestinationChain.selector, HUB_CHAIN_ID, 1));
-        walletGate.bridgeHub(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
     }
 
     function test_depositWnt_wraps_and_credits_DA() public {
@@ -443,13 +400,13 @@ contract BridgeHubE2ETest is Test {
         vm.store(master, bytes32(uint(0)), bytes32(amount));
 
         vm.chainId(ORIGIN_CHAIN_ID);
-        SpokeGate.BridgeIntent memory intent = _buildMasterBridge(false, amount, 1e6, 1e6);
+        CoreGate.BridgeIntent memory intent = _buildMasterBridge(false, amount, 1e6, 1e6);
         bytes32 digest = _masterBridgeDigest(intent);
-        walletGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 1e6);
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 1e6);
 
-        assertEq(spokePool.lastDepositor(), master, "depositor = master account");
-        assertEq(spokePool.lastRecipient(), masterDA, "recipient = master TransientRoute");
-        assertEq(spokePool.lastInputAmount(), amount - 1e6, "across input = total minus relayFee");
+        assertEq(mockSettler.lastUser(), master, "depositor = master account");
+        assertEq(mockSettler.lastRecipient(), masterDA, "recipient = master TransientRoute");
+        assertEq(mockSettler.lastInputAmount(), amount - 1e6, "across input = total minus relayFee");
         assertEq(usdc.balanceOf(feeReceiver), 1e6, "feeReceiver paid");
         assertEq(MasterAccount(payable(master)).signedBalance(), 0, "master signedBalance swept");
     }
@@ -462,18 +419,54 @@ contract BridgeHubE2ETest is Test {
         usdc.mint(masterDA, amount);
 
         vm.chainId(ORIGIN_CHAIN_ID);
-        SpokeGate.BridgeIntent memory intent = _buildMasterBridge(true, amount, 1e6, 1e6);
+        CoreGate.BridgeIntent memory intent = _buildMasterBridge(true, amount, 1e6, 1e6);
         bytes32 digest = _masterBridgeDigest(intent);
-        walletGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 1e6);
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 1e6);
 
-        assertEq(spokePool.lastDepositor(), masterDA, "depositor = master TransientRoute");
-        assertEq(spokePool.lastRecipient(), masterDA, "recipient = master TransientRoute");
+        assertEq(mockSettler.lastUser(), masterDA, "depositor = master TransientRoute");
+        assertEq(mockSettler.lastRecipient(), masterDA, "recipient = master TransientRoute");
         assertEq(usdc.balanceOf(masterDA), 0, "master DA spent: input plus relayFee");
         assertEq(usdc.balanceOf(feeReceiver), 1e6, "feeReceiver paid from DA");
         assertEq(MasterAccount(payable(master)).signedBalance(), 0, "master signedBalance untouched");
     }
 
-    function test_master_operate() public {
+    function test_master_bridge_swap_nonBaseInputToBase() public {
+        _createMaster(params, userKey);
+        address master = address(accountGate.verifyMasterAccount(params));
+        address masterDA = accountGate.predictTransientRoute(master);
+        usdc.mint(master, 50e6);
+        vm.store(master, bytes32(uint(0)), bytes32(uint(50e6)));
+        MockERC20 residual = new MockERC20("Residual", "RES", 18);
+        uint amount = 1e18;
+        residual.mint(masterDA, amount);
+
+        vm.chainId(ORIGIN_CHAIN_ID);
+        CoreGate.BridgeIntent memory intent = _buildMasterBridge(true, amount, 1e6, 1e6);
+        intent.inputToken = IERC20(address(residual));
+        bytes32 digest = _masterBridgeDigest(intent);
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 1e6);
+
+        assertEq(mockSettler.openCount(), 1);
+        assertEq(mockSettler.lastInputToken(), address(residual), "swap input is non-base residual");
+        assertEq(mockSettler.lastOutputToken(), address(usdc), "swap output is base USDC");
+        assertEq(residual.balanceOf(masterDA), 0, "non-base residual fully swept");
+        assertEq(MasterAccount(payable(master)).signedBalance(), 50e6, "base signedBalance untouched by transient swap");
+    }
+
+    function test_master_bridge_swap_nonBaseInput_signedBalancePath_reverts() public {
+        _createMaster(params, userKey);
+        MockERC20 residual = new MockERC20("Residual", "RES", 18);
+        vm.chainId(ORIGIN_CHAIN_ID);
+        CoreGate.BridgeIntent memory intent = _buildMasterBridge(false, 100e6, 1e6, 1e6);
+        intent.inputToken = IERC20(address(residual));
+        bytes32 digest = _masterBridgeDigest(intent);
+        vm.expectRevert(
+            abi.encodeWithSelector(Error.Intent__TokenMismatch.selector, USDC_ID, address(usdc), address(residual))
+        );
+        coreGate.bridge(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 1e6);
+    }
+
+    function test_master_operate_hub() public {
         _createMaster(params, userKey);
         address master = address(accountGate.verifyMasterAccount(params));
         uint amount = 50e6;
@@ -481,7 +474,7 @@ contract BridgeHubE2ETest is Test {
         vm.store(master, bytes32(uint(0)), bytes32(amount));
 
         IAccount.Call[] memory _emptyCalls = new IAccount.Call[](0);
-        SpokeGate.OperateIntent memory intent = SpokeGate.OperateIntent({
+        CoreGate.OperateIntent memory intent = CoreGate.OperateIntent({
             params: params,
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -511,27 +504,27 @@ contract BridgeHubE2ETest is Test {
         bytes32 _dom = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256("SpokeGate"),
+                keccak256("CoreGate"),
                 keccak256("1"),
                 block.chainid,
-                address(walletGate)
+                address(coreGate)
             )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _dom, _sh));
 
-        walletGate.operate(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
+        coreGate.operate(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
 
-        assertEq(MasterAccount(payable(master)).signedBalance(), amount, "signedBalance unchanged by no-op operate");
+        assertEq(MasterAccount(payable(master)).signedBalance(), amount, "signedBalance unchanged by no-op hub operate");
     }
 
-    function test_master_signRecordedBalance() public {
+    function test_master_recognize() public {
         _createMaster(params, userKey);
         address master = address(accountGate.verifyMasterAccount(params));
         address masterDA = accountGate.predictTransientRoute(master);
         uint amount = 75e6;
         usdc.mint(masterDA, amount);
 
-        SpokeGate.MasterSignRecordedBalanceIntent memory intent = SpokeGate.MasterSignRecordedBalanceIntent({
+        CoreGate.RecognizeIntent memory intent = CoreGate.RecognizeIntent({
             params: params,
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -539,25 +532,26 @@ contract BridgeHubE2ETest is Test {
             nonce: 1,
             chainId: block.chainid,
             amount: amount,
+            isMaster: true,
             fromTransientRoute: true
         });
-        bytes32 digest = _masterSignRecordedBalanceDigest(intent);
+        bytes32 digest = _masterRecognizeDigest(intent);
 
-        walletGate.signRecordedBalance(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
+        coreGate.recognize(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
 
         assertEq(usdc.balanceOf(masterDA), 0, "TR fully swept");
         assertEq(usdc.balanceOf(master), amount, "master received TR funds");
         assertEq(MasterAccount(payable(master)).signedBalance(), amount, "master signedBalance credited");
     }
 
-    function test_master_signRecordedBalance_refundPath() public {
+    function test_master_recognize_refundPath() public {
         _createMaster(params, userKey);
         address master = address(accountGate.verifyMasterAccount(params));
         address masterDA = accountGate.predictTransientRoute(master);
         uint amount = 40e6;
         usdc.mint(master, amount);
 
-        SpokeGate.MasterSignRecordedBalanceIntent memory intent = SpokeGate.MasterSignRecordedBalanceIntent({
+        CoreGate.RecognizeIntent memory intent = CoreGate.RecognizeIntent({
             params: params,
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -565,35 +559,36 @@ contract BridgeHubE2ETest is Test {
             nonce: 1,
             chainId: block.chainid,
             amount: amount,
+            isMaster: true,
             fromTransientRoute: false
         });
-        bytes32 digest = _masterSignRecordedBalanceDigest(intent);
+        bytes32 digest = _masterRecognizeDigest(intent);
 
-        walletGate.signRecordedBalance(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
+        coreGate.recognize(intent, _signDigest(userKey, digest), _signDigest(attestorKey, digest), 0);
 
         assertEq(usdc.balanceOf(masterDA), 0, "TR untouched");
         assertEq(usdc.balanceOf(master), amount, "master balance unchanged");
         assertEq(MasterAccount(payable(master)).signedBalance(), amount, "refund credited to signedBalance");
     }
 
-    function _masterSignRecordedBalanceDigest(
-        SpokeGate.MasterSignRecordedBalanceIntent memory _intent
+    function _masterRecognizeDigest(
+        CoreGate.RecognizeIntent memory _intent
     ) internal view returns (bytes32) {
         bytes32 _structHash = keccak256(
             abi.encode(
-                MASTER_SIGN_RECORDED_BALANCE_INTENT_TYPEHASH,
+                RECOGNIZE_INTENT_TYPEHASH,
                 _hashAccount(_intent.params),
                 _intent.blockNumber,
                 _intent.deadline,
                 _intent.acceptableRelayFee,
                 _intent.nonce,
                 _intent.chainId,
+                _intent.isMaster,
                 _intent.fromTransientRoute,
                 _intent.amount
             )
         );
-        return
-            keccak256(abi.encodePacked("\x19\x01", _domainSeparator("SpokeGate", address(walletGate)), _structHash));
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator("CoreGate", address(coreGate)), _structHash));
     }
 
     function _buildMasterBridge(
@@ -601,61 +596,64 @@ contract BridgeHubE2ETest is Test {
         uint _inputAmount,
         uint _bridgeFee,
         uint _relayFee
-    ) internal view returns (SpokeGate.BridgeIntent memory) {
-        return SpokeGate.BridgeIntent({
+    ) internal view returns (CoreGate.BridgeIntent memory) {
+        return CoreGate.BridgeIntent({
             params: params,
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: _relayFee,
             nonce: 1,
             chainId: block.chainid,
+            isMaster: true,
             fromTransientRoute: _fromTransientRoute,
             inputToken: IERC20(address(usdc)),
             outputToken: IERC20(address(usdc)),
             inputAmount: _inputAmount,
-            bridgeFee: _bridgeFee,
+            outputAmount: _inputAmount > _relayFee + _bridgeFee ? _inputAmount - _relayFee - _bridgeFee : 0,
             destinationChainId: 1,
-            exclusiveRelayer: address(0),
-            quoteTimestamp: uint32(block.timestamp),
-            fillDeadline: uint32(block.timestamp + 3600),
-            exclusivityDeadline: 0
+            inputOracle: INPUT_ORACLE,
+            outputOracle: OUTPUT_ORACLE,
+            expires: uint32(block.timestamp + 3600),
+            fillDeadline: uint32(block.timestamp + 3600)
         });
     }
 
     function _masterBridgeDigest(
-        SpokeGate.BridgeIntent memory _intent
+        CoreGate.BridgeIntent memory _intent
     ) internal view returns (bytes32) {
         bytes32 _structHash = keccak256(
             abi.encode(
-                MASTER_BRIDGE_INTENT_TYPEHASH,
+                BRIDGE_INTENT_TYPEHASH,
                 _hashAccount(_intent.params),
                 _intent.blockNumber,
                 _intent.deadline,
                 _intent.acceptableRelayFee,
                 _intent.nonce,
                 _intent.chainId,
+                _intent.isMaster,
                 _intent.fromTransientRoute,
                 _intent.inputToken,
                 _intent.outputToken,
                 _intent.inputAmount,
-                _intent.bridgeFee,
+                _intent.outputAmount,
                 _intent.destinationChainId,
-                _intent.exclusiveRelayer,
-                _intent.quoteTimestamp,
-                _intent.fillDeadline,
-                _intent.exclusivityDeadline
+                _intent.inputOracle,
+                _intent.outputOracle,
+                _intent.expires,
+                _intent.fillDeadline
             )
         );
-        return
-            keccak256(abi.encodePacked("\x19\x01", _domainSeparator("SpokeGate", address(walletGate)), _structHash));
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator("CoreGate", address(coreGate)), _structHash));
     }
 
     function _buildBridge(
         uint _inputAmount,
         uint _bridgeFee,
         uint _relayFee
-    ) internal view returns (SpokeGate.BridgeHubIntent memory) {
-        return _buildBridge({_fromTransientRoute: false, _inputAmount: _inputAmount, _bridgeFee: _bridgeFee, _relayFee: _relayFee});
+    ) internal view returns (CoreGate.BridgeIntent memory) {
+        return _buildBridge({
+            _fromTransientRoute: false, _inputAmount: _inputAmount, _bridgeFee: _bridgeFee, _relayFee: _relayFee
+        });
     }
 
     function _buildBridge(
@@ -663,55 +661,54 @@ contract BridgeHubE2ETest is Test {
         uint _inputAmount,
         uint _bridgeFee,
         uint _relayFee
-    ) internal view returns (SpokeGate.BridgeHubIntent memory) {
-        return SpokeGate.BridgeHubIntent({
+    ) internal view returns (CoreGate.BridgeIntent memory) {
+        return CoreGate.BridgeIntent({
             params: params,
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: _relayFee,
             nonce: nonce,
             chainId: block.chainid,
+            isMaster: false,
             fromTransientRoute: _fromTransientRoute,
             inputToken: IERC20(address(usdc)),
             outputToken: IERC20(address(usdc)),
             inputAmount: _inputAmount,
-            bridgeFee: _bridgeFee,
+            outputAmount: _inputAmount > _relayFee + _bridgeFee ? _inputAmount - _relayFee - _bridgeFee : 0,
             destinationChainId: HUB_CHAIN_ID,
-            exclusiveRelayer: address(0),
-            quoteTimestamp: uint32(block.timestamp),
-            fillDeadline: uint32(block.timestamp + 3600),
-            exclusivityDeadline: 0
+            inputOracle: INPUT_ORACLE,
+            outputOracle: OUTPUT_ORACLE,
+            expires: uint32(block.timestamp + 3600),
+            fillDeadline: uint32(block.timestamp + 3600)
         });
     }
 
     function _bridgeDigest(
-        SpokeGate.BridgeHubIntent memory _intent
+        CoreGate.BridgeIntent memory _intent
     ) internal view returns (bytes32) {
         bytes32 _structHash = keccak256(
             abi.encode(
-                BRIDGE_HUB_INTENT_TYPEHASH,
+                BRIDGE_INTENT_TYPEHASH,
                 _hashAccount(_intent.params),
                 _intent.blockNumber,
                 _intent.deadline,
                 _intent.acceptableRelayFee,
                 _intent.nonce,
                 _intent.chainId,
+                _intent.isMaster,
                 _intent.fromTransientRoute,
                 _intent.inputToken,
                 _intent.outputToken,
                 _intent.inputAmount,
-                _intent.bridgeFee,
+                _intent.outputAmount,
                 _intent.destinationChainId,
-                _intent.exclusiveRelayer,
-                _intent.quoteTimestamp,
-                _intent.fillDeadline,
-                _intent.exclusivityDeadline
+                _intent.inputOracle,
+                _intent.outputOracle,
+                _intent.expires,
+                _intent.fillDeadline
             )
         );
-        return
-            keccak256(
-                abi.encodePacked("\x19\x01", _domainSeparator("SpokeGate", address(walletGate)), _structHash)
-            );
+        return keccak256(abi.encodePacked("\x19\x01", _domainSeparator("CoreGate", address(coreGate)), _structHash));
     }
 
     function _seedAccounted(
@@ -750,14 +747,14 @@ contract BridgeHubE2ETest is Test {
         bytes32 _dom = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256("SpokeGate"),
+                keccak256("CoreGate"),
                 keccak256("1"),
                 block.chainid,
-                address(walletGate)
+                address(coreGate)
             )
         );
         bytes32 _d = keccak256(abi.encodePacked("\x19\x01", _dom, _sh));
-        walletGate.createMasterAccount(
+        coreGate.createMasterAccount(
             _mi, _signDeployAuth(_userKey), "", _signDigest(_userKey, _d), _signDigest(attestorKey, _d), 0
         );
     }

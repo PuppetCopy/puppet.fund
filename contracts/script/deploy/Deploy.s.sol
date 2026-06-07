@@ -16,9 +16,8 @@ import {PuppetAccount} from "src/core/PuppetAccount.sol";
 import {TransientRoute} from "src/core/TransientRoute.sol";
 import {MasterAccount} from "src/core/MasterAccount.sol";
 import {WalletDepositModule} from "src/core/module/WalletDepositModule.sol";
-import {CoreGate} from "src/core/CoreGate.sol";
-import {SpokeGate} from "src/spoke/SpokeGate.sol";
-import {HubGate} from "src/hub/HubGate.sol";
+import {CoreGate} from "src/CoreGate.sol";
+import {HubGate} from "src/HubGate.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
 import {ShareModule} from "src/hub/ShareModule.sol";
 import {RedeemModule} from "src/hub/module/RedeemModule.sol";
@@ -30,30 +29,37 @@ import {AllocateStore} from "src/hub/AllocateStore.sol";
 contract Deploy is BaseScript {
     using stdToml for string;
 
+    function _requireDeployConfig() internal view {
+        require(ATTESTOR_ADDRESS != address(0), "Deploy: ATTESTOR_ADDRESS is zero");
+        require(RELAYER_ADDRESS != address(0), "Deploy: RELAYER_ADDRESS is zero");
+    }
+
     function deployHub() public {
         require(block.chainid == _getHubChainId(), "Deploy: deployHub must run on the hub chain");
+        _requireDeployConfig();
         vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
         string[] memory core = _coreContracts();
-        for (uint i; i < core.length; ++i) _deploy(core[i]);
+        for (uint i; i < core.length; ++i) {
+            _deploy(core[i]);
+        }
         string[] memory hub = _hubContracts();
-        for (uint i; i < hub.length; ++i) _deploy(hub[i]);
-        string[] memory spoke = _spokeContracts();
-        for (uint i; i < spoke.length; ++i) _deploy(spoke[i]);
+        for (uint i; i < hub.length; ++i) {
+            _deploy(hub[i]);
+        }
         _wireCore();
         _wireHub();
-        _wireSpoke();
         vm.stopBroadcast();
     }
 
     function deploySpoke() public {
         require(block.chainid != _getHubChainId(), "Deploy: deploySpoke must run on a non-hub chain");
+        _requireDeployConfig();
         vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
         string[] memory core = _coreContracts();
-        for (uint i; i < core.length; ++i) _deploy(core[i]);
-        string[] memory spoke = _spokeContracts();
-        for (uint i; i < spoke.length; ++i) _deploy(spoke[i]);
+        for (uint i; i < core.length; ++i) {
+            _deploy(core[i]);
+        }
         _wireCore();
-        _wireSpoke();
         vm.stopBroadcast();
     }
 
@@ -96,14 +102,12 @@ contract Deploy is BaseScript {
         Dictate dictate = Dictate(_getCoreAddress("Dictate"));
         bytes32[] memory targets;
         if (block.chainid == _getHubChainId()) {
-            targets = new bytes32[](3);
-            targets[0] = "CoreGate";
-            targets[1] = "HubGate";
-            targets[2] = "SpokeGate";
-        } else {
             targets = new bytes32[](2);
             targets[0] = "CoreGate";
-            targets[1] = "SpokeGate";
+            targets[1] = "HubGate";
+        } else {
+            targets = new bytes32[](1);
+            targets[0] = "CoreGate";
         }
 
         vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
@@ -115,11 +119,13 @@ contract Deploy is BaseScript {
 
     function verify() public {
         string[] memory core = _coreContracts();
-        for (uint i; i < core.length; ++i) _verify(core[i]);
+        for (uint i; i < core.length; ++i) {
+            _verify(core[i]);
+        }
         string[] memory hub = _hubContracts();
-        for (uint i; i < hub.length; ++i) _verify(hub[i]);
-        string[] memory spoke = _spokeContracts();
-        for (uint i; i < spoke.length; ++i) _verify(spoke[i]);
+        for (uint i; i < hub.length; ++i) {
+            _verify(hub[i]);
+        }
     }
 
     function verify(
@@ -153,11 +159,6 @@ contract Deploy is BaseScript {
         names[7] = "HubGate";
     }
 
-    function _spokeContracts() internal pure returns (string[] memory names) {
-        names = new string[](1);
-        names[0] = "SpokeGate";
-    }
-
     function _deploy(
         string memory name
     ) internal returns (address addr) {
@@ -165,7 +166,9 @@ contract Deploy is BaseScript {
         bytes memory initCode = bytes.concat(m.creationCode, m.ctorArgs);
         if (m.isCore) {
             addr = address(
-                uint160(uint(keccak256(abi.encodePacked(bytes1(0xff), address(FACTORY), bytes32(0), keccak256(initCode)))))
+                uint160(
+                    uint(keccak256(abi.encodePacked(bytes1(0xff), address(FACTORY), bytes32(0), keccak256(initCode))))
+                )
             );
             if (addr.code.length == 0) FACTORY.safeCreate2(bytes32(0), initCode);
             _setCoreAddress(name, addr, true);
@@ -190,20 +193,8 @@ contract Deploy is BaseScript {
 
         dictate.setPermission(accountGate, AccountModule.dispatch.selector, coreProxy);
         dictate.setPermission(accountGate, AccountModule.createPuppetAccount.selector, coreProxy);
+        dictate.setPermission(accountGate, AccountModule.createMasterAccount.selector, coreProxy);
         dictate.setAccess(walletDeposit, coreProxy);
-    }
-
-    function _wireSpoke() internal {
-        Dictate dictate = Dictate(_specAddr("Dictate"));
-        AccountModule accountGate = AccountModule(_specAddr("AccountModule"));
-
-        address spokeImpl = _specAddr("SpokeGate");
-        address spokeProxy = dictate.setGate("SpokeGate", spokeImpl);
-        _setChainAddress("SpokeGateImpl", spokeImpl);
-        _setChainAddress("SpokeGate", spokeProxy);
-
-        dictate.setPermission(accountGate, AccountModule.dispatch.selector, spokeProxy);
-        dictate.setPermission(accountGate, AccountModule.createMasterAccount.selector, spokeProxy);
     }
 
     function _wireHub() internal {
@@ -258,11 +249,8 @@ contract Deploy is BaseScript {
     ) internal view returns (Meta memory) {
         bytes32 k = keccak256(bytes(name));
         if (k == keccak256("Dictate")) {
-            return Meta({
-                creationCode: type(Dictate).creationCode,
-                ctorArgs: abi.encode(GOVERNOR_ADDRESS),
-                isCore: true
-            });
+            return
+                Meta({creationCode: type(Dictate).creationCode, ctorArgs: abi.encode(GOVERNOR_ADDRESS), isCore: true});
         }
         if (k == keccak256("RegisterModule")) {
             return Meta({
@@ -272,32 +260,19 @@ contract Deploy is BaseScript {
             });
         }
         if (k == keccak256("PuppetAccount")) {
-            return Meta({
-                creationCode: type(PuppetAccount).creationCode,
-                ctorArgs: "",
-                isCore: true
-            });
+            return Meta({creationCode: type(PuppetAccount).creationCode, ctorArgs: "", isCore: true});
         }
         if (k == keccak256("TransientRoute")) {
-            return Meta({
-                creationCode: type(TransientRoute).creationCode,
-                ctorArgs: "",
-                isCore: true
-            });
+            return Meta({creationCode: type(TransientRoute).creationCode, ctorArgs: "", isCore: true});
         }
         if (k == keccak256("MasterAccount")) {
-            return Meta({
-                creationCode: type(MasterAccount).creationCode,
-                ctorArgs: "",
-                isCore: true
-            });
+            return Meta({creationCode: type(MasterAccount).creationCode, ctorArgs: "", isCore: true});
         }
         if (k == keccak256("Attest")) {
-            return Meta({
-                creationCode: type(Attest).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate")),
-                isCore: true
-            });
+            return
+                Meta({
+                    creationCode: type(Attest).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: true
+                });
         }
         if (k == keccak256("AccountModule")) {
             return Meta({
@@ -315,7 +290,7 @@ contract Deploy is BaseScript {
         if (k == keccak256("WalletDepositModule")) {
             return Meta({
                 creationCode: type(WalletDepositModule).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate"), _specAddr("RegisterModule")),
+                ctorArgs: abi.encode(_specAddr("Dictate")),
                 isCore: true
             });
         }
@@ -327,6 +302,7 @@ contract Deploy is BaseScript {
                     _specAddr("AccountModule"),
                     _specAddr("WalletDepositModule"),
                     _specAddr("RegisterModule"),
+                    _getHubChainId(),
                     CoreGate.Config({
                         attestor: ATTESTOR_ADDRESS,
                         feeReceiver: RELAYER_ADDRESS,
@@ -338,32 +314,8 @@ contract Deploy is BaseScript {
                 isCore: false
             });
         }
-        if (k == keccak256("SpokeGate")) {
-            return Meta({
-                creationCode: type(SpokeGate).creationCode,
-                ctorArgs: abi.encode(
-                    _specAddr("Dictate"),
-                    _specAddr("AccountModule"),
-                    _specAddr("RegisterModule"),
-                    _getHubChainId(),
-                    SpokeGate.Config({
-                        attestor: ATTESTOR_ADDRESS,
-                        feeReceiver: RELAYER_ADDRESS,
-                        transferGasLimit: _getTransferGasLimit(),
-                        maxBlockDelay: _getMaxBlockDelay(),
-                        acrossSpokePool: _getAcrossSpokePool(),
-                        maxRelayFeeBps: _getMaxRelayFeeBps()
-                    })
-                ),
-                isCore: false
-            });
-        }
         if (k == keccak256("ShareToken")) {
-            return Meta({
-                creationCode: type(ShareToken).creationCode,
-                ctorArgs: "",
-                isCore: false
-            });
+            return Meta({creationCode: type(ShareToken).creationCode, ctorArgs: "", isCore: false});
         }
         if (k == keccak256("ShareModule")) {
             return Meta({
@@ -374,16 +326,12 @@ contract Deploy is BaseScript {
         }
         if (k == keccak256("RedeemStore")) {
             return Meta({
-                creationCode: type(RedeemStore).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate")),
-                isCore: false
+                creationCode: type(RedeemStore).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: false
             });
         }
         if (k == keccak256("RedeemModule")) {
             return Meta({
-                creationCode: type(RedeemModule).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate")),
-                isCore: false
+                creationCode: type(RedeemModule).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: false
             });
         }
         if (k == keccak256("AllocateStore")) {
@@ -425,7 +373,6 @@ contract Deploy is BaseScript {
                         feeReceiver: RELAYER_ADDRESS,
                         transferGasLimit: _getTransferGasLimit(),
                         maxBlockDelay: _getMaxBlockDelay(),
-                        acrossSpokePool: _getAcrossSpokePool(),
                         maxRelayFeeBps: _getMaxRelayFeeBps()
                     })
                 ),

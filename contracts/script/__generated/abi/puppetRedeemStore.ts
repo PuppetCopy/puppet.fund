@@ -446,53 +446,9 @@ export default [
     "stateMutability": "nonpayable"
   },
   {
-    "type": "function",
-    "name": "transferOutUnsigned",
-    "inputs": [
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "_receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_gasLimit",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
     "type": "error",
     "name": "Access__Unauthorized",
     "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "BankStore__InsufficientUnsigned",
-    "inputs": [
-      {
-        "name": "requested",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "available",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
   },
   {
     "type": "error",

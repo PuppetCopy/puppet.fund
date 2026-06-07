@@ -4,30 +4,34 @@ pragma solidity ^0.8.35;
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {Permission} from "../utils/auth/Permission.sol";
-import {Error} from "../utils/Error.sol";
-import {IntentLib} from "../utils/IntentLib.sol";
-import {AccountLib} from "../core/AccountLib.sol";
-import {RuleLib} from "./RuleLib.sol";
-import {IAuthority} from "../utils/interfaces/IAuthority.sol";
-import {IArbSys} from "../utils/interfaces/IArbSys.sol";
+import {Permission} from "./utils/auth/Permission.sol";
+import {Error} from "./utils/Error.sol";
+import {IntentLib} from "./utils/IntentLib.sol";
+import {AccountLib} from "./core/AccountLib.sol";
+import {RuleLib} from "./hub/RuleLib.sol";
+import {IAuthority} from "./utils/interfaces/IAuthority.sol";
+import {IArbSys} from "./utils/interfaces/IArbSys.sol";
 
-import {AccountModule} from "../core/module/AccountModule.sol";
-import {PuppetAccount} from "../core/PuppetAccount.sol";
-import {MasterAccount} from "../core/MasterAccount.sol";
-import {IAccount} from "../core/interface/IAccount.sol";
-import {ShareModule} from "./ShareModule.sol";
-import {ShareToken} from "./ShareToken.sol";
-import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "./module/AllocateModule.sol";
-import {AllocateStore} from "./AllocateStore.sol";
-import {SubscribeModule, SUBSCRIBE_INTENT_TYPEHASH} from "./module/SubscribeModule.sol";
-import {RedeemModule, SELL_INTENT_TYPEHASH, CLAIM_INTENT_TYPEHASH, FULFILL_INTENT_TYPEHASH} from "./module/RedeemModule.sol";
-import {RedeemStore} from "./RedeemStore.sol";
-import {RegisterModule} from "../core/module/RegisterModule.sol";
-import {IAcrossSpokePool} from "../utils/interfaces/IAcrossSpokePool.sol";
+import {AccountModule} from "./core/module/AccountModule.sol";
+import {PuppetAccount} from "./core/PuppetAccount.sol";
+import {MasterAccount} from "./core/MasterAccount.sol";
+import {IAccount} from "./core/interface/IAccount.sol";
+import {ShareModule} from "./hub/ShareModule.sol";
+import {ShareToken} from "./hub/ShareToken.sol";
+import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "./hub/module/AllocateModule.sol";
+import {AllocateStore} from "./hub/AllocateStore.sol";
+import {SubscribeModule, SUBSCRIBE_INTENT_TYPEHASH} from "./hub/module/SubscribeModule.sol";
+import {
+    RedeemModule,
+    SELL_INTENT_TYPEHASH,
+    CLAIM_INTENT_TYPEHASH,
+    FULFILL_INTENT_TYPEHASH
+} from "./hub/module/RedeemModule.sol";
+import {RedeemStore} from "./hub/RedeemStore.sol";
+import {RegisterModule} from "./core/module/RegisterModule.sol";
 
 bytes32 constant BRIDGE_TO_WALLET_INTENT_TYPEHASH = keccak256(
-    "BridgeToWalletIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,address inputToken,address outputToken,uint256 inputAmount,uint256 bridgeFee,uint256 destinationChainId,address exclusiveRelayer,uint32 quoteTimestamp,uint32 fillDeadline,uint32 exclusivityDeadline)AccountInitParams(address user,bytes32 name,bytes32 baseTokenId,address signer)"
+    "BridgeToWalletIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,address inputToken,address outputToken,uint256 inputAmount,uint256 outputAmount,uint256 destinationChainId,address provider,bytes providerCallData,uint32 expires,uint32 fillDeadline)AccountInitParams(address user,bytes32 name,bytes32 baseTokenId,address signer)"
 );
 
 contract HubGate is Permission, EIP712 {
@@ -36,7 +40,6 @@ contract HubGate is Permission, EIP712 {
         address feeReceiver;
         uint transferGasLimit;
         uint maxBlockDelay;
-        address acrossSpokePool;
         uint maxRelayFeeBps;
     }
 
@@ -50,12 +53,12 @@ contract HubGate is Permission, EIP712 {
         IERC20 inputToken;
         IERC20 outputToken;
         uint inputAmount;
-        uint bridgeFee;
+        uint outputAmount;
         uint destinationChainId;
-        address exclusiveRelayer;
-        uint32 quoteTimestamp;
+        address provider;
+        bytes providerCallData;
+        uint32 expires;
         uint32 fillDeadline;
-        uint32 exclusivityDeadline;
     }
 
     IArbSys public constant arbSys = IArbSys(address(100));
@@ -73,7 +76,6 @@ contract HubGate is Permission, EIP712 {
     address internal immutable feeReceiver;
     uint internal immutable transferGasLimit;
     uint internal immutable maxBlockDelay;
-    address internal immutable acrossSpokePool;
     uint internal immutable maxRelayFeeBps;
 
     constructor(
@@ -106,7 +108,6 @@ contract HubGate is Permission, EIP712 {
         feeReceiver = _config.feeReceiver;
         transferGasLimit = _config.transferGasLimit;
         maxBlockDelay = _config.maxBlockDelay;
-        acrossSpokePool = _config.acrossSpokePool;
         maxRelayFeeBps = _config.maxRelayFeeBps;
     }
 
@@ -116,7 +117,6 @@ contract HubGate is Permission, EIP712 {
             feeReceiver: feeReceiver,
             transferGasLimit: transferGasLimit,
             maxBlockDelay: maxBlockDelay,
-            acrossSpokePool: acrossSpokePool,
             maxRelayFeeBps: maxRelayFeeBps
         });
     }
@@ -224,7 +224,7 @@ contract HubGate is Permission, EIP712 {
         IntentLib.verifyRelayFeeRatio(_actualRelayFee, _masterAccountIn, maxRelayFeeBps);
     }
 
-    function createMaster(
+    function seedMasterAccount(
         AllocateModule.AllocateIntent calldata _intent,
         bytes[] calldata _bodyList,
         bytes[] calldata _mandateList,
@@ -234,7 +234,8 @@ contract HubGate is Permission, EIP712 {
         bytes calldata _attestorSignature,
         uint _actualRelayFee
     ) external {
-        (MasterAccount _masterAccount,) = accountModule.createMasterAccount(_intent.params, _userDeploySig, _signerProof);
+        (MasterAccount _masterAccount,,) =
+            accountModule.createMasterAccount(_intent.params, _userDeploySig, _signerProof);
         shareModule.createShareToken(address(_masterAccount), _intent.masterAmount);
         this.allocate(_intent, _bodyList, _mandateList, _userSignature, _attestorSignature, _actualRelayFee);
     }
@@ -268,7 +269,8 @@ contract HubGate is Permission, EIP712 {
 
         ShareToken _shareToken = predictShareToken(_masterAccount);
         IERC20 _baseToken = IntentLib.verifyTokenAndCap(registerModule, _intent.masterParams.baseTokenId, address(0), 0);
-        uint _holderSignedBalance = AccountLib.hashAccount(_intent.params) == AccountLib.hashAccount(_intent.masterParams)
+        uint _holderSignedBalance = AccountLib.hashAccount(_intent.params)
+            == AccountLib.hashAccount(_intent.masterParams)
             ? IAccount(_masterAccount).signedBalance()
             : accountModule.verifyPuppetAccount(_intent.params).signedBalance();
         IntentLib.verifyRelayFeeRatio(_actualRelayFee, _holderSignedBalance, maxRelayFeeBps);
@@ -414,39 +416,23 @@ contract HubGate is Permission, EIP712 {
         if (_actualRelayFee >= _intent.inputAmount) {
             revert Error.Deposit__InsufficientBalance(_intent.inputAmount, _actualRelayFee);
         }
-        uint _acrossInputAmount = _intent.inputAmount - _actualRelayFee;
-        if (_intent.bridgeFee >= _acrossInputAmount) {
-            revert Error.Deposit__BridgeFeeExceedsInput(_intent.bridgeFee, _acrossInputAmount);
-        }
+        if (_intent.outputAmount == 0) revert Error.Deposit__ZeroBridgeOutput();
+        uint _settlerInputAmount = _intent.inputAmount - _actualRelayFee;
 
-        IAccount.Call[] memory _calls = new IAccount.Call[](2);
+        IAccount.Call[] memory _calls = new IAccount.Call[](3);
         _calls[0] = IAccount.Call({
             target: address(_intent.inputToken),
             value: 0,
             gasLimit: transferGasLimit,
-            callData: abi.encodeCall(IERC20.approve, (acrossSpokePool, _acrossInputAmount))
+            callData: abi.encodeCall(IERC20.approve, (_intent.provider, _settlerInputAmount))
         });
-        _calls[1] = IAccount.Call({
-            target: acrossSpokePool,
+        _calls[1] =
+            IAccount.Call({target: _intent.provider, value: 0, gasLimit: 0, callData: _intent.providerCallData});
+        _calls[2] = IAccount.Call({
+            target: address(_intent.inputToken),
             value: 0,
-            gasLimit: 0,
-            callData: abi.encodeCall(
-                IAcrossSpokePool.depositV3,
-                (
-                    address(_puppetAccount),
-                    _recipient,
-                    address(_intent.inputToken),
-                    address(_intent.outputToken),
-                    _acrossInputAmount,
-                    _acrossInputAmount - _intent.bridgeFee,
-                    _intent.destinationChainId,
-                    _intent.exclusiveRelayer,
-                    _intent.quoteTimestamp,
-                    _intent.fillDeadline,
-                    _intent.exclusivityDeadline,
-                    ""
-                )
-            )
+            gasLimit: transferGasLimit,
+            callData: abi.encodeCall(IERC20.approve, (_intent.provider, 0))
         });
 
         accountModule.dispatch(
@@ -465,12 +451,12 @@ contract HubGate is Permission, EIP712 {
                         _intent.inputToken,
                         _intent.outputToken,
                         _intent.inputAmount,
-                        _intent.bridgeFee,
+                        _intent.outputAmount,
                         _intent.destinationChainId,
-                        _intent.exclusiveRelayer,
-                        _intent.quoteTimestamp,
-                        _intent.fillDeadline,
-                        _intent.exclusivityDeadline
+                        _intent.provider,
+                        keccak256(_intent.providerCallData),
+                        _intent.expires,
+                        _intent.fillDeadline
                     )
                 )
             ),
@@ -480,7 +466,7 @@ contract HubGate is Permission, EIP712 {
             _intent.nonce,
             _intent.inputToken,
             0,
-            _acrossInputAmount,
+            _settlerInputAmount,
             _actualRelayFee,
             feeReceiver,
             transferGasLimit

@@ -196,9 +196,8 @@ contract RedeemModule is Access {
         if (_actualRelayFee >= paidAmount_) revert Error.Share__RelayFeeTooHigh();
 
         bool _isOwner = AccountLib.hashAccount(_intent.params) == AccountLib.hashAccount(_intent.masterParams);
-        IAccount _holder = _isOwner
-            ? IAccount(_masterAccount)
-            : IAccount(address(_accountGate.verifyPuppetAccount(_intent.params)));
+        IAccount _holder =
+            _isOwner ? IAccount(_masterAccount) : IAccount(address(_accountGate.verifyPuppetAccount(_intent.params)));
         RedeemStore.Pool memory _pool = _store.getPool(_masterAccount, _baseToken);
         RedeemStore.Position memory _position = _store.getPosition(_masterAccount, _baseToken, address(_holder));
         uint _stake = _position.stake;
@@ -304,8 +303,7 @@ contract RedeemModule is Access {
 
         uint _poolShares = _shareToken.balanceOf(address(_store));
         uint _maxRetirable = _poolShares >= 2 ? _poolShares - 1 : 0;
-        uint _sharesRetired =
-            _intent.acceptableShares < _maxRetirable ? _intent.acceptableShares : _maxRetirable;
+        uint _sharesRetired = _intent.acceptableShares < _maxRetirable ? _intent.acceptableShares : _maxRetirable;
         uint _drainedBase = Math.mulDiv(_sharesRetired, _intent.acceptableNetAssetValue, _supply);
         if (_sharesRetired == 0) revert Error.Fulfill__NothingToRetire();
         if (_drainedBase <= _actualRelayFee) revert Error.Fulfill__RelayFeeTooHigh();

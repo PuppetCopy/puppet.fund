@@ -320,22 +320,6 @@ export default [
   },
   {
     "type": "error",
-    "name": "Allocate__ZeroSharesMinted",
-    "inputs": [
-      {
-        "name": "recipient",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "allocated",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
     "name": "Module__CallerNotAuthority",
     "inputs": []
   },

@@ -3,7 +3,6 @@ pragma solidity ^0.8.35;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {RegisterModule} from "./RegisterModule.sol";
 import {Access} from "../../utils/auth/Access.sol";
 import {Error} from "../../utils/Error.sol";
 import {TransferUtils} from "../../utils/TransferUtils.sol";
@@ -11,15 +10,9 @@ import {IAuthority} from "../../utils/interfaces/IAuthority.sol";
 import {IWNT} from "../../utils/interfaces/IWNT.sol";
 
 contract WalletDepositModule is Access {
-    RegisterModule public immutable registerModule;
-
     constructor(
-        IAuthority _authority,
-        RegisterModule _registerModule
-    ) Access(_authority) {
-        if (address(_registerModule) == address(0)) revert Error.Gate__InvalidModule();
-        registerModule = _registerModule;
-    }
+        IAuthority _authority
+    ) Access(_authority) {}
 
     function deposit(
         address _depositor,

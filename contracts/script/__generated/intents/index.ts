@@ -8,20 +8,65 @@ export type IntentTypedData = Pick<TypedDataDefinition, 'primaryType' | 'types'>
 export type IntentActionMap = Readonly<Record<string, IntentTypedData>>
 
 export const CORE_GATE_DOMAIN_MAP: Record<number, TypedDataDomain> = {
-  8453: { name: 'CoreGate', version: '1', chainId: 8453, verifyingContract: '0x5C71b01F2f6f17B12d53513538c353e42D3b2cFF' },
-  42161: { name: 'CoreGate', version: '1', chainId: 42161, verifyingContract: '0x5C71b01F2f6f17B12d53513538c353e42D3b2cFF' }
+  8453: { name: 'CoreGate', version: '1', chainId: 8453, verifyingContract: '0xFBFc9643E2b7B21Db28d2d240AFB2266706575d3' },
+  42161: { name: 'CoreGate', version: '1', chainId: 42161, verifyingContract: '0xFBFc9643E2b7B21Db28d2d240AFB2266706575d3' }
 }
 
 export const HUB_GATE_DOMAIN_MAP: Record<number, TypedDataDomain> = {
-  42161: { name: 'HubGate', version: '1', chainId: 42161, verifyingContract: '0xF5c8Ea0d163d05671F05176af3a5380Cc78c7581' }
-}
-
-export const SPOKE_GATE_DOMAIN_MAP: Record<number, TypedDataDomain> = {
-  8453: { name: 'SpokeGate', version: '1', chainId: 8453, verifyingContract: '0xd838467d992E29C76038dA7c678E57Bd31184949' },
-  42161: { name: 'SpokeGate', version: '1', chainId: 42161, verifyingContract: '0xd838467d992E29C76038dA7c678E57Bd31184949' }
+  42161: { name: 'HubGate', version: '1', chainId: 42161, verifyingContract: '0x45D8b0FD376234dcE2457E6D258c377B734019DF' }
 }
 
 export const CORE_GATE_INTENTS = {
+  bridge: {
+    primaryType: 'BridgeIntent',
+    types: {
+      BridgeIntent: [
+      { name: 'params', type: 'AccountInitParams' },
+      { name: 'blockNumber', type: 'uint256' },
+      { name: 'deadline', type: 'uint256' },
+      { name: 'acceptableRelayFee', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' },
+      { name: 'chainId', type: 'uint256' },
+      { name: 'isMaster', type: 'bool' },
+      { name: 'fromTransientRoute', type: 'bool' },
+      { name: 'inputToken', type: 'address' },
+      { name: 'outputToken', type: 'address' },
+      { name: 'inputAmount', type: 'uint256' },
+      { name: 'outputAmount', type: 'uint256' },
+      { name: 'destinationChainId', type: 'uint256' },
+      { name: 'provider', type: 'address' },
+      { name: 'providerCallData', type: 'bytes' },
+      { name: 'expires', type: 'uint32' },
+      { name: 'fillDeadline', type: 'uint32' }
+      ],
+      AccountInitParams: [
+      { name: 'user', type: 'address' },
+      { name: 'name', type: 'bytes32' },
+      { name: 'baseTokenId', type: 'bytes32' },
+      { name: 'signer', type: 'address' }
+      ]
+    }
+  },
+  createMasterAccount: {
+    primaryType: 'CreateMasterAccountIntent',
+    types: {
+      CreateMasterAccountIntent: [
+      { name: 'params', type: 'AccountInitParams' },
+      { name: 'blockNumber', type: 'uint256' },
+      { name: 'deadline', type: 'uint256' },
+      { name: 'acceptableRelayFee', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' },
+      { name: 'chainId', type: 'uint256' },
+      { name: 'initialDepositAmount', type: 'uint256' }
+      ],
+      AccountInitParams: [
+      { name: 'user', type: 'address' },
+      { name: 'name', type: 'bytes32' },
+      { name: 'baseTokenId', type: 'bytes32' },
+      { name: 'signer', type: 'address' }
+      ]
+    }
+  },
   createPuppetAccount: {
     primaryType: 'CreatePuppetAccountIntent',
     types: {
@@ -42,16 +87,41 @@ export const CORE_GATE_INTENTS = {
       ]
     }
   },
-  signTransientRouteBalance: {
-    primaryType: 'SignTransientRouteBalanceIntent',
+  operate: {
+    primaryType: 'OperateIntent',
     types: {
-      SignTransientRouteBalanceIntent: [
+      OperateIntent: [
       { name: 'params', type: 'AccountInitParams' },
       { name: 'blockNumber', type: 'uint256' },
       { name: 'deadline', type: 'uint256' },
       { name: 'acceptableRelayFee', type: 'uint256' },
       { name: 'nonce', type: 'uint256' },
       { name: 'chainId', type: 'uint256' },
+      { name: 'baseToken', type: 'address' },
+      { name: 'callListHash', type: 'bytes32' },
+      { name: 'amountIn', type: 'uint256' },
+      { name: 'amountOut', type: 'uint256' }
+      ],
+      AccountInitParams: [
+      { name: 'user', type: 'address' },
+      { name: 'name', type: 'bytes32' },
+      { name: 'baseTokenId', type: 'bytes32' },
+      { name: 'signer', type: 'address' }
+      ]
+    }
+  },
+  recognize: {
+    primaryType: 'RecognizeIntent',
+    types: {
+      RecognizeIntent: [
+      { name: 'params', type: 'AccountInitParams' },
+      { name: 'blockNumber', type: 'uint256' },
+      { name: 'deadline', type: 'uint256' },
+      { name: 'acceptableRelayFee', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' },
+      { name: 'chainId', type: 'uint256' },
+      { name: 'isMaster', type: 'bool' },
+      { name: 'fromTransientRoute', type: 'bool' },
       { name: 'amount', type: 'uint256' }
       ],
       AccountInitParams: [
@@ -143,12 +213,12 @@ export const HUB_GATE_INTENTS = {
       { name: 'inputToken', type: 'address' },
       { name: 'outputToken', type: 'address' },
       { name: 'inputAmount', type: 'uint256' },
-      { name: 'bridgeFee', type: 'uint256' },
+      { name: 'outputAmount', type: 'uint256' },
       { name: 'destinationChainId', type: 'uint256' },
-      { name: 'exclusiveRelayer', type: 'address' },
-      { name: 'quoteTimestamp', type: 'uint32' },
-      { name: 'fillDeadline', type: 'uint32' },
-      { name: 'exclusivityDeadline', type: 'uint32' }
+      { name: 'provider', type: 'address' },
+      { name: 'providerCallData', type: 'bytes' },
+      { name: 'expires', type: 'uint32' },
+      { name: 'fillDeadline', type: 'uint32' }
       ],
       AccountInitParams: [
       { name: 'user', type: 'address' },
@@ -179,7 +249,29 @@ export const HUB_GATE_INTENTS = {
       ]
     }
   },
-  createMaster: {
+  fulfill: {
+    primaryType: 'FulfillIntent',
+    types: {
+      FulfillIntent: [
+      { name: 'params', type: 'AccountInitParams' },
+      { name: 'blockNumber', type: 'uint256' },
+      { name: 'deadline', type: 'uint256' },
+      { name: 'acceptableRelayFee', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' },
+      { name: 'chainId', type: 'uint256' },
+      { name: 'acceptableNetAssetValue', type: 'uint256' },
+      { name: 'totalShareSupply', type: 'uint256' },
+      { name: 'acceptableShares', type: 'uint256' }
+      ],
+      AccountInitParams: [
+      { name: 'user', type: 'address' },
+      { name: 'name', type: 'bytes32' },
+      { name: 'baseTokenId', type: 'bytes32' },
+      { name: 'signer', type: 'address' }
+      ]
+    }
+  },
+  seedMasterAccount: {
     primaryType: 'AllocateIntent',
     types: {
       AllocateIntent: [
@@ -195,28 +287,6 @@ export const HUB_GATE_INTENTS = {
       { name: 'masterAmount', type: 'uint256' },
       { name: 'puppetListHash', type: 'bytes32' },
       { name: 'matchedAmountListHash', type: 'bytes32' }
-      ],
-      AccountInitParams: [
-      { name: 'user', type: 'address' },
-      { name: 'name', type: 'bytes32' },
-      { name: 'baseTokenId', type: 'bytes32' },
-      { name: 'signer', type: 'address' }
-      ]
-    }
-  },
-  fulfill: {
-    primaryType: 'FulfillIntent',
-    types: {
-      FulfillIntent: [
-      { name: 'params', type: 'AccountInitParams' },
-      { name: 'blockNumber', type: 'uint256' },
-      { name: 'deadline', type: 'uint256' },
-      { name: 'acceptableRelayFee', type: 'uint256' },
-      { name: 'nonce', type: 'uint256' },
-      { name: 'chainId', type: 'uint256' },
-      { name: 'acceptableNetAssetValue', type: 'uint256' },
-      { name: 'totalShareSupply', type: 'uint256' },
-      { name: 'acceptableShares', type: 'uint256' }
       ],
       AccountInitParams: [
       { name: 'user', type: 'address' },
@@ -270,131 +340,6 @@ export const HUB_GATE_INTENTS = {
       { name: 'masterParams', type: 'AccountInitParams' },
       { name: 'body', type: 'bytes' },
       { name: 'mandate', type: 'bytes' }
-      ]
-    }
-  }
-} as const satisfies IntentActionMap
-
-export const SPOKE_GATE_INTENTS = {
-  bridge: {
-    primaryType: 'BridgeIntent',
-    types: {
-      BridgeIntent: [
-      { name: 'params', type: 'AccountInitParams' },
-      { name: 'blockNumber', type: 'uint256' },
-      { name: 'deadline', type: 'uint256' },
-      { name: 'acceptableRelayFee', type: 'uint256' },
-      { name: 'nonce', type: 'uint256' },
-      { name: 'chainId', type: 'uint256' },
-      { name: 'fromTransientRoute', type: 'bool' },
-      { name: 'inputToken', type: 'address' },
-      { name: 'outputToken', type: 'address' },
-      { name: 'inputAmount', type: 'uint256' },
-      { name: 'bridgeFee', type: 'uint256' },
-      { name: 'destinationChainId', type: 'uint256' },
-      { name: 'exclusiveRelayer', type: 'address' },
-      { name: 'quoteTimestamp', type: 'uint32' },
-      { name: 'fillDeadline', type: 'uint32' },
-      { name: 'exclusivityDeadline', type: 'uint32' }
-      ],
-      AccountInitParams: [
-      { name: 'user', type: 'address' },
-      { name: 'name', type: 'bytes32' },
-      { name: 'baseTokenId', type: 'bytes32' },
-      { name: 'signer', type: 'address' }
-      ]
-    }
-  },
-  bridgeHub: {
-    primaryType: 'BridgeHubIntent',
-    types: {
-      BridgeHubIntent: [
-      { name: 'params', type: 'AccountInitParams' },
-      { name: 'blockNumber', type: 'uint256' },
-      { name: 'deadline', type: 'uint256' },
-      { name: 'acceptableRelayFee', type: 'uint256' },
-      { name: 'nonce', type: 'uint256' },
-      { name: 'chainId', type: 'uint256' },
-      { name: 'fromTransientRoute', type: 'bool' },
-      { name: 'inputToken', type: 'address' },
-      { name: 'outputToken', type: 'address' },
-      { name: 'inputAmount', type: 'uint256' },
-      { name: 'bridgeFee', type: 'uint256' },
-      { name: 'destinationChainId', type: 'uint256' },
-      { name: 'exclusiveRelayer', type: 'address' },
-      { name: 'quoteTimestamp', type: 'uint32' },
-      { name: 'fillDeadline', type: 'uint32' },
-      { name: 'exclusivityDeadline', type: 'uint32' }
-      ],
-      AccountInitParams: [
-      { name: 'user', type: 'address' },
-      { name: 'name', type: 'bytes32' },
-      { name: 'baseTokenId', type: 'bytes32' },
-      { name: 'signer', type: 'address' }
-      ]
-    }
-  },
-  createMasterAccount: {
-    primaryType: 'CreateMasterAccountIntent',
-    types: {
-      CreateMasterAccountIntent: [
-      { name: 'params', type: 'AccountInitParams' },
-      { name: 'blockNumber', type: 'uint256' },
-      { name: 'deadline', type: 'uint256' },
-      { name: 'acceptableRelayFee', type: 'uint256' },
-      { name: 'nonce', type: 'uint256' },
-      { name: 'chainId', type: 'uint256' },
-      { name: 'initialDepositAmount', type: 'uint256' }
-      ],
-      AccountInitParams: [
-      { name: 'user', type: 'address' },
-      { name: 'name', type: 'bytes32' },
-      { name: 'baseTokenId', type: 'bytes32' },
-      { name: 'signer', type: 'address' }
-      ]
-    }
-  },
-  operate: {
-    primaryType: 'OperateIntent',
-    types: {
-      OperateIntent: [
-      { name: 'params', type: 'AccountInitParams' },
-      { name: 'blockNumber', type: 'uint256' },
-      { name: 'deadline', type: 'uint256' },
-      { name: 'acceptableRelayFee', type: 'uint256' },
-      { name: 'nonce', type: 'uint256' },
-      { name: 'chainId', type: 'uint256' },
-      { name: 'baseToken', type: 'address' },
-      { name: 'callListHash', type: 'bytes32' },
-      { name: 'amountIn', type: 'uint256' },
-      { name: 'amountOut', type: 'uint256' }
-      ],
-      AccountInitParams: [
-      { name: 'user', type: 'address' },
-      { name: 'name', type: 'bytes32' },
-      { name: 'baseTokenId', type: 'bytes32' },
-      { name: 'signer', type: 'address' }
-      ]
-    }
-  },
-  signRecordedBalance: {
-    primaryType: 'MasterSignRecordedBalanceIntent',
-    types: {
-      MasterSignRecordedBalanceIntent: [
-      { name: 'params', type: 'AccountInitParams' },
-      { name: 'blockNumber', type: 'uint256' },
-      { name: 'deadline', type: 'uint256' },
-      { name: 'acceptableRelayFee', type: 'uint256' },
-      { name: 'nonce', type: 'uint256' },
-      { name: 'chainId', type: 'uint256' },
-      { name: 'fromTransientRoute', type: 'bool' },
-      { name: 'amount', type: 'uint256' }
-      ],
-      AccountInitParams: [
-      { name: 'user', type: 'address' },
-      { name: 'name', type: 'bytes32' },
-      { name: 'baseTokenId', type: 'bytes32' },
-      { name: 'signer', type: 'address' }
       ]
     }
   }

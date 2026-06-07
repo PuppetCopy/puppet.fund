@@ -1,6 +1,6 @@
 import { type Address, createPublicClient, getAddress, http } from 'viem'
 import { arbitrum } from 'viem/chains'
-import { GMX_V2_CONTRACT_MAP } from '../../src-ts/gmx/gmxContracts.js'
+import { GMX_V2_CONTRACT_MAP } from '../__generated/gmx/gmxContracts.js'
 
 // Contract addresses on Arbitrum
 const READER_ADDRESS = GMX_V2_CONTRACT_MAP.GmxReaderV2.address
@@ -87,7 +87,7 @@ ${marketList
 `
 
   // Write the file
-  await Bun.write('./src-ts/gmx/marketList.ts', fileContent)
+  await Bun.write('./script/__generated/gmx/marketList.ts', fileContent)
 
   console.log(`✅ Successfully generated market list with ${marketList.length} markets`)
   console.log('\nMarket summary:')

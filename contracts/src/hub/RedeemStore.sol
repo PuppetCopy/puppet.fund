@@ -89,13 +89,4 @@ contract RedeemStore is BankStore {
     ) external auth {
         _transferOut(_gasLimit, _token, _receiver, _amount);
     }
-
-    function transferOutUnsigned(
-        IERC20 _token,
-        address _receiver,
-        uint _amount,
-        uint _gasLimit
-    ) external auth {
-        _transferOutUnsigned(_gasLimit, _token, _receiver, _amount);
-    }
 }

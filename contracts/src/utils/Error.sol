@@ -25,8 +25,6 @@ library Error {
     error WalletDeposit__ZeroAmount();
     error WalletDeposit__UnregisteredToken();
 
-    error BankStore__InsufficientUnsigned(uint requested, uint available);
-
     error Attest__InvalidAttestor();
 
     error Module__InvalidAuthority();
@@ -67,7 +65,6 @@ library Error {
     error Allocate__ZeroAcceptableNav();
     error Allocate__PreMintSupplyMismatch(uint current, uint expected);
     error Allocate__PostMintSupplyMismatch(uint current, uint expected);
-    error Allocate__ZeroSharesMinted(address recipient, uint allocated);
     error Allocate__PuppetListNotSorted(address prev, address curr);
     error Allocate__ListLengthMismatch(uint puppetsLen, uint bodiesLen, uint sigsLen);
 
@@ -95,12 +92,11 @@ library Error {
 
     error Deposit__NothingToWithdraw();
     error Deposit__NothingToRecord();
-    error Deposit__UnauthorizedAcrossCallback(address caller);
     error Deposit__BaseTokenMismatch(bytes32 baseTokenId, address expected, address received);
     error Deposit__NothingToBridge();
     error Deposit__InsufficientBalance(uint balance, uint required);
     error Deposit__RelayFeeTooHigh();
-    error Deposit__BridgeFeeExceedsInput(uint bridgeFee, uint inputAmount);
+    error Deposit__ZeroBridgeOutput();
     error Deposit__SameChainBridge(uint destinationChainId);
     error Deposit__InvalidDestinationChain(uint expected, uint provided);
 

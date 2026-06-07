@@ -5,8 +5,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
 
-import {AccountModule} from "../core/module/AccountModule.sol";
-import {AccountLib} from "../core/AccountLib.sol";
 import {Error} from "./Error.sol";
 import {RegisterModule} from "../core/module/RegisterModule.sol";
 

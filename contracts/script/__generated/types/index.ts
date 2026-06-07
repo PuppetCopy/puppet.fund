@@ -49,6 +49,26 @@ export interface IAllocateStore__PuppetState {
   lastAllocatedAt: bigint
 }
 
+export interface ICoreGate__BridgeIntent {
+  params: IAccountLib__AccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  isMaster: boolean
+  fromTransientRoute: boolean
+  inputToken: Address
+  outputToken: Address
+  inputAmount: bigint
+  outputAmount: bigint
+  destinationChainId: bigint
+  provider: Address
+  providerCallData: Hex
+  expires: number
+  fillDeadline: number
+}
+
 export interface ICoreGate__Config {
   attestor: Address
   feeReceiver: Address
@@ -57,13 +77,28 @@ export interface ICoreGate__Config {
   maxRelayFeeBps: bigint
 }
 
-export interface ICoreGate__SignTransientRouteBalanceIntent {
+export interface ICoreGate__OperateIntent {
   params: IAccountLib__AccountInitParams
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
   chainId: bigint
+  baseToken: Address
+  callList: IIAccount__Call[]
+  amountIn: bigint
+  amountOut: bigint
+}
+
+export interface ICoreGate__RecognizeIntent {
+  params: IAccountLib__AccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  isMaster: boolean
+  fromTransientRoute: boolean
   amount: bigint
 }
 
@@ -87,12 +122,12 @@ export interface IHubGate__BridgeToWalletIntent {
   inputToken: Address
   outputToken: Address
   inputAmount: bigint
-  bridgeFee: bigint
+  outputAmount: bigint
   destinationChainId: bigint
-  exclusiveRelayer: Address
-  quoteTimestamp: number
+  provider: Address
+  providerCallData: Hex
+  expires: number
   fillDeadline: number
-  exclusivityDeadline: number
 }
 
 export interface IHubGate__Config {
@@ -100,7 +135,6 @@ export interface IHubGate__Config {
   feeReceiver: Address
   transferGasLimit: bigint
   maxBlockDelay: bigint
-  acrossSpokePool: Address
   maxRelayFeeBps: bigint
 }
 
@@ -166,77 +200,6 @@ export interface IRuleLib__Rule {
   masterParams: IAccountLib__AccountInitParams
   body: Hex
   mandate: Hex
-}
-
-export interface ISpokeGate__BridgeHubIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  fromTransientRoute: boolean
-  inputToken: Address
-  outputToken: Address
-  inputAmount: bigint
-  bridgeFee: bigint
-  destinationChainId: bigint
-  exclusiveRelayer: Address
-  quoteTimestamp: number
-  fillDeadline: number
-  exclusivityDeadline: number
-}
-
-export interface ISpokeGate__BridgeIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  fromTransientRoute: boolean
-  inputToken: Address
-  outputToken: Address
-  inputAmount: bigint
-  bridgeFee: bigint
-  destinationChainId: bigint
-  exclusiveRelayer: Address
-  quoteTimestamp: number
-  fillDeadline: number
-  exclusivityDeadline: number
-}
-
-export interface ISpokeGate__Config {
-  attestor: Address
-  feeReceiver: Address
-  transferGasLimit: bigint
-  maxBlockDelay: bigint
-  acrossSpokePool: Address
-  maxRelayFeeBps: bigint
-}
-
-export interface ISpokeGate__MasterSignRecordedBalanceIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  fromTransientRoute: boolean
-  amount: bigint
-}
-
-export interface ISpokeGate__OperateIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  baseToken: Address
-  callList: IIAccount__Call[]
-  amountIn: bigint
-  amountOut: bigint
 }
 
 export interface ISubscribeModule__SubscribeIntent {

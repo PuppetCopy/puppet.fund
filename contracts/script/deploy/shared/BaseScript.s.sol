@@ -43,11 +43,16 @@ abstract contract BaseScript is Script {
         return IERC20(addr);
     }
 
-    function _getAcrossSpokePool() internal view returns (address) {
-        address addr = _const.readAddress(string.concat(".", _chainKey(), ".across.SpokePool"));
-        require(addr != address(0), "Across SpokePool not configured for this chain");
-        require(addr.code.length > 0, "Across SpokePool not deployed");
+    function _getOifInputSettler() internal view returns (address) {
+        address addr = _const.readAddress(".oif.inputSettler");
+        require(addr != address(0), "OIF inputSettler not configured");
         return addr;
+    }
+
+    function _getOifOutputSettler() internal view returns (bytes32) {
+        address addr = _const.readAddress(".oif.outputSettler");
+        require(addr != address(0), "OIF outputSettler not configured");
+        return bytes32(uint(uint160(addr)));
     }
 
     function _getHubChainId() internal view returns (uint) {
@@ -93,9 +98,7 @@ abstract contract BaseScript is Script {
         if (enforceDrift && vm.keyExistsToml(fresh, addrKey)) {
             address prior = fresh.readAddress(addrKey);
             if (prior != address(0) && prior != addr && !vm.envOr("ALLOW_CORE_DRIFT", false)) {
-                revert(
-                    string.concat("Core address drift: ", name, " deployed at different address on another chain")
-                );
+                revert(string.concat("Core address drift: ", name, " deployed at different address on another chain"));
             }
         }
         vm.writeToml(vm.toString(addr), DEPLOYMENTS_PATH, addrKey);

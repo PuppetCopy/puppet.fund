@@ -9,11 +9,11 @@ export const CONTRACT_EVENT_MAP = {
     },
     DeployMasterAccount: {
       hash: '0x3477df3d1dd543b14a6286569105a168ee37ba444d2e458a251bd34fe6544c86',
-      args: [{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"address",name:"account"},{type:"address",name:"transientRoute"}]
+      args: [{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"address",name:"account"},{type:"address",name:"transientRoute"},{type:"address",name:"depositRoute"}]
     },
     DeployPuppetAccount: {
       hash: '0x7eb7e993a5f78384ea2bc550a06f6bbd0c81bf1dd87e41d93f83db79a5b213a6',
-      args: [{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"address",name:"account"},{type:"address",name:"transientRoute"}]
+      args: [{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"address",name:"account"},{type:"address",name:"depositRoute"}]
     },
     MandateCall: {
       hash: '0x6fed18cec7ec1f04eec6b2a4a063be23a15114300daa6c8379022f08e40f4fb7',
@@ -27,9 +27,17 @@ export const CONTRACT_EVENT_MAP = {
     }
   },
   CoreGate: {
-    SignTransientRouteBalance: {
-      hash: '0x97967bf1493e78f62e8d3eb467249e74f51da081acb3eb4676809655ca0972d3',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"uint256",name:"amount"}]},{type:"address",name:"puppetAccount"}]
+    Bridge: {
+      hash: '0x7aa5ae620294318af92bf4e2b2a729646c932a80312a5fa630da993a2ef5cc10',
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"bool",name:"isMaster"},{type:"bool",name:"fromTransientRoute"},{type:"address",name:"inputToken"},{type:"address",name:"outputToken"},{type:"uint256",name:"inputAmount"},{type:"uint256",name:"outputAmount"},{type:"uint256",name:"destinationChainId"},{type:"address",name:"provider"},{type:"bytes",name:"providerCallData"},{type:"uint32",name:"expires"},{type:"uint32",name:"fillDeadline"}]},{type:"address",name:"account"}]
+    },
+    Operate: {
+      hash: '0x81fb87d9a5f286238a2fad3da31bb37826bc310f3dae1f4c04560a6367abd806',
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"address",name:"baseToken"},{type:"tuple[]",name:"callList",components:[{type:"address",name:"target"},{type:"uint256",name:"value"},{type:"uint256",name:"gasLimit"},{type:"bytes",name:"callData"}]},{type:"uint256",name:"amountIn"},{type:"uint256",name:"amountOut"}]},{type:"address",name:"masterAccount"},{type:"address",name:"sender"},{type:"bytes[]",name:"returnCallData"}]
+    },
+    Recognize: {
+      hash: '0x7709d2e247ded521a3d8b6d76ec26284fdd5df4413db1c22519a5ba3029aecbe',
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"bool",name:"isMaster"},{type:"bool",name:"fromTransientRoute"},{type:"uint256",name:"amount"}]},{type:"address",name:"account"}]
     },
     Withdraw: {
       hash: '0x8d7f87ab38a7f75a63dc465e10aadacecfca64c44ca774040b039bfb004e3367',
@@ -57,7 +65,7 @@ export const CONTRACT_EVENT_MAP = {
   HubGate: {
     BridgeToWallet: {
       hash: '0x36a439c94af30a80008ae60bbe07a578f3cf44fb5c46880eb4226fca2072399f',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"address",name:"inputToken"},{type:"address",name:"outputToken"},{type:"uint256",name:"inputAmount"},{type:"uint256",name:"bridgeFee"},{type:"uint256",name:"destinationChainId"},{type:"address",name:"exclusiveRelayer"},{type:"uint32",name:"quoteTimestamp"},{type:"uint32",name:"fillDeadline"},{type:"uint32",name:"exclusivityDeadline"}]},{type:"address",name:"puppetAccount"},{type:"address",name:"recipient"}]
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"address",name:"inputToken"},{type:"address",name:"outputToken"},{type:"uint256",name:"inputAmount"},{type:"uint256",name:"outputAmount"},{type:"uint256",name:"destinationChainId"},{type:"address",name:"provider"},{type:"bytes",name:"providerCallData"},{type:"uint32",name:"expires"},{type:"uint32",name:"fillDeadline"}]},{type:"address",name:"puppetAccount"},{type:"address",name:"recipient"}]
     }
   },
   RedeemModule: {
@@ -88,24 +96,6 @@ export const CONTRACT_EVENT_MAP = {
     CreateShareToken: {
       hash: '0xa2950e4c1878e266c825ab552e11d8d4233bf677b6e5bbd63c70ee00cadb7752',
       args: [{type:"address",name:"master"},{type:"address",name:"shareToken"},{type:"uint256",name:"initialSupply"}]
-    }
-  },
-  SpokeGate: {
-    Bridge: {
-      hash: '0x7aa5ae620294318af92bf4e2b2a729646c932a80312a5fa630da993a2ef5cc10',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"bool",name:"fromTransientRoute"},{type:"address",name:"inputToken"},{type:"address",name:"outputToken"},{type:"uint256",name:"inputAmount"},{type:"uint256",name:"bridgeFee"},{type:"uint256",name:"destinationChainId"},{type:"address",name:"exclusiveRelayer"},{type:"uint32",name:"quoteTimestamp"},{type:"uint32",name:"fillDeadline"},{type:"uint32",name:"exclusivityDeadline"}]},{type:"address",name:"masterAccount"}]
-    },
-    BridgeHub: {
-      hash: '0x4c4f9c18a13e136e05f5178f806d2f407f435220d27e3fd1cf60052217fef7e4',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"bool",name:"fromTransientRoute"},{type:"address",name:"inputToken"},{type:"address",name:"outputToken"},{type:"uint256",name:"inputAmount"},{type:"uint256",name:"bridgeFee"},{type:"uint256",name:"destinationChainId"},{type:"address",name:"exclusiveRelayer"},{type:"uint32",name:"quoteTimestamp"},{type:"uint32",name:"fillDeadline"},{type:"uint32",name:"exclusivityDeadline"}]},{type:"address",name:"puppetAccount"}]
-    },
-    Operate: {
-      hash: '0x81fb87d9a5f286238a2fad3da31bb37826bc310f3dae1f4c04560a6367abd806',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"address",name:"baseToken"},{type:"tuple[]",name:"callList",components:[{type:"address",name:"target"},{type:"uint256",name:"value"},{type:"uint256",name:"gasLimit"},{type:"bytes",name:"callData"}]},{type:"uint256",name:"amountIn"},{type:"uint256",name:"amountOut"}]},{type:"address",name:"masterAccount"},{type:"address",name:"sender"},{type:"bytes[]",name:"returnCallData"}]
-    },
-    SignRecordedBalance: {
-      hash: '0x18c3382a339485e9fe75bf4066c67409b6a9cb40b884f8d0b504c30fcbb34067',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"bytes32",name:"name"},{type:"bytes32",name:"baseTokenId"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"bool",name:"fromTransientRoute"},{type:"uint256",name:"amount"}]},{type:"address",name:"masterAccount"}]
     }
   },
   SubscribeModule: {

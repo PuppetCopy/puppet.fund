@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 const RAW_BASE = 'https://raw.githubusercontent.com/gmx-io/gmx-synthetics/main'
-const OUT_DIR = './src-ts/gmx'
+const OUT_DIR = './script/__generated/gmx'
 
 const CONTRACT_MAPPINGS = {
   Reader: 'GmxReaderV2',

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.35;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {LibClone} from "solady/utils/LibClone.sol";
 
 import {IAccount} from "../interface/IAccount.sol";
 import {AccountLib} from "../AccountLib.sol";
@@ -98,6 +99,12 @@ contract AccountModule is Permission {
         return AccountLib.predictTransientRoute(transientRouteImpl, address(this), _account);
     }
 
+    function predictDepositRoute(
+        address _account
+    ) external view returns (address) {
+        return AccountLib.predictDepositRoute(transientRouteImpl, address(this), _account);
+    }
+
     function isNonceConsumed(
         address _account,
         uint _nonce
@@ -105,28 +112,54 @@ contract AccountModule is Permission {
         return NonceLib.isConsumedBy(_NONCE_SCOPE, _nonce, _account);
     }
 
+    function _create(
+        address _impl,
+        AccountLib.AccountInitParams calldata _params,
+        bytes calldata _userDeploySig,
+        bytes calldata _signerProof
+    ) private returns (address _account, address _depositRoute) {
+        if (_params.user == address(0)) revert Error.Account__InvalidUser();
+        if (_params.baseTokenId == bytes32(0)) revert Error.Account__InvalidBaseTokenId();
+        AccountLib.verifyDeployAuth(_params.user, _params.signer, _userDeploySig, _signerProof);
+        bytes memory _args =
+            abi.encodePacked(address(attest), _params.signer, _params.user, _params.name, _params.baseTokenId);
+        _account = LibClone.cloneDeterministic(_impl, _args, keccak256(_args));
+        _depositRoute = LibClone.cloneDeterministic(
+            transientRouteImpl, abi.encodePacked(_account), AccountLib.depositRouteSalt(_account)
+        );
+    }
+
+    function _createTransientRoute(
+        address _account
+    ) private returns (address) {
+        return
+            LibClone.cloneDeterministic(
+                transientRouteImpl, abi.encodePacked(_account), bytes32(uint(uint160(_account)))
+            );
+    }
+
     function createPuppetAccount(
         AccountLib.AccountInitParams calldata _params,
         bytes calldata _userDeploySig,
         bytes calldata _signerProof
     ) external auth returns (PuppetAccount account_, address transientRoute_) {
-        (address _account, address _transientRoute) =
-            AccountLib.create(puppetAccountImpl, transientRouteImpl, address(attest), _params, _userDeploySig, _signerProof);
+        (address _account, address _depositRoute) = _create(puppetAccountImpl, _params, _userDeploySig, _signerProof);
         account_ = PuppetAccount(payable(_account));
-        transientRoute_ = _transientRoute;
-        _logEvent("DeployPuppetAccount", abi.encode(_params, _account, _transientRoute));
+        transientRoute_ = _depositRoute;
+        _logEvent("DeployPuppetAccount", abi.encode(_params, _account, _depositRoute));
     }
 
     function createMasterAccount(
         AccountLib.AccountInitParams calldata _params,
         bytes calldata _userDeploySig,
         bytes calldata _signerProof
-    ) external auth returns (MasterAccount account_, address transientRoute_) {
-        (address _account, address _transientRoute) =
-            AccountLib.create(masterAccountImpl, transientRouteImpl, address(attest), _params, _userDeploySig, _signerProof);
+    ) external auth returns (MasterAccount account_, address transientRoute_, address depositRoute_) {
+        (address _account, address _depositRoute) = _create(masterAccountImpl, _params, _userDeploySig, _signerProof);
+        address _transientRoute = _createTransientRoute(_account);
         account_ = MasterAccount(payable(_account));
         transientRoute_ = _transientRoute;
-        _logEvent("DeployMasterAccount", abi.encode(_params, _account, _transientRoute));
+        depositRoute_ = _depositRoute;
+        _logEvent("DeployMasterAccount", abi.encode(_params, _account, _transientRoute, _depositRoute));
     }
 
     function dispatch(
@@ -187,8 +220,9 @@ contract AccountModule is Permission {
         uint _amountOut,
         uint _transferGasLimit
     ) external auth returns (uint signedPostBalance_, uint postBalance_, bytes[] memory results_) {
-        (signedPostBalance_, postBalance_, results_) =
-            attest.executeMandate(_puppet, _callList, _mandateDigest, _mandate, _baseToken, _amountOut, _transferGasLimit);
+        (signedPostBalance_, postBalance_, results_) = attest.executeMandate(
+            _puppet, _callList, _mandateDigest, _mandate, _baseToken, _amountOut, _transferGasLimit
+        );
         _logEvent(
             "MandateCall",
             abi.encode(

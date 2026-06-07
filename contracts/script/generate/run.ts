@@ -10,7 +10,7 @@ const FOUNDRY_TOML_PATH = './foundry.toml'
 const CONST_TOML_PATH = './const.toml'
 const BROADCAST_PATH = './broadcast'
 const ERROR_SOL_PATH = './src/utils/Error.sol'
-const OUTPUT_DIR = './src-ts'
+const OUTPUT_DIR = './script/__generated'
 const ADDRESS_ZERO = '0x0000000000000000000000000000000000000000'
 
 // Chain alias → chainId, sourced from foundry.toml's [rpc_endpoints] so the
@@ -297,7 +297,7 @@ ${[...new Map(contracts.filter(c => c.abi).map(c => [c.name, c] as const)).value
     .sort((a, b) => a - b)
 
   // Hub/spoke split based on which chains a contract is deployed to.
-  // Universal gates (CoreGate, SpokeGate) appear in both since they're deployed everywhere.
+  // Universal gates (CoreGate) appear in both since they're deployed everywhere.
   const hubContracts = chainContracts.filter(c => gateChainAddresses.get(c.name)?.has(hubChainId!) ?? false)
   const spokeContracts = chainContracts.filter(c => {
     const m = gateChainAddresses.get(c.name)
@@ -332,12 +332,11 @@ ${[...new Map(contracts.filter(c => c.abi).map(c => [c.name, c] as const)).value
     return `  ${contract.name}: {\n${lines.join(',\n')}\n  }`
   }
 
-  // Load const.toml for per-chain token + across-spoke-pool addresses + protocol config
+  // Load const.toml for per-chain token + universal OIF settler addresses + protocol config
   const constContent = await Bun.file(CONST_TOML_PATH).text()
   const constParsed = parseToml(constContent) as Record<string, unknown>
 
   const chainTokenEntries: string[] = []
-  const chainAcrossEntries: string[] = []
   const chainNetworkEntries: string[] = []
   const tokenSymbols = new Set<string>()
   for (const [alias, chainId] of Object.entries(chainIdMap).sort(([, a], [, b]) => a - b)) {
@@ -354,14 +353,12 @@ ${[...new Map(contracts.filter(c => c.abi).map(c => [c.name, c] as const)).value
         .join(', ')
       chainTokenEntries.push(`  ${chainId}: { ${tokenBody} }`)
     }
-    const across = chainEntry.across
-    if (across && Object.keys(across).length > 0) {
-      const acrossBody = Object.entries(across)
-        .map(([name, addr]) => `${name}: '${getAddress(addr)}'`)
-        .join(', ')
-      chainAcrossEntries.push(`  ${chainId}: { ${acrossBody} }`)
-    }
   }
+
+  const oifSection = (constParsed.oif ?? {}) as Record<string, string>
+  const oifInputSettler = getAddress(oifSection.inputSettler)
+  const oifOutputSettler = getAddress(oifSection.outputSettler)
+  const oifOracle = getAddress(oifSection.oracle)
 
   // [protocol] block — runtime gate-config knobs mirrored as SDK preflight context
   const protocol = (constParsed.protocol ?? {}) as Record<string, number | bigint | string>
@@ -456,8 +453,10 @@ export const CHAIN_TOKEN_MAP = {
 ${chainTokenEntries.join(',\n')}
 } as const
 
-export const CHAIN_ACROSS_MAP = {
-${chainAcrossEntries.join(',\n')}
+export const OIF = {
+  inputSettler: '${oifInputSettler}',
+  outputSettler: '${oifOutputSettler}',
+  oracle: '${oifOracle}',
 } as const
 
 export const CHAIN_NETWORK_MAP = {
@@ -495,7 +494,7 @@ export const PUPPET_CONTRACT_MAP = { ...CORE_CONTRACT_MAP, ...HUB_CONTRACT_MAP, 
 
   await Bun.write(`${OUTPUT_DIR}/deployments/index.ts`, contractsContent)
   console.log(
-    `  Generated const + deployments maps (${coreContracts.length} core, ${hubContracts.length} hub, ${spokeContracts.length} spoke, ${chainTokenEntries.length} chain-token, ${chainAcrossEntries.length} chain-across)`
+    `  Generated const + deployments maps (${coreContracts.length} core, ${hubContracts.length} hub, ${spokeContracts.length} spoke, ${chainTokenEntries.length} chain-token)`
   )
 }
 
@@ -686,9 +685,8 @@ export * from './gasLimits/index.js'
 // in src/ it's defined) is the authoritative EIP-712 signed shape. No
 // product-specific action list hardcoded in the generator.
 const ROUTER_FILES: { path: string; router: string }[] = [
-  { path: 'src/core/CoreGate.sol', router: 'CoreGate' },
-  { path: 'src/hub/HubGate.sol', router: 'HubGate' },
-  { path: 'src/spoke/SpokeGate.sol', router: 'SpokeGate' }
+  { path: 'src/CoreGate.sol', router: 'CoreGate' },
+  { path: 'src/HubGate.sol', router: 'HubGate' }
 ]
 
 type Eip712Types = Record<string, { name: string; type: string }[]>
@@ -826,7 +824,7 @@ async function generateIntentTypedData(): Promise<void> {
           : []
         return { address: getAddress(direct.address), chainIds }
       }
-      // Chain-keyed section: a universal gate (CoreGate, SpokeGate) lives at the same address
+      // Chain-keyed section: a universal gate (CoreGate) lives at the same address
       // under every [chain.<alias>] block, so accumulate all chains rather than returning the first.
       const matched: number[] = []
       let matchedAddr: string | undefined
@@ -1058,7 +1056,7 @@ async function main(): Promise<void> {
     await Bun.write(
       `${OUTPUT_DIR}/gasLimits/index.ts`,
       '// SKIP_GAS placeholder. Do not edit manually.\n' +
-        'export const router__gasLimit = { CoreGate: {}, HubGate: {}, SpokeGate: {} } as const\n'
+        'export const router__gasLimit = { CoreGate: {}, HubGate: {} } as const\n'
     )
   }
   await generateIndex()

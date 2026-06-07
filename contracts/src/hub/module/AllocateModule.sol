@@ -88,13 +88,16 @@ contract AllocateModule is Access {
             (bytes32 _bodyHash, bytes32 _mandateDigest) =
                 RuleLib.mandate(_routerDomainSeparator, _puppet, _masterAccount, _intent.baseToken, _body);
             if (_stateList[_i].mandate != _bodyHash) continue;
-            if (block.timestamp < _stateList[_i].lastAllocatedAt + RuleLib.throttlePeriod(_body)) continue;
+            uint _lastAllocatedAt = _stateList[_i].lastAllocatedAt;
+            uint _throttle = RuleLib.throttlePeriod(_body);
+            if (_throttle > type(uint).max - _lastAllocatedAt || block.timestamp < _lastAllocatedAt + _throttle) {
+                continue;
+            }
             uint _rateLimit = RuleLib.rateLimit(_body);
             if (_rateLimit != 0 && _amount > _rateLimit) _amount = _rateLimit;
 
-            uint _sa = _preMintSupply == 0
-                ? _amount
-                : Math.mulDiv(_amount, _preMintSupply, _intent.acceptableNetAssetValue);
+            uint _sa =
+                _preMintSupply == 0 ? _amount : Math.mulDiv(_amount, _preMintSupply, _intent.acceptableNetAssetValue);
             if (_sa == 0) continue;
 
             _transferList[0] = IAccount.Call({
@@ -111,7 +114,9 @@ contract AllocateModule is Access {
                 _intent.baseToken,
                 _amount,
                 _transferGasLimit
-            ) returns (uint, uint, bytes[] memory) {
+            ) returns (
+                uint, uint, bytes[] memory
+            ) {
                 _puppetSharesMintedList[_i] = _sa;
                 _totalPuppetMinted += _sa;
                 _totalMatched += _amount;
@@ -121,29 +126,30 @@ contract AllocateModule is Access {
         }
 
         uint _ownerNewShares;
-        if (_intent.masterAmount > 0) {
+        uint _masterSeed = _intent.masterAmount;
+        if (_masterSeed > 0) {
             _ownerNewShares = _preMintSupply == 0
-                ? _intent.masterAmount
-                : Math.mulDiv(_intent.masterAmount, _preMintSupply, _intent.acceptableNetAssetValue);
-            if (_ownerNewShares == 0) revert Error.Allocate__ZeroSharesMinted(_intent.params.user, _intent.masterAmount);
+                ? _masterSeed
+                : Math.mulDiv(_masterSeed, _preMintSupply, _intent.acceptableNetAssetValue);
+            if (_ownerNewShares == 0) _masterSeed = 0;
         }
 
-        masterAccountIn_ = _intent.masterAmount + _totalMatched;
+        masterAccountIn_ = _masterSeed + _totalMatched;
         if (masterAccountIn_ == 0) revert Error.Allocate__ZeroAmount();
         if (_preMintSupply == 0) _store.setSeeded(_masterAccount);
 
         IAccount.Call[] memory _calls = new IAccount.Call[](0);
-        if (_intent.masterAmount > 0) {
+        if (_masterSeed > 0) {
             IAccount.Call[] memory _seedCall = new IAccount.Call[](1);
             _seedCall[0] = IAccount.Call({
                 target: address(_intent.baseToken),
                 value: 0,
                 gasLimit: _transferGasLimit,
-                callData: abi.encodeCall(IERC20.transfer, (_masterAccount, _intent.masterAmount))
+                callData: abi.encodeCall(IERC20.transfer, (_masterAccount, _masterSeed))
             });
             _calls = new IAccount.Call[](1);
             _calls[0] = IAccount.Call({
-                target: _accountGate.predictTransientRoute(_masterAccount),
+                target: _accountGate.predictDepositRoute(_masterAccount),
                 value: 0,
                 gasLimit: 0,
                 callData: abi.encodeCall(TransientRoute.execute, (_seedCall))

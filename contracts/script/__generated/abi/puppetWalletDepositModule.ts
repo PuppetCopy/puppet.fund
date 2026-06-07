@@ -9,11 +9,6 @@ export default [
         "name": "_authority",
         "type": "address",
         "internalType": "contract IAuthority"
-      },
-      {
-        "name": "_registerModule",
-        "type": "address",
-        "internalType": "contract RegisterModule"
       }
     ],
     "stateMutability": "nonpayable"
@@ -113,19 +108,6 @@ export default [
   },
   {
     "type": "function",
-    "name": "registerModule",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract RegisterModule"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "setAccess",
     "inputs": [
       {
@@ -164,11 +146,6 @@ export default [
   {
     "type": "error",
     "name": "Access__Unauthorized",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "Gate__InvalidModule",
     "inputs": []
   },
   {

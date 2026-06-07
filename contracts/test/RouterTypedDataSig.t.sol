@@ -15,6 +15,7 @@ import {RegisterModule} from "src/core/module/RegisterModule.sol";
 import {WalletDepositModule} from "src/core/module/WalletDepositModule.sol";
 import {CoreGate, WITHDRAW_INTENT_TYPEHASH} from "src/core/CoreGate.sol";
 import {ACCOUNT_TYPEHASH, AccountLib} from "src/core/AccountLib.sol";
+import {Bridge} from "src/utils/Bridge.sol";
 
 import {MockERC20} from "./mock/MockERC20.t.sol";
 
@@ -61,10 +62,17 @@ contract RouterTypedDataSigTest is Test {
         );
         dictate.setAccess(attest, address(accountGate));
 
-        WalletDepositModule walletDeposit = new WalletDepositModule(dictate, register);
+        WalletDepositModule walletDeposit = new WalletDepositModule(dictate);
+
+        Bridge bridge = new Bridge(address(0), bytes32(0));
 
         router = new CoreGate(
-            dictate, accountGate, walletDeposit, register,
+            dictate,
+            accountGate,
+            walletDeposit,
+            register,
+            bridge,
+            HUB_CHAIN_ID,
             CoreGate.Config({
                 attestor: attestor,
                 feeReceiver: feeReceiver,
@@ -73,7 +81,6 @@ contract RouterTypedDataSigTest is Test {
                 maxRelayFeeBps: 1000
             })
         );
-
 
         dictate.setAccess(walletDeposit, address(router));
         grantGate(dictate, accountGate, address(router));
@@ -120,7 +127,13 @@ contract RouterTypedDataSigTest is Test {
         CoreGate.WithdrawIntent memory _intent
     ) internal view returns (bytes32) {
         bytes32 _accountHash = keccak256(
-            abi.encode(ACCOUNT_TYPESTRING_HASH, _intent.params.user, _intent.params.name, _intent.params.baseTokenId, _intent.params.signer)
+            abi.encode(
+                ACCOUNT_TYPESTRING_HASH,
+                _intent.params.user,
+                _intent.params.name,
+                _intent.params.baseTokenId,
+                _intent.params.signer
+            )
         );
         bytes32 _structHash = keccak256(
             abi.encode(
@@ -141,9 +154,7 @@ contract RouterTypedDataSigTest is Test {
         bytes32 _typeHash =
             keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
         return keccak256(
-            abi.encode(
-                _typeHash, keccak256(bytes("CoreGate")), keccak256(bytes("1")), block.chainid, address(router)
-            )
+            abi.encode(_typeHash, keccak256(bytes("CoreGate")), keccak256(bytes("1")), block.chainid, address(router))
         );
     }
 

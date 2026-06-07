@@ -1,11 +1,11 @@
 {
-  "extends": "../tsconfig.base.json",
+  "extends": "../../tsconfig.base.json",
   "include": [
-    "src-ts"
+    "script/__generated"
   ],
   "compilerOptions": {
     "outDir": "dist/esm",
-    "rootDir": "./src-ts",
+    "rootDir": "./script/__generated",
     "declarationDir": "dist/types",
     "tsBuildInfoFile": "forge-cache/tsconfig.tsbuildinfo",
     "types": []

@@ -31,8 +31,9 @@ contract AllocateStore is Access {
         _stateList = new PuppetState[](_puppetList.length);
         for (uint _i; _i < _puppetList.length; ++_i) {
             address _puppet = _puppetList[_i];
-            _stateList[_i] =
-                PuppetState({mandate: mandateMap[_puppet][_master], lastAllocatedAt: lastAllocatedAtMap[_puppet][_master]});
+            _stateList[_i] = PuppetState({
+                mandate: mandateMap[_puppet][_master], lastAllocatedAt: lastAllocatedAtMap[_puppet][_master]
+            });
         }
     }
 

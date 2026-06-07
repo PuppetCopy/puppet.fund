@@ -8,7 +8,7 @@ import {BaseScript} from "../deploy/shared/BaseScript.s.sol";
 
 import {AccountLib, ACCOUNT_TYPEHASH} from "src/core/AccountLib.sol";
 import {AccountModule} from "src/core/module/AccountModule.sol";
-import {CoreGate, SIGN_TRANSIENT_ROUTE_BALANCE_INTENT_TYPEHASH, WITHDRAW_INTENT_TYPEHASH, TEMP_ACCEPT_UNRECORDED_FUNDS_INTENT_TYPEHASH} from "src/core/CoreGate.sol";
+import {CoreGate, WITHDRAW_INTENT_TYPEHASH, RECOGNIZE_INTENT_TYPEHASH} from "src/CoreGate.sol";
 import {PuppetAccount} from "src/core/PuppetAccount.sol";
 
 contract SiphonDeployer is BaseScript {
@@ -28,7 +28,7 @@ contract SiphonDeployer is BaseScript {
         }
     }
 
-    function run() public {
+    function run() public view {
         require(vm.addr(ATTESTOR_PRIVATE_KEY) == ATTESTOR_ADDRESS, "Siphon: ATTESTOR_PRIVATE_KEY does not match ATTESTOR_ADDRESS");
 
         PuppetAccount target = PuppetAccount(payable(TARGET));
@@ -65,16 +65,14 @@ contract SiphonDeployer is BaseScript {
         console2.log("Siphon: account signedBalance", signed);
 
         if (trBalance > 0) {
-            console2.log("--- signTransientRouteBalance calldata (run via cast send) ---");
-            _emitSignTransientRouteBalanceCalldata(coreGate, params, trBalance);
+            console2.log("--- recognize calldata (run via cast send) ---");
+            _emitRecognizeCalldata(coreGate, params, trBalance);
             signed += trBalance;
         }
 
         uint surplus = accountBalance > signed ? accountBalance - signed : 0;
         if (surplus > 0) {
-            console2.log("--- temp__acceptUnrecordedFunds calldata (run via cast send) ---");
-            _emitTempAcceptCalldata(coreGate, params, surplus);
-            signed += surplus;
+            console2.log("Siphon: unrecorded account surplus (no recognize path in symmetric model)", surplus);
         }
 
         if (signed > 0) {
@@ -100,32 +98,36 @@ contract SiphonDeployer is BaseScript {
         revert("Siphon: unknown baseTokenId on this chain");
     }
 
-    function _emitSignTransientRouteBalanceCalldata(
+    function _emitRecognizeCalldata(
         CoreGate _coreGate,
         AccountLib.AccountInitParams memory _params,
         uint _amount
-    ) internal {
-        uint _nonce = uint(keccak256(abi.encode("SiphonDeployer", "signTransientRouteBalance", block.timestamp, block.chainid)));
+    ) internal view {
+        uint _nonce = uint(keccak256(abi.encode("SiphonDeployer", "recognize", block.timestamp, block.chainid)));
 
-        CoreGate.SignTransientRouteBalanceIntent memory intent = CoreGate.SignTransientRouteBalanceIntent({
+        CoreGate.RecognizeIntent memory intent = CoreGate.RecognizeIntent({
             params: _params,
             blockNumber: _currentBlockNumber(),
             deadline: block.timestamp + 3600,
             acceptableRelayFee: 0,
             nonce: _nonce,
             chainId: block.chainid,
+            isMaster: false,
+            fromTransientRoute: false,
             amount: _amount
         });
 
         bytes32 _structHash = keccak256(
             abi.encode(
-                SIGN_TRANSIENT_ROUTE_BALANCE_INTENT_TYPEHASH,
+                RECOGNIZE_INTENT_TYPEHASH,
                 _hashAccount(intent.params),
                 intent.blockNumber,
                 intent.deadline,
                 intent.acceptableRelayFee,
                 intent.nonce,
                 intent.chainId,
+                intent.isMaster,
+                intent.fromTransientRoute,
                 intent.amount
             )
         );
@@ -134,47 +136,7 @@ contract SiphonDeployer is BaseScript {
         bytes memory _userSig = _sign(DEPLOYER_PRIVATE_KEY, _digest);
         bytes memory _attestorSig = _sign(ATTESTOR_PRIVATE_KEY, _digest);
 
-        bytes memory _calldata = abi.encodeCall(CoreGate.signTransientRouteBalance, (intent, _userSig, _attestorSig, 0));
-        console2.log("to:", address(_coreGate));
-        console2.log("data:");
-        console2.logBytes(_calldata);
-    }
-
-    function _emitTempAcceptCalldata(
-        CoreGate _coreGate,
-        AccountLib.AccountInitParams memory _params,
-        uint _amount
-    ) internal {
-        uint _nonce = uint(keccak256(abi.encode("SiphonDeployer", "tempAcceptUnrecordedFunds", block.timestamp, block.chainid)));
-
-        CoreGate.TempAcceptUnrecordedFundsIntent memory intent = CoreGate.TempAcceptUnrecordedFundsIntent({
-            params: _params,
-            blockNumber: _currentBlockNumber(),
-            deadline: block.timestamp + 3600,
-            acceptableRelayFee: 0,
-            nonce: _nonce,
-            chainId: block.chainid,
-            amount: _amount
-        });
-
-        bytes32 _structHash = keccak256(
-            abi.encode(
-                TEMP_ACCEPT_UNRECORDED_FUNDS_INTENT_TYPEHASH,
-                _hashAccount(intent.params),
-                intent.blockNumber,
-                intent.deadline,
-                intent.acceptableRelayFee,
-                intent.nonce,
-                intent.chainId,
-                intent.amount
-            )
-        );
-
-        bytes32 _digest = _hashTypedData(_coreGate, _structHash);
-        bytes memory _userSig = _sign(DEPLOYER_PRIVATE_KEY, _digest);
-        bytes memory _attestorSig = _sign(ATTESTOR_PRIVATE_KEY, _digest);
-
-        bytes memory _calldata = abi.encodeCall(CoreGate.temp__acceptUnrecordedFunds, (intent, _userSig, _attestorSig, 0));
+        bytes memory _calldata = abi.encodeCall(CoreGate.recognize, (intent, _userSig, _attestorSig, 0));
         console2.log("to:", address(_coreGate));
         console2.log("data:");
         console2.logBytes(_calldata);
@@ -184,7 +146,7 @@ contract SiphonDeployer is BaseScript {
         CoreGate _coreGate,
         AccountLib.AccountInitParams memory _params,
         uint _amount
-    ) internal {
+    ) internal view {
         uint _nonce = uint(keccak256(abi.encode("SiphonDeployer", "walletWithdraw", block.timestamp, block.chainid)));
 
         CoreGate.WithdrawIntent memory intent = CoreGate.WithdrawIntent({

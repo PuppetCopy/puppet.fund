@@ -730,7 +730,7 @@ if (import.meta.main) {
   const code = generateEventParamsCode(contractEvents)
 
   // Write to file
-  const outputPath = './src-ts/events.ts'
+  const outputPath = './script/__generated/events.ts'
   await Bun.write(outputPath, code)
   console.log(`\nWritten to ${outputPath}`)
 }

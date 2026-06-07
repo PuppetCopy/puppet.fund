@@ -8,7 +8,6 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 library Precision {
     uint public constant BASIS_POINT_DIVISOR = 10_000;
     uint public constant FLOAT_PRECISION = 1e30;
-    uint public constant VIRTUAL_SHARES = 1e12;
 
     function applyBasisPoints(
         uint _bps,

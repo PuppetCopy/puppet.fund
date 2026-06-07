@@ -113,22 +113,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "BankStore__InsufficientUnsigned",
-    inputs: [
-      {
-        name: "requested",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "available",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
     name: "Attest__InvalidAttestor",
     inputs: []
   },
@@ -432,22 +416,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Allocate__ZeroSharesMinted",
-    inputs: [
-      {
-        name: "recipient",
-        internalType: "address",
-        type: "address"
-      },
-      {
-        name: "allocated",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
     name: "Allocate__PuppetListNotSorted",
     inputs: [
       {
@@ -641,17 +609,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Deposit__UnauthorizedAcrossCallback",
-    inputs: [
-      {
-        name: "caller",
-        internalType: "address",
-        type: "address"
-      }
-    ]
-  },
-  {
-    type: "error",
     name: "Deposit__BaseTokenMismatch",
     inputs: [
       {
@@ -699,19 +656,8 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Deposit__BridgeFeeExceedsInput",
-    inputs: [
-      {
-        name: "bridgeFee",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "inputAmount",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
+    name: "Deposit__ZeroBridgeOutput",
+    inputs: []
   },
   {
     type: "error",

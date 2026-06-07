@@ -16,11 +16,14 @@ import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "src/hub/module/AllocateM
 import {AllocateStore} from "src/hub/AllocateStore.sol";
 import {RuleLib} from "src/hub/RuleLib.sol";
 import {IAccount} from "src/core/interface/IAccount.sol";
-import {WalletDepositModule} from "src/core/module/WalletDepositModule.sol";
-import {SpokeGate} from "src/spoke/SpokeGate.sol";
 import {Attest} from "src/core/Attest.sol";
-import {ACROSS_SPOKE_POOL_ARBITRUM} from "./shared/Across.t.sol";
-import {RedeemModule, SELL_INTENT_TYPEHASH, CLAIM_INTENT_TYPEHASH, FULFILL_INTENT_TYPEHASH} from "src/hub/module/RedeemModule.sol";
+import {Bridge} from "src/utils/Bridge.sol";
+import {
+    RedeemModule,
+    SELL_INTENT_TYPEHASH,
+    CLAIM_INTENT_TYPEHASH,
+    FULFILL_INTENT_TYPEHASH
+} from "src/hub/module/RedeemModule.sol";
 import {RedeemStore} from "src/hub/RedeemStore.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
 import {SubscribeModule, SUBSCRIBE_INTENT_TYPEHASH} from "src/hub/module/SubscribeModule.sol";
@@ -60,7 +63,6 @@ contract RedeemModuleCrossMasterBugTest is Test {
     RedeemModule redeem;
     RedeemStore redeemStore;
     HubGate router;
-    SpokeGate walletGate;
 
     bytes32 domainSeparator;
     address master1Pool;
@@ -109,31 +111,28 @@ contract RedeemModuleCrossMasterBugTest is Test {
         redeemStore = new RedeemStore(dictate);
         allocateStore = new AllocateStore(dictate);
 
+        Bridge bridge = new Bridge(address(0), bytes32(0));
+
         router = new HubGate(
-            dictate, accountGate, shareGate, allocate, allocateStore, subscribe, redeem, redeemStore, register,
+            dictate,
+            accountGate,
+            shareGate,
+            allocate,
+            allocateStore,
+            subscribe,
+            redeem,
+            redeemStore,
+            register,
+            bridge,
             HubGate.Config({
                 attestor: attestor,
                 feeReceiver: feeReceiver,
                 transferGasLimit: TRANSFER_GAS_LIMIT,
                 maxBlockDelay: 5,
-                acrossSpokePool: ACROSS_SPOKE_POOL_ARBITRUM,
                 maxRelayFeeBps: 1000
             })
         );
 
-        WalletDepositModule walletDeposit = new WalletDepositModule(dictate, register);
-        walletGate = new SpokeGate(
-            dictate, accountGate, register, 42_161,
-            SpokeGate.Config({
-                attestor: attestor,
-                feeReceiver: feeReceiver,
-                transferGasLimit: TRANSFER_GAS_LIMIT,
-                maxBlockDelay: 5,
-                acrossSpokePool: ACROSS_SPOKE_POOL_ARBITRUM,
-                maxRelayFeeBps: 1000
-            })
-        );
-        dictate.setAccess(walletDeposit, address(walletGate));
         dictate.setAccess(allocateStore, address(subscribe));
         dictate.setAccess(allocateStore, address(allocate));
         dictate.setAccess(redeemStore, address(redeem));
@@ -147,7 +146,6 @@ contract RedeemModuleCrossMasterBugTest is Test {
         grantGate(dictate, accountGate, address(subscribe));
         grantGate(dictate, accountGate, address(allocate));
         grantGate(dictate, accountGate, address(redeem));
-        grantGate(dictate, accountGate, address(walletGate));
         grantGate(dictate, accountGate, address(router));
         grantGate(dictate, accountGate, address(this));
 
@@ -159,8 +157,8 @@ contract RedeemModuleCrossMasterBugTest is Test {
         domainSeparator = _domainSeparator();
         vm.mockCall(address(0x64), abi.encodeWithSignature("arbBlockNumber()"), abi.encode(block.number));
 
-        _createMaster(_master1Params(), key1);
-        _createMaster(_master2Params(), key2);
+        _seedMasterAccount(_master1Params(), key1);
+        _seedMasterAccount(_master2Params(), key2);
         master1Pool = address(accountGate.verifyMasterAccount(_master1Params()));
         master2Pool = address(accountGate.verifyMasterAccount(_master2Params()));
         master1KeyPersonal = master1Pool;
@@ -397,7 +395,6 @@ contract RedeemModuleCrossMasterBugTest is Test {
     }
 
     function test_allocateAllowance_fullyConsumedAfterDrain() public {
-        IERC20 _usdc = IERC20(address(usdc));
         _subscribe1(puppetA, userA, keyA, 100e6);
         _fundPuppet(puppetA, 100e6);
         address[] memory _aOnly = new address[](1);
@@ -536,7 +533,21 @@ contract RedeemModuleCrossMasterBugTest is Test {
 
         vm.prank(_attacker);
         vm.expectRevert(Error.Permission__Unauthorized.selector);
-        accountGate.dispatch(puppetA, _malicious, _digest, _userSig, _attSig, attestor, _intent.nonce, _usdc, 0, 0, 0, address(0), 200_000);
+        accountGate.dispatch(
+            puppetA,
+            _malicious,
+            _digest,
+            _userSig,
+            _attSig,
+            attestor,
+            _intent.nonce,
+            _usdc,
+            0,
+            0,
+            0,
+            address(0),
+            200_000
+        );
 
         assertEq(_usdc.balanceOf(address(puppetA)), 100e6, "puppet untouched");
         assertEq(_usdc.balanceOf(_attacker), 0, "attacker gained nothing");
@@ -581,9 +592,7 @@ contract RedeemModuleCrossMasterBugTest is Test {
         _fulfill1(30e6);
 
         RedeemStore.Pool memory _poolAfter = redeemStore.getPool(master1Pool, _usdc);
-        assertGt(
-            _poolAfter.accruedPerStake, _poolBefore.accruedPerStake, "partial fulfill credits the pending queue"
-        );
+        assertGt(_poolAfter.accruedPerStake, _poolBefore.accruedPerStake, "partial fulfill credits the pending queue");
         assertGt(
             redeem.getClaimable(redeemStore, master1Pool, _usdc, address(puppetA)),
             0,
@@ -918,11 +927,39 @@ contract RedeemModuleCrossMasterBugTest is Test {
         router.claim(_intent, _signDigest(key1, _digest), _signDigest(attestorKey, _digest), _intent.acceptableRelayFee);
     }
 
+    // 2-TR split: funds in the master's bridge-recipient route (where OIF fills land) are NOT seedable as
+    // masterAmount — allocate sources owner-share seeds ONLY from the distinct deposit route. This structurally
+    // blocks minting owner shares for bridged/relocated (already-NAV-counted) funds.
+    function test_allocate_masterSeed_rejectsBridgedFundsInBridgeRoute() public {
+        address _bridgeRoute = accountGate.predictTransientRoute(master1Pool);
+        address _depositRoute = accountGate.predictDepositRoute(master1Pool);
+        assertTrue(_bridgeRoute != _depositRoute, "bridge and deposit routes are distinct addresses");
+
+        // simulate a bridge fill delivering 100e6 into the master's bridge route; deposit route stays empty
+        usdc.mint(_bridgeRoute, 100e6);
+
+        address[] memory _none = new address[](0);
+        (
+            AllocateModule.AllocateIntent memory _intent,
+            bytes memory _userSig,
+            bytes memory _attSig,
+            bytes[] memory _bodies,
+            bytes[] memory _sigs
+        ) = _attestAllocateModule1(100e6, _none); // builds the intent but does NOT fund the deposit route
+
+        // the seed must be sourced from the (empty) deposit route -> the transfer reverts -> allocate reverts
+        vm.expectRevert();
+        router.allocate(_intent, _bodies, _sigs, _userSig, _attSig, _intent.acceptableRelayFee);
+
+        // the bridged funds remain untouched in the bridge route (recognize-only path, mints no shares)
+        assertEq(usdc.balanceOf(_bridgeRoute), 100e6, "bridged funds remain in bridge route");
+    }
+
     function _allocate1(
         uint _masterAmount,
         address[] memory _puppetList
     ) internal {
-        if (_masterAmount > 0) usdc.mint(accountGate.predictTransientRoute(master1Pool), _masterAmount);
+        if (_masterAmount > 0) usdc.mint(accountGate.predictDepositRoute(master1Pool), _masterAmount);
         (
             AllocateModule.AllocateIntent memory _intent,
             bytes memory _userSig,
@@ -965,7 +1002,9 @@ contract RedeemModuleCrossMasterBugTest is Test {
                 )
             )
         );
-        router.fulfill(_intent, _signDigest(key1, _digest), _signDigest(attestorKey, _digest), _intent.acceptableRelayFee);
+        router.fulfill(
+            _intent, _signDigest(key1, _digest), _signDigest(attestorKey, _digest), _intent.acceptableRelayFee
+        );
     }
 
     function _sell1(
@@ -1112,7 +1151,7 @@ contract RedeemModuleCrossMasterBugTest is Test {
         uint _masterAmount,
         address[] memory _puppetList
     ) internal {
-        if (_masterAmount > 0) usdc.mint(accountGate.predictTransientRoute(master2Pool), _masterAmount);
+        if (_masterAmount > 0) usdc.mint(accountGate.predictDepositRoute(master2Pool), _masterAmount);
         (
             AllocateModule.AllocateIntent memory _intent,
             bytes memory _userSig,
@@ -1155,7 +1194,9 @@ contract RedeemModuleCrossMasterBugTest is Test {
                 )
             )
         );
-        router.fulfill(_intent, _signDigest(key2, _digest), _signDigest(attestorKey, _digest), _intent.acceptableRelayFee);
+        router.fulfill(
+            _intent, _signDigest(key2, _digest), _signDigest(attestorKey, _digest), _intent.acceptableRelayFee
+        );
     }
 
     function _sell2(
@@ -1251,18 +1292,17 @@ contract RedeemModuleCrossMasterBugTest is Test {
         return abi.encode(uint(0), uint(0));
     }
 
-
     function _nonce() internal returns (uint) {
         _nonceCounter++;
         return _nonceCounter;
     }
 
-    function _createMaster(
+    function _seedMasterAccount(
         AccountLib.AccountInitParams memory _p,
         uint _userKey
     ) internal {
         uint _genesisSeed = 10e6;
-        usdc.mint(accountGate.predictTransientRoute(accountGate.predictMasterAccount(_p)), _genesisSeed);
+        usdc.mint(accountGate.predictDepositRoute(accountGate.predictMasterAccount(_p)), _genesisSeed);
         AllocateModule.AllocateIntent memory _intent = AllocateModule.AllocateIntent({
             params: _p,
             blockNumber: block.number,
@@ -1296,7 +1336,7 @@ contract RedeemModuleCrossMasterBugTest is Test {
                 )
             )
         );
-        router.createMaster(
+        router.seedMasterAccount(
             _intent,
             new bytes[](0),
             new bytes[](0),

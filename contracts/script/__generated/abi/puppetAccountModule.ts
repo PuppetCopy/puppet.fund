@@ -135,6 +135,11 @@ export default [
         "name": "transientRoute_",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "depositRoute_",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "nonpayable"
@@ -415,6 +420,25 @@ export default [
     "type": "function",
     "name": "masterAccountImpl",
     "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "predictDepositRoute",
+    "inputs": [
+      {
+        "name": "_account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
     "outputs": [
       {
         "name": "",
