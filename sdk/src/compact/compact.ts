@@ -39,18 +39,16 @@ const MASTER_ROUTED_KINDS: ReadonlySet<IActionKind> = new Set([
   'operate',
   'allocate',
   'fulfill',
-  'createMaster',
-  'createMasterAccount',
-  'bridge'
+  'seedMasterAccount',
+  'createMasterAccount'
 ])
 
 function accountForRequest(request: IRelayRequest): Address {
-  return MASTER_ROUTED_KINDS.has(request.kind)
-    ? predictMasterAccount(request.input.params)
-    : predictPuppetAccount(request.input.params)
+  const isMaster = MASTER_ROUTED_KINDS.has(request.kind) || (request.input as { isMaster?: boolean }).isMaster === true
+  return isMaster ? predictMasterAccount(request.input.params) : predictPuppetAccount(request.input.params)
 }
 
-export type IMatchmakerStatus = 'open' | 'closed'
+export type IMatchmakerStatus = 'open' | 'connecting' | 'closed'
 
 export interface ICompactOpts {
   matchmakerUrl: string
@@ -62,6 +60,10 @@ export interface ICompactOpts {
 export interface ICompact {
   attest(request: IRelayRequest, timeoutMs?: number): Promise<IAttestResult>
   status: IStream<IMatchmakerStatus>
+  // Synchronous connection check for callers that want to gate a trade without
+  // consuming the `status` stream (e.g. an operator tick loop). True only while the
+  // socket is OPEN; false during connecting/backoff/closed.
+  isOpen(): boolean
   close(): void
 }
 
@@ -128,6 +130,9 @@ export function createCompact(opts: ICompactOpts): ICompact {
 
   const scheduleReconnect = (): void => {
     if (disposed || reconnectTimer !== null) return
+    // The socket auto-reconnects with backoff, so signal a transient 'connecting'
+    // state rather than leaving status at 'closed' (which reads as a permanent outage).
+    pushStatus('connecting')
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null
       reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS)
@@ -139,6 +144,7 @@ export function createCompact(opts: ICompactOpts): ICompact {
     if (disposed) return
     const socket = new WebSocket(matchmakerUrl)
     ws = socket
+    pushStatus('connecting')
 
     socket.addEventListener(
       'open',
@@ -152,9 +158,11 @@ export function createCompact(opts: ICompactOpts): ICompact {
 
     const onDown = (): void => {
       if (ws !== socket) return
-      pushStatus('closed')
       abandon(new Error('matchmaker connection lost'))
-      scheduleReconnect()
+      // scheduleReconnect() pushes 'connecting' so a transient drop self-heals as a
+      // 'reconnecting' state instead of flashing a permanent-looking 'closed'.
+      if (disposed) pushStatus('closed')
+      else scheduleReconnect()
     }
     socket.addEventListener('error', onDown, { once: true })
     socket.addEventListener('close', onDown, { once: true })
@@ -174,6 +182,9 @@ export function createCompact(opts: ICompactOpts): ICompact {
 
   return {
     status,
+    isOpen(): boolean {
+      return ws?.readyState === WebSocket.OPEN
+    },
     async attest(request: IRelayRequest, timeoutMs = defaultTimeoutMs): Promise<IAttestResult> {
       const account = accountForRequest(request)
       const intent = request.intent as IIntentByKind[IActionKind] & { chainId: bigint; nonce: bigint }
@@ -198,7 +209,7 @@ export function createCompact(opts: ICompactOpts): ICompact {
       const chainId = Number(intent.chainId)
       if (
         request.kind === 'createPuppetAccount' ||
-        request.kind === 'createMaster' ||
+        request.kind === 'seedMasterAccount' ||
         request.kind === 'createMasterAccount'
       ) {
         await awaitAccountDeployed(sql, account, chainId, settlementTimeoutMs)

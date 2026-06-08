@@ -1,4 +1,6 @@
 export * from './allocation.js'
+export * from './cache.js'
+export * from './context.js'
 export * from './dispatch.js'
 export * from './fee.js'
 export * from './gasPrice.js'

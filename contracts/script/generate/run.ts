@@ -297,7 +297,7 @@ ${[...new Map(contracts.filter(c => c.abi).map(c => [c.name, c] as const)).value
     .sort((a, b) => a - b)
 
   // Hub/spoke split based on which chains a contract is deployed to.
-  // Universal gates (CoreGate) appear in both since they're deployed everywhere.
+  // Universal gates (PuppetGate/MasterGate) appear in both since they're deployed everywhere.
   const hubContracts = chainContracts.filter(c => gateChainAddresses.get(c.name)?.has(hubChainId!) ?? false)
   const spokeContracts = chainContracts.filter(c => {
     const m = gateChainAddresses.get(c.name)
@@ -685,7 +685,8 @@ export * from './gasLimits/index.js'
 // in src/ it's defined) is the authoritative EIP-712 signed shape. No
 // product-specific action list hardcoded in the generator.
 const ROUTER_FILES: { path: string; router: string }[] = [
-  { path: 'src/CoreGate.sol', router: 'CoreGate' },
+  { path: 'src/PuppetGate.sol', router: 'PuppetGate' },
+  { path: 'src/MasterGate.sol', router: 'MasterGate' },
   { path: 'src/HubGate.sol', router: 'HubGate' }
 ]
 
@@ -824,7 +825,7 @@ async function generateIntentTypedData(): Promise<void> {
           : []
         return { address: getAddress(direct.address), chainIds }
       }
-      // Chain-keyed section: a universal gate (CoreGate) lives at the same address
+      // Chain-keyed section: a universal gate (PuppetGate/MasterGate) lives at the same address
       // under every [chain.<alias>] block, so accumulate all chains rather than returning the first.
       const matched: number[] = []
       let matchedAddr: string | undefined
@@ -1056,7 +1057,7 @@ async function main(): Promise<void> {
     await Bun.write(
       `${OUTPUT_DIR}/gasLimits/index.ts`,
       '// SKIP_GAS placeholder. Do not edit manually.\n' +
-        'export const router__gasLimit = { CoreGate: {}, HubGate: {} } as const\n'
+        'export const router__gasLimit = { PuppetGate: {}, MasterGate: {}, HubGate: {} } as const\n'
     )
   }
   await generateIndex()

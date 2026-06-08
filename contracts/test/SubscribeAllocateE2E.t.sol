@@ -15,7 +15,6 @@ import {MasterAccount} from "src/core/MasterAccount.sol";
 import {Dictate} from "src/core/Dictate.sol";
 import {RegisterModule} from "src/core/module/RegisterModule.sol";
 
-import {Bridge} from "src/utils/Bridge.sol";
 import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "src/hub/module/AllocateModule.sol";
 import {AllocateStore} from "src/hub/AllocateStore.sol";
 import {RedeemModule} from "src/hub/module/RedeemModule.sol";
@@ -25,7 +24,8 @@ import {ShareModule} from "src/hub/ShareModule.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
 import {SubscribeModule, SUBSCRIBE_INTENT_TYPEHASH} from "src/hub/module/SubscribeModule.sol";
 
-import {HubGate} from "src/hub/HubGate.sol";
+import {BaseGate} from "src/utils/BaseGate.sol";
+import {HubGate} from "src/HubGate.sol";
 
 import {MockERC20} from "./mock/MockERC20.t.sol";
 
@@ -110,8 +110,6 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
         redeem = new RedeemModule(dictate);
         redeemStore = new RedeemStore(dictate);
 
-        Bridge bridge = new Bridge(address(0), bytes32(0));
-
         router = new HubGate(
             dictate,
             accountGate,
@@ -122,8 +120,7 @@ contract SubscribeModuleAllocateModuleE2ETest is Test {
             redeem,
             redeemStore,
             register,
-            bridge,
-            HubGate.Config({
+            BaseGate.Config({
                 attestor: attestor,
                 feeReceiver: feeReceiver,
                 transferGasLimit: TRANSFER_GAS_LIMIT,

@@ -1,11 +1,11 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { SPOKE_GATE_INTENTS } from '@puppet/contracts/intents'
+import { MASTER_GATE_INTENTS } from '@puppet/contracts/intents'
 import type { IAccountLib__AccountInitParams, IAccountModule__CreateMasterAccountIntent } from '@puppet/contracts/types'
 import type { Hex, TypedDataDefinition } from 'viem'
 import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
 import * as IntentLib from './intentLib.js'
-import { type IDraftContext, SPOKE_GATE_DOMAIN_MAP } from './shared.js'
+import { MASTER_GATE_DOMAIN_MAP, type IDraftContext } from './shared.js'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
@@ -37,10 +37,16 @@ export function attestCreateMasterAccountIntent(
       'hub master accounts are created via createMaster; createMasterAccount is spoke-only'
     )
   }
-  IntentLib.verifyChainId(input.chainId, BigInt(ctx.chainId))
-  IntentLib.verifyTimeBounds(input.blockNumber, input.deadline, ctx.currentBlock)
-  IntentLib.verifyRelayFee(input.acceptableRelayFee, input.initialDepositAmount)
-  IntentLib.verifyTokenAndCap(ctx.tokenRegistry, ctx.chainId, input.params.baseTokenId, 0n)
+  IntentLib.verifyCommonIntent(ctx, {
+    blockNumber: input.blockNumber,
+    deadline: input.deadline,
+    intentChainId: input.chainId,
+    baseTokenId: input.params.baseTokenId,
+    lookupChain: ctx.chainId,
+    capAmount: 0n,
+    acceptableRelayFee: input.acceptableRelayFee,
+    relayFeeDenominator: input.initialDepositAmount
+  })
   if (input.params.user === ZERO_ADDRESS) throw new CompactContractError('Account__InvalidUser', [])
   if (input.params.baseTokenId === ZERO_BYTES32) throw new CompactContractError('Account__InvalidBaseTokenId', [])
 
@@ -61,11 +67,11 @@ export function attestCreateMasterAccountIntent(
     initialDepositAmount: input.initialDepositAmount
   }
 
-  const domain = SPOKE_GATE_DOMAIN_MAP[ctx.chainId]
+  const domain = MASTER_GATE_DOMAIN_MAP[ctx.chainId]
   if (!domain) throw new CompactError('BAD_REQUEST', `unsupported chain ${ctx.chainId}`)
   const typedData: TypedDataDefinition = {
     domain,
-    ...SPOKE_GATE_INTENTS.createMasterAccount,
+    ...MASTER_GATE_INTENTS.createMasterAccount,
     message: intent as unknown as Record<string, unknown>
   }
   return { intent, typedData, args: [intent, input.userDeploySig, input.userSignerProof] }

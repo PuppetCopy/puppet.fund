@@ -194,7 +194,7 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
           ),
           queued > 0n
             ? $node(style({ color: palette.foreground, fontSize: text.xs }))(
-                $text(`${readableTokenAmount(desc, queued)} shares queued — waiting on master fulfillment.`)
+                $text(`${readableTokenAmount(desc, queued)} shares queued, waiting on master fulfillment.`)
               )
             : $node(style({ color: palette.foreground, fontSize: text.xs }))(
                 $text('Nothing queued. Sell shares first, then claim once the master fulfills.')

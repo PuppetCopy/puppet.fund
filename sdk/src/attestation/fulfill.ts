@@ -22,15 +22,19 @@ export interface IFulfillAttestContext extends IDraftContext {
   totalShareSupply: bigint
   queuedShares: bigint
   signedBalance: bigint
+  poolTotalStake: bigint
 }
 
 export function attestFulfillIntent(ctx: IFulfillAttestContext, input: IFulfillInput) {
-  // HubGate.fulfill → IntentLib.verifyTimeBounds
-  IntentLib.verifyTimeBounds(input.blockNumber, input.deadline, ctx.currentBlock)
-  // HubGate.fulfill → IntentLib.verifyTokenAndCap(baseTokenId, address(0), 0)
-  IntentLib.verifyTokenAndCap(ctx.tokenRegistry, HUB_CHAIN_ID, input.params.baseTokenId, 0n)
-  // HubGate.fulfill → IntentLib.verifyRelayFeeRatio(actualRelayFee, master.signedBalance, maxBps)
-  IntentLib.verifyRelayFee(input.acceptableRelayFee, ctx.signedBalance)
+  IntentLib.verifyCommonIntent(ctx, {
+    blockNumber: input.blockNumber,
+    deadline: input.deadline,
+    baseTokenId: input.params.baseTokenId,
+    lookupChain: HUB_CHAIN_ID,
+    capAmount: 0n,
+    acceptableRelayFee: input.acceptableRelayFee,
+    relayFeeDenominator: ctx.signedBalance
+  })
 
   // RedeemModule.fulfill body, in source order
   if (input.acceptableNetAssetValue === 0n) throw new CompactContractError('Fulfill__ZeroAcceptableNav', [])
@@ -45,6 +49,8 @@ export function attestFulfillIntent(ctx: IFulfillAttestContext, input: IFulfillI
     ctx.totalShareSupply === 0n ? 0n : (sharesRetired * input.acceptableNetAssetValue) / ctx.totalShareSupply
   if (sharesRetired === 0n) throw new CompactContractError('Fulfill__NothingToRetire', [])
   if (drainedBase <= input.acceptableRelayFee) throw new CompactContractError('Fulfill__RelayFeeTooHigh', [])
+  IntentLib.assertOutflowCovered(ctx, { amountIn: 0n, amountOut: drainedBase })
+  if (ctx.poolTotalStake === 0n) throw new CompactContractError('Share__NoStakeToCredit', [])
 
   const intent: IRedeemModule__FulfillIntent = {
     params: input.params,

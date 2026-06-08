@@ -14,11 +14,12 @@ import {
 import { getLiquidationPrice, getPositionPnlUsd, getTokenDescription, liquidationWeight } from '@puppet/sdk/gmx'
 import { empty, filterNull, type IStream, map, skipRepeats, toStream } from 'aelea/stream'
 import type { IBehavior, IComposeBehavior } from 'aelea/stream-extended'
-import { $node, $text, component, type INode, nodeEvent, style, styleInline } from 'aelea/ui'
+import { $node, $text, component, type I$Node, type INode, nodeEvent, style, styleInline } from 'aelea/ui'
 import { $column, $row, $separator, isDesktopScreen, layoutSheet, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import type { Address } from 'viem/accounts'
 import {
+  $errorCard,
   $icon,
   $infoLabel,
   $Link,
@@ -31,11 +32,12 @@ import {
   text
 } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
-import { $AccountLabel, $profileAvatar } from '../components/$AccountProfile.js'
+import { $accountLabel } from '../components/$AccountProfile.js'
 import { latestPriceMap } from '../io/gmx/priceFeed.js'
 import { $separator2 } from '../pages/common.js'
 import type { IPosition } from '../pages/types.js'
 import { isPositionSettled } from '../utils/utils.js'
+import { $roboAvatar } from './$roboAvatar.js'
 
 export const $midContainer = $column(
   style({
@@ -46,6 +48,17 @@ export const $midContainer = $column(
     width: '100%'
   })
 )
+
+// Centered, full-width recovery state for a failed network fetch: the shared $errorCard
+// (icon + classified title/detail) stacked above a caller-supplied Retry control, so a
+// failed list/table degrades into something the user can recover from with one tap instead
+// of the default tiny inline alert pill. The Retry node is built by the caller so it can be
+// tethered to re-trigger the specific fetch that failed.
+export const $errorWithRetry = (error: unknown, $retry: I$Node): I$Node =>
+  $column(
+    spacing.default,
+    style({ placeSelf: 'center', margin: 'auto', alignItems: 'center', padding: '24px 0', width: '100%' })
+  )($errorCard(error), $retry)
 
 export const $size = (size: bigint, collateral: bigint, $divider = $separator2) => {
   return $column(spacing.tiny)($text(readableUsd(size)), $divider, $leverage(size, collateral))
@@ -123,7 +136,7 @@ export const $masterDisplay = ({ address, size = 36 }: { address: Address; size?
   const badge = Math.round(size * 0.5)
   return $row(spacing.small, style({ alignItems: 'center' }))(
     $node(style({ position: 'relative', width: `${size}px`, height: `${size}px`, flexShrink: '0' }))(
-      $profileAvatar({ address, size }),
+      $roboAvatar(address, size),
       $node(
         style({
           position: 'absolute',
@@ -147,7 +160,7 @@ export const $masterDisplay = ({ address, size = 36 }: { address: Address; size?
         })
       )
     ),
-    $AccountLabel({ address })
+    $accountLabel({ address })
   )
 }
 
@@ -188,9 +201,7 @@ export const $puppetList = (puppets?: Address[], click?: IComposeBehavior<INode,
   return $row(style({ cursor: 'pointer' }))(
     ...puppets.map(account => {
       if (!click) {
-        return style({ marginRight: '-12px', border: '2px solid black' })(
-          $profileAvatar({ address: account, size: 25 })
-        )
+        return style({ marginRight: '-12px', border: '2px solid black' })($roboAvatar(account, 25))
       }
 
       return click(
@@ -201,7 +212,7 @@ export const $puppetList = (puppets?: Address[], click?: IComposeBehavior<INode,
           history.pushState({}, '', url)
           return url
         })
-      )(style({ marginRight: '-12px', border: '2px solid black' })($profileAvatar({ address: account, size: 25 })))
+      )(style({ marginRight: '-12px', border: '2px solid black' })($roboAvatar(account, 25)))
     })
     // $content
   )
@@ -424,24 +435,22 @@ interface I$MasterDisplay {
 }
 export const $MasterDisplay = (config: I$MasterDisplay) =>
   component(([click, clickTether]: IBehavior<any, Address>) => {
-    const { address, ensName, ensNameStream, puppetList, labelSize, profileSize } = config
+    const { address, ensName, ensNameStream, puppetList, labelSize, profileSize = 50 } = config
 
     return [
       $Link({
         $content: $row(spacing.small, style({ alignItems: 'center', textDecoration: 'none' }))(
-          $profileAvatar({ address, size: profileSize }),
+          $roboAvatar(address, profileSize),
           labelSize === undefined || labelSize > 0
             ? $column(style({ gap: '3px' }))(
-                $AccountLabel({
+                $accountLabel({
                   address,
                   primarySize: labelSize
                 }),
                 puppetList.length > 0
                   ? $row(style({ alignItems: 'center' }))(
                       ...puppetList.map(puppet => {
-                        return style({ marginRight: '-12px', border: '2px solid black' })(
-                          $profileAvatar({ address: puppet, size: 25 })
-                        )
+                        return style({ marginRight: '-12px', border: '2px solid black' })($roboAvatar(puppet, 25))
                       }),
                       $node(style({ gap: '8px', marginLeft: '16px', fontSize: text.sm }))($text(`${puppetList.length}`))
                     )

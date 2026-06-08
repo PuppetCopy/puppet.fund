@@ -21,6 +21,14 @@ export const activityOptionShortLabelMap = {
   [IntervalTime.YEAR]: '1Y'
 } as const
 
+export const activityOptionPeriodLabelMap = {
+  [IntervalTime.DAY]: '1 Day',
+  [IntervalTime.WEEK]: '1 Week',
+  [IntervalTime.MONTH]: '1 Month',
+  [IntervalTime.QUARTER]: '3 Months',
+  [IntervalTime.YEAR]: '1 Year'
+} as const
+
 export interface I$LastActivity {
   activityTimeframe: IStream<IntervalTime>
   $container?: INodeCompose

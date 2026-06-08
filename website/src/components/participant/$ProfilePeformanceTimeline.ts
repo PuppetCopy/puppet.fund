@@ -165,7 +165,7 @@ export const $usdTimeline = ({
                   baseLineColor: palette.message,
                   baseLineVisible: true,
                   lineWidth: 2,
-                  lineType: LineType.Curved,
+                  lineType: LineType.Simple,
                   baseValue: {
                     price: 0,
                     type: 'price'
@@ -225,7 +225,7 @@ export const $MasterRouteTimeline = ({
           sourceList,
           ticks: 280,
           getTime: item => item.time,
-          sourceMap: next => {
+          mapSource: next => {
             sumMap.set(next.master, next.value)
             const sum = [...sumMap.values()].reduce((acc, curr) => acc + curr, 0n)
             return formatFixed(USD_DECIMALS, sum)

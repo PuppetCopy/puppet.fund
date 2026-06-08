@@ -4,13 +4,12 @@ pragma solidity ^0.8.35;
 import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {Permission} from "./utils/auth/Permission.sol";
+import {BaseGate} from "./utils/BaseGate.sol";
 import {Error} from "./utils/Error.sol";
 import {IntentLib} from "./utils/IntentLib.sol";
 import {AccountLib} from "./core/AccountLib.sol";
 import {RuleLib} from "./hub/RuleLib.sol";
 import {IAuthority} from "./utils/interfaces/IAuthority.sol";
-import {IArbSys} from "./utils/interfaces/IArbSys.sol";
 
 import {AccountModule} from "./core/module/AccountModule.sol";
 import {PuppetAccount} from "./core/PuppetAccount.sol";
@@ -34,15 +33,7 @@ bytes32 constant BRIDGE_TO_WALLET_INTENT_TYPEHASH = keccak256(
     "BridgeToWalletIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,address inputToken,address outputToken,uint256 inputAmount,uint256 outputAmount,uint256 destinationChainId,address provider,bytes providerCallData,uint32 expires,uint32 fillDeadline)AccountInitParams(address user,bytes32 name,bytes32 baseTokenId,address signer)"
 );
 
-contract HubGate is Permission, EIP712 {
-    struct Config {
-        address attestor;
-        address feeReceiver;
-        uint transferGasLimit;
-        uint maxBlockDelay;
-        uint maxRelayFeeBps;
-    }
-
+contract HubGate is BaseGate, EIP712 {
     struct BridgeToWalletIntent {
         AccountLib.AccountInitParams params;
         uint blockNumber;
@@ -61,22 +52,12 @@ contract HubGate is Permission, EIP712 {
         uint32 fillDeadline;
     }
 
-    IArbSys public constant arbSys = IArbSys(address(100));
-
-    AccountModule internal immutable accountModule;
     ShareModule internal immutable shareModule;
     AllocateModule internal immutable allocateModule;
     AllocateStore internal immutable allocateStore;
     SubscribeModule internal immutable subscribeModule;
     RedeemModule internal immutable redeemModule;
     RedeemStore internal immutable redeemStore;
-    RegisterModule internal immutable registerModule;
-
-    address internal immutable attestor;
-    address internal immutable feeReceiver;
-    uint internal immutable transferGasLimit;
-    uint internal immutable maxBlockDelay;
-    uint internal immutable maxRelayFeeBps;
 
     constructor(
         IAuthority _authority,
@@ -89,36 +70,18 @@ contract HubGate is Permission, EIP712 {
         RedeemStore _redeemStore,
         RegisterModule _register,
         Config memory _config
-    ) Permission(_authority) EIP712("HubGate", "1") {
+    ) BaseGate(_authority, _accountGate, _register, _config) EIP712("HubGate", "1") {
         if (
-            address(_accountGate) == address(0) || address(_shareGate) == address(0) || address(_allocate) == address(0)
+            address(_shareGate) == address(0) || address(_allocate) == address(0)
                 || address(_allocateStore) == address(0) || address(_subscribe) == address(0)
                 || address(_redeem) == address(0) || address(_redeemStore) == address(0)
-                || address(_register) == address(0)
         ) revert Error.Gate__InvalidModule();
-        accountModule = _accountGate;
         shareModule = _shareGate;
         allocateModule = _allocate;
         allocateStore = _allocateStore;
         subscribeModule = _subscribe;
         redeemModule = _redeem;
         redeemStore = _redeemStore;
-        registerModule = _register;
-        attestor = _config.attestor;
-        feeReceiver = _config.feeReceiver;
-        transferGasLimit = _config.transferGasLimit;
-        maxBlockDelay = _config.maxBlockDelay;
-        maxRelayFeeBps = _config.maxRelayFeeBps;
-    }
-
-    function getConfig() external view returns (Config memory) {
-        return Config({
-            attestor: attestor,
-            feeReceiver: feeReceiver,
-            transferGasLimit: transferGasLimit,
-            maxBlockDelay: maxBlockDelay,
-            maxRelayFeeBps: maxRelayFeeBps
-        });
     }
 
     function predictShareToken(
@@ -420,20 +383,10 @@ contract HubGate is Permission, EIP712 {
         uint _settlerInputAmount = _intent.inputAmount - _actualRelayFee;
 
         IAccount.Call[] memory _calls = new IAccount.Call[](3);
-        _calls[0] = IAccount.Call({
-            target: address(_intent.inputToken),
-            value: 0,
-            gasLimit: transferGasLimit,
-            callData: abi.encodeCall(IERC20.approve, (_intent.provider, _settlerInputAmount))
-        });
+        _calls[0] = _approveCall(_intent.inputToken, _intent.provider, _settlerInputAmount);
         _calls[1] =
             IAccount.Call({target: _intent.provider, value: 0, gasLimit: 0, callData: _intent.providerCallData});
-        _calls[2] = IAccount.Call({
-            target: address(_intent.inputToken),
-            value: 0,
-            gasLimit: transferGasLimit,
-            callData: abi.encodeCall(IERC20.approve, (_intent.provider, 0))
-        });
+        _calls[2] = _approveCall(_intent.inputToken, _intent.provider, 0);
 
         accountModule.dispatch(
             _puppetAccount,

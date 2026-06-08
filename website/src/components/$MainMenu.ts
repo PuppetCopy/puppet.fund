@@ -6,24 +6,30 @@ import {
   combine,
   constant,
   empty,
+  filter,
   type IStream,
   map,
   merge,
   nowWith,
   o,
   op,
+  skipRepeats,
   start,
   switchLatest,
-  switchPromises
+  switchPromises,
+  tap
 } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import {
+  $element,
   $node,
   $text,
   attr,
+  attrBehavior,
   component,
   effectProp,
-  type I$Node,
+  effectRun,
+  type I$Slottable,
   type INode,
   type INodeCompose,
   type ISlottable,
@@ -42,7 +48,7 @@ import {
   spacing
 } from 'aelea/ui-components'
 import { colorShade, palette, type Theme, theme } from 'aelea/ui-components-theme'
-import { $defaultAnchor, $Link, locationChange, pushUrl, type RouteNode, type RouteSpec } from 'aelea/ui-router'
+import { $defaultAnchor, $Link, locationChange, pushUrl, type Route } from 'aelea/ui-router'
 import type { Address } from 'viem'
 import {
   $alertIntermediateSpinnerContainer,
@@ -56,13 +62,17 @@ import {
   $moreDots,
   $puppeteer,
   $twitter,
+  keyActivate,
   text
 } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
+import { $jazzicon } from '../common/$avatar.js'
 import { $puppetLogo } from '../common/$icons.js'
+import { $roboAvatar } from '../common/$roboAvatar.js'
+import { DOCS_URL, GITHUB_REPO_URL } from '../const/links.js'
 import * as context from '../io/context.js'
 import { type connectWallet, type IConnectedWallet, walletQuery } from '../wallet/index.js'
-import { $disconnectedWalletDisplay, $profileAvatar, $profileDisplay, readableAccountName } from './$AccountProfile.js'
+import { $accountLabel, readableAccountName } from './$AccountProfile.js'
 import { $ThemePicker } from './$ThemePicker.js'
 import { $WalletConnect } from './$WalletConnect.js'
 
@@ -92,18 +102,32 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
       [changeTheme, changeThemeTether]: IBehavior<ISlottable, Theme>,
       [selectConnector, selectConnectorTether]: IBehavior<Address[]>, //
       [targetClick, targetClickTether]: IBehavior<INode, PointerEvent>,
-      [openAccounts, openAccountsTether]: IBehavior<INode, PointerEvent>,
-      [changeActiveSubaccount, changeActiveSubaccountTether]: IBehavior<INode, Address>,
+      // Capture the extra menu's dismiss output so aria-expanded can mirror open/closed state.
+      [extraDismiss, extraDismissTether]: IBehavior<unknown>,
+      // Escape keydown inside the extra menu (popover:'manual' suppresses native Escape close);
+      // fed back into the popover's `dismiss` prop to close it.
+      [escapeExtra, escapeExtraTether]: IBehavior<INode, KeyboardEvent>,
       // Wiring this through is what subscribes $WalletConnect's click → map(connectWallet)
       // operator chain. Without it, button clicks don't fire connect. Value is unused here.
       [_connect, connectTether]: IBehavior<ReturnType<typeof connectWallet>>
     ) => {
+      // Trigger handle for returning focus when Escape closes the extra menu.
+      let extraTriggerEl: HTMLElement | null = null
+      // Open/closed stream: true on trigger click, false on the popover's dismiss event.
+      const extraOpen = merge(constant(true, clickPopoverClaim), constant(false, extraDismiss))
+      // Escape keydown → close: filters Escape, returns focus to the trigger, emits a dismiss.
+      const onEscape = (getTrigger: () => HTMLElement | null) =>
+        o(
+          nodeEvent('keydown'),
+          filter((e: KeyboardEvent) => e.key === 'Escape'),
+          tap((e: KeyboardEvent) => {
+            e.preventDefault()
+            e.stopPropagation()
+            getTrigger()?.focus()
+          })
+        )
       const subaccountListState: IStream<ISubaccountState[]> = op(subaccountList, switchPromises, state())
 
-      const $menuItem = $node(
-        style({ borderRadius: '10px', padding: '10px 12px', cursor: 'pointer' }),
-        stylePseudo(':hover', { backgroundColor: colorShade(palette.foreground, 12) })
-      )
       const iconCircularStyle = style({
         padding: '0 4px',
         border: `1px solid ${colorShade(palette.foreground, 40)}`,
@@ -126,13 +150,13 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
       const $iconCircular = $node(layoutSheet.displayFlex, iconCircularStyle, iconCircularHover, iconCircularActive)
 
       const $socialLinkList = [
-        $iconAnchor(attr({ href: 'https://docs.puppet.fund', 'aria-label': 'Documentation' }))(
+        $iconAnchor(attr({ href: DOCS_URL, 'aria-label': 'Documentation' }))(
           $icon({ $content: $gitbook, width: '22px', viewBox: '0 0 32 32' })
         ),
         $iconAnchor(attr({ href: 'https://twitter.com/PuppetCopy', 'aria-label': 'Twitter' }))(
           $icon({ $content: $twitter, width: '22px', viewBox: '0 0 24 24' })
         ),
-        $iconAnchor(attr({ href: 'https://github.com/PuppetCopy/monorepo', 'aria-label': 'GitHub' }))(
+        $iconAnchor(attr({ href: GITHUB_REPO_URL, 'aria-label': 'GitHub' }))(
           $icon({ $content: $github, width: '22px', viewBox: '0 0 32 32' })
         )
       ]
@@ -140,6 +164,11 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
       const themeState = start(theme, changeTheme)
       const $extraMenuPopover = $Popover({
         $container: $iconCircular,
+        // Announced as a menu; popover:'manual' suppresses native Escape, so wire it explicitly.
+        $contentContainer: $defaultPopoverContentContainer(
+          attr({ role: 'menu', tabindex: '-1' }),
+          escapeExtraTether(onEscape(() => extraTriggerEl))
+        ),
         $open: constant(
           $column(spacing.default)(
             isMobileScreen
@@ -153,10 +182,18 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
           ),
           clickPopoverClaim
         ),
-        dismiss: locationChange,
+        // Close on route change OR Escape pressed inside the menu/trigger.
+        dismiss: merge(locationChange, escapeExtra),
         $target: $icon({
           svgOps: o(
             clickPopoverClaimTether(nodeEvent('click')),
+            escapeExtraTether(onEscape(() => extraTriggerEl)),
+            attr({ role: 'button', tabindex: '0', 'aria-haspopup': 'menu', 'aria-label': 'More menu' }),
+            attrBehavior(map(open => ({ 'aria-expanded': open ? 'true' : 'false' }), extraOpen)),
+            keyActivate(),
+            effectRun((el: unknown) => {
+              extraTriggerEl = el as HTMLElement
+            }),
             style({
               padding: '6px',
               cursor: 'pointer',
@@ -166,25 +203,39 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
           ),
           width: '32px',
           $content: $moreDots,
-          viewBox: '0 0 32 32'
+          viewBox: '0 0 32 32',
+          // Accessible name so the icon-only trigger is not silent to AT (and is not aria-hidden).
+          // The svgOps above further refine role/aria-label for the menu-trigger semantics.
+          label: 'More options'
         })
-      })({})
+      })({ dismiss: extraDismissTether() })
+
+      const $connectCircle = $node(
+        style({
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          width: '45px',
+          height: '45px',
+          flexShrink: '0',
+          borderRadius: '50%',
+          color: palette.foreground,
+          fontWeight: '800',
+          fontSize: text.xl
+        })
+      )($text('?'))
 
       const $target = $row(
-        spacing.small,
         style({
           borderRadius: '50px',
           border: `1px solid ${colorShade(palette.foreground, 40)}`,
           alignItems: 'center',
-          paddingRight: '16px',
           cursor: 'pointer'
         }),
-        stylePseudo(':hover', {
-          border: `1px solid ${palette.foreground}`
-        }),
+        stylePseudo(':hover', { borderColor: palette.foreground }),
         targetClickTether(nodeEvent('pointerdown'))
       )(
-        $disconnectedWalletDisplay(),
+        $connectCircle,
         $node(
           style({
             width: '1px',
@@ -192,7 +243,10 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
             backgroundColor: colorShade(palette.foreground, 40)
           })
         )(),
-        $column(style({ fontSize: text.xs }))($text('Click to'), style({ fontWeight: 'bold' })($node($text('Connect'))))
+        $column(style({ fontSize: text.xs, padding: '0 16px', lineHeight: '1.3', whiteSpace: 'nowrap' }))(
+          $node($text('Click to')),
+          $node(style({ fontWeight: 'bold' }))($text('Connect'))
+        )
       )
 
       return [
@@ -221,8 +275,8 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
 
           $row(style({ flex: 1, alignItems: 'center', placeContent: 'center' }))(
             $intermediatePromise({
-              $loader: $node(style({ position: 'relative', display: 'inline-flex', borderRadius: '999px' }))(
-                style({ position: 'relative', borderRadius: 'inherit' })($target),
+              $loader: $node(style({ position: 'relative', display: 'inline-flex', borderRadius: '50px' }))(
+                style({ position: 'relative' })($target),
                 style({
                   position: 'absolute',
                   inset: '0px',
@@ -230,9 +284,9 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
                   height: '100%',
                   pointerEvents: 'none',
                   zIndex: 0,
-                  borderRadius: 'inherit'
+                  borderRadius: '50px'
                 })(
-                  style({ width: '100%', height: '100%', borderRadius: 'inherit', overflow: 'hidden' })(
+                  style({ width: '100%', height: '100%', borderRadius: '50px', overflow: 'hidden' })(
                     $alertIntermediateSpinnerContainer()
                   )
                 )
@@ -269,174 +323,109 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
                   flexShrink: '0',
                   overflow: 'hidden'
                 })
-                const $plainRight = $node($circle)($caret())
-                const $spinningRight = $node($circle)(
-                  $node(
-                    style({
-                      position: 'absolute',
-                      top: '-50%',
-                      left: '-50%',
-                      width: '200%',
-                      height: '200%',
-                      animation: 'rotate 3.5s linear infinite',
-                      background: `conic-gradient(from 0deg, ${palette.indeterminate}, ${colorShade(palette.foreground, 40)}, ${colorShade(palette.foreground, 40)}, ${palette.indeterminate})`
-                    })
-                  )(),
-                  $node(
-                    style({ position: 'absolute', inset: '1px', borderRadius: '50%', background: palette.horizon })
-                  )(),
-                  $caret()
-                )
-                const $rightSlot = switchLatest(
-                  map(
-                    p =>
-                      p.list.length === 0
-                        ? $spinningRight
-                        : p.sub
-                          ? $node($circle)($profileAvatar({ address: connection.address, size: 45, pixel: false }))
-                          : $plainRight,
-                    combine({ sub: selectedSubaccount, list: subaccountListState })
+                const $caretCircle = () => $node($circle)($caret())
+                const $spinningCaret = () =>
+                  $node($circle)(
+                    $node(
+                      style({
+                        position: 'absolute',
+                        top: '-50%',
+                        left: '-50%',
+                        width: '200%',
+                        height: '200%',
+                        animation: 'rotate 3.5s linear infinite',
+                        background: `conic-gradient(from 0deg, ${palette.indeterminate}, ${colorShade(palette.foreground, 40)}, ${colorShade(palette.foreground, 40)}, ${palette.indeterminate})`
+                      })
+                    )(),
+                    $node(
+                      style({ position: 'absolute', inset: '1px', borderRadius: '50%', background: palette.horizon })
+                    )(),
+                    $caret()
                   )
+                const $rightSlot = $node($circle)($jazzicon(connection.address))
+
+                const circleKey = op(
+                  combine({ sub: selectedSubaccount, list: subaccountListState }),
+                  map(p => (p.sub ? `sub:${p.sub.account}` : p.list.length === 0 ? 'spin' : 'caret')),
+                  skipRepeats
+                )
+                const $identityCircle = switchLatest(
+                  map(key => {
+                    if (key === 'spin') return $spinningCaret()
+                    if (key === 'caret') return $caretCircle()
+                    return $roboAvatar(key.slice(4) as Address, 45)
+                  }, circleKey)
                 )
 
-                const shortAddress = (a: string) => `${a.slice(0, 6)}..${a.slice(-4)}`
-                const $identitySlot = switchLatest(
+                const $identityBody = switchLatest(
                   map(
-                    p => {
-                      const sub = p.sub
-                      if (!sub) return $profileDisplay({ address: connection.address, pixel: false })
-                      const subLabel = readableAccountName(sub.name) ?? shortAddress(sub.account)
-                      const usdLabel = accountUsdLabel(p.registry, sub)
-                      return $row(spacing.small, style({ alignItems: 'center' }))(
-                        $profileAvatar({ address: sub.account, size: 45 }),
-                        $column(style({ minWidth: '0', gap: '3px' }))(
-                          $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.1' }))(
-                            $text(shortAddress(connection.address))
-                          ),
-                          $row(spacing.small, style({ alignItems: 'center' }))(
-                            $node(style({ fontSize: text.base, color: palette.message, lineHeight: '1.1' }))(
-                              $text(subLabel)
+                    p =>
+                      p.sub
+                        ? $column(style({ minWidth: '0', gap: '2px' }))(
+                            $row(spacing.small, style({ alignItems: 'center' }))(
+                              $accountLabel({
+                                address: p.sub.account,
+                                ensName: readableAccountName(p.sub.name),
+                                primarySize: 0.95
+                              }),
+                              $accountTypeIcon(p.sub.isMaster, 14)
                             ),
-                            $accountTypeIcon(sub.isMaster, 14),
                             $node(style({ fontSize: text.sm, color: palette.message, lineHeight: '1.1' }))(
-                              $text(usdLabel)
+                              $text(accountUsdLabel(p.registry, p.sub))
                             )
                           )
-                        )
-                      )
-                    },
+                        : $column(style({ fontSize: text.xs, lineHeight: '1.3', whiteSpace: 'nowrap' }))(
+                            $node($text('Click to')),
+                            $node(style({ fontWeight: 'bold' }))($text('Create subaccount'))
+                          ),
                     combine({ sub: selectedSubaccount, registry: switchPromises(context.tokenRegistryQuery) })
                   )
                 )
 
-                return $Popover({
-                  $target: $node(
-                    style({
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      borderRadius: '50px',
-                      border: `1px solid ${colorShade(palette.foreground, 40)}`,
-                      padding: '0',
-                      cursor: 'pointer'
-                    }),
-                    stylePseudo(':hover', { borderColor: palette.foreground }),
-                    openAccountsTether(nodeEvent('click'))
-                  )(
-                    $row(spacing.small, style({ alignItems: 'center', alignSelf: 'stretch', pointerEvents: 'none' }))(
-                      $identitySlot,
-                      $rightSlot
-                    )
-                  ),
-                  $contentContainer: $defaultPopoverContentContainer(
-                    style({ padding: '6px', borderRadius: '16px', minWidth: '300px' })
-                  ),
-                  $open: map(
-                    () =>
-                      $column(spacing.tiny)(
-                        $menuItem(
-                          effectProp(
-                            'onclick',
-                            nowWith(() => () => pushUrl('/portfolio'))
-                          )
-                        )(
-                          $row(spacing.small, style({ alignItems: 'center' }))(
-                            $node(style({ fontWeight: '600', color: palette.message }))($text('Portfolio')),
-                            $node(style({ flex: 1 }))(),
-                            $node(style({ fontSize: text.xs, color: palette.foreground }))($text('All accounts'))
-                          )
-                        ),
-                        $node(
-                          style({
-                            height: '1px',
-                            backgroundColor: colorShade(palette.foreground, 15),
-                            margin: '2px 8px'
-                          })
-                        )(),
-                        switchLatest(
-                          map(
-                            p => {
-                              const otherList = p.sub
-                                ? p.list.filter(acc => acc.account.toLowerCase() !== p.sub?.account.toLowerCase())
-                                : p.list
-                              return p.list.length === 0
-                                ? $node(style({ color: palette.foreground, fontSize: text.sm, padding: '10px 12px' }))(
-                                    $text('No accounts yet - create one below')
-                                  )
-                                : $column(spacing.tiny)(
-                                    ...otherList.map(acc =>
-                                      $menuItem(
-                                        changeActiveSubaccountTether(nodeEvent('click'), constant(acc.account))
-                                      )(
-                                        $row(spacing.small, style({ alignItems: 'center' }))(
-                                          $profileDisplay({ address: acc.account, name: acc.name, profileSize: 28 }),
-                                          $accountTypeIcon(acc.isMaster, 14),
-                                          $node(style({ flex: 1 }))(),
-                                          $node(style({ fontSize: text.sm, color: palette.message }))(
-                                            $text(accountUsdLabel(p.registry, acc))
-                                          )
-                                        )
-                                      )
-                                    )
-                                  )
-                            },
-                            combine({
-                              list: subaccountListState,
-                              sub: selectedSubaccount,
-                              registry: switchPromises(context.tokenRegistryQuery)
-                            })
-                          )
-                        ),
-                        $node(
-                          style({
-                            height: '1px',
-                            backgroundColor: colorShade(palette.foreground, 15),
-                            margin: '2px 8px'
-                          })
-                        )(),
-                        $menuItem(
-                          effectProp(
-                            'onclick',
-                            nowWith(() => () => pushUrl('/hello'))
-                          )
-                        )(
-                          $row(spacing.small, style({ alignItems: 'center' }))(
-                            $node(
-                              style({
-                                width: '20px',
-                                textAlign: 'center',
-                                fontSize: '22px',
-                                lineHeight: '1',
-                                color: palette.message
-                              })
-                            )($text('+')),
-                            $node(style({ fontWeight: '600', color: palette.message }))($text('Create account'))
-                          )
-                        )
-                      ),
-                    openAccounts
-                  ),
-                  dismiss: merge(locationChange, changeActiveSubaccount)
-                })({})
+                const $identitySlot = $row(spacing.small, style({ alignItems: 'center' }))(
+                  $identityCircle,
+                  $identityBody,
+                  $node(
+                    style({ alignSelf: 'stretch', width: '1px', backgroundColor: colorShade(palette.foreground, 40) })
+                  )(),
+                  $accountLabel({ address: connection.address, primarySize: 0.75 })
+                )
+
+                const accountHref: IStream<string> = op(
+                  selectedSubaccount,
+                  map(sub => (sub ? '/portfolio' : '/hello')),
+                  skipRepeats
+                )
+
+                return $element('a')(
+                  attr({ 'aria-label': 'Account' }),
+                  attrBehavior(map(h => ({ href: h }), accountHref)),
+                  style({
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    borderRadius: '50px',
+                    border: `1px solid ${colorShade(palette.foreground, 40)}`,
+                    padding: '0',
+                    cursor: 'pointer',
+                    color: palette.message,
+                    textDecoration: 'none'
+                  }),
+                  stylePseudo(':hover', { borderColor: palette.foreground }),
+                  effectProp(
+                    'onclick',
+                    nowWith(() => (ev: MouseEvent) => {
+                      if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return
+                      ev.preventDefault()
+                      const dest = (ev.currentTarget as HTMLAnchorElement).getAttribute('href')
+                      if (dest) pushUrl(dest)
+                    })
+                  )
+                )(
+                  $row(spacing.small, style({ alignItems: 'center', alignSelf: 'stretch', pointerEvents: 'none' }))(
+                    $identitySlot,
+                    $rightSlot
+                  )
+                )
               }, walletQuery)
             })
           ),
@@ -445,18 +434,16 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
             $extraMenuPopover,
             ...(isDesktopScreen ? $socialLinkList : [])
           )
-        ),
-
-        { changeActiveSubaccount }
+        )
       ]
     }
   )
 
 interface I$PageLink {
-  route: RouteNode<RouteSpec>
+  route: Route
   params?: Record<string, string>
   $container?: INodeCompose<HTMLAnchorElement>
-  $content: I$Node
+  $content: I$Slottable
 }
 
 const $pageLink = (config: I$PageLink) =>

@@ -8,7 +8,14 @@ import { type IBehavior, multicast } from 'aelea/stream-extended'
 import { $node, $text, component, style } from 'aelea/ui'
 import { $column, $Popover, $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
-import { $ButtonSecondary, $defaultMiniButtonSecondary, $hintAdjustment, intermediateText, text } from '@/ui-components'
+import {
+  $ButtonSecondary,
+  $defaultMiniButtonSecondary,
+  $hintAdjustment,
+  $loadingValue,
+  intermediateText,
+  text
+} from '@/ui-components'
 import { $route } from '../../common/$common.js'
 import { formatUsd, priceFor } from '../../io/gmx/priceFeed.js'
 import type { IConnectedWallet } from '../../wallet/index.js'
@@ -66,7 +73,7 @@ export const $TokenBalanceEditor = ({
           )
 
           const $balanceDisplay = $column(style({ gap: '1px', alignItems: 'flex-start' }))(
-            $node(style({ fontWeight: '600', fontSize: text.base, color: palette.message }))($text(usdValue)),
+            $node(style({ fontWeight: '600', fontSize: text.base, color: palette.message }))($loadingValue(usdValue)),
             $hintAdjustment({
               color: adjustmentColor,
               change: adjustmentChange,

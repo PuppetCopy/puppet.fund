@@ -6,7 +6,7 @@ export type IAccountCallRow = IAccountModule__AccountCall
 export type IWalletDepositRow = IWalletDepositModule__WalletDeposit
 
 const SETTLEMENT_POLL_START_MS = 250
-const SETTLEMENT_POLL_MAX_MS = 2000
+const SETTLEMENT_POLL_MAX_MS = 500
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
 

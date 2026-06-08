@@ -1,5 +1,5 @@
 import { type GetConnectionReturnType, getConnection, getWalletClient } from '@wagmi/core'
-import { type IStream, map, merge, op, skipRepeatsWith } from 'aelea/stream'
+import { type IStream, map, merge, op, skipRepeats, skipRepeatsWith } from 'aelea/stream'
 import { state } from 'aelea/stream-extended'
 import { subject } from '../utils/subject.js'
 import type { IConnectedWallet } from './connectedWallet.js'
@@ -38,6 +38,18 @@ const stableConnection = op(
 export const walletQuery: IStream<Promise<IConnectedWallet | null>> = op(
   merge(pushed.stream, map(buildWallet, stableConnection)),
   state()
+)
+
+// Live wallet chain id, sourced directly from the wagmi connection's `chainId`.
+// Unlike `walletQuery`/`stableConnection` (which deliberately dedupe out chain
+// changes so subscribers aren't torn down), this stream re-emits on every chain
+// switch — letting consumers gate on the wallet's *current* chain so a
+// "wrong network" warning clears the instant the user switches.
+export const walletChainId: IStream<number | null> = op(
+  connection,
+  map(c => (c.status === 'connected' ? (c.chainId ?? null) : null)),
+  skipRepeats,
+  state(null)
 )
 
 export function setWallet(wallet: Promise<IConnectedWallet | null> | IConnectedWallet | null): void {

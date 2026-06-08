@@ -8,7 +8,7 @@ import {BaseScript} from "../deploy/shared/BaseScript.s.sol";
 
 import {AccountLib, ACCOUNT_TYPEHASH} from "src/core/AccountLib.sol";
 import {AccountModule} from "src/core/module/AccountModule.sol";
-import {CoreGate, WITHDRAW_INTENT_TYPEHASH, RECOGNIZE_INTENT_TYPEHASH} from "src/CoreGate.sol";
+import {PuppetGate, WITHDRAW_INTENT_TYPEHASH, RECOGNIZE_INTENT_TYPEHASH} from "src/PuppetGate.sol";
 import {PuppetAccount} from "src/core/PuppetAccount.sol";
 
 contract SiphonDeployer is BaseScript {
@@ -49,7 +49,7 @@ contract SiphonDeployer is BaseScript {
         console2.log("Siphon: params.signer", params.signer);
 
         AccountModule accountModule = AccountModule(_getCoreAddress("AccountModule"));
-        CoreGate coreGate = CoreGate(_getChainAddress("CoreGate"));
+        PuppetGate puppetGate = PuppetGate(_getChainAddress("PuppetGate"));
         address transientRoute = accountModule.predictTransientRoute(TARGET);
 
         // The deployer account is keyed on a single baseTokenId; resolve the registered token from it.
@@ -66,7 +66,7 @@ contract SiphonDeployer is BaseScript {
 
         if (trBalance > 0) {
             console2.log("--- recognize calldata (run via cast send) ---");
-            _emitRecognizeCalldata(coreGate, params, trBalance);
+            _emitRecognizeCalldata(puppetGate, params, trBalance);
             signed += trBalance;
         }
 
@@ -77,7 +77,7 @@ contract SiphonDeployer is BaseScript {
 
         if (signed > 0) {
             console2.log("--- walletWithdraw calldata (run via cast send) ---");
-            _emitWalletWithdrawCalldata(coreGate, params, signed);
+            _emitWalletWithdrawCalldata(puppetGate, params, signed);
         } else {
             console2.log("Siphon: nothing to withdraw");
         }
@@ -99,21 +99,19 @@ contract SiphonDeployer is BaseScript {
     }
 
     function _emitRecognizeCalldata(
-        CoreGate _coreGate,
+        PuppetGate _puppetGate,
         AccountLib.AccountInitParams memory _params,
         uint _amount
     ) internal view {
         uint _nonce = uint(keccak256(abi.encode("SiphonDeployer", "recognize", block.timestamp, block.chainid)));
 
-        CoreGate.RecognizeIntent memory intent = CoreGate.RecognizeIntent({
+        PuppetGate.RecognizeIntent memory intent = PuppetGate.RecognizeIntent({
             params: _params,
             blockNumber: _currentBlockNumber(),
             deadline: block.timestamp + 3600,
             acceptableRelayFee: 0,
             nonce: _nonce,
             chainId: block.chainid,
-            isMaster: false,
-            fromTransientRoute: false,
             amount: _amount
         });
 
@@ -126,30 +124,28 @@ contract SiphonDeployer is BaseScript {
                 intent.acceptableRelayFee,
                 intent.nonce,
                 intent.chainId,
-                intent.isMaster,
-                intent.fromTransientRoute,
                 intent.amount
             )
         );
 
-        bytes32 _digest = _hashTypedData(_coreGate, _structHash);
+        bytes32 _digest = _hashTypedData(_puppetGate, _structHash);
         bytes memory _userSig = _sign(DEPLOYER_PRIVATE_KEY, _digest);
         bytes memory _attestorSig = _sign(ATTESTOR_PRIVATE_KEY, _digest);
 
-        bytes memory _calldata = abi.encodeCall(CoreGate.recognize, (intent, _userSig, _attestorSig, 0));
-        console2.log("to:", address(_coreGate));
+        bytes memory _calldata = abi.encodeCall(PuppetGate.recognize, (intent, _userSig, _attestorSig, 0));
+        console2.log("to:", address(_puppetGate));
         console2.log("data:");
         console2.logBytes(_calldata);
     }
 
     function _emitWalletWithdrawCalldata(
-        CoreGate _coreGate,
+        PuppetGate _puppetGate,
         AccountLib.AccountInitParams memory _params,
         uint _amount
     ) internal view {
         uint _nonce = uint(keccak256(abi.encode("SiphonDeployer", "walletWithdraw", block.timestamp, block.chainid)));
 
-        CoreGate.WithdrawIntent memory intent = CoreGate.WithdrawIntent({
+        PuppetGate.WithdrawIntent memory intent = PuppetGate.WithdrawIntent({
             params: _params,
             blockNumber: _currentBlockNumber(),
             deadline: block.timestamp + 3600,
@@ -172,12 +168,12 @@ contract SiphonDeployer is BaseScript {
             )
         );
 
-        bytes32 _digest = _hashTypedData(_coreGate, _structHash);
+        bytes32 _digest = _hashTypedData(_puppetGate, _structHash);
         bytes memory _userSig = _sign(DEPLOYER_PRIVATE_KEY, _digest);
         bytes memory _attestorSig = _sign(ATTESTOR_PRIVATE_KEY, _digest);
 
-        bytes memory _calldata = abi.encodeCall(CoreGate.walletWithdraw, (intent, _userSig, _attestorSig, 0));
-        console2.log("to:", address(_coreGate));
+        bytes memory _calldata = abi.encodeCall(PuppetGate.walletWithdraw, (intent, _userSig, _attestorSig, 0));
+        console2.log("to:", address(_puppetGate));
         console2.log("data:");
         console2.logBytes(_calldata);
     }
@@ -196,10 +192,10 @@ contract SiphonDeployer is BaseScript {
     }
 
     function _hashTypedData(
-        CoreGate _coreGate,
+        PuppetGate _puppetGate,
         bytes32 _structHash
     ) internal view returns (bytes32) {
-        (, string memory _name, string memory _version, uint _chainId, address _verifyingContract,,) = _coreGate.eip712Domain();
+        (, string memory _name, string memory _version, uint _chainId, address _verifyingContract,,) = _puppetGate.eip712Domain();
         bytes32 _domainSeparator = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),

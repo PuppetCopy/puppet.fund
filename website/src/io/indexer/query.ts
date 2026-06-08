@@ -143,6 +143,11 @@ export type ILeaderboardRow = IMasterLatestMetric & {
   name: Hex | null
   puppetList: Address[]
   navTimeline: IBalanceTimelinePoint[]
+  // Consistency metric derived on the website from the per-trade `pnlList` the indexer already exposes.
+  // TODO(indexer): needs maxDrawdown (bps) and sharpeRatio on MasterLatestMetric to surface downside/risk-adjusted
+  // return alongside win-rate; drawdown/Sharpe can't be reconstructed from the leaderboard payload alone.
+  winCount: number
+  lossCount: number
 }
 
 export async function fetchLeaderboardPage(params: {
@@ -158,7 +163,11 @@ export async function fetchLeaderboardPage(params: {
     where: {
       interval: { _eq: params.activityTimeframe },
       lastUpdatedTimestamp: { _gte: startActivityTimeframe },
-      ...(params.account ? { master: { _eq: getAddress(params.account) } } : {}),
+      // Match either stored casing (event-derived rows are lowercase; predicted accounts are checksummed),
+      // so the "Find trader" address search isn't silently filtered out by a case mismatch.
+      ...(params.account
+        ? { master: { _in: [params.account.toLowerCase() as Address, getAddress(params.account)] } }
+        : {}),
       ...(params.collateralTokenList.length > 0
         ? { baseTokenId: { _in: params.collateralTokenList.map(getAddress) } }
         : {})
@@ -216,13 +225,22 @@ export async function fetchLeaderboardPage(params: {
             ],
             ticks: BALANCE_TIMELINE_BUCKETS,
             getTime: s => s.time,
-            sourceMap: s => formatFixed(USD_DECIMALS, s.nav)
+            mapSource: s => formatFixed(USD_DECIMALS, s.nav)
           })
+    // Derive win/loss consistency from the per-trade realised PnL series the indexer already provides.
+    let winCount = 0
+    let lossCount = 0
+    for (const pnl of m.pnlList) {
+      if (pnl > 0n) winCount++
+      else if (pnl < 0n) lossCount++
+    }
     return {
       ...m,
       name: nameByMaster.get(m.master) ?? null,
       puppetList: puppetsByMaster.get(m.master) ?? [],
-      navTimeline
+      navTimeline,
+      winCount,
+      lossCount
     }
   })
 }
@@ -253,7 +271,10 @@ export async function fetchGmxTraderLeaderboardPage(params: {
     where: {
       interval: { _eq: params.activityTimeframe },
       lastUpdatedTimestamp: { _gte: startActivityTimeframe },
-      ...(params.account ? { account: { _eq: getAddress(params.account) } } : {}),
+      // Match either stored casing so the address search isn't silently filtered out by case mismatch.
+      ...(params.account
+        ? { account: { _in: [params.account.toLowerCase() as Address, getAddress(params.account)] } }
+        : {}),
       ...(params.collateralTokenList.length > 0
         ? { collateralToken: { _in: params.collateralTokenList.map(getAddress) } }
         : {})
@@ -264,58 +285,36 @@ export async function fetchGmxTraderLeaderboardPage(params: {
   })
   if (metricList.length === 0) return []
 
-  const accountList = [...new Set(metricList.map(m => m.account))]
-  const collateralList = [...new Set(metricList.map(m => m.collateralToken))]
-  const [checkpointList, seedList] = await Promise.all([
-    select(sqlClient, 'GmxTraderCheckpoint', {
-      where: {
-        account: { _in: accountList },
-        collateralToken: { _in: collateralList },
-        blockTimestamp: { _gte: startActivityTimeframe }
-      },
-      orderBy: { blockTimestamp: 'asc' }
-    }),
-    select(sqlClient, 'GmxTraderCheckpoint', {
-      where: {
-        account: { _in: accountList },
-        collateralToken: { _in: collateralList },
-        blockTimestamp: { _lt: startActivityTimeframe }
-      },
-      orderBy: { blockTimestamp: 'desc' },
-      fields: ['account', 'collateralToken', 'cumulativePnl']
-    })
-  ])
-
-  const seriesByKey = new Map<string, { time: number; cum: bigint }[]>()
-  for (const c of checkpointList) {
-    const key = `${c.account.toLowerCase()}:${c.collateralToken.toLowerCase()}`
-    const series = seriesByKey.get(key) ?? []
-    series.push({ time: c.blockTimestamp, cum: c.cumulativePnl })
-    seriesByKey.set(key, series)
-  }
-
-  const seedByKey = new Map<string, bigint>()
-  for (const s of seedList) {
-    const key = `${s.account.toLowerCase()}:${s.collateralToken.toLowerCase()}`
-    if (!seedByKey.has(key)) seedByKey.set(key, s.cumulativePnl)
-  }
-
   return metricList.map(m => {
-    const key = `${m.account.toLowerCase()}:${m.collateralToken.toLowerCase()}`
-    const series = seriesByKey.get(key) ?? []
-    const baseline = seedByKey.get(key) ?? 0n
+    // Build a VALID bucketed timeline before cumulating. The indexed per-period series (pnlList/
+    // pnlTimestampList on GmxTraderRouteMetric) can arrive out of block-time order, so we bucket each
+    // (timestamp, pnl) into a fixed time-slot, sum per slot, sort by time, then cumulate in TIME order.
+    // Accumulating in raw array order (as before) both mis-ordered the curve and produced wrong cum
+    // values — a later-time pnl folded in early — which is what tripped resampleTimeSeries' sorted-check.
+    const slotSize = Math.max(1, Math.floor(params.activityTimeframe / BALANCE_TIMELINE_BUCKETS))
+    const pnlBySlot = new Map<number, bigint>()
+    for (let i = 0; i < m.pnlTimestampList.length; i++) {
+      const slot = Math.floor(m.pnlTimestampList[i] / slotSize) * slotSize
+      pnlBySlot.set(slot, (pnlBySlot.get(slot) ?? 0n) + (m.pnlList[i] ?? 0n))
+    }
+    let cum = 0n
+    const points = [...pnlBySlot.keys()]
+      .sort((a, b) => a - b)
+      .map(slot => {
+        cum += pnlBySlot.get(slot) as bigint
+        return { time: slot, cum }
+      })
+    // Slots are pruned indexer-side against the LAST EVENT's time, not wall-clock now, so the oldest
+    // slot can predate startActivityTimeframe (now - interval). Clamp the 0-anchor to <= the first point.
+    const anchorTime = points.length > 0 ? Math.min(startActivityTimeframe, points[0].time) : startActivityTimeframe
     const pnlTimeline =
-      series.length === 0
+      points.length === 0
         ? []
         : resampleTimeSeries({
-            sourceList: [
-              { time: startActivityTimeframe, cum: 0n },
-              ...series.map(s => ({ time: s.time, cum: s.cum - baseline })),
-              { time: now, cum: series[series.length - 1].cum - baseline }
-            ],
+            sourceList: [{ time: anchorTime, cum: 0n }, ...points, { time: now, cum: points[points.length - 1].cum }],
             ticks: BALANCE_TIMELINE_BUCKETS,
             getTime: s => s.time,
-            sourceMap: s => formatFixed(USD_DECIMALS, s.cum)
+            mapSource: s => formatFixed(USD_DECIMALS, s.cum)
           })
     return {
       account: m.account,
@@ -444,7 +443,7 @@ export async function fetchPuppetBalanceTimeline(
     sourceList,
     ticks: BALANCE_TIMELINE_BUCKETS,
     getTime: source => source.time,
-    sourceMap: source => formatFixed(USD_DECIMALS, source.total)
+    mapSource: source => formatFixed(USD_DECIMALS, source.total)
   })
 }
 
@@ -489,6 +488,6 @@ export async function fetchMasterPerformanceTimeline(
     sourceList,
     ticks: BALANCE_TIMELINE_BUCKETS,
     getTime: source => source.time,
-    sourceMap: source => formatFixed(USD_DECIMALS, source.nav)
+    mapSource: source => formatFixed(USD_DECIMALS, source.nav)
   })
 }

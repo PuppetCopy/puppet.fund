@@ -58,7 +58,10 @@ export const $PairBanner = ({ walletQuery, subaccountList }: IPairBanner) =>
                 nowWith(() => () => {
                   sealPairingPayload(pairParams.epk, {
                     user: wallet.address,
-                    bindSig: session.bindSig,
+                    // Seal the derived session signer key, never the wallet bind
+                    // signature: the operator only needs to sign operate intents, so
+                    // it should never receive the stronger deploy-auth secret.
+                    signerKey: session.privateKey,
                     endpoints: {
                       matchmakerUrl,
                       indexerUrl: indexerEndpoint,

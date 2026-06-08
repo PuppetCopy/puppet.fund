@@ -49,3 +49,42 @@ export function verifyRelayFee(acceptableRelayFee: bigint, amount: bigint): void
     ])
   }
 }
+
+export interface ICommonAttestContext {
+  chainId: ChainId
+  currentBlock: bigint
+  tokenRegistry: ITokenRegistryMap
+}
+
+export interface IVerifyCommonIntentParams {
+  blockNumber: bigint
+  deadline: bigint
+  intentChainId?: bigint
+  baseTokenId: Hex
+  lookupChain: ChainId
+  capAmount: bigint
+  acceptableRelayFee: bigint
+  relayFeeDenominator?: bigint
+}
+
+export function verifyCommonIntent(ctx: ICommonAttestContext, params: IVerifyCommonIntentParams): Address {
+  if (params.intentChainId !== undefined) {
+    verifyChainId(params.intentChainId, BigInt(ctx.chainId))
+  }
+  verifyTimeBounds(params.blockNumber, params.deadline, ctx.currentBlock)
+  const baseToken = verifyTokenAndCap(ctx.tokenRegistry, params.lookupChain, params.baseTokenId, params.capAmount)
+  if (params.relayFeeDenominator !== undefined) {
+    verifyRelayFee(params.acceptableRelayFee, params.relayFeeDenominator)
+  }
+  return baseToken
+}
+
+export function assertOutflowCovered(
+  ctx: { signedBalance: bigint },
+  amounts: { amountIn: bigint; amountOut: bigint }
+): void {
+  const signedSum = ctx.signedBalance + amounts.amountIn
+  if (amounts.amountOut > signedSum) {
+    throw new CompactContractError('Account__OutflowExceedsSigned', [amounts.amountOut, signedSum])
+  }
+}

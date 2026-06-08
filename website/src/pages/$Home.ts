@@ -86,9 +86,7 @@ export const $Home = (_config: I$Home) =>
               $text('Masters seamlessly earn more doing what they do best')
             ),
             $node(style({ whiteSpace: 'pre-wrap', textAlign: 'center', maxWidth: '878px' }))(
-              $text(
-                'Puppets (Investors) effortlessly pick and choose top masters to copy based by their performance and strategy to build a winning Portfolio'
-              )
+              $text('Puppets (investors) build a portfolio of top masters, picked by performance and strategy.')
             )
           ),
           $node(),
@@ -135,10 +133,10 @@ export const $Home = (_config: I$Home) =>
         $column(spacing.default, style({ flex: 1 }))(
           $heading1($text('Pick Top Masters to Copy')),
           $text(
-            'Explore the leaderboard to find masters. pick ones you like. define rules to better protect your deposit.'
+            'Explore the leaderboard to find masters, pick the ones you like, and set rules to protect your deposit.'
           ),
           $text(
-            'every time each master open or maintain a position, a percentage of your deposit is used to copy the position.'
+            'Each time a master opens or adjusts a position, a share of your deposit copies it, within the rules you set.'
           )
         ),
         $row(style({ flex: 1 }))($video('assets/video/leaderboard-pick-masters.mp4'))
@@ -146,8 +144,8 @@ export const $Home = (_config: I$Home) =>
       $snapSection(style({ margin: '0 auto', maxWidth: '1240px', flexDirection: 'row', gap: '70px' }))(
         $column(spacing.default, style({ flex: 1 }))(
           $heading1($text('Masters Earn More')),
-          $text('Masters earn more by having more puppets copying their trades.'),
-          $text('Trading done seamlessly with their own funds and without directly knowing or managing puppets funds.')
+          $text('Masters earn more as more puppets copy their trades.'),
+          $text('They trade their own funds as usual, never holding or managing puppet money.')
         ),
         $row(style({ flex: 1 }))($video('assets/video/trade-adjust.mp4'))
       )

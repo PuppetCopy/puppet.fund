@@ -1,9 +1,21 @@
 import { empty, type IOps, type IStream, map, switchLatest, toStream } from 'aelea/stream'
 import type { IBehavior } from 'aelea/stream-extended'
-import { $node, $text, component, type I$Node, type INode, type INodeCompose, style } from 'aelea/ui'
-import { $Dropdown, $row, spacing } from 'aelea/ui-components'
+import {
+  $node,
+  $text,
+  attr,
+  attrBehavior,
+  component,
+  effectRun,
+  type I$Node,
+  type INode,
+  type INodeCompose,
+  style,
+  stylePseudo
+} from 'aelea/ui'
+import { $Dropdown, $defaultDropListContainer, $defaultOptionContainer, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $icon } from '../$common.js'
+import { $icon, dropAnchorKeyNav, keyActivate, listboxKeyNav } from '../$common.js'
 import { $caretDown } from '../$icons.js'
 import { $infoLabel } from '../$info.js'
 export const $defaultDropSelectAnchor = $row(
@@ -15,8 +27,12 @@ export const $defaultDropSelectAnchor = $row(
     padding: '8px 12px',
     gap: '10px',
     borderRadius: '14px',
-    border: `1px solid ${colorShade(palette.foreground, 15)}`
-  })
+    // Visible border consistent with the icon-circular controls (design-system standard).
+    border: `1px solid ${colorShade(palette.foreground, 40)}`,
+    transition: 'border-color 120ms ease-out'
+  }),
+  // Hover brightens the border, matching the icon-circular controls / choice cards.
+  stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) })
 )
 
 // Back-compat alias — `$container` was the historical name; `$anchor` describes
@@ -51,22 +67,52 @@ export const $DropSelect = <T>({
   label,
   $anchor = $defaultDropSelectAnchor,
   $container,
-  $dropListContainer,
-  $optionContainer,
+  $dropListContainer = $defaultDropListContainer,
+  $optionContainer = $defaultOptionContainer,
   $$option = $stringRender<T>(),
   $valueLabel = $stringRender<T>(),
   closeOnSelect
 }: I$DropSelect<T>) =>
-  component(([select, selectTether]: IBehavior<T>) => {
+  component(([select, selectTether]: IBehavior<T>, [isOpen, isOpenTether]: IBehavior<boolean>) => {
+    // Captured so Escape (the popover list uses popover:'manual', which suppresses native
+    // Escape) and focus-return have a handle to the trigger element, and so the anchor's
+    // ArrowDown/ArrowUp can move focus into the freshly-mounted list.
+    let anchorEl: HTMLElement | null = null
+    let listEl: HTMLElement | null = null
+    // Re-clicking the open trigger toggles the dropdown closed (aelea $Dropdown.isOpen reducer).
+    const closeAndFocus = () => {
+      anchorEl?.click()
+      anchorEl?.focus()
+    }
+
     return [
       $Dropdown({
         optionList,
         $$option,
         $container,
-        $dropListContainer,
-        $optionContainer,
+        // role=listbox + roving Arrow focus + Escape close (returns focus to the anchor).
+        $dropListContainer: $dropListContainer(
+          attr({ role: 'listbox', tabindex: '-1' }),
+          effectRun((el: unknown) => {
+            listEl = el as HTMLElement
+          }),
+          listboxKeyNav(closeAndFocus, () => anchorEl)
+        ),
+        // Each option is keyboard-activatable and announced as an option.
+        $optionContainer: $optionContainer(attr({ role: 'option', tabindex: '0' }), keyActivate()),
         closeOnSelect,
+        // Decorators (ARIA/keyboard/element-capture) are applied first, then the children —
+        // aelea's compose overloads don't allow mixing ops and leaves in a single call.
         $anchor: $anchor(
+          // Focusable, announced as a listbox trigger; aria-expanded follows the open stream.
+          // Enter/Space toggle it; ArrowDown/ArrowUp open it (if closed) and move focus to the list.
+          attr({ role: 'button', tabindex: '0', 'aria-haspopup': 'listbox' }),
+          attrBehavior(map(open => ({ 'aria-expanded': open ? 'true' : 'false' }), isOpen)),
+          effectRun((el: unknown) => {
+            anchorEl = el as HTMLElement
+          }),
+          dropAnchorKeyNav(() => listEl)
+        )(
           labelToNode(label),
           $row(spacing.default, style({ justifyContent: 'space-between', flex: 1 }))(
             switchLatest($valueLabel(toStream(value))),
@@ -80,7 +126,9 @@ export const $DropSelect = <T>({
           )
         )
       })({
-        select: selectTether()
+        select: selectTether(),
+        // Capture the dropdown open state to feed aria-expanded on the anchor above.
+        isOpen: isOpenTether()
       }),
       { select }
     ]

@@ -18,14 +18,24 @@ export interface IClaimInput {
 
 export interface IClaimAttestContext extends IDraftContext {
   currentBlock: bigint
+  claimable?: bigint
 }
 
 export function attestClaimIntent(ctx: IClaimAttestContext, input: IClaimInput) {
-  IntentLib.verifyTimeBounds(input.blockNumber, input.deadline, ctx.currentBlock)
-  IntentLib.verifyTokenAndCap(ctx.tokenRegistry, HUB_CHAIN_ID, input.masterParams.baseTokenId, 0n)
+  IntentLib.verifyCommonIntent(ctx, {
+    blockNumber: input.blockNumber,
+    deadline: input.deadline,
+    baseTokenId: input.masterParams.baseTokenId,
+    lookupChain: HUB_CHAIN_ID,
+    capAmount: 0n,
+    acceptableRelayFee: input.acceptableRelayFee,
+    relayFeeDenominator: input.amount
+  })
   if (input.amount === 0n) throw new CompactContractError('Share__Empty', [])
   if (input.acceptableRelayFee >= input.amount) throw new CompactContractError('Share__RelayFeeTooHigh', [])
-  IntentLib.verifyRelayFee(input.acceptableRelayFee, input.amount)
+  if (ctx.claimable !== undefined && input.amount > ctx.claimable) {
+    throw new CompactContractError('Share__InsufficientClaimable', [])
+  }
 
   const intent: IRedeemModule__ClaimIntent = {
     params: input.params,

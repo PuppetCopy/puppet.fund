@@ -7,7 +7,7 @@ import {
   resolveDispatchNetwork
 } from '@puppet/sdk/attestation'
 import { formatThrownError } from '@puppet/sdk/compact'
-import { CHAIN_LIST, type ChainId } from '@puppet/sdk/const'
+import { ADDRESS_ZERO, CHAIN_LIST, type ChainId } from '@puppet/sdk/const'
 import { readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { getTokenDescription } from '@puppet/sdk/gmx'
 import {
@@ -59,7 +59,7 @@ import {
 import { uiStorage } from '@/ui-storage'
 import { originChainKey } from '../../app/localStoreSchema.js'
 import { $chainIcon, $chainLabel, chainName } from '../../common/$chain.js'
-import { type AcrossQuote, fetchAcrossQuote } from '../../io/bridge/across.js'
+import { type AcrossBridgeQuote, fetchAcrossBridgeQuote } from '../../io/bridge/across.js'
 import * as context from '../../io/context.js'
 import { formatUsd, priceFor } from '../../io/gmx/priceFeed.js'
 import type { IConnectedWallet } from '../../wallet/index.js'
@@ -129,12 +129,17 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
         combine({ chainId: chainSelection, feeMap: relayFeeMapQuery })
       )
 
+      const sliderFee: IStream<bigint> = start(0n, relayFee)
       const sliderAmount: IStream<bigint> = sampleMap(
-        (bal, pct) => {
-          const bp = BigInt(Math.round(Math.max(0, Math.min(1, pct)) * 10000))
-          return ((bal ?? 0n) * bp) / 10000n
+        (s, pct) => {
+          const bal = s.balance ?? 0n
+          const clamped = Math.max(0, Math.min(1, pct))
+          if (clamped >= 1) return bal
+          const available = bal > s.fee ? bal - s.fee : 0n
+          const bp = BigInt(Math.round(clamped * 10000))
+          return (available * bp) / 10000n
         },
-        balance,
+        combine({ balance, fee: sliderFee }),
         sliderPercent
       )
       const maxAmount: IStream<bigint> = sampleMap(bal => bal ?? 0n, balance, clickMax)
@@ -153,7 +158,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       )
 
       type QuoteStatus =
-        | { status: 'idle'; quote: AcrossQuote | null }
+        | { status: 'idle'; quote: AcrossBridgeQuote | null }
         | { status: 'error'; quote: null; message: string }
       const quoteRefreshTick: IStream<number> = start(0, periodic(60_000))
       const quoteParams = debounce(
@@ -167,7 +172,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
           _: quoteRefreshTick
         })
       )
-      const acrossQuoteFetch: IStream<Promise<QuoteStatus>> = multicast(
+      const acrossQuoteFetch: IStream<Promise<QuoteStatus>> = op(
         map(async (params): Promise<QuoteStatus> => {
           if (params.chainId === HUB_CHAIN_ID) return { status: 'idle', quote: null }
           if (params.raw === 0n) return { status: 'idle', quote: null }
@@ -176,7 +181,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
           if (input <= 0n) return { status: 'idle', quote: null }
           const outputToken = tokenInfoFor(tokenRegistry, params.chainId as ChainId, baseTokenId).token
           try {
-            const quote = await fetchAcrossQuote({
+            const quote = await fetchAcrossBridgeQuote({
               originChainId: HUB_CHAIN_ID,
               destinationChainId: params.chainId,
               inputToken: token,
@@ -186,10 +191,11 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
             })
             return { status: 'idle', quote }
           } catch (err) {
-            console.error('[$WithdrawEditor.acrossQuoteFetch] fetchAcrossQuote failed', err)
+            console.error('[$WithdrawEditor.acrossQuoteFetch] fetchAcrossBridgeQuote failed', err)
             return { status: 'error', quote: null, message: formatThrownError(err) }
           }
-        }, quoteParams)
+        }, quoteParams),
+        state()
       )
       const acrossQuoteQuery: IStream<QuoteStatus> = multicast(switchPromises(acrossQuoteFetch))
 
@@ -218,10 +224,10 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
             if (params.q.status === 'error') return params.q.message
             if (!params.q.quote) return null
             if (params.q.quote.isAmountTooLow) {
-              return `Below Across minimum ${readableTokenAmount(tokenDescription, params.q.quote.limits.minDeposit)}`
+              return `Below bridge minimum ${readableTokenAmount(tokenDescription, params.q.quote.limits.minDeposit)}`
             }
             if (params.balance - fee > params.q.quote.limits.maxDeposit) {
-              return `Exceeds Across max ${readableTokenAmount(tokenDescription, params.q.quote.limits.maxDeposit)}`
+              return `Exceeds bridge max ${readableTokenAmount(tokenDescription, params.q.quote.limits.maxDeposit)}`
             }
           }
           return null
@@ -287,7 +293,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       )
 
       const $bridgeFeeRow = switchMap(
-        chainId => (chainId === HUB_CHAIN_ID ? empty : $labeledValue('Bridge Fee ~', $intermediateText(bridgeFeeText))),
+        chainId => (chainId === HUB_CHAIN_ID ? empty : $labeledValue('Bridge Fee', $intermediateText(bridgeFeeText))),
         chainSelection
       )
 
@@ -304,8 +310,13 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       })
 
       const sliderValue: IStream<number> = map(
-        p => (p.bal && p.bal > 0n ? Number((p.amt * 10000n) / p.bal) / 10000 : 0),
-        combine({ amt: amountValue, bal: balance })
+        p => {
+          const bal = p.bal ?? 0n
+          const available = bal > p.fee ? bal - p.fee : 0n
+          if (available <= 0n) return 0
+          return Math.min(1, Number((p.amt * 10000n) / available) / 10000)
+        },
+        combine({ amt: amountValue, bal: balance, fee: sliderFee })
       )
       const hasError: IStream<boolean> = map(a => a !== null, alert)
       const sliderDisabled: IStream<boolean> = map(b => b === null || b === 0n, balance)
@@ -361,7 +372,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
             $chainIcon(id, 28),
             $column(style({ gap: '0' }))(
               $node(style({ fontWeight: '600', fontSize: text.base }))($text(chainName(id))),
-              $node(style({ color: palette.foreground, fontSize: text.xs }))($text('Send to'))
+              $node(style({ color: palette.foreground, fontSize: text.xs }))($text('Receive at'))
             )
           )
         ),
@@ -480,7 +491,6 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
                 }
               }
 
-              const intentInputAmount = isSweep ? 0n : params.amount + params.fee
               const grossAmount = isSweep ? liveBalance : params.amount + params.fee
               const quote = params.q.quote
               const input: IBridgeToWalletInput = {
@@ -489,13 +499,14 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
                 deadline,
                 acceptableRelayFee: params.fee,
                 nonce,
-                inputAmount: intentInputAmount,
+                inputAmount: grossAmount,
                 destinationChainId: BigInt(params.chainId),
-                exclusiveRelayer: quote?.exclusiveRelayer ?? '0x0000000000000000000000000000000000000000',
-                quoteTimestamp: quote?.quoteTimestamp ?? 0,
-                fillDeadline: quote?.fillDeadline ?? 0,
-                exclusivityDeadline: quote?.exclusivityDeadline ?? 0,
-                outputAmount: quote?.outputAmount ?? 0n
+                exclusiveRelayer: quote?.route.exclusiveRelayer ?? ADDRESS_ZERO,
+                quoteTimestamp: quote?.route.quoteTimestamp ?? 0,
+                exclusivityParameter: quote?.route.exclusivityParameter ?? 0,
+                outputAmount: quote?.outputAmount ?? 0n,
+                expires: quote?.expires ?? 0,
+                fillDeadline: quote?.fillDeadline ?? 0
               }
               return {
                 kind: 'withdraw',

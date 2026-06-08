@@ -16,7 +16,9 @@ import {PuppetAccount} from "src/core/PuppetAccount.sol";
 import {TransientRoute} from "src/core/TransientRoute.sol";
 import {MasterAccount} from "src/core/MasterAccount.sol";
 import {WalletDepositModule} from "src/core/module/WalletDepositModule.sol";
-import {CoreGate} from "src/CoreGate.sol";
+import {BaseGate} from "src/utils/BaseGate.sol";
+import {PuppetGate} from "src/PuppetGate.sol";
+import {MasterGate} from "src/MasterGate.sol";
 import {HubGate} from "src/HubGate.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
 import {ShareModule} from "src/hub/ShareModule.sol";
@@ -81,6 +83,57 @@ contract Deploy is BaseScript {
         vm.stopBroadcast();
     }
 
+    function deployGateSplit() public {
+        _requireDeployConfig();
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
+        Dictate dictate = Dictate(_getCoreAddress("Dictate"));
+        AccountModule accountGate = AccountModule(_getCoreAddress("AccountModule"));
+        WalletDepositModule walletDeposit = WalletDepositModule(_getCoreAddress("WalletDepositModule"));
+
+        _deployAndWireGate(dictate, accountGate, walletDeposit, "PuppetGate", AccountModule.createPuppetAccount.selector);
+        _deployAndWireGate(dictate, accountGate, walletDeposit, "MasterGate", AccountModule.createMasterAccount.selector);
+
+        vm.stopBroadcast();
+    }
+
+    function retireCoreGate() public {
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
+        Dictate dictate = Dictate(_getCoreAddress("Dictate"));
+        AccountModule accountGate = AccountModule(_getCoreAddress("AccountModule"));
+        WalletDepositModule walletDeposit = WalletDepositModule(_getCoreAddress("WalletDepositModule"));
+
+        address coreProxy = dictate.gateMap("CoreGate");
+        require(coreProxy != address(0), "Deploy: CoreGate already retired");
+        dictate.removePermission(accountGate, AccountModule.dispatch.selector, coreProxy);
+        dictate.removePermission(accountGate, AccountModule.createPuppetAccount.selector, coreProxy);
+        dictate.removePermission(accountGate, AccountModule.createMasterAccount.selector, coreProxy);
+        dictate.removeAccess(walletDeposit, coreProxy);
+        dictate.removeGate("CoreGate");
+
+        vm.stopBroadcast();
+    }
+
+    function _deployAndWireGate(
+        Dictate _dictate,
+        AccountModule _accountGate,
+        WalletDepositModule _walletDeposit,
+        string memory _name,
+        bytes4 _createSelector
+    ) internal {
+        Meta memory m = _meta(_name);
+        address impl = _create(bytes.concat(m.creationCode, m.ctorArgs));
+        bytes32 nameB;
+        assembly {
+            nameB := mload(add(_name, 32))
+        }
+        address proxy = _dictate.setGate(nameB, impl);
+        _setChainAddress(string.concat(_name, "Impl"), impl);
+        _setChainAddress(_name, proxy);
+        _dictate.setPermission(_accountGate, AccountModule.dispatch.selector, proxy);
+        _dictate.setPermission(_accountGate, _createSelector, proxy);
+        _dictate.setAccess(_walletDeposit, proxy);
+    }
+
     function registerTokens() public {
         Dictate dictate = Dictate(_getCoreAddress("Dictate"));
         RegisterModule register = RegisterModule(_getCoreAddress("RegisterModule"));
@@ -102,12 +155,14 @@ contract Deploy is BaseScript {
         Dictate dictate = Dictate(_getCoreAddress("Dictate"));
         bytes32[] memory targets;
         if (block.chainid == _getHubChainId()) {
-            targets = new bytes32[](2);
-            targets[0] = "CoreGate";
-            targets[1] = "HubGate";
+            targets = new bytes32[](3);
+            targets[0] = "PuppetGate";
+            targets[1] = "MasterGate";
+            targets[2] = "HubGate";
         } else {
-            targets = new bytes32[](1);
-            targets[0] = "CoreGate";
+            targets = new bytes32[](2);
+            targets[0] = "PuppetGate";
+            targets[1] = "MasterGate";
         }
 
         vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
@@ -135,7 +190,7 @@ contract Deploy is BaseScript {
     }
 
     function _coreContracts() internal pure returns (string[] memory names) {
-        names = new string[](9);
+        names = new string[](10);
         names[0] = "Dictate";
         names[1] = "RegisterModule";
         names[2] = "PuppetAccount";
@@ -144,7 +199,8 @@ contract Deploy is BaseScript {
         names[5] = "Attest";
         names[6] = "AccountModule";
         names[7] = "WalletDepositModule";
-        names[8] = "CoreGate";
+        names[8] = "PuppetGate";
+        names[9] = "MasterGate";
     }
 
     function _hubContracts() internal pure returns (string[] memory names) {
@@ -186,15 +242,23 @@ contract Deploy is BaseScript {
         // AccountModule is the ONLY authorized caller of Attest.execute/executeMandate (the account's gate).
         dictate.setAccess(Attest(_specAddr("Attest")), address(accountGate));
 
-        address coreImpl = _specAddr("CoreGate");
-        address coreProxy = dictate.setGate("CoreGate", coreImpl);
-        _setChainAddress("CoreGateImpl", coreImpl);
-        _setChainAddress("CoreGate", coreProxy);
+        address puppetImpl = _specAddr("PuppetGate");
+        address puppetProxy = dictate.setGate("PuppetGate", puppetImpl);
+        _setChainAddress("PuppetGateImpl", puppetImpl);
+        _setChainAddress("PuppetGate", puppetProxy);
 
-        dictate.setPermission(accountGate, AccountModule.dispatch.selector, coreProxy);
-        dictate.setPermission(accountGate, AccountModule.createPuppetAccount.selector, coreProxy);
-        dictate.setPermission(accountGate, AccountModule.createMasterAccount.selector, coreProxy);
-        dictate.setAccess(walletDeposit, coreProxy);
+        dictate.setPermission(accountGate, AccountModule.dispatch.selector, puppetProxy);
+        dictate.setPermission(accountGate, AccountModule.createPuppetAccount.selector, puppetProxy);
+        dictate.setAccess(walletDeposit, puppetProxy);
+
+        address masterImpl = _specAddr("MasterGate");
+        address masterProxy = dictate.setGate("MasterGate", masterImpl);
+        _setChainAddress("MasterGateImpl", masterImpl);
+        _setChainAddress("MasterGate", masterProxy);
+
+        dictate.setPermission(accountGate, AccountModule.dispatch.selector, masterProxy);
+        dictate.setPermission(accountGate, AccountModule.createMasterAccount.selector, masterProxy);
+        dictate.setAccess(walletDeposit, masterProxy);
     }
 
     function _wireHub() internal {
@@ -294,16 +358,36 @@ contract Deploy is BaseScript {
                 isCore: true
             });
         }
-        if (k == keccak256("CoreGate")) {
+        if (k == keccak256("PuppetGate")) {
             return Meta({
-                creationCode: type(CoreGate).creationCode,
+                creationCode: type(PuppetGate).creationCode,
                 ctorArgs: abi.encode(
                     _specAddr("Dictate"),
                     _specAddr("AccountModule"),
                     _specAddr("WalletDepositModule"),
                     _specAddr("RegisterModule"),
                     _getHubChainId(),
-                    CoreGate.Config({
+                    BaseGate.Config({
+                        attestor: ATTESTOR_ADDRESS,
+                        feeReceiver: RELAYER_ADDRESS,
+                        transferGasLimit: _getTransferGasLimit(),
+                        maxBlockDelay: _getMaxBlockDelay(),
+                        maxRelayFeeBps: _getMaxRelayFeeBps()
+                    })
+                ),
+                isCore: false
+            });
+        }
+        if (k == keccak256("MasterGate")) {
+            return Meta({
+                creationCode: type(MasterGate).creationCode,
+                ctorArgs: abi.encode(
+                    _specAddr("Dictate"),
+                    _specAddr("AccountModule"),
+                    _specAddr("WalletDepositModule"),
+                    _specAddr("RegisterModule"),
+                    _getHubChainId(),
+                    BaseGate.Config({
                         attestor: ATTESTOR_ADDRESS,
                         feeReceiver: RELAYER_ADDRESS,
                         transferGasLimit: _getTransferGasLimit(),
@@ -368,7 +452,7 @@ contract Deploy is BaseScript {
                     _specAddr("RedeemModule"),
                     _specAddr("RedeemStore"),
                     _specAddr("RegisterModule"),
-                    HubGate.Config({
+                    BaseGate.Config({
                         attestor: ATTESTOR_ADDRESS,
                         feeReceiver: RELAYER_ADDRESS,
                         transferGasLimit: _getTransferGasLimit(),

@@ -1,4 +1,5 @@
-import { $wrapNativeElement } from 'aelea/ui'
+import { $wrapNativeElement, style } from 'aelea/ui'
+import { $row } from 'aelea/ui-components'
 import Color from 'color'
 // @ts-expect-error
 import MersenneTwister from 'mersenne-twister'
@@ -91,7 +92,9 @@ export function createJazziconSvg(address: string): SVGSVGElement {
   return svg
 }
 
-export function $jazzicon(address: Address) {
-  const svg = createJazziconSvg(address)
-  return $wrapNativeElement(svg)()
+export function $jazzicon(address: Address, size?: number) {
+  const $svg = $wrapNativeElement(createJazziconSvg(address))()
+  return size === undefined
+    ? $svg
+    : $row(style({ width: `${size}px`, height: `${size}px`, borderRadius: '50%', overflow: 'hidden' }))($svg)
 }

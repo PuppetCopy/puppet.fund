@@ -21,29 +21,27 @@ import {AllocateStore} from "src/hub/AllocateStore.sol";
 import {SubscribeModule} from "src/hub/module/SubscribeModule.sol";
 import {RedeemModule} from "src/hub/module/RedeemModule.sol";
 import {RedeemStore} from "src/hub/RedeemStore.sol";
-import {HubGate, BRIDGE_TO_WALLET_INTENT_TYPEHASH} from "src/hub/HubGate.sol";
+import {HubGate, BRIDGE_TO_WALLET_INTENT_TYPEHASH} from "src/HubGate.sol";
+import {BaseGate} from "src/utils/BaseGate.sol";
 import {
-    CoreGate,
+    PuppetGate,
     WITHDRAW_INTENT_TYPEHASH,
     BRIDGE_INTENT_TYPEHASH,
     RECOGNIZE_INTENT_TYPEHASH
-} from "src/core/CoreGate.sol";
-import {OIF_INPUT_SETTLER} from "./shared/OifSettler.t.sol";
+} from "src/PuppetGate.sol";
+import {BRIDGE_PROVIDER} from "./shared/BridgeProvider.t.sol";
 import {ACCOUNT_TYPEHASH, AccountLib} from "src/core/AccountLib.sol";
 import {Error} from "src/utils/Error.sol";
 import {IAccount} from "src/core/interface/IAccount.sol";
 
 import {MockERC20} from "./mock/MockERC20.t.sol";
 import {MockWNT} from "./mock/MockWNT.t.sol";
-import {MockInputSettlerEscrow} from "./mock/MockInputSettlerEscrow.t.sol";
-import {Bridge} from "src/utils/Bridge.sol";
+import {MockBridgeProvider} from "./mock/MockBridgeProvider.t.sol";
 
 uint constant HUB_CHAIN_ID = 42_161;
 
 contract DepositHotPathTest is Test {
     bytes32 constant USDC_ID = keccak256("USDC");
-    bytes32 constant OUTPUT_ORACLE = bytes32(uint(0xACE));
-    address constant INPUT_ORACLE = address(0xACE);
     uint constant TRANSFER_GAS_LIMIT = 100_000;
 
     address owner = makeAddr("Owner");
@@ -58,7 +56,7 @@ contract DepositHotPathTest is Test {
     AccountModule accountGate;
     RegisterModule register;
     HubGate hubGate;
-    CoreGate coreGate;
+    PuppetGate puppetGate;
 
     bytes32 hubDomainSeparator;
     bytes32 coreDomainSeparator;
@@ -105,8 +103,6 @@ contract DepositHotPathTest is Test {
 
         WalletDepositModule walletDeposit = new WalletDepositModule(dictate);
 
-        Bridge bridge = new Bridge(OIF_INPUT_SETTLER, bytes32(0));
-
         hubGate = new HubGate(
             dictate,
             accountGate,
@@ -117,8 +113,7 @@ contract DepositHotPathTest is Test {
             redeem,
             redeemStore,
             register,
-            bridge,
-            HubGate.Config({
+            BaseGate.Config({
                 attestor: attestor,
                 feeReceiver: feeReceiver,
                 transferGasLimit: TRANSFER_GAS_LIMIT,
@@ -127,14 +122,13 @@ contract DepositHotPathTest is Test {
             })
         );
 
-        coreGate = new CoreGate(
+        puppetGate = new PuppetGate(
             dictate,
             accountGate,
             walletDeposit,
             register,
-            bridge,
             HUB_CHAIN_ID,
-            CoreGate.Config({
+            BaseGate.Config({
                 attestor: attestor,
                 feeReceiver: feeReceiver,
                 transferGasLimit: TRANSFER_GAS_LIMIT,
@@ -143,7 +137,7 @@ contract DepositHotPathTest is Test {
             })
         );
 
-        dictate.setAccess(walletDeposit, address(coreGate));
+        dictate.setAccess(walletDeposit, address(puppetGate));
         dictate.setAccess(allocateStore, address(subscribe));
         dictate.setAccess(allocateStore, address(allocate));
         dictate.setAccess(redeemStore, address(redeem));
@@ -156,7 +150,7 @@ contract DepositHotPathTest is Test {
         grantGate(dictate, accountGate, address(subscribe));
         grantGate(dictate, accountGate, address(allocate));
         grantGate(dictate, accountGate, address(redeem));
-        grantGate(dictate, accountGate, address(coreGate));
+        grantGate(dictate, accountGate, address(puppetGate));
         grantGate(dictate, accountGate, address(hubGate));
 
         dictate.setAccess(register, owner);
@@ -165,7 +159,7 @@ contract DepositHotPathTest is Test {
         vm.stopPrank();
 
         hubDomainSeparator = _domainSeparator("HubGate", address(hubGate));
-        coreDomainSeparator = _domainSeparator("CoreGate", address(coreGate));
+        coreDomainSeparator = _domainSeparator("PuppetGate", address(puppetGate));
         vm.mockCall(address(0x64), abi.encodeWithSignature("arbBlockNumber()"), abi.encode(block.number));
 
         puppet = _makePuppet("PuppetAccount", bytes32("P"), USDC_ID);
@@ -203,7 +197,7 @@ contract DepositHotPathTest is Test {
             )
         );
         bytes32 _digest = _coreDigest(_structHash);
-        coreGate.createPuppetAccount(
+        puppetGate.createPuppetAccount(
             intent,
             _signPuppetDeploy(c.userKey),
             "",
@@ -249,8 +243,8 @@ contract DepositHotPathTest is Test {
     function _buildWithdraw(
         uint _amount,
         uint _relayFee
-    ) internal view returns (CoreGate.WithdrawIntent memory) {
-        return CoreGate.WithdrawIntent({
+    ) internal view returns (PuppetGate.WithdrawIntent memory) {
+        return PuppetGate.WithdrawIntent({
             blockNumber: block.number,
             deadline: block.timestamp + 1,
             params: _params(),
@@ -262,7 +256,7 @@ contract DepositHotPathTest is Test {
     }
 
     function _withdrawDigest(
-        CoreGate.WithdrawIntent memory _intent
+        PuppetGate.WithdrawIntent memory _intent
     ) internal view returns (bytes32) {
         bytes32 _structHash = keccak256(
             abi.encode(
@@ -282,10 +276,10 @@ contract DepositHotPathTest is Test {
     function test_withdraw_pays_signed_amount_and_fee() public {
         _seedAccounted(puppet.acct, 150e6);
 
-        CoreGate.WithdrawIntent memory intent = _buildWithdraw(150e6, 5e6);
+        PuppetGate.WithdrawIntent memory intent = _buildWithdraw(150e6, 5e6);
         bytes32 digest = _withdrawDigest(intent);
         puppet.nonce++;
-        coreGate.walletWithdraw(
+        puppetGate.walletWithdraw(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
 
@@ -298,11 +292,11 @@ contract DepositHotPathTest is Test {
     function test_withdraw_zero_amount_reverts() public {
         _seedAccounted(puppet.acct, 100e6);
 
-        CoreGate.WithdrawIntent memory intent = _buildWithdraw(0, 1e6);
+        PuppetGate.WithdrawIntent memory intent = _buildWithdraw(0, 1e6);
         bytes32 digest = _withdrawDigest(intent);
 
         vm.expectRevert(Error.Deposit__NothingToWithdraw.selector);
-        coreGate.walletWithdraw(
+        puppetGate.walletWithdraw(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
     }
@@ -310,11 +304,11 @@ contract DepositHotPathTest is Test {
     function test_withdraw_insufficient_signed_reverts() public {
         _seedAccounted(puppet.acct, 5e6);
 
-        CoreGate.WithdrawIntent memory intent = _buildWithdraw(10e6, 1e6);
+        PuppetGate.WithdrawIntent memory intent = _buildWithdraw(10e6, 1e6);
         bytes32 digest = _withdrawDigest(intent);
 
         vm.expectRevert(abi.encodeWithSelector(Error.Deposit__InsufficientBalance.selector, 5e6, 10e6));
-        coreGate.walletWithdraw(
+        puppetGate.walletWithdraw(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
     }
@@ -322,19 +316,19 @@ contract DepositHotPathTest is Test {
     function test_withdraw_nonce_reuse_reverts() public {
         _seedAccounted(puppet.acct, 150e6);
 
-        CoreGate.WithdrawIntent memory intent = _buildWithdraw(1e6, 0);
+        PuppetGate.WithdrawIntent memory intent = _buildWithdraw(1e6, 0);
         bytes32 digest1 = _withdrawDigest(intent);
         puppet.nonce++;
-        coreGate.walletWithdraw(
+        puppetGate.walletWithdraw(
             intent, _signDigest(puppet.userKey, digest1), _signDigest(attestorKey, digest1), intent.acceptableRelayFee
         );
 
         _seedAccounted(puppet.acct, 10e6);
-        CoreGate.WithdrawIntent memory intent2 = _buildWithdraw(1e6, 0);
+        PuppetGate.WithdrawIntent memory intent2 = _buildWithdraw(1e6, 0);
         intent2.nonce = 0;
         bytes32 digest2 = _withdrawDigest(intent2);
         vm.expectRevert();
-        coreGate.walletWithdraw(
+        puppetGate.walletWithdraw(
             intent2, _signDigest(puppet.userKey, digest2), _signDigest(attestorKey, digest2), intent2.acceptableRelayFee
         );
     }
@@ -342,34 +336,34 @@ contract DepositHotPathTest is Test {
     function test_withdraw_requires_auth() public {
         _seedAccounted(puppet.acct, 150e6);
 
-        CoreGate.WithdrawIntent memory intent = _buildWithdraw(1e6, 0);
+        PuppetGate.WithdrawIntent memory intent = _buildWithdraw(1e6, 0);
         bytes32 digest = _withdrawDigest(intent);
         bytes memory sig = _signDigest(puppet.userKey, digest);
         bytes memory att = _signDigest(makeKey("Attacker"), digest);
 
         vm.expectRevert(Error.Account__InvalidSignature.selector);
-        coreGate.walletWithdraw(intent, sig, att, intent.acceptableRelayFee);
+        puppetGate.walletWithdraw(intent, sig, att, intent.acceptableRelayFee);
     }
 
     function test_withdraw_wrong_signer_reverts() public {
         _seedAccounted(puppet.acct, 150e6);
 
-        CoreGate.WithdrawIntent memory intent = _buildWithdraw(1e6, 0);
+        PuppetGate.WithdrawIntent memory intent = _buildWithdraw(1e6, 0);
         bytes32 digest = _withdrawDigest(intent);
         bytes memory sig = _signDigest(makeKey("Attacker"), digest);
         bytes memory att = _signDigest(attestorKey, digest);
 
         vm.expectRevert(Error.Account__InvalidSignature.selector);
-        coreGate.walletWithdraw(intent, sig, att, intent.acceptableRelayFee);
+        puppetGate.walletWithdraw(intent, sig, att, intent.acceptableRelayFee);
     }
 
     function test_withdraw_partial_leaves_remainder() public {
         _seedAccounted(puppet.acct, 150e6);
 
-        CoreGate.WithdrawIntent memory intent = _buildWithdraw(40e6, 1e6);
+        PuppetGate.WithdrawIntent memory intent = _buildWithdraw(40e6, 1e6);
         bytes32 digest = _withdrawDigest(intent);
         puppet.nonce++;
-        coreGate.walletWithdraw(
+        puppetGate.walletWithdraw(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
 
@@ -382,11 +376,11 @@ contract DepositHotPathTest is Test {
     function test_withdraw_partial_exceeds_balance_reverts() public {
         _seedAccounted(puppet.acct, 40e6);
 
-        CoreGate.WithdrawIntent memory intent = _buildWithdraw(50e6, 1e6);
+        PuppetGate.WithdrawIntent memory intent = _buildWithdraw(50e6, 1e6);
         bytes32 digest = _withdrawDigest(intent);
 
         vm.expectRevert(abi.encodeWithSelector(Error.Deposit__InsufficientBalance.selector, 40e6, 50e6));
-        coreGate.walletWithdraw(
+        puppetGate.walletWithdraw(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
     }
@@ -394,7 +388,7 @@ contract DepositHotPathTest is Test {
     function _buildBridge(
         uint _bridgeFee,
         uint _relayFee
-    ) internal view returns (CoreGate.BridgeIntent memory) {
+    ) internal view returns (PuppetGate.BridgeIntent memory) {
         return _buildBridge({_fromTransientRoute: false, _inputAmount: 0, _bridgeFee: _bridgeFee, _relayFee: _relayFee});
     }
 
@@ -403,30 +397,61 @@ contract DepositHotPathTest is Test {
         uint _inputAmount,
         uint _bridgeFee,
         uint _relayFee
-    ) internal view returns (CoreGate.BridgeIntent memory) {
-        return CoreGate.BridgeIntent({
+    ) internal view returns (PuppetGate.BridgeIntent memory) {
+        PuppetGate.BridgeIntent memory _intent = PuppetGate.BridgeIntent({
             blockNumber: block.number,
             deadline: block.timestamp + 1,
             params: _params(),
-            isMaster: false,
             fromTransientRoute: _fromTransientRoute,
             inputToken: IERC20(address(usdc)),
             outputToken: IERC20(address(usdc)),
             inputAmount: _inputAmount,
             outputAmount: _inputAmount > _relayFee + _bridgeFee ? _inputAmount - _relayFee - _bridgeFee : 0,
             destinationChainId: HUB_CHAIN_ID,
-            inputOracle: INPUT_ORACLE,
-            outputOracle: OUTPUT_ORACLE,
+            provider: BRIDGE_PROVIDER,
+            providerCallData: "",
             expires: uint32(block.timestamp + 3600),
             fillDeadline: uint32(block.timestamp + 3600),
             acceptableRelayFee: _relayFee,
             nonce: puppet.nonce,
             chainId: block.chainid
         });
+        _intent.providerCallData = _providerCallData(_intent, accountGate.predictDepositRoute(address(puppet.acct)));
+        return _intent;
+    }
+
+    function _providerCallData(
+        PuppetGate.BridgeIntent memory _intent,
+        address _recipient
+    ) internal pure returns (bytes memory) {
+        uint _settler =
+            _intent.inputAmount > _intent.acceptableRelayFee ? _intent.inputAmount - _intent.acceptableRelayFee : 0;
+        return _fillCallData(
+            address(_intent.inputToken),
+            _settler,
+            address(_intent.outputToken),
+            _intent.outputAmount,
+            _recipient,
+            _intent.destinationChainId
+        );
+    }
+
+    function _fillCallData(
+        address _inputToken,
+        uint _settlerInputAmount,
+        address _outputToken,
+        uint _outputAmount,
+        address _recipient,
+        uint _destinationChainId
+    ) internal pure returns (bytes memory) {
+        return abi.encodeCall(
+            MockBridgeProvider.fill,
+            (_inputToken, _settlerInputAmount, _outputToken, _outputAmount, _recipient, _destinationChainId)
+        );
     }
 
     function _bridgeDigest(
-        CoreGate.BridgeIntent memory _intent
+        PuppetGate.BridgeIntent memory _intent
     ) internal view returns (bytes32) {
         bytes32 _structHash = keccak256(
             abi.encode(
@@ -437,15 +462,14 @@ contract DepositHotPathTest is Test {
                 _intent.acceptableRelayFee,
                 _intent.nonce,
                 _intent.chainId,
-                _intent.isMaster,
                 _intent.fromTransientRoute,
                 _intent.inputToken,
                 _intent.outputToken,
                 _intent.inputAmount,
                 _intent.outputAmount,
                 _intent.destinationChainId,
-                _intent.inputOracle,
-                _intent.outputOracle,
+                _intent.provider,
+                keccak256(_intent.providerCallData),
                 _intent.expires,
                 _intent.fillDeadline
             )
@@ -456,67 +480,67 @@ contract DepositHotPathTest is Test {
     function test_bridge_sweeps_balance_and_approves_and_pays_fee() public {
         _seedAccounted(puppet.acct, 150e6);
 
-        vm.etch(OIF_INPUT_SETTLER, address(new MockInputSettlerEscrow()).code);
+        vm.etch(BRIDGE_PROVIDER, address(new MockBridgeProvider()).code);
 
-        CoreGate.BridgeIntent memory intent =
+        PuppetGate.BridgeIntent memory intent =
             _buildBridge({_fromTransientRoute: false, _inputAmount: 150e6, _bridgeFee: 1e6, _relayFee: 5e6});
         bytes32 digest = _bridgeDigest(intent);
         puppet.nonce++;
 
-        coreGate.bridge(
+        puppetGate.bridge(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
 
-        assertEq(usdc.balanceOf(OIF_INPUT_SETTLER), 145e6, "spoke received full sweep");
+        assertEq(usdc.balanceOf(BRIDGE_PROVIDER), 145e6, "spoke received full sweep");
         assertEq(usdc.balanceOf(feeReceiver), 5e6, "fee paid");
         assertEq(usdc.balanceOf(address(puppet.acct)), 0, "no dust");
-        assertEq(MockInputSettlerEscrow(OIF_INPUT_SETTLER).openCount(), 1);
+        assertEq(MockBridgeProvider(BRIDGE_PROVIDER).openCount(), 1);
 
-        uint outputAmount = MockInputSettlerEscrow(OIF_INPUT_SETTLER).lastOutputAmount();
+        uint outputAmount = MockBridgeProvider(BRIDGE_PROVIDER).lastOutputAmount();
         assertEq(outputAmount, 144e6, "outputAmount = inputAmount - bridgeFee");
     }
 
     function test_bridge_zero_balance_reverts() public {
-        CoreGate.BridgeIntent memory intent = _buildBridge({_bridgeFee: 1e6, _relayFee: 1e6});
+        PuppetGate.BridgeIntent memory intent = _buildBridge({_bridgeFee: 1e6, _relayFee: 1e6});
         bytes32 digest = _bridgeDigest(intent);
 
         vm.expectRevert(Error.Deposit__NothingToBridge.selector);
-        coreGate.bridge(
+        puppetGate.bridge(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
     }
 
     function test_bridge_fee_covers_balance_reverts() public {
         _seedAccounted(puppet.acct, 3e6);
-        CoreGate.BridgeIntent memory intent = _buildBridge({_bridgeFee: 1e6, _relayFee: 5e6});
+        PuppetGate.BridgeIntent memory intent = _buildBridge({_bridgeFee: 1e6, _relayFee: 5e6});
         bytes32 digest = _bridgeDigest(intent);
 
         vm.expectRevert();
-        coreGate.bridge(
+        puppetGate.bridge(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
     }
 
     function test_bridge_fee_equals_input_reverts() public {
         _seedAccounted(puppet.acct, 10e6);
-        CoreGate.BridgeIntent memory intent =
+        PuppetGate.BridgeIntent memory intent =
             _buildBridge({_fromTransientRoute: false, _inputAmount: 10e6, _bridgeFee: 9e6, _relayFee: 1e6});
         bytes32 digest = _bridgeDigest(intent);
 
         vm.expectRevert(Error.Deposit__ZeroBridgeOutput.selector);
-        coreGate.bridge(
+        puppetGate.bridge(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
     }
 
     function test_bridge_sweep_appliesRatioCapOnResolvedAmount() public {
         _seedAccounted(puppet.acct, 6e6);
-        CoreGate.BridgeIntent memory intent =
+        PuppetGate.BridgeIntent memory intent =
             _buildBridge({_fromTransientRoute: false, _inputAmount: 6e6, _bridgeFee: 1e6, _relayFee: 1e6});
         bytes32 digest = _bridgeDigest(intent);
 
         vm.expectRevert(abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, 1e6, 6e6, 1000));
-        coreGate.bridge(
+        puppetGate.bridge(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
     }
@@ -552,7 +576,7 @@ contract DepositHotPathTest is Test {
         );
 
         vm.expectRevert(abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, 1e6, 6e6, 1000));
-        coreGate.createPuppetAccount(
+        puppetGate.createPuppetAccount(
             intent, _signPuppetDeploy(_k), "", _signDigest(_k, digest), _signDigest(attestorKey, digest), 1e6
         );
     }
@@ -560,49 +584,50 @@ contract DepositHotPathTest is Test {
     function test_bridge_partial_leaves_remainder() public {
         _seedAccounted(puppet.acct, 200e6);
 
-        vm.etch(OIF_INPUT_SETTLER, address(new MockInputSettlerEscrow()).code);
+        vm.etch(BRIDGE_PROVIDER, address(new MockBridgeProvider()).code);
 
-        CoreGate.BridgeIntent memory intent = _buildBridge({_bridgeFee: 1e6, _relayFee: 5e6});
+        PuppetGate.BridgeIntent memory intent = _buildBridge({_bridgeFee: 1e6, _relayFee: 5e6});
         intent.inputAmount = 50e6;
         intent.outputAmount = 44e6;
+        intent.providerCallData = _providerCallData(intent, accountGate.predictDepositRoute(address(puppet.acct)));
         bytes32 digest = _bridgeDigest(intent);
         puppet.nonce++;
 
-        coreGate.bridge(
+        puppetGate.bridge(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
 
-        assertEq(usdc.balanceOf(OIF_INPUT_SETTLER), 45e6, "spoke pulled inputAmount minus fee");
+        assertEq(usdc.balanceOf(BRIDGE_PROVIDER), 45e6, "spoke pulled inputAmount minus fee");
         assertEq(usdc.balanceOf(feeReceiver), 5e6);
         assertEq(usdc.balanceOf(address(puppet.acct)), 150e6, "remainder retained");
 
-        uint outputAmount = MockInputSettlerEscrow(OIF_INPUT_SETTLER).lastOutputAmount();
+        uint outputAmount = MockBridgeProvider(BRIDGE_PROVIDER).lastOutputAmount();
         assertEq(outputAmount, 44e6, "outputAmount = inputAmount - fee - bridgeFee");
     }
 
     function test_bridge_partial_exceeds_balance_reverts() public {
         _seedAccounted(puppet.acct, 40e6);
 
-        CoreGate.BridgeIntent memory intent = _buildBridge({_bridgeFee: 1e6, _relayFee: 5e6});
+        PuppetGate.BridgeIntent memory intent = _buildBridge({_bridgeFee: 1e6, _relayFee: 5e6});
         intent.inputAmount = 50e6;
         bytes32 digest = _bridgeDigest(intent);
 
         vm.expectRevert(abi.encodeWithSelector(Error.Deposit__InsufficientBalance.selector, 40e6, 50e6));
-        coreGate.bridge(
+        puppetGate.bridge(
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
     }
 
     function test_bridge_requires_auth() public {
         _seedAccounted(puppet.acct, 150e6);
-        CoreGate.BridgeIntent memory intent =
+        PuppetGate.BridgeIntent memory intent =
             _buildBridge({_fromTransientRoute: false, _inputAmount: 150e6, _bridgeFee: 1e6, _relayFee: 5e6});
         bytes32 digest = _bridgeDigest(intent);
         bytes memory sig = _signDigest(puppet.userKey, digest);
         bytes memory att = _signDigest(makeKey("Attacker"), digest);
 
         vm.expectRevert(Error.Account__InvalidSignature.selector);
-        coreGate.bridge(intent, sig, att, intent.acceptableRelayFee);
+        puppetGate.bridge(intent, sig, att, intent.acceptableRelayFee);
     }
 
     function _fundAccount(
@@ -615,22 +640,20 @@ contract DepositHotPathTest is Test {
     function _buildRecognize(
         uint _amount,
         uint _relayFee
-    ) internal view returns (CoreGate.RecognizeIntent memory) {
-        return CoreGate.RecognizeIntent({
+    ) internal view returns (PuppetGate.RecognizeIntent memory) {
+        return PuppetGate.RecognizeIntent({
             blockNumber: block.number,
             deadline: block.timestamp + 1,
             params: _params(),
             amount: _amount,
             acceptableRelayFee: _relayFee,
             nonce: puppet.nonce,
-            chainId: block.chainid,
-            isMaster: false,
-            fromTransientRoute: false
+            chainId: block.chainid
         });
     }
 
     function _recognizeDigest(
-        CoreGate.RecognizeIntent memory _intent
+        PuppetGate.RecognizeIntent memory _intent
     ) internal view returns (bytes32) {
         bytes32 _structHash = keccak256(
             abi.encode(
@@ -641,8 +664,6 @@ contract DepositHotPathTest is Test {
                 _intent.acceptableRelayFee,
                 _intent.nonce,
                 _intent.chainId,
-                _intent.isMaster,
-                _intent.fromTransientRoute,
                 _intent.amount
             )
         );
@@ -652,9 +673,9 @@ contract DepositHotPathTest is Test {
     function test_recognize_credits_signedBalance() public {
         usdc.mint(accountGate.predictDepositRoute(address(puppet.acct)), 100e6);
 
-        CoreGate.RecognizeIntent memory intent = _buildRecognize(100e6, 0);
+        PuppetGate.RecognizeIntent memory intent = _buildRecognize(100e6, 0);
         bytes32 digest = _recognizeDigest(intent);
-        coreGate.recognize(intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), 0);
+        puppetGate.recognize(intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), 0);
 
         assertEq(usdc.balanceOf(address(puppet.acct)), 100e6, "puppet credited full amount");
         assertEq(puppet.acct.signedBalance(), 100e6, "signed balance reflects inflow");
@@ -663,18 +684,18 @@ contract DepositHotPathTest is Test {
     function test_recognize_revertsOnZeroAmount() public {
         usdc.mint(accountGate.predictDepositRoute(address(puppet.acct)), 100e6);
 
-        CoreGate.RecognizeIntent memory intent = _buildRecognize(0, 0);
+        PuppetGate.RecognizeIntent memory intent = _buildRecognize(0, 0);
         bytes32 digest = _recognizeDigest(intent);
         vm.expectRevert(Error.Deposit__NothingToRecord.selector);
-        coreGate.recognize(intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), 0);
+        puppetGate.recognize(intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), 0);
     }
 
     function test_recognize_paysRelayFee() public {
         usdc.mint(accountGate.predictDepositRoute(address(puppet.acct)), 100e6);
 
-        CoreGate.RecognizeIntent memory intent = _buildRecognize(100e6, 5e6);
+        PuppetGate.RecognizeIntent memory intent = _buildRecognize(100e6, 5e6);
         bytes32 digest = _recognizeDigest(intent);
-        coreGate.recognize(intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), 5e6);
+        puppetGate.recognize(intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), 5e6);
 
         assertEq(puppet.acct.signedBalance(), 95e6, "recognized net of relay fee");
         assertEq(usdc.balanceOf(address(puppet.acct)), 95e6, "account holds recognized net");
@@ -685,9 +706,9 @@ contract DepositHotPathTest is Test {
         _seedAccounted(puppet.acct, 50e6);
         usdc.mint(accountGate.predictDepositRoute(address(puppet.acct)), 30e6);
 
-        CoreGate.RecognizeIntent memory intent = _buildRecognize(30e6, 0);
+        PuppetGate.RecognizeIntent memory intent = _buildRecognize(30e6, 0);
         bytes32 digest = _recognizeDigest(intent);
-        coreGate.recognize(intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), 0);
+        puppetGate.recognize(intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), 0);
 
         assertEq(puppet.acct.signedBalance(), 80e6, "recognize adds to existing signed balance");
         assertEq(usdc.balanceOf(address(puppet.acct)), 80e6, "account holds prior plus recognized");
@@ -706,7 +727,7 @@ contract DepositHotPathTest is Test {
         wnt.transfer(address(wp.acct), 1 ether);
         vm.store(address(wp.acct), bytes32(uint(0)), bytes32(uint(1 ether)));
 
-        CoreGate.WithdrawIntent memory intent = CoreGate.WithdrawIntent({
+        PuppetGate.WithdrawIntent memory intent = PuppetGate.WithdrawIntent({
             blockNumber: block.number,
             deadline: block.timestamp + 1,
             params: AccountLib.AccountInitParams({
@@ -720,7 +741,7 @@ contract DepositHotPathTest is Test {
         bytes32 digest = _withdrawDigest(intent);
 
         uint userBalBefore = wp.user.balance;
-        coreGate.walletWithdrawWnt(intent, _signDigest(wp.userKey, digest), _signDigest(attestorKey, digest), 0);
+        puppetGate.walletWithdrawWnt(intent, _signDigest(wp.userKey, digest), _signDigest(attestorKey, digest), 0);
 
         assertEq(wnt.balanceOf(address(wp.acct)), 0, "puppet WNT balance drained");
         assertEq(wp.user.balance - userBalBefore, 1 ether, "user EOA got 1 ETH");
@@ -740,7 +761,7 @@ contract DepositHotPathTest is Test {
         wnt.transfer(address(wp.acct), 1 ether);
         vm.store(address(wp.acct), bytes32(uint(0)), bytes32(uint(1 ether)));
 
-        CoreGate.WithdrawIntent memory intent = CoreGate.WithdrawIntent({
+        PuppetGate.WithdrawIntent memory intent = PuppetGate.WithdrawIntent({
             blockNumber: block.number,
             deadline: block.timestamp + 1,
             params: AccountLib.AccountInitParams({
@@ -754,7 +775,7 @@ contract DepositHotPathTest is Test {
         bytes32 digest = _withdrawDigest(intent);
 
         uint userBalBefore = wp.user.balance;
-        coreGate.walletWithdrawWnt(
+        puppetGate.walletWithdrawWnt(
             intent, _signDigest(wp.userKey, digest), _signDigest(attestorKey, digest), 0.05 ether
         );
 
@@ -774,13 +795,13 @@ contract DepositHotPathTest is Test {
         vm.stopPrank();
 
         // `puppet` (the default account) is a USDC account; build its normal USDC withdraw co-signature.
-        CoreGate.WithdrawIntent memory intent = _buildWithdraw(1e6, 0);
+        PuppetGate.WithdrawIntent memory intent = _buildWithdraw(1e6, 0);
         bytes32 digest = _withdrawDigest(intent);
 
         vm.expectRevert(
             abi.encodeWithSelector(Error.Intent__TokenMismatch.selector, USDC_ID, address(usdc), address(wnt))
         );
-        coreGate.walletWithdrawWnt(intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), 0);
+        puppetGate.walletWithdrawWnt(intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), 0);
     }
 
     function makeKey(
@@ -823,7 +844,7 @@ contract DepositHotPathTest is Test {
         uint _relayFee,
         uint _destinationChainId
     ) internal view returns (HubGate.BridgeToWalletIntent memory) {
-        return HubGate.BridgeToWalletIntent({
+        HubGate.BridgeToWalletIntent memory _intent = HubGate.BridgeToWalletIntent({
             blockNumber: block.number,
             deadline: block.timestamp + 1,
             params: _params(),
@@ -832,14 +853,19 @@ contract DepositHotPathTest is Test {
             inputAmount: _inputAmount,
             outputAmount: _inputAmount > _relayFee + _bridgeFee ? _inputAmount - _relayFee - _bridgeFee : 0,
             destinationChainId: _destinationChainId,
-            inputOracle: INPUT_ORACLE,
-            outputOracle: OUTPUT_ORACLE,
+            provider: BRIDGE_PROVIDER,
+            providerCallData: "",
             expires: uint32(block.timestamp + 3600),
             fillDeadline: uint32(block.timestamp + 3600),
             acceptableRelayFee: _relayFee,
             nonce: puppet.nonce,
             chainId: block.chainid
         });
+        uint _settler = _inputAmount > _relayFee ? _inputAmount - _relayFee : 0;
+        _intent.providerCallData = _fillCallData(
+            address(usdc), _settler, address(usdc), _intent.outputAmount, _params().user, _destinationChainId
+        );
+        return _intent;
     }
 
     function _bridgeToWalletDigest(
@@ -859,8 +885,8 @@ contract DepositHotPathTest is Test {
                 _intent.inputAmount,
                 _intent.outputAmount,
                 _intent.destinationChainId,
-                _intent.inputOracle,
-                _intent.outputOracle,
+                _intent.provider,
+                keccak256(_intent.providerCallData),
                 _intent.expires,
                 _intent.fillDeadline
             )
@@ -870,7 +896,7 @@ contract DepositHotPathTest is Test {
 
     function test_bridgeToWallet_pays_fee_and_bridges_to_user_eoa() public {
         _seedAccounted(puppet.acct, 100e6);
-        vm.etch(OIF_INPUT_SETTLER, address(new MockInputSettlerEscrow()).code);
+        vm.etch(BRIDGE_PROVIDER, address(new MockBridgeProvider()).code);
 
         HubGate.BridgeToWalletIntent memory intent =
             _buildBridgeToWallet({_inputAmount: 100e6, _bridgeFee: 1e6, _relayFee: 5e6, _destinationChainId: 8453});
@@ -881,15 +907,15 @@ contract DepositHotPathTest is Test {
             intent, _signDigest(puppet.userKey, digest), _signDigest(attestorKey, digest), intent.acceptableRelayFee
         );
 
-        assertEq(usdc.balanceOf(OIF_INPUT_SETTLER), 95e6, "spoke received input minus relayFee");
+        assertEq(usdc.balanceOf(BRIDGE_PROVIDER), 95e6, "spoke received input minus relayFee");
         assertEq(usdc.balanceOf(feeReceiver), 5e6, "fee paid");
         assertEq(usdc.balanceOf(address(puppet.acct)), 0, "puppet drained");
         assertEq(puppet.acct.signedBalance(), 0, "signedBalance reflects drain");
 
-        address depositor = MockInputSettlerEscrow(OIF_INPUT_SETTLER).lastUser();
-        address recipient = MockInputSettlerEscrow(OIF_INPUT_SETTLER).lastRecipient();
-        uint outputAmount = MockInputSettlerEscrow(OIF_INPUT_SETTLER).lastOutputAmount();
-        uint destChainId = MockInputSettlerEscrow(OIF_INPUT_SETTLER).lastDestinationChainId();
+        address depositor = MockBridgeProvider(BRIDGE_PROVIDER).lastUser();
+        address recipient = MockBridgeProvider(BRIDGE_PROVIDER).lastRecipient();
+        uint outputAmount = MockBridgeProvider(BRIDGE_PROVIDER).lastOutputAmount();
+        uint destChainId = MockBridgeProvider(BRIDGE_PROVIDER).lastDestinationChainId();
         assertEq(depositor, address(puppet.acct), "depositor = puppet account");
         assertEq(recipient, puppet.user, "OIF recipient = user EOA");
         assertEq(destChainId, 8453, "destination is spoke chain");
@@ -964,7 +990,7 @@ contract DepositHotPathTest is Test {
 
     function test_bridgeToWallet_nonce_reuse_reverts() public {
         _seedAccounted(puppet.acct, 200e6);
-        vm.etch(OIF_INPUT_SETTLER, address(new MockInputSettlerEscrow()).code);
+        vm.etch(BRIDGE_PROVIDER, address(new MockBridgeProvider()).code);
 
         HubGate.BridgeToWalletIntent memory intent =
             _buildBridgeToWallet({_inputAmount: 50e6, _bridgeFee: 1e6, _relayFee: 1e6, _destinationChainId: 8453});

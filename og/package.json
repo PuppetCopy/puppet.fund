@@ -16,7 +16,7 @@
     "@puppet/contracts": "workspace:*",
     "@puppet/indexer-graphql": "workspace:*",
     "@puppet/sdk": "workspace:*",
-    "@takumi-rs/core": "^1.6.0",
+    "@takumi-rs/core": "1.7.0",
     "aelea": "catalog:",
     "viem": "catalog:"
   },

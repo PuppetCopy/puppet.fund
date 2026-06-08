@@ -1,11 +1,32 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import type { IAccountState } from '@puppet/indexer-graphql/entities'
 import { type IStream, map } from 'aelea/stream'
 import { type Address, getAddress, type Hex } from 'viem'
 import { predictMasterAccount, predictPuppetAccount } from '../account/index.js'
 import { type IIndexerClient, liveSelect, select } from './shared.js'
 
-export type IAccountStateRow = IAccountState
+// The indexed account-state row. Owned by the SDK rather than re-exported from the
+// indexer's generated entities, so the SDK's public types carry no reference to
+// @puppet/indexer-graphql (which ships raw .ts and would otherwise leak into every
+// downstream package's .d.ts and block declaration bundling). Mirrors the AccountState
+// entity exactly — keep in sync if that entity changes (the metric.test.ts drift guard
+// fails at typecheck if they diverge).
+export interface IAccountStateRow {
+  id: string
+  account: Address
+  chainId: bigint
+  user: Address
+  signer: Address
+  name: Hex
+  baseTokenId: Hex
+  signedBalance: bigint
+  recordedBalance: bigint
+  positionBalance: bigint
+  isMaster: boolean
+  lastNonce: bigint
+  lastEventBlock: bigint
+  lastEventAt: number
+  lastTransactionHash: Hex
+}
 
 export type ISubaccountState = IAccountStateRow & {
   chains: Map<number, IAccountStateRow>

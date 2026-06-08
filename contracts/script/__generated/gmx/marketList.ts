@@ -946,5 +946,12 @@ export const ARBITRUM_MARKET_LIST = [
     longToken: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
     shortToken: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
     marketType: "PERP"
+  },
+  {
+    marketToken: "0x470128853D74dab7423904a20eA5AA230e9e561B",
+    indexToken: "0x8CBd0d5d81e7957123E6D8fFaE657a40bDC5691b",
+    longToken: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+    shortToken: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+    marketType: "PERP"
   }
 ] as const

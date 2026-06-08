@@ -52,6 +52,15 @@ export function predictTransientRoute(account: Address): Address {
   })
 }
 
+export function predictDepositRoute(account: Address): Address {
+  const args = encodePacked(['address'], [account])
+  return getCreate2Address({
+    from: PUPPET_CONTRACT_MAP.AccountModule.address,
+    salt: keccak256(encodePacked(['string', 'address'], ['DEPOSIT_ROUTE', account])),
+    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.TransientRoute.address, args)
+  })
+}
+
 export function predictMasterAccount(params: IAccountLib__AccountInitParams): Address {
   const args = packAccountArgs(params)
   return getCreate2Address({
@@ -78,8 +87,6 @@ export function deriveSessionKey(signature: Hex): Hex {
 export function signerProofDigest(user: Address): Hex {
   return keccak256(encodeAbiParameters([{ type: 'address' }], [user]))
 }
-
-export { TOKEN_ID }
 
 const SYMBOL_BY_TOKEN_ID: Record<string, keyof typeof TOKEN_ID> = Object.fromEntries(
   (Object.keys(TOKEN_ID) as (keyof typeof TOKEN_ID)[]).map(sym => [TOKEN_ID[sym].toLowerCase(), sym])

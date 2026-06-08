@@ -6,29 +6,47 @@ import {
   resolveDispatchChainId,
   resolveDispatchNetwork
 } from '@puppet/sdk/attestation'
-import { getAcceptableRelayFee, getSubaccountState, indexerBlock, randomNonce } from '@puppet/sdk/state'
+import { evaluateAccountNav } from '@puppet/sdk/evaluation'
+import {
+  getAcceptableRelayFee,
+  getSubaccountState,
+  type IndexerHealth,
+  type ISubaccountState,
+  indexerBlock,
+  randomNonce
+} from '@puppet/sdk/state'
 import type { Address } from 'viem'
 import { fetchMasterPoolState, fetchMasterSubscribers } from '../../../io/indexer/query.js'
 import { homePublicClient } from '../../../wallet/index.js'
 import type { IAllocateDraft, ICreateMasterDraft } from '../draft.js'
 import { DEFAULT_DEADLINE_SEC, type ExecContext } from './_shared.js'
 
-async function gatherMatched(
-  ctx: ExecContext,
-  master: Address,
-  baseToken: Address,
-  masterAmount: bigint
-): Promise<{
+export interface IGatheredAllocation {
   acceptableNetAssetValue: bigint
   totalShareSupply: bigint
-  puppetList: Address[]
-  matchedAmountList: bigint[]
-}> {
+  matched: ReturnType<typeof computeAllocation>
+  totalPuppets: number
+}
+
+export async function gatherMatched(
+  sql: Parameters<typeof evaluateAccountNav>[0],
+  indexerHealth: IndexerHealth,
+  master: Address,
+  baseToken: Address,
+  masterAmount: bigint,
+  subaccount?: ISubaccountState
+): Promise<IGatheredAllocation> {
   const [puppets, pool] = await Promise.all([fetchMasterSubscribers(master), fetchMasterPoolState(master)])
 
   const totalShareSupply = pool?.totalShareSupply ?? 0n
   const queuedShares = pool?.queuedShares ?? 0n
-  const acceptableNetAssetValue = totalShareSupply > 0n ? totalShareSupply : masterAmount > 0n ? masterAmount : 1n
+  const acceptableNetAssetValue =
+    totalShareSupply > 0n
+      ? (await evaluateAccountNav(sql, { master, baseToken, health: indexerHealth, kind: 'allocate', subaccount }))
+          .navSigned
+      : masterAmount > 0n
+        ? masterAmount
+        : 1n
 
   const matched = computeAllocation({
     masterAmount,
@@ -39,21 +57,16 @@ async function gatherMatched(
     puppets
   })
 
-  return {
-    acceptableNetAssetValue,
-    totalShareSupply,
-    puppetList: matched.puppetList,
-    matchedAmountList: matched.matchedAmountList
-  }
+  return { acceptableNetAssetValue, totalShareSupply, matched, totalPuppets: puppets.length }
 }
 
 export async function buildCreateMasterInput(draft: ICreateMasterDraft, ctx: ExecContext): Promise<ICreateMasterInput> {
-  const matched = await gatherMatched(ctx, draft.master, draft.baseToken, draft.masterAmount)
+  const gathered = await gatherMatched(ctx.sql, ctx.indexerHealth, draft.master, draft.baseToken, draft.masterAmount)
   const blockNumber = indexerBlock(ctx.indexerHealth, resolveDispatchNetwork(resolveDispatchChainId(undefined)))
   const acceptableRelayFee = await getAcceptableRelayFee(
     ctx.gasPrice,
     'HubGate',
-    'createMaster',
+    'seedMasterAccount',
     draft.baseToken,
     homePublicClient
   )
@@ -64,10 +77,10 @@ export async function buildCreateMasterInput(draft: ICreateMasterDraft, ctx: Exe
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,
     nonce: randomNonce(),
-    acceptableNetAssetValue: matched.acceptableNetAssetValue,
+    acceptableNetAssetValue: gathered.acceptableNetAssetValue,
     masterAmount: draft.masterAmount,
-    puppetList: matched.puppetList,
-    matchedAmountList: matched.matchedAmountList,
+    puppetList: gathered.matched.puppetList,
+    matchedAmountList: gathered.matched.matchedAmountList,
     userDeploySig: '0x',
     userSignerProof: '0x'
   }
@@ -83,7 +96,14 @@ export async function buildAllocateInput(draft: IAllocateDraft, ctx: ExecContext
     signer: master.signer
   }
 
-  const matched = await gatherMatched(ctx, master.account, draft.baseToken, draft.masterAmount)
+  const gathered = await gatherMatched(
+    ctx.sql,
+    ctx.indexerHealth,
+    master.account,
+    draft.baseToken,
+    draft.masterAmount,
+    master
+  )
   const blockNumber = indexerBlock(ctx.indexerHealth, resolveDispatchNetwork(resolveDispatchChainId(undefined)))
   const acceptableRelayFee = await getAcceptableRelayFee(
     ctx.gasPrice,
@@ -99,10 +119,10 @@ export async function buildAllocateInput(draft: IAllocateDraft, ctx: ExecContext
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,
     nonce: randomNonce(),
-    acceptableNetAssetValue: matched.acceptableNetAssetValue,
-    totalShareSupply: matched.totalShareSupply,
+    acceptableNetAssetValue: gathered.acceptableNetAssetValue,
+    totalShareSupply: gathered.totalShareSupply,
     masterAmount: draft.masterAmount,
-    puppetList: matched.puppetList,
-    matchedAmountList: matched.matchedAmountList
+    puppetList: gathered.matched.puppetList,
+    matchedAmountList: gathered.matched.matchedAmountList
   }
 }

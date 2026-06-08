@@ -9,6 +9,7 @@
   "scripts": {
     "build": "bun run clean && tsgo -b",
     "clean": "rm -rf dist",
+    "test": "bun test",
     "tsgo:check": "tsgo --noEmit"
   },
   "files": [

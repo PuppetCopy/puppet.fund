@@ -53,7 +53,7 @@ export default [
       {
         "name": "_config",
         "type": "tuple",
-        "internalType": "struct HubGate.Config",
+        "internalType": "struct BaseGate.Config",
         "components": [
           {
             "name": "attestor",
@@ -206,19 +206,6 @@ export default [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "arbSys",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract IArbSys"
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -652,7 +639,7 @@ export default [
       {
         "name": "",
         "type": "tuple",
-        "internalType": "struct HubGate.Config",
+        "internalType": "struct BaseGate.Config",
         "components": [
           {
             "name": "attestor",

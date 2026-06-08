@@ -49,67 +49,12 @@ export interface IAllocateStore__PuppetState {
   lastAllocatedAt: bigint
 }
 
-export interface ICoreGate__BridgeIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  isMaster: boolean
-  fromTransientRoute: boolean
-  inputToken: Address
-  outputToken: Address
-  inputAmount: bigint
-  outputAmount: bigint
-  destinationChainId: bigint
-  provider: Address
-  providerCallData: Hex
-  expires: number
-  fillDeadline: number
-}
-
-export interface ICoreGate__Config {
+export interface IBaseGate__Config {
   attestor: Address
   feeReceiver: Address
   transferGasLimit: bigint
   maxBlockDelay: bigint
   maxRelayFeeBps: bigint
-}
-
-export interface ICoreGate__OperateIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  baseToken: Address
-  callList: IIAccount__Call[]
-  amountIn: bigint
-  amountOut: bigint
-}
-
-export interface ICoreGate__RecognizeIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  isMaster: boolean
-  fromTransientRoute: boolean
-  amount: bigint
-}
-
-export interface ICoreGate__WithdrawIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  amount: bigint
 }
 
 export interface IHubGate__BridgeToWalletIntent {
@@ -130,19 +75,93 @@ export interface IHubGate__BridgeToWalletIntent {
   fillDeadline: number
 }
 
-export interface IHubGate__Config {
-  attestor: Address
-  feeReceiver: Address
-  transferGasLimit: bigint
-  maxBlockDelay: bigint
-  maxRelayFeeBps: bigint
-}
-
 export interface IIAccount__Call {
   target: Address
   value: bigint
   gasLimit: bigint
   callData: Hex
+}
+
+export interface IMasterGate__BridgeIntent {
+  params: IAccountLib__AccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  fromTransientRoute: boolean
+  inputToken: Address
+  outputToken: Address
+  inputAmount: bigint
+  outputAmount: bigint
+  destinationChainId: bigint
+  provider: Address
+  providerCallData: Hex
+  expires: number
+  fillDeadline: number
+}
+
+export interface IMasterGate__OperateIntent {
+  params: IAccountLib__AccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  baseToken: Address
+  callList: IIAccount__Call[]
+  amountIn: bigint
+  amountOut: bigint
+}
+
+export interface IMasterGate__RecognizeIntent {
+  params: IAccountLib__AccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  fromTransientRoute: boolean
+  amount: bigint
+}
+
+export interface IPuppetGate__BridgeIntent {
+  params: IAccountLib__AccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  fromTransientRoute: boolean
+  inputToken: Address
+  outputToken: Address
+  inputAmount: bigint
+  outputAmount: bigint
+  destinationChainId: bigint
+  provider: Address
+  providerCallData: Hex
+  expires: number
+  fillDeadline: number
+}
+
+export interface IPuppetGate__RecognizeIntent {
+  params: IAccountLib__AccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  amount: bigint
+}
+
+export interface IPuppetGate__WithdrawIntent {
+  params: IAccountLib__AccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  amount: bigint
 }
 
 export interface IRedeemModule__ClaimIntent {

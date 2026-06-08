@@ -1,10 +1,10 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
+import { HUB_CHAIN_ID, TOKEN_ID } from '@puppet/contracts/const'
 import {
+  predictDepositRoute,
   predictMasterAccount,
   predictPuppetAccount,
   predictTransientRoute,
-  symbolForBaseTokenId,
-  TOKEN_ID
+  symbolForBaseTokenId
 } from '@puppet/sdk/account'
 import { resolveDispatchChainId, resolveDispatchNetwork } from '@puppet/sdk/attestation'
 import { formatThrownError } from '@puppet/sdk/compact'
@@ -53,8 +53,19 @@ import {
   take
 } from 'aelea/stream'
 import { type IBehavior, multicast, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
-import { $element, $node, $text, attr, component, effectProp, type I$Node, type I$Slottable, style } from 'aelea/ui'
-import { $Button, $column, $row, designSheet, spacing } from 'aelea/ui-components'
+import {
+  $element,
+  $node,
+  $text,
+  attr,
+  component,
+  effectProp,
+  effectRun,
+  type I$Node,
+  type I$Slottable,
+  style
+} from 'aelea/ui'
+import { $Button, $column, $row, designSheet, isMobileScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { pushUrl } from 'aelea/ui-router'
 import { type Address, type Hex, isAddressEqual } from 'viem'
@@ -66,6 +77,7 @@ import {
   $anchor,
   $ButtonCircular,
   $check,
+  $defaultButtonCircularContainer,
   $defaultButtonPrimary,
   $defaultTooltipDropContainer,
   $icon,
@@ -77,6 +89,7 @@ import {
   text
 } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
+import { $jazzicon } from '../common/$avatar.js'
 import { $chainIcon, chainName } from '../common/$chain.js'
 import { $heading3 } from '../common/$text.js'
 import { $card2 } from '../common/elements/$common.js'
@@ -121,6 +134,17 @@ interface I$ActionDrawer {
 type PlannedStep = { kind: 'bind' } | { kind: 'draft'; draft: IDraft }
 
 const chainFor = (id: number) => (CHAIN_MAP as Record<number, typeof HUB_CHAIN>)[id] ?? HUB_CHAIN
+
+const DRAFT_VERB: Record<IDraft['kind'], string> = {
+  deposit: 'Fund',
+  withdraw: 'Withdraw',
+  subscribe: 'Subscribe',
+  allocate: 'Allocate',
+  createMaster: 'Create master',
+  sell: 'Sell',
+  claim: 'Claim',
+  fulfill: 'Fulfill'
+}
 
 type BindStep = { kind: 'bind'; key: typeof SESSION_BIND_KEY; query: Promise<ISessionKey> }
 type DraftStep = {
@@ -206,9 +230,12 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
       )
 
       const inFlightRef = { current: false }
+      // Escape key inside the drawer feeds the same close path as the X button,
+      // so the in-flight confirm guard below applies uniformly to both.
+      const escapeRequest = subject<unknown>()
       const clickClose: IStream<unknown> = multicast(
         op(
-          clickCloseRaw,
+          merge(clickCloseRaw, escapeRequest.stream),
           filter(
             () =>
               !inFlightRef.current ||
@@ -330,16 +357,48 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         skipRepeats
       )
 
+      const submissionStatus: IStream<SubmissionStatus | null> = op(
+        switchMap(sub => {
+          if (!sub || sub.steps.length === 0) return just(null)
+          return combineMap(
+            (...states) => {
+              for (const s of states) {
+                if (s.status === PromiseStatus.ERROR) {
+                  return { kind: 'error' as const, message: formatThrownError(s.error) }
+                }
+              }
+              for (const s of states) {
+                if (s.status === PromiseStatus.PENDING) return { kind: 'pending' as const }
+              }
+              return { kind: 'done' as const }
+            },
+            ...sub.steps.map(s => promiseState(just(s.query)))
+          )
+        }, submission),
+        state(null)
+      )
+
+      // A failed submission is recoverable: it must NOT permanently block Submit,
+      // so we can retry the remaining (unreleased) drafts. Only a pending or done
+      // submission blocks re-submission.
+      const submissionErrored: IStream<boolean> = op(
+        submissionStatus,
+        map(s => s?.kind === 'error'),
+        skipRepeats,
+        state(false)
+      )
+
       const submitDisabled = op(
         combine({
           list: draftList,
           submission,
+          errored: submissionErrored,
           needsBind,
           indexerHealth: context.indexerHealth,
           matchmaker: compact.status
         }),
         map(p => {
-          if (p.submission !== null) return true
+          if (p.submission !== null && !p.errored) return true
           if (p.list.length === 0) return true
           if (p.needsBind) return true
           if (p.indexerHealth.worstSeverity === 'unreachable') return true
@@ -355,24 +414,6 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         map(p => p.needsBind && p.submission === null),
         skipRepeats
       )
-
-      const submissionStatus: IStream<SubmissionStatus | null> = switchMap(sub => {
-        if (!sub || sub.steps.length === 0) return just(null)
-        return combineMap(
-          (...states) => {
-            for (const s of states) {
-              if (s.status === PromiseStatus.ERROR) {
-                return { kind: 'error' as const, message: formatThrownError(s.error) }
-              }
-            }
-            for (const s of states) {
-              if (s.status === PromiseStatus.PENDING) return { kind: 'pending' as const }
-            }
-            return { kind: 'done' as const }
-          },
-          ...sub.steps.map(s => promiseState(just(s.query)))
-        )
-      }, submission)
 
       const baseTokenIdFor = (d: IDraft): Hex | null => {
         if (d.kind === 'deposit' || d.kind === 'withdraw') return d.inputAmount.baseTokenId
@@ -439,22 +480,15 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         )
       }, draftList)
 
-      const $executionFees = $labeledValue(
-        'Execution fees',
-        $text(
-          map(p => {
-            const tokens = new Set<Hex>([...p.relay.keys(), ...p.bridge.keys()])
-            if (tokens.size === 0) return '—'
-            return [...tokens]
-              .map(t => readableTokenAmountLabel(p.descOf(t), (p.relay.get(t) ?? 0n) + (p.bridge.get(t) ?? 0n)))
-              .join(' + ')
-          }, feeBreakdown)
-        ),
+      // The fee breakdown (per-token bridge/relay + gas). Used as the hover
+      // tooltip on desktop and rendered inline on touch (mobile) where there is
+      // no hover. A factory so each placement gets a fresh node.
+      const $executionFeesBreakdown = (): I$Node =>
         switchMap(p => {
           const tokens = new Set<Hex>([...p.relay.keys(), ...p.bridge.keys()])
           if (tokens.size === 0) {
             return $column(spacing.small, style({ minWidth: '200px', fontSize: text.sm }))(
-              $labeledValue('Relay fees', $text('—')),
+              $labeledValue('Relay fees', $text('-')),
               $labeledValue('Gas price', p.gasGwei)
             )
           }
@@ -469,7 +503,7 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
               rows.push(
                 $labeledValue(
                   `Relay fees (${desc.symbol})`,
-                  relayFee === 0n ? '—' : readableTokenAmountLabel(desc, relayFee)
+                  relayFee === 0n ? '-' : readableTokenAmountLabel(desc, relayFee)
                 )
               )
               return rows
@@ -477,6 +511,19 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
             $labeledValue('Gas price', p.gasGwei)
           )
         }, feeBreakdown)
+
+      const $executionFees = $labeledValue(
+        'Execution fees',
+        $text(
+          map(p => {
+            const tokens = new Set<Hex>([...p.relay.keys(), ...p.bridge.keys()])
+            if (tokens.size === 0) return '-'
+            return [...tokens]
+              .map(t => readableTokenAmountLabel(p.descOf(t), (p.relay.get(t) ?? 0n) + (p.bridge.get(t) ?? 0n)))
+              .join(' + ')
+          }, feeBreakdown)
+        ),
+        $executionFeesBreakdown()
       )
 
       // ── render primitives ─────────────────────────────────────────────────
@@ -701,15 +748,16 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         const amountText = `${sweep}${approx}${readableTokenAmount(desc, draft.output.amount)} ${symbol}`
         const tooltip = isSweep
           ? isBridge
-            ? 'Sweeps puppet balance at execution; includes late-arriving deposits or reward drips. Across fill may deliver slightly less after bridge fees.'
+            ? 'Sweeps puppet balance at execution; includes late-arriving deposits or reward drips. The bridge fill may deliver slightly less after bridge fees.'
             : 'Sweeps puppet balance at execution; includes late-arriving deposits or reward drips.'
           : isBridge
-            ? 'Across fill may deliver slightly less after bridge fees.'
+            ? 'The bridge fill may deliver slightly less after bridge fees.'
             : 'Exact partial withdraw; relay fee is paid separately from the puppet balance.'
         return $row(spacing.small, style({ alignItems: 'center' }))(
           $node(attr({ title: tooltip }))($text(amountText)),
           $row(spacing.small, style({ alignItems: 'center', color: palette.foreground, fontSize: text.xs }))(
             $text('to'),
+            $jazzicon(draft.output.receiver, 18),
             $anchor(
               attr({
                 href: getAccountExplorerUrl(draft.output.receiver, chainFor(draft.output.chainId)),
@@ -790,11 +838,14 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
       const $draftBadge = (draft: IDraft, query: Promise<unknown> | null, submitBlockByChain: Map<number, bigint>) => {
         if (draft.kind === 'createMaster' || draft.kind === 'allocate') {
           const fundSteps = draft.inputSteps.map(step => {
-            if (step.kind === 'transferToMaster') {
+            if (step.kind === 'transferToMaster' || step.kind === 'transferToMasterWnt') {
               return {
                 kind: step.kind,
                 nonce: null,
-                recipient: { address: predictTransientRoute(step.input.master), chainId: step.input.chainId }
+                recipient: {
+                  address: predictDepositRoute(predictMasterAccount(step.input.params)),
+                  chainId: step.input.chainId
+                }
               }
             }
             const transientRoute = predictTransientRoute(predictMasterAccount(step.input.params))
@@ -820,13 +871,13 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
           )
         }
         const steps = draft.inputSteps.map(step => {
-          const transientRoute = predictTransientRoute(predictPuppetAccount(step.input.params))
+          const depositRoute = predictDepositRoute(predictPuppetAccount(step.input.params))
           const hasChainId =
             step.kind === 'walletDeposit' ||
             step.kind === 'walletDepositWnt' ||
-            step.kind === 'signTransientRouteBalance' ||
-            step.kind === 'bridgeHub'
-          const recipient = hasChainId ? { address: transientRoute, chainId: Number(step.input.chainId) } : null
+            step.kind === 'recognize' ||
+            step.kind === 'bridge'
+          const recipient = hasChainId ? { address: depositRoute, chainId: Number(step.input.chainId) } : null
           return { kind: step.kind, nonce: stepNonce(step), recipient }
         })
         return $sequencedStepRow(steps, query, submitBlockByChain, draft.alert !== null)
@@ -837,7 +888,8 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         idx: number | null,
         registry: ITokenRegistryMap,
         query: Promise<unknown> | null,
-        submitBlockByChain: Map<number, bigint>
+        submitBlockByChain: Map<number, bigint>,
+        showIndex: boolean
       ): I$Node => {
         if (step.kind === 'bind') {
           return $row(
@@ -853,14 +905,65 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
             )
           )
         }
+        const draft = step.draft
         return $row(spacing.small, style({ alignItems: 'center', padding: '6px 0' }))(
-          $stepIndex(idx ?? 0),
-          $draftBadge(step.draft, query, submitBlockByChain),
-          $draftDescription(step.draft, registry)
+          ...(showIndex ? [$stepIndex(idx ?? 0)] : []),
+          $draftBadge(draft, query, submitBlockByChain),
+          $node(style({ flex: 1, minWidth: '16px' }))(),
+          $node(style({ color: palette.message, fontWeight: '600' }))($text(DRAFT_VERB[draft.kind])),
+          $draftDescription(draft, registry)
         )
       }
 
       // ── layout ────────────────────────────────────────────────────────────
+
+      const drawerTitleId = 'action-drawer-title'
+
+      // Modal dialog behavior: trap Tab/Shift+Tab within the drawer, route
+      // Escape to the close path, move focus in on open and restore it on close.
+      const focusTrap = (root: unknown): Disposable | void => {
+        if (!(root instanceof HTMLElement)) return
+        const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
+        const focusables = (): HTMLElement[] =>
+          Array.from(
+            root.querySelectorAll<HTMLElement>(
+              'a[href], button, textarea, input, select, [tabindex]:not([tabindex="-1"])'
+            )
+          ).filter(el => !el.hasAttribute('disabled') && el.tabIndex !== -1 && el.offsetParent !== null)
+        const first = focusables()[0]
+        ;(first ?? root).focus()
+        const onKeyDown = (ev: KeyboardEvent): void => {
+          if (ev.key === 'Escape') {
+            ev.preventDefault()
+            escapeRequest.push(ev)
+            return
+          }
+          if (ev.key !== 'Tab') return
+          const items = focusables()
+          if (items.length === 0) {
+            ev.preventDefault()
+            root.focus()
+            return
+          }
+          const head = items[0]
+          const tail = items[items.length - 1]
+          const active = document.activeElement
+          if (ev.shiftKey && (active === head || !root.contains(active))) {
+            ev.preventDefault()
+            tail.focus()
+          } else if (!ev.shiftKey && active === tail) {
+            ev.preventDefault()
+            head.focus()
+          }
+        }
+        root.addEventListener('keydown', onKeyDown)
+        return {
+          [Symbol.dispose]() {
+            root.removeEventListener('keydown', onKeyDown)
+            previouslyFocused?.focus()
+          }
+        }
+      }
 
       const $drawerContent = $card2(
         style({
@@ -868,13 +971,18 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
           padding: '12px 0',
           borderBottom: 'none',
           borderRadius: '20px 20px 0 0'
-        })
+        }),
+        attr({ role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': drawerTitleId, tabindex: '-1' }),
+        effectRun(focusTrap)
       )(
         $column(spacing.default)(
           $row(spacing.small, style({ alignItems: 'center', padding: '0 24px' }))(
-            $heading3($text(title)),
+            $heading3(attr({ id: drawerTitleId }))($text(title)),
             $node(style({ flex: 1 }))(),
-            $ButtonCircular({ $iconPath: $xCross })({ click: clickCloseTether() })
+            $ButtonCircular({
+              $iconPath: $xCross,
+              $container: $defaultButtonCircularContainer(attr({ 'aria-label': 'Close' }))
+            })({ click: clickCloseTether() })
           ),
 
           $column(
@@ -885,13 +993,14 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
               p => {
                 const steps: ReadonlyArray<PlannedStep | Step> = p.submission ? p.submission.steps : p.planned
                 if (steps.length === 0) return empty
+                const showIndex = steps.filter(s => s.kind === 'draft').length > 1
                 let idx = 0
                 return $column(spacing.small)(
                   ...steps.map(s => {
                     const stepIdx = s.kind === 'draft' ? idx++ : null
                     const query = 'query' in s ? s.query : null
                     const submitBlocks = 'submitBlockByChain' in s ? s.submitBlockByChain : new Map<number, bigint>()
-                    return $item(s, stepIdx, p.registry, query, submitBlocks)
+                    return $item(s, stepIdx, p.registry, query, submitBlocks, showIndex)
                   })
                 )
               },
@@ -899,31 +1008,48 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
             )
           ),
 
-          $row(spacing.small, style({ padding: '0 24px', alignItems: 'center', minWidth: 0 }))(
-            switchMap(
+          (() => {
+            // The status / error one-liner. On touch (mobile) there is no hover,
+            // so the ellipsised + tooltip-only treatment is dropped in favour of
+            // a full-width, wrapping message on its own line.
+            const $statusMessage = switchMap(
               p => {
                 if (p.status?.kind === 'done') {
                   return $node(style({ color: palette.positive, fontSize: text.xs, fontWeight: '600' }))($text('Done'))
                 }
                 const submissionError = p.status?.kind === 'error' ? p.status.message : null
-                const matchmakerAlert = p.matchmaker !== 'open' ? 'Service offline, cannot submit' : null
+                const matchmakerAlert =
+                  p.matchmaker === 'connecting'
+                    ? 'Reconnecting to relay…'
+                    : p.matchmaker !== 'open'
+                      ? 'Service offline, cannot submit'
+                      : null
                 const $oneLiner = (full: string, $tooltip?: I$Slottable): I$Node =>
-                  $Tooltip({
-                    $dropContainer: $defaultTooltipDropContainer,
-                    $content: $tooltip ?? $node($text(full)),
-                    $anchor: $node(
-                      style({
-                        color: palette.negative,
-                        fontSize: text.xs,
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        minWidth: 0,
-                        maxWidth: '320px',
-                        cursor: 'help'
-                      })
-                    )($text(full))
-                  })({})
+                  isMobileScreen
+                    ? $node(
+                        style({
+                          color: palette.negative,
+                          fontSize: text.xs,
+                          minWidth: 0,
+                          whiteSpace: 'normal'
+                        })
+                      )($text(full))
+                    : $Tooltip({
+                        $dropContainer: $defaultTooltipDropContainer,
+                        $content: $tooltip ?? $node($text(full)),
+                        $anchor: $node(
+                          style({
+                            color: palette.negative,
+                            fontSize: text.xs,
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            minWidth: 0,
+                            maxWidth: '320px',
+                            cursor: 'help'
+                          })
+                        )($text(full))
+                      })({})
                 if (submissionError) return $oneLiner(submissionError)
                 if (matchmakerAlert) return $oneLiner(matchmakerAlert)
                 if (p.indexerHealth.worstSeverity === 'unreachable')
@@ -935,7 +1061,13 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
                   const symbol = symbolForBaseTokenId(offending.baseTokenId) ?? 'base token'
                   const portfolioHref = `/${routeSchema.portfolio.fragment}`
                   const fullText = `Deposit ${symbol} to your Puppet Account to pay for execution fees`
-                  const $rich = $node(style({ color: palette.message, fontSize: text.xs, whiteSpace: 'nowrap' }))(
+                  const $rich = $node(
+                    style({
+                      color: palette.message,
+                      fontSize: text.xs,
+                      whiteSpace: isMobileScreen ? 'normal' : 'nowrap'
+                    })
+                  )(
                     $text(`Deposit ${symbol} to your `),
                     $element('a')(
                       attr({ href: portfolioHref }),
@@ -955,7 +1087,7 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
                     )($text('Puppet Account')),
                     $text(' to pay for execution fees')
                   )
-                  return $oneLiner(fullText, $rich)
+                  return isMobileScreen ? $rich : $oneLiner(fullText, $rich)
                 }
                 return $oneLiner(offending.alert!)
               },
@@ -965,18 +1097,31 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
                 matchmaker: compact.status,
                 indexerHealth: context.indexerHealth
               })
-            ),
-            $node(style({ flex: 1 }))(),
-            switchMap(
+            )
+
+            // Execution fees. On desktop the breakdown lives in the hover tooltip
+            // ($executionFees). Touch has no hover, so on mobile render the
+            // summary plus the breakdown inline and let it wrap.
+            const $fees = switchMap(
               list =>
-                list.length > 0 ? $node(style({ fontSize: text.sm, whiteSpace: 'nowrap' }))($executionFees) : empty,
+                list.length > 0 && !list.some(d => d.alert !== null)
+                  ? isMobileScreen
+                    ? $column(spacing.small, style({ fontSize: text.sm, minWidth: 0, whiteSpace: 'normal' }))(
+                        $executionFees,
+                        $executionFeesBreakdown()
+                      )
+                    : $node(style({ fontSize: text.sm, whiteSpace: 'nowrap' }))($executionFees)
+                  : empty,
               draftList
-            ),
-            switchMap(
+            )
+
+            const $enableSessionButton = switchMap(
               show =>
                 show
                   ? $Button({
-                      $container: $defaultButtonPrimary,
+                      $container: isMobileScreen
+                        ? $defaultButtonPrimary(style({ width: '100%', minHeight: '44px' }))
+                        : $defaultButtonPrimary,
                       disabled: enableSessionPending,
                       $content: switchMap(
                         pending => $node($text(pending ? 'Enabling…' : 'Enable Session')),
@@ -985,18 +1130,36 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
                     })({ click: clickEnableSessionTether() })
                   : empty,
               showEnableSession
-            ),
-            $Button({
-              $container: $defaultButtonPrimary,
+            )
+
+            const $submitButton = $Button({
+              $container: isMobileScreen
+                ? $defaultButtonPrimary(style({ width: '100%', minHeight: '44px' }))
+                : $defaultButtonPrimary,
               disabled: submitDisabled,
-              $content: switchMap(
-                list => $node($text(list.some(d => d.alert !== null) ? 'Resolve alerts' : 'Submit')),
-                draftList
-              )
+              $content: switchMap(list => {
+                if (list.some(d => d.alert !== null)) return $node($text('Resolve alerts'))
+                return $node($text(list.length > 1 ? `Submit ${list.length} actions` : 'Submit'))
+              }, draftList)
             })({
               click: clickSubmitTether()
             })
-          )
+
+            return isMobileScreen
+              ? $column(spacing.small, style({ padding: '0 24px', minWidth: 0 }))(
+                  $fees,
+                  $statusMessage,
+                  $enableSessionButton,
+                  $submitButton
+                )
+              : $row(spacing.small, style({ padding: '0 24px', alignItems: 'center', minWidth: 0 }))(
+                  $fees,
+                  $node(style({ flex: 1 }))(),
+                  $statusMessage,
+                  $enableSessionButton,
+                  $submitButton
+                )
+          })()
         )
       )
 

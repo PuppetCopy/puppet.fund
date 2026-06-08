@@ -23,11 +23,17 @@
 
         html {
             text-rendering: geometricPrecision;
+            /* Reserve the scrollbar gutter so page content doesn't shift sideways when the
+               vertical scrollbar appears as content grows. */
+            scrollbar-gutter: stable;
         }
 
         body {
             margin: 0;
             background-color: __THEME_BACKGROUND__;
+            /* No-op while the body isn't a scroll container, but keeps the gutter reserved if it
+               ever becomes one. */
+            scrollbar-gutter: stable;
         }
 
         input[type=number]::-webkit-inner-spin-button,
@@ -91,6 +97,16 @@
 
             100% {
                 transform: rotate(360deg);
+            }
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.3;
             }
         }
     </style>

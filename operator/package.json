@@ -1,26 +1,31 @@
 {
   "name": "@puppet.fund/operator",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "license": "BUSL-1.1",
   "description": "Build autonomous trading operators on Puppet",
   "type": "module",
   "sideEffects": false,
+  "engines": {
+    "bun": ">=1.3"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./gmx": {
-      "types": "./dist/gmx.d.ts",
-      "import": "./dist/gmx.js"
+    "./*": {
+      "types": "./dist/*/index.d.ts",
+      "import": "./dist/*/index.js"
     }
   },
   "files": [
     "dist"
   ],
   "scripts": {
-    "build": "vite build",
+    "build": "vite build && bun run rollup-dts",
+    "rollup-dts": "bun scripts/rollup-dts.ts",
     "clean": "rm -rf dist",
+    "test": "bun test",
     "tsgo:check": "tsgo --noEmit"
   },
   "dependencies": {
@@ -31,12 +36,13 @@
     "viem": "catalog:"
   },
   "devDependencies": {
+    "@microsoft/api-extractor": "7.58.7",
     "@puppet/contracts": "workspace:*",
     "@puppet/sdk": "workspace:*",
     "@types/bun": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
-    "vite-plugin-dts": "5.0.1"
+    "vite-plugin-dts": "5.0.2"
   },
   "keywords": [
     "puppet",

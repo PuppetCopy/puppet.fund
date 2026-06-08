@@ -21,11 +21,21 @@ import { $alert, $alertTooltip } from './$alert.js'
 import { $icon, $txHashRef } from './$common.js'
 import { $alertIcon } from './$icons.js'
 
+export const $loadingDash: I$Node = $node(
+  style({ display: 'inline-block', color: palette.foreground, animation: 'pulse 1.4s ease-in-out infinite' })
+)($text('-'))
+
+export const $loadingValue = (valueSrc: IStream<string>): I$Node =>
+  switchLatest(map(v => (v === '-' ? $loadingDash : $node($text(v))), valueSrc))
+
 export const intermediateText = (querySrc: IStream<Promise<string>>, hint = '-'): IStream<string> =>
   switchMap(res => start(hint, fromPromise(res)), querySrc)
 
-export const $intermediateText = (querySrc: IStream<Promise<string>>, hint = '-', $display = $text): I$Slottable =>
-  $display(intermediateText(querySrc, hint))
+export const $intermediateText = (
+  querySrc: IStream<Promise<string>>,
+  hint = '-',
+  $display: (src: IStream<string>) => I$Slottable = $loadingValue
+): I$Slottable => $display(intermediateText(querySrc, hint))
 
 export const $spinner = $node(
   style({

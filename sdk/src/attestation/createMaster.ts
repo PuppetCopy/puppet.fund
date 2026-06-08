@@ -32,13 +32,14 @@ export interface ICreateMasterAttestContext extends IDraftContext {
 }
 
 export function attestCreateMasterIntent(ctx: ICreateMasterAttestContext, input: ICreateMasterInput) {
-  IntentLib.verifyTimeBounds(input.blockNumber, input.deadline, ctx.currentBlock)
-  const baseToken = IntentLib.verifyTokenAndCap(
-    ctx.tokenRegistry,
-    HUB_CHAIN_ID,
-    input.params.baseTokenId,
-    input.masterAmount
-  )
+  const baseToken = IntentLib.verifyCommonIntent(ctx, {
+    blockNumber: input.blockNumber,
+    deadline: input.deadline,
+    baseTokenId: input.params.baseTokenId,
+    lookupChain: HUB_CHAIN_ID,
+    capAmount: input.masterAmount,
+    acceptableRelayFee: input.acceptableRelayFee
+  })
   if (input.params.user === ZERO_ADDRESS) throw new CompactContractError('Account__InvalidUser', [])
   if (input.params.baseTokenId === ZERO_BYTES32) throw new CompactContractError('Account__InvalidBaseTokenId', [])
 
@@ -66,18 +67,12 @@ export function attestCreateMasterIntent(ctx: ICreateMasterAttestContext, input:
 
   const byPuppet = new Map<string, { body: Hex; mandate: Hex }>()
   for (const row of ctx.positions) {
-    byPuppet.set(row.puppet, { body: row.body, mandate: row.mandate })
+    byPuppet.set(row.puppet.toLowerCase(), { body: row.body, mandate: row.mandate })
   }
   const bodyList: Hex[] = []
   const mandateList: Hex[] = []
   for (let i = 0; i < input.puppetList.length; i++) {
-    const found = byPuppet.get(input.puppetList[i]!.toLowerCase() as Hex)
-    if (input.matchedAmountList[i] !== 0n && !found) {
-      throw new CompactError(
-        'SUBSCRIPTION_MISSING',
-        `puppet ${input.puppetList[i]} has matchedAmount ${input.matchedAmountList[i]} but no standing-auth subscription`
-      )
-    }
+    const found = byPuppet.get(input.puppetList[i]!.toLowerCase())
     bodyList.push(found?.body ?? ('0x' as Hex))
     mandateList.push(found?.mandate ?? ('0x' as Hex))
   }
@@ -100,7 +95,7 @@ export function attestCreateMasterIntent(ctx: ICreateMasterAttestContext, input:
   const { puppetList, matchedAmountList, ...rest } = intent
   const typedData: TypedDataDefinition = {
     domain: HUB_DOMAIN,
-    ...HUB_GATE_INTENTS.createMaster,
+    ...HUB_GATE_INTENTS.seedMasterAccount,
     message: {
       ...rest,
       puppetListHash: keccak256(concat(puppetList)),

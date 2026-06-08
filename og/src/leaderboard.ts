@@ -1,8 +1,8 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { IntervalTime, USD_DECIMALS } from '@puppet/sdk/const'
-import { formatFixed, getUnixTimestamp } from '@puppet/sdk/core'
+import { IntervalTime } from '@puppet/sdk/const'
+import { getUnixTimestamp, readablePnl } from '@puppet/sdk/core'
 import { createIndexerClient, select } from '@puppet/sdk/state'
-import { pixelAvatarSvg } from '@puppet/sdk/ui-components'
+import { roboAvatarSvg } from '@puppet/sdk/ui-components'
 import { type Hex, hexToString } from 'viem'
 
 const indexerEndpoint = Bun.env.INDEXER_ENDPOINT
@@ -32,7 +32,7 @@ export async function fetchTopMasters(limit: number): Promise<ITopMaster[]> {
   const since = getUnixTimestamp() - IntervalTime.WEEK
   const metricList = await select(indexer, 'MasterLatestMetric', {
     where: { interval: { _eq: IntervalTime.WEEK }, lastUpdatedTimestamp: { _gte: since } },
-    orderBy: { navPerShare: 'desc' },
+    orderBy: { realisedPnl: 'desc' },
     limit
   })
   if (metricList.length === 0) return []
@@ -43,14 +43,11 @@ export async function fetchTopMasters(limit: number): Promise<ITopMaster[]> {
   })
   const nameByMaster = new Map(nameRows.map(r => [r.account, decodeName(r.name)]))
 
-  return metricList.map((m, i) => {
-    const nav = formatFixed(USD_DECIMALS, m.navPerShare)
-    return {
-      rank: i + 1,
-      avatar: `data:image/svg+xml;base64,${btoa(pixelAvatarSvg(m.master))}`,
-      label: nameByMaster.get(m.master) || short(m.master),
-      value: `${nav.toFixed(2)}×`,
-      positive: nav >= 1
-    }
-  })
+  return metricList.map((m, i) => ({
+    rank: i + 1,
+    avatar: `data:image/svg+xml;base64,${btoa(roboAvatarSvg(m.master))}`,
+    label: nameByMaster.get(m.master) || short(m.master),
+    value: readablePnl(m.realisedPnl),
+    positive: m.realisedPnl >= 0n
+  }))
 }

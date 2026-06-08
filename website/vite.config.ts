@@ -10,9 +10,8 @@ const SITE_CONFIG = {
   __WEBSITE__: 'https://puppet.fund',
   __TWITTER_ID__: '@PuppetCopy',
   __APP_NAME__: 'Puppet',
-  __APP_DESC_SHORT__: 'Puppet - Wallet for traders, platform for investors',
-  __APP_DESC_LONG__:
-    'Puppet is a wallet for traders (humans or agents) to operate across chains and DeFi venues, and a platform where investors back them under co-attested funding rules.',
+  __APP_DESC_SHORT__: 'Puppet, seamless copytrading',
+  __APP_DESC_LONG__: 'Fund top on-chain traders and share their gains. You keep your keys and set the rules.',
   __OG_IMAGE__:
     '/api/og{{if eq .OriginalReq.URL.Path `/leaderboard`}}/leaderboard?d={{now | date `2006-01-02-15`}}{{end}}',
   __THEME_PRIMARY__: '#870B38',
@@ -25,6 +24,8 @@ const WC_METADATA = {
   url: SITE_CONFIG.__WEBSITE__,
   icons: [`${SITE_CONFIG.__WEBSITE__}/assets/pwa/transparent-512x512.png`]
 }
+
+const INDEXER_GRAPHQL = new URL(Bun.env.INDEXER_ENDPOINT!)
 
 export default defineConfig({
   resolve: { tsconfigPaths: true },
@@ -82,11 +83,11 @@ export default defineConfig({
         }
       },
       '/api/indexer': {
-        target: Bun.env.INDEXER_ENDPOINT,
+        target: INDEXER_GRAPHQL.origin,
         changeOrigin: true,
         secure: true,
         ws: true,
-        rewrite: path => path.replace(/^\/api\/indexer/, '/v1/graphql')
+        rewrite: path => path.replace(/^\/api\/indexer/, INDEXER_GRAPHQL.pathname)
       },
       '/api/bridgeQuote': {
         target: 'https://app.across.to',
@@ -94,12 +95,15 @@ export default defineConfig({
         secure: true,
         rewrite: path => {
           const stripped = path.replace(/^\/api\/bridgeQuote/, '/api')
-          const integratorId = Bun.env.ACROSS_INTEGRATOR_ID
-          if (!integratorId) return stripped
-          return stripped.includes('?')
-            ? `${stripped}&integratorId=${integratorId}`
-            : `${stripped}?integratorId=${integratorId}`
+          const integratorId = Bun.env.ACROSS_INTEGRATOR_ID ?? Bun.env.ACROSS_API_KEY ?? ''
+          return `${stripped}${stripped.includes('?') ? '&' : '?'}integratorId=${integratorId}`
         }
+      },
+      '/api/swapQuote': {
+        target: 'https://li.quest',
+        changeOrigin: true,
+        secure: true,
+        rewrite: path => path.replace(/^\/api\/swapQuote/, '')
       },
       '/api/matchmaker': {
         target: Bun.env.MATCHMAKER_ENDPOINT,

@@ -13,9 +13,9 @@ import {PuppetAccount} from "src/core/PuppetAccount.sol";
 import {MasterAccount} from "src/core/MasterAccount.sol";
 import {RegisterModule} from "src/core/module/RegisterModule.sol";
 import {WalletDepositModule} from "src/core/module/WalletDepositModule.sol";
-import {CoreGate, WITHDRAW_INTENT_TYPEHASH} from "src/core/CoreGate.sol";
+import {BaseGate} from "src/utils/BaseGate.sol";
+import {PuppetGate, WITHDRAW_INTENT_TYPEHASH} from "src/PuppetGate.sol";
 import {ACCOUNT_TYPEHASH, AccountLib} from "src/core/AccountLib.sol";
-import {Bridge} from "src/utils/Bridge.sol";
 
 import {MockERC20} from "./mock/MockERC20.t.sol";
 
@@ -37,7 +37,7 @@ contract RouterTypedDataSigTest is Test {
     Dictate dictate;
     AccountModule accountGate;
     RegisterModule register;
-    CoreGate router;
+    PuppetGate router;
     bytes32 domainSeparator;
     PuppetAccount puppet;
 
@@ -64,16 +64,13 @@ contract RouterTypedDataSigTest is Test {
 
         WalletDepositModule walletDeposit = new WalletDepositModule(dictate);
 
-        Bridge bridge = new Bridge(address(0), bytes32(0));
-
-        router = new CoreGate(
+        router = new PuppetGate(
             dictate,
             accountGate,
             walletDeposit,
             register,
-            bridge,
             HUB_CHAIN_ID,
-            CoreGate.Config({
+            BaseGate.Config({
                 attestor: attestor,
                 feeReceiver: feeReceiver,
                 transferGasLimit: 200_000,
@@ -99,7 +96,7 @@ contract RouterTypedDataSigTest is Test {
         usdc.mint(address(puppet), 100e6);
         vm.store(address(puppet), bytes32(uint(0)), bytes32(uint(100e6)));
 
-        CoreGate.WithdrawIntent memory intent = CoreGate.WithdrawIntent({
+        PuppetGate.WithdrawIntent memory intent = PuppetGate.WithdrawIntent({
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             params: _params(),
@@ -124,7 +121,7 @@ contract RouterTypedDataSigTest is Test {
     }
 
     function _walletStyleDigest(
-        CoreGate.WithdrawIntent memory _intent
+        PuppetGate.WithdrawIntent memory _intent
     ) internal view returns (bytes32) {
         bytes32 _accountHash = keccak256(
             abi.encode(
@@ -154,7 +151,7 @@ contract RouterTypedDataSigTest is Test {
         bytes32 _typeHash =
             keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
         return keccak256(
-            abi.encode(_typeHash, keccak256(bytes("CoreGate")), keccak256(bytes("1")), block.chainid, address(router))
+            abi.encode(_typeHash, keccak256(bytes("PuppetGate")), keccak256(bytes("1")), block.chainid, address(router))
         );
     }
 

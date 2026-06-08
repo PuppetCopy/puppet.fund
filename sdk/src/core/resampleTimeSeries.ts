@@ -10,7 +10,7 @@ export interface IResampleTimeSeries<TSource, TMap, TResult extends TimelineItem
   sourceList: TSource[]
 
   getTime: (t: TSource) => number
-  sourceMap: (next: TSource, timeslot: number) => TMap
+  mapSource: (next: TSource, timeslot: number) => TMap
   gapMap?: (next: TResult, timeslot: number) => TResult
   squashMap?: (conflict: TResult, next: TSource, timeslot: number) => TMap
 }
@@ -21,9 +21,9 @@ export function resampleTimeSeries<TSource, TMap, TResult extends TimelineItem<T
   const {
     ticks = 30,
     sourceList,
-    sourceMap,
+    mapSource,
     gapMap = prev => prev,
-    squashMap = (_prev, next, timeslot) => sourceMap(next, timeslot),
+    squashMap = (_prev, next, timeslot) => mapSource(next, timeslot),
     getTime
   } = config
 
@@ -37,7 +37,7 @@ export function resampleTimeSeries<TSource, TMap, TResult extends TimelineItem<T
 
   const seedSlot = Math.floor(initialTime / interval)
   const seedTimeSlot = seedSlot * interval
-  const seedMap = { time: seedTimeSlot, slot: seedSlot, value: sourceMap(sourceList[0], seedTimeSlot) } as TResult
+  const seedMap = { time: seedTimeSlot, slot: seedSlot, value: mapSource(sourceList[0], seedTimeSlot) } as TResult
   const timelineMap: { [k: number]: TResult } = {}
 
   timelineMap[seedSlot] = seedMap
@@ -82,7 +82,7 @@ export function resampleTimeSeries<TSource, TMap, TResult extends TimelineItem<T
       } as TResult
     }
 
-    const item = { time: timeSlot * interval, slot: timeSlot, value: sourceMap(source, timeSlot) } as TResult
+    const item = { time: timeSlot * interval, slot: timeSlot, value: mapSource(source, timeSlot) } as TResult
 
     timelineMap[timeSlot] = item
     prev = item

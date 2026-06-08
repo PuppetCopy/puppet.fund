@@ -1,6 +1,6 @@
 import { router__gasLimit } from '@puppet/contracts'
 import { CHAIN_TOKEN_MAP, HUB_CHAIN_ID, TOKEN_ID } from '@puppet/contracts/const'
-import { CORE_GATE_INTENTS, HUB_GATE_INTENTS, SPOKE_GATE_INTENTS } from '@puppet/contracts/intents'
+import { HUB_GATE_INTENTS, MASTER_GATE_INTENTS, PUPPET_GATE_INTENTS } from '@puppet/contracts/intents'
 import { combine, type IStream, just, map, op } from 'aelea/stream'
 import { state } from 'aelea/stream-extended'
 import type { Address, Chain, Client, Hex, Transport } from 'viem'
@@ -15,9 +15,9 @@ import { periodicRun } from '../core/stream/recover.js'
 export type FeeClient = Client<Transport, Chain | undefined>
 
 const ROUTER_GAS = {
-  CoreGate: router__gasLimit.CoreGate,
-  HubGate: router__gasLimit.HubGate,
-  SpokeGate: router__gasLimit.SpokeGate
+  PuppetGate: router__gasLimit.PuppetGate,
+  MasterGate: router__gasLimit.MasterGate,
+  HubGate: router__gasLimit.HubGate
 } as const
 
 export type RelayRouter = keyof typeof ROUTER_GAS
@@ -34,10 +34,15 @@ const PER_UNIT_GAS: Partial<Record<RelayMethod, bigint>> = {
   subscribe: 10_000n
 }
 
-export function relayRouterForKind(kind: RelayMethod): RelayRouter {
-  if (kind in CORE_GATE_INTENTS) return 'CoreGate'
+// bridge/recognize exist on both PuppetGate and MasterGate; the caller passes the
+// account role to disambiguate. All other kinds live on exactly one gate.
+export function relayRouterForKind(kind: RelayMethod, isMaster = false): RelayRouter {
   if (kind in HUB_GATE_INTENTS) return 'HubGate'
-  if (kind in SPOKE_GATE_INTENTS) return 'SpokeGate'
+  const inPuppet = kind in PUPPET_GATE_INTENTS
+  const inMaster = kind in MASTER_GATE_INTENTS
+  if (inPuppet && inMaster) return isMaster ? 'MasterGate' : 'PuppetGate'
+  if (inMaster) return 'MasterGate'
+  if (inPuppet) return 'PuppetGate'
   throw new Error(`unknown relay kind ${kind}`)
 }
 
@@ -92,7 +97,7 @@ export async function getAcceptableRelayFee(
 
 export function getRelayFeeQuoteSource(tokenPerEth: bigint, gasPrice: bigint): RelayFeeMap {
   const map = {} as RelayFeeMap
-  for (const router of ['CoreGate', 'HubGate', 'SpokeGate'] as const) {
+  for (const router of ['PuppetGate', 'MasterGate', 'HubGate'] as const) {
     for (const [method, gas] of Object.entries(ROUTER_GAS[router])) {
       map[method as RelayMethod] = { relayFee: withMargin((gas * gasPrice * tokenPerEth) / WEI_PER_ETH) }
     }
@@ -164,6 +169,21 @@ export function createTokenPerEthSource(
     periodicRun({ interval: rateIntervalMs, actionOp: map(() => getTokenPerEth(oracleClient, tokenAddr)) }),
     state()
   )
+}
+
+/**
+ * On-demand per-baseTokenId tokenPerEth fetch (no stream). Same address
+ * resolution as `createTokenPerEthSource`; WETH short-circuits to identity in
+ * `getTokenPerEth`, USDC reads Chainlink. For callers that cache per-request
+ * instead of polling.
+ */
+export async function getTokenPerEthForId(baseTokenId: Hex, oracleClient: FeeClient): Promise<bigint> {
+  const chainId = oracleClient.chain?.id
+  if (chainId === undefined) {
+    throw new Error('getTokenPerEthForId requires an oracle client bound to a chain')
+  }
+  const tokenAddr = feeTokenAddress(baseTokenId, chainId)
+  return getTokenPerEth(oracleClient, tokenAddr)
 }
 
 /**

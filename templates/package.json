@@ -15,7 +15,10 @@
     "tsgo:check": "tsgo --noEmit"
   },
   "devDependencies": {
-    "@types/bun": "catalog:"
+    "@anthropic-ai/sdk": "0.100.1",
+    "@puppet.fund/operator": "workspace:*",
+    "@types/bun": "catalog:",
+    "viem": "catalog:"
   },
   "keywords": [
     "puppet",

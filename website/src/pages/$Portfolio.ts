@@ -1,6 +1,6 @@
 import type { IntervalTime } from '@puppet/sdk/const'
 import type { ISubaccountState, ITokenRegistryMap } from '@puppet/sdk/state'
-import { combine, filter, type IStream, map, nowWith, op, switchLatest, switchPromises } from 'aelea/stream'
+import { combine, empty, filter, type IStream, map, nowWith, op, switchLatest, switchPromises } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $element, $node, $text, attr, component, effectProp, type I$Node, style, stylePseudo } from 'aelea/ui'
 import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
@@ -8,14 +8,15 @@ import { colorShade, palette } from 'aelea/ui-components-theme'
 import { pushUrl } from 'aelea/ui-router'
 import { isAddressEqual } from 'viem'
 import type { Address } from 'viem/accounts'
-import { $arrowRight, $icon, $infoLabel, $Link, text } from '@/ui-components'
+import { $arrowRight, $ButtonSecondary, $defaultButtonSecondary, $icon, $infoLabel, $Link, text } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
 import { $heading3 } from '../common/$text.js'
 import { $card, $card2 } from '../common/elements/$common.js'
 import { $profileDisplay } from '../components/$AccountProfile.js'
 import { $SelectCollateralToken } from '../components/$CollateralTokenSelector.js'
+import { $WalletConnect } from '../components/$WalletConnect.js'
 import { $usdTimeline, type ITimelinePoint } from '../components/participant/$ProfilePeformanceTimeline.js'
-import { $MasterAccountEditor } from '../components/portfolio/$MasterAccountEditor.js'
+import { $AllocateEditor } from '../components/portfolio/$AllocateEditor.js'
 import { $TokenBalanceEditor } from '../components/portfolio/$TokenBalanceEditor.js'
 import type {
   IAllocateDraft,
@@ -28,7 +29,13 @@ import type {
 } from '../components/portfolio/draft.js'
 import * as context from '../io/context.js'
 import { fetchPuppetBalanceTimeline } from '../io/indexer/query.js'
-import type { IConnectedWallet } from '../wallet/index.js'
+import {
+  type connectWallet,
+  disconnect,
+  type IConnectedWallet,
+  refreshWallet,
+  revokeSessionKey
+} from '../wallet/index.js'
 import type { IPageFilterParams } from './types.js'
 
 const $timelineCard = (
@@ -48,7 +55,7 @@ const $timelineCard = (
     $usdTimeline({
       timelineQuery,
       label: 'Portfolio',
-      tooltip: 'Your total value in USD — account balance plus the marked value of open positions',
+      tooltip: 'Your total value in USD: account balance plus the marked value of open positions',
       activityTimeframe,
       $lead,
       $empty: $column(
@@ -83,7 +90,10 @@ export const $Portfolio = ({
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
       [changeMasterDraft, changeMasterDraftTether]: IBehavior<IAllocateDraft | ICreateMasterDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
-      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IFulfillDraft>
+      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IFulfillDraft>,
+      // Wiring this through is what subscribes $WalletConnect's click → map(connectWallet)
+      // operator chain. Without it, button clicks don't fire connect. Value is unused here.
+      [_connect, connectTether]: IBehavior<ReturnType<typeof connectWallet>>
     ) => {
       const registeredCollateralList = switchPromises(context.registeredCollateralListQuery)
       const walletState: IStream<IConnectedWallet | null> = op(walletQuery, switchPromises, state())
@@ -116,7 +126,7 @@ export const $Portfolio = ({
           })
         )($text(acc.isMaster ? 'Master' : 'Puppet'))
         const $editor = acc.isMaster
-          ? $MasterAccountEditor({ account, walletAccount: wallet, tokenRegistry: registry, activeMaster })({
+          ? $AllocateEditor({ account, walletAccount: wallet, tokenRegistry: registry, activeMaster })({
               changeDraft: changeMasterDraftTether(),
               changeRedeemDraft: changeRedeemDraftTether(),
               changeFulfillDraft: changeFulfillDraftTether()
@@ -148,10 +158,7 @@ export const $Portfolio = ({
 
       return [
         $column(spacing.default)(
-          $row(
-            spacing.small,
-            style({ alignItems: 'center', paddingLeft: '20px', fontSize: text.sm, color: palette.foreground })
-          )(
+          $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm, color: palette.foreground }))(
             $element('a')(
               attr({ href: '/' }),
               style({ color: palette.foreground, cursor: 'pointer' }),
@@ -166,25 +173,82 @@ export const $Portfolio = ({
               )
             )($text('Leaderboard')),
             $icon({ $content: $arrowRight, fill: palette.foreground, width: '8px' }),
-            $node(style({ color: palette.message }))($text('Portfolio'))
+            $node(style({ color: palette.message }))($text('Portfolio')),
+            $node(style({ flex: 1 }))(),
+            switchLatest(
+              map(
+                wallet =>
+                  wallet
+                    ? $node(
+                        attr({ role: 'button', tabindex: '0' }),
+                        style({ color: palette.foreground, cursor: 'pointer' }),
+                        stylePseudo(':hover', { color: palette.message }),
+                        effectProp(
+                          'onclick',
+                          nowWith(() => async () => {
+                            revokeSessionKey(wallet.address)
+                            await disconnect()
+                            refreshWallet()
+                          })
+                        )
+                      )($text('Disconnect'))
+                    : empty,
+                walletState
+              )
+            )
           ),
           $card(spacing.big, style({ flex: 1, width: '100%' }))(
             $timelineCard(balanceTimelineQuery, activityTimeframe, $lead, changeActivityTimeframeTether),
             switchLatest(
               map(
                 p => {
-                  if (!p.wallet) return $infoLabel($text('Connect your wallet to view your accounts'))
-                  if (p.accounts.length === 0) return $infoLabel($text('No accounts yet'))
+                  if (!p.wallet)
+                    return $column(
+                      spacing.big,
+                      style({ alignItems: 'center', textAlign: 'center', padding: '40px 16px' })
+                    )(
+                      $heading3($text('Connect your wallet')),
+                      $infoLabel(style({ maxWidth: '420px' }))(
+                        $text('Connect your wallet to see your accounts, balances and open positions.')
+                      ),
+                      $WalletConnect()({ connect: connectTether() })
+                    )
+                  if (p.accounts.length === 0)
+                    return $column(
+                      spacing.big,
+                      style({ alignItems: 'center', textAlign: 'center', padding: '40px 16px' })
+                    )(
+                      $heading3($text('No accounts yet')),
+                      $infoLabel(style({ maxWidth: '460px' }))(
+                        $text(
+                          'A backer deposits into a puppet account to copy a trader, and a trader creates a master account to lead.'
+                        )
+                      ),
+                      $Link({
+                        route: routeSchema.hello,
+                        $content: $row(spacing.small, style({ alignItems: 'center', color: palette.message }))(
+                          $text('Create account'),
+                          $icon({ $content: $arrowRight, fill: palette.message, width: '10px' })
+                        )
+                      })({})
+                    )
                   const wallet = p.wallet
-                  return $column(
-                    spacing.big,
-                    style({ padding: '16px 0' })
-                  )(
+                  return $column(spacing.big, style({ padding: '16px 0' }))(
                     ...p.accounts.flatMap((acc, i) =>
                       i === 0
                         ? [$accountRow(acc, p.registry, wallet)]
                         : [$accountSeparator(), $accountRow(acc, p.registry, wallet)]
-                    )
+                    ),
+                    $accountSeparator(),
+                    $ButtonSecondary({
+                      $container: $defaultButtonSecondary(
+                        effectProp(
+                          'onclick',
+                          nowWith(() => () => pushUrl('/hello'))
+                        )
+                      ),
+                      $content: $text('+ Create account')
+                    })({})
                   )
                 },
                 combine({ accounts: subaccountListState, registry: tokenRegistryValue, wallet: walletState })

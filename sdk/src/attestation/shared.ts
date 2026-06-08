@@ -4,15 +4,16 @@ import type {
   IAccountModule__CreateMasterAccountIntent,
   IAccountModule__CreatePuppetAccountIntent,
   IAllocateModule__AllocateIntent,
-  ICoreGate__SignTransientRouteBalanceIntent,
-  ICoreGate__WithdrawIntent,
   IHubGate__BridgeToWalletIntent,
+  IMasterGate__BridgeIntent,
+  IMasterGate__OperateIntent,
+  IMasterGate__RecognizeIntent,
+  IPuppetGate__BridgeIntent,
+  IPuppetGate__RecognizeIntent,
+  IPuppetGate__WithdrawIntent,
   IRedeemModule__ClaimIntent,
   IRedeemModule__FulfillIntent,
   IRedeemModule__SellIntent,
-  ISpokeGate__BridgeHubIntent,
-  ISpokeGate__BridgeIntent,
-  ISpokeGate__OperateIntent,
   ISubscribeModule__SubscribeIntent
 } from '@puppet/contracts/types'
 import { type Address, getAddress } from 'viem'
@@ -22,7 +23,7 @@ import type { IAccountStateRow } from '../state/metric.js'
 import { type IIndexerClient, selectOne } from '../state/shared.js'
 import type { ITokenRegistryMap } from '../state/tokenRegistry.js'
 
-export { CORE_GATE_DOMAIN_MAP, SPOKE_GATE_DOMAIN_MAP } from '@puppet/contracts/intents'
+export { MASTER_GATE_DOMAIN_MAP, PUPPET_GATE_DOMAIN_MAP } from '@puppet/contracts/intents'
 export const HUB_DOMAIN = HUB_GATE_DOMAIN_MAP[HUB_CHAIN_ID]
 
 export interface IIntentByKind {
@@ -33,13 +34,12 @@ export interface IIntentByKind {
   fulfill: IRedeemModule__FulfillIntent
   createPuppetAccount: IAccountModule__CreatePuppetAccountIntent
   createMasterAccount: IAccountModule__CreateMasterAccountIntent
-  createMaster: IAllocateModule__AllocateIntent
-  operate: ISpokeGate__OperateIntent
-  signTransientRouteBalance: ICoreGate__SignTransientRouteBalanceIntent
-  walletWithdraw: ICoreGate__WithdrawIntent
-  walletWithdrawWnt: ICoreGate__WithdrawIntent
-  bridgeHub: ISpokeGate__BridgeHubIntent
-  bridge: ISpokeGate__BridgeIntent
+  seedMasterAccount: IAllocateModule__AllocateIntent
+  operate: IMasterGate__OperateIntent
+  recognize: IPuppetGate__RecognizeIntent | IMasterGate__RecognizeIntent
+  walletWithdraw: IPuppetGate__WithdrawIntent
+  walletWithdrawWnt: IPuppetGate__WithdrawIntent
+  bridge: IPuppetGate__BridgeIntent | IMasterGate__BridgeIntent
   bridgeToWallet: IHubGate__BridgeToWalletIntent
 }
 

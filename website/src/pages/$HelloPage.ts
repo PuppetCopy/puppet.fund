@@ -1,9 +1,9 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
+import { HUB_CHAIN_ID, TOKEN_ID } from '@puppet/contracts/const'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
-import { EMPTY_NAME, predictPuppetAccount, TOKEN_ID } from '@puppet/sdk/account'
+import { EMPTY_NAME, predictPuppetAccount } from '@puppet/sdk/account'
 import { getTokenDescription } from '@puppet/sdk/gmx'
 import { type ISubaccountState, stubMasterState, stubSubaccountState } from '@puppet/sdk/state'
-import { pixelAvatarName } from '@puppet/sdk/ui-components'
+import { roboAvatarName } from '@puppet/sdk/ui-components'
 import {
   combine,
   constant,
@@ -46,7 +46,7 @@ import { $puppetLogo } from '../common/$icons.js'
 import { $heading1 } from '../common/$text.js'
 import { $card } from '../common/elements/$common.js'
 import { $stubAccountDisplay } from '../components/$AccountProfile.js'
-import { $MasterAccountEditor } from '../components/portfolio/$MasterAccountEditor.js'
+import { $AllocateEditor } from '../components/portfolio/$AllocateEditor.js'
 import { $TokenBalanceEditor } from '../components/portfolio/$TokenBalanceEditor.js'
 import type {
   IAllocateDraft,
@@ -57,12 +57,28 @@ import type {
   ISellDraft,
   IWithdrawDraft
 } from '../components/portfolio/draft.js'
+import { DOCS_URL, OPERATOR_GUIDE_URL } from '../const/links.js'
 import * as context from '../io/context.js'
 import { bindSession, type IConnectedWallet, refreshWallet } from '../wallet/index.js'
-import { $body, $bulletList, $callout, $codeBlock, $linkButton, $stage } from './$onboarding.js'
+import { $body, $bulletList, $callout, $linkButton, $stage, $stageHeader, $terminal } from './$onboarding.js'
 
 type ITrack = 'puppet' | 'master'
 type IMasterMode = 'human' | 'agent'
+type ITemplate = 'base' | 'trend' | 'copy-trader' | 'llm-basic'
+
+const TEMPLATE_LABEL: Record<ITemplate, string> = {
+  base: 'Base',
+  trend: 'Trend',
+  'copy-trader': 'Copy-trader',
+  'llm-basic': 'LLM'
+}
+const TEMPLATE_DESC: Record<ITemplate, string> = {
+  base: 'A connected operator with an empty strategy body to fill in yourself (src/index.ts).',
+  trend: 'Deterministic EMA(12/26) + RSI trend-follower on ETH, one position at a time, with a cooldown.',
+  'copy-trader':
+    'Mirrors a chosen GMX trader’s ETH position, sized to your funds, with risk caps and a liquidation guard (set TRADER_ACCOUNT).',
+  'llm-basic': `LLM's decides long / flat / close via structured tool use; your code enforces the risk caps.`
+}
 
 export interface I$HelloPage {
   walletQuery: IStream<Promise<IConnectedWallet | null>>
@@ -71,6 +87,38 @@ export interface I$HelloPage {
   draftWithdrawList: IStream<IWithdrawDraft[]>
   activeMaster: IStream<Address | null>
 }
+
+const $accountStatusBadge = (predicted: IStream<Address>, accountList: IStream<ISubaccountState[]>): I$Node =>
+  switchLatest(
+    map(
+      created =>
+        created
+          ? $node(
+              style({
+                flexShrink: '0',
+                fontSize: text.xs,
+                color: palette.positive,
+                border: `1px solid ${colorShade(palette.positive, 30)}`,
+                borderRadius: '100px',
+                padding: '4px 10px'
+              })
+            )($text('Created'))
+          : $node(
+              style({
+                flexShrink: '0',
+                fontSize: text.xs,
+                color: palette.foreground,
+                border: `1px solid ${colorShade(palette.foreground, 30)}`,
+                borderRadius: '100px',
+                padding: '4px 10px'
+              })
+            )($text('Not created yet')),
+      op(
+        combine({ addr: predicted, accounts: accountList }),
+        map(q => q.accounts.some(a => isAddressEqual(a.account, q.addr)))
+      )
+    )
+  )
 
 export const $HelloPage = ({
   walletQuery,
@@ -88,7 +136,8 @@ export const $HelloPage = ({
       [selectBaseToken, selectBaseTokenTether]: IBehavior<Hex>,
       [changeName, changeNameTether]: IBehavior<string>,
       [selectTrack, selectTrackTether]: IBehavior<INode, ITrack>,
-      [selectMode, selectModeTether]: IBehavior<IMasterMode>
+      [selectMode, selectModeTether]: IBehavior<IMasterMode>,
+      [selectTemplate, selectTemplateTether]: IBehavior<ITemplate>
     ) => {
       const walletState: IStream<IConnectedWallet | null> = op(walletQuery, switchPromises, state())
       const subaccountListState: IStream<ISubaccountState[]> = op(subaccountList, switchPromises, state())
@@ -104,7 +153,11 @@ export const $HelloPage = ({
           p => {
             if (!p.wallet) return $callout('Connect your wallet to fund your account.')
             const wallet = p.wallet
-            const signer = wallet.session?.signer ?? wallet.address
+            // If the AccountState query already returned accounts for this wallet, reuse their signer so
+            // we target the real account and skip the session prompt; only ask to sign when there are none.
+            const existingSigner = p.accounts.find(a => isAddressEqual(a.user, wallet.address))?.signer
+            const signer = wallet.session?.signer ?? existingSigner ?? wallet.address
+            const needsSession = !wallet.session && !existingSigner
             const homeTokens = p.registry.get(HUB_CHAIN_ID)
             const $tokenSelector = $ButtonToggle({
               value: baseTokenId,
@@ -125,7 +178,7 @@ export const $HelloPage = ({
 
             const $nameField = $FieldLabeled({
               label: null,
-              placeholder: map(pixelAvatarName, predicted),
+              placeholder: map(roboAvatarName, predicted),
               maxLength: 32,
               value: nameInput
             })({
@@ -172,21 +225,28 @@ export const $HelloPage = ({
             )
 
             return $column(spacing.default)(
-              $tokenSelector,
+              $column(spacing.tiny)(
+                $tokenSelector,
+                $node(style({ color: palette.foreground, fontSize: text.xs, lineHeight: '1.5' }))(
+                  $text(
+                    'Base token: the currency your account holds and settles in. Matching and funding only happen within the same base token, so pick the one your traders use.'
+                  )
+                )
+              ),
               $stubAccountDisplay({
                 $title: $nameField,
                 address: predicted,
-                $detail: wallet.session
-                  ? undefined
-                  : $node(style({ fontSize: text.base, color: palette.indeterminate }))(
+                $detail: needsSession
+                  ? $node(style({ fontSize: text.base, color: palette.indeterminate }))(
                       $text('Sign to maintain a session')
-                    ),
-                $action: wallet.session ? undefined : $signSession
+                    )
+                  : undefined,
+                $action: needsSession ? $signSession : $accountStatusBadge(predicted, subaccountListState)
               }),
               $accountSection
             )
           },
-          combine({ wallet: walletState, registry: tokenRegistryValue, baseTokenId })
+          combine({ wallet: walletState, registry: tokenRegistryValue, baseTokenId, accounts: subaccountListState })
         )
       )
 
@@ -195,7 +255,11 @@ export const $HelloPage = ({
           p => {
             if (!p.wallet) return $callout('Connect your wallet to create and fund your trading account.')
             const wallet = p.wallet
-            const signer = wallet.session?.signer ?? wallet.address
+            // If the AccountState query already returned accounts for this wallet, reuse their signer so
+            // we target the real account and skip the session prompt; only ask to sign when there are none.
+            const existingSigner = p.accounts.find(a => isAddressEqual(a.user, wallet.address))?.signer
+            const signer = wallet.session?.signer ?? existingSigner ?? wallet.address
+            const needsSession = !wallet.session && !existingSigner
             const homeTokens = p.registry.get(HUB_CHAIN_ID)
             const $tokenSelector = $ButtonToggle({
               value: baseTokenId,
@@ -224,7 +288,7 @@ export const $HelloPage = ({
 
             const $nameField = $FieldLabeled({
               label: null,
-              placeholder: map(pixelAvatarName, predicted),
+              placeholder: map(roboAvatarName, predicted),
               maxLength: 32,
               value: nameInput
             })({
@@ -250,7 +314,7 @@ export const $HelloPage = ({
                   subaccountListState,
                   map(list => list.find(b => isAddressEqual(b.account, stub.account)) ?? stub)
                 )
-                return $MasterAccountEditor({
+                return $AllocateEditor({
                   account,
                   walletAccount: wallet,
                   tokenRegistry: p.registry,
@@ -264,25 +328,39 @@ export const $HelloPage = ({
             )
 
             return $column(spacing.default)(
-              $tokenSelector,
+              $column(spacing.tiny)(
+                $tokenSelector,
+                $node(style({ color: palette.foreground, fontSize: text.xs, lineHeight: '1.5' }))(
+                  $text(
+                    'Base token: the currency your account holds and settles in. Matching and funding only happen within the same base token, so pick the one your traders use.'
+                  )
+                )
+              ),
               $stubAccountDisplay({
                 $title: $nameField,
                 address: predicted,
-                $detail: wallet.session
-                  ? undefined
-                  : $node(style({ fontSize: text.base, color: palette.indeterminate }))(
+                $detail: needsSession
+                  ? $node(style({ fontSize: text.base, color: palette.indeterminate }))(
                       $text('Sign to maintain a session')
-                    ),
-                $action: wallet.session ? undefined : $signSession
+                    )
+                  : undefined,
+                $action: needsSession ? $signSession : $accountStatusBadge(predicted, subaccountListState)
               }),
               $accountSection
             )
           },
-          combine({ wallet: walletState, registry: tokenRegistryValue, baseTokenId })
+          combine({ wallet: walletState, registry: tokenRegistryValue, baseTokenId, accounts: subaccountListState })
         )
       )
 
-      const $choiceCard = (track: ITrack, $iconNode: I$Node, title: string, desc: string): I$Node =>
+      const $choiceCard = (
+        track: ITrack,
+        $iconNode: I$Node,
+        kicker: string,
+        title: string,
+        desc: string,
+        accent: string
+      ): I$Node =>
         $card(
           spacing.small,
           style({
@@ -290,15 +368,30 @@ export const $HelloPage = ({
             minWidth: '240px',
             cursor: 'pointer',
             border: `1px solid ${colorShade(palette.foreground, 20)}`,
-            transition: 'border-color 120ms ease-out'
+            transition: 'border-color 120ms ease-out, transform 120ms ease-out, box-shadow 120ms ease-out'
           }),
-          stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) }),
-          styleBehavior(map(t => (t === track ? { borderColor: palette.primary } : {}), trackState)),
+          stylePseudo(':hover', {
+            borderColor: colorShade(palette.foreground, 50),
+            transform: 'translateY(-2px)',
+            boxShadow: '0 10px 28px -14px rgba(0, 0, 0, 0.65)'
+          }),
+          styleBehavior(map(t => (t === track ? { borderColor: accent } : {}), trackState)),
           selectTrackTether(nodeEvent('click'), constant(track))
         )(
-          $row(spacing.small, style({ alignItems: 'center' }))(
-            $icon({ $content: $iconNode, width: '38px', fill: palette.foreground, viewBox: '0 0 32 32' }),
-            $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text(title))
+          $row(spacing.default, style({ alignItems: 'center' }))(
+            $icon({ $content: $iconNode, width: '40px', fill: accent, viewBox: '0 0 32 32' }),
+            $column(spacing.tiny, style({ flex: '1', minWidth: '0' }))(
+              $node(
+                style({
+                  fontSize: text.xs,
+                  color: palette.foreground,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em'
+                })
+              )($text(kicker)),
+              $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text(title))
+            ),
+            $node(style({ color: accent, fontSize: text.lg, fontWeight: '600' }))($text('→'))
           ),
           $node(style({ color: palette.foreground, fontSize: text.sm, lineHeight: '1.6' }))($text(desc))
         )
@@ -318,45 +411,82 @@ export const $HelloPage = ({
         )
       })({ select: selectModeTether() })
 
+      // Template picker for the agent path: the four templates are alternatives (you scaffold one), so
+      // pick one and its description + command render in a single terminal below.
+      const templateState: IStream<ITemplate> = state('base', selectTemplate)
+      const $templatePicker: I$Node = $ButtonToggle({
+        value: templateState,
+        optionList: ['base', 'trend', 'copy-trader', 'llm-basic'] satisfies ITemplate[],
+        $$option: map((t: ITemplate) =>
+          $node(style({ fontWeight: '600', color: palette.message, whiteSpace: 'nowrap', padding: '2px 4px' }))(
+            $text(TEMPLATE_LABEL[t])
+          )
+        )
+      })({ select: selectTemplateTether() })
+
       const $chooser: I$Node = $row(spacing.default, style({ flexWrap: 'wrap', alignItems: 'stretch' }))(
         $choiceCard(
           'puppet',
           $puppetLogo,
           'Puppet fund',
-          'Access the world’s top traders and fund the ones you believe in, All of them, under your rules.'
+          'Back a trader',
+          'Puppets (Investors) pick and choose top traders to fund by their rules',
+          palette.primary
         ),
         $choiceCard(
           'master',
           $puppeteer,
-          'Run a Master account',
-          'Create an account and trade seamlessly. Build a track record and earn more doing what you do best.'
+          'Master Wallet',
+          'Become a trader',
+          'Traders seamlessly earn more doing what they do best',
+          palette.positive
         )
+      )
+
+      // Step 1 folds in the chosen path's first concrete action (fund / create account), so picking a
+      // path and getting set up read as one step rather than two. The steps below renumber from 2.
+      const $subhead = (label: string): I$Node =>
+        $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text(label))
+
+      const $firstAction: I$Node = switchLatest(
+        map(track => {
+          if (track === 'puppet') {
+            return $card(spacing.default)($subhead('Fund your account'), $fundStep($fundEditor))
+          }
+          if (track === 'master') {
+            return $card(spacing.default)($subhead('Create your trading account'), $createMasterStep)
+          }
+          return empty
+        }, trackState)
       )
 
       const $flow: I$Node = switchLatest(
         map(track => {
           if (track === 'puppet') {
             return $column(spacing.big)(
-              $stage(2, 'Fund your account', $fundStep($fundEditor)),
-              $stage(3, 'Find a trader', $findStep()),
-              $stage(4, 'Write the rules', $rulesStep()),
-              $stage(5, 'Hold, track, exit', $exitStep()),
-              $stage(6, 'Why it adds up', $puppetNextStep())
+              $stage(2, 'Find a trader', $findStep()),
+              $stage(3, 'Write the rules', $rulesStep()),
+              $stage(4, 'Hold, track, exit', $exitStep()),
+              $stage(5, 'Why it adds up', $puppetNextStep())
             )
           }
           if (track === 'master') {
             return $column(spacing.big)(
-              $stage(2, 'Create your trading account', $createMasterStep),
               $stage(
-                3,
+                2,
                 'Choose how you run it',
                 $column(spacing.default)(
                   $masterModeToggle,
-                  switchLatest(map(mode => (mode === 'agent' ? $spinUpStep() : $tradeStep()), modeState))
+                  switchLatest(
+                    map(
+                      mode => (mode === 'agent' ? $spinUpStep(templateState, $templatePicker) : $tradeStep()),
+                      modeState
+                    )
+                  )
                 )
               ),
               $stage(
-                4,
+                3,
                 'From here',
                 switchLatest(map(mode => (mode === 'agent' ? $agentNextStep() : $humanNextStep()), modeState))
               )
@@ -369,7 +499,7 @@ export const $HelloPage = ({
       return [
         $column(spacing.big, style({ maxWidth: '860px', margin: '0 auto', padding: '32px 24px' }))(
           $hero(),
-          $stage(1, 'Choose your path', $chooser),
+          $column(spacing.default)($stageHeader(1, 'Choose your path'), $chooser, $firstAction),
           $flow
         ),
         {
@@ -386,13 +516,13 @@ export const $HelloPage = ({
 const $hero = (): I$Node =>
   $column(spacing.default, style({ paddingBottom: '12px' }))(
     $heading1($text('Hello.')),
-    $node(style({ fontSize: text.lg, color: palette.foreground, lineHeight: '1.5' }))(
-      $text(
-        'Puppet connects backers and traders under signed rules, with custody held by the protocol and never a counterparty.'
+    $node(style({ fontSize: text.lg, lineHeight: '1.5' }))(
+      $element('span')(style({ color: palette.foreground }))(
+        $text('Puppet connects backers and traders under signed rules. ')
+      ),
+      $element('span')(style({ color: palette.message }))(
+        $text('You hold custody. Your subaccount is a smart wallet controlled by you.')
       )
-    ),
-    $node(style({ fontSize: text.lg, color: palette.foreground, lineHeight: '1.5' }))(
-      $text('Pick how you want to take part. The steps below adapt to your choice.')
     )
   )
 
@@ -444,7 +574,7 @@ const $puppetNextStep = (): I$Node =>
     ),
     $element('div')(style({ display: 'flex', gap: '12px', paddingTop: '8px', flexWrap: 'wrap' }))(
       $linkButton('Browse traders', '/', true),
-      $linkButton('How it works', 'https://docs.puppet.fund', false)
+      $linkButton('How it works', DOCS_URL, false)
     )
   )
 
@@ -456,10 +586,7 @@ const $tradeStep = (): I$Node =>
     $callout(
       'Puppet Wallet never holds your real wallet keys. It can only sign trades within the rules you set, and can only ever send funds back to you, so it can never move your money out.'
     ),
-    $row(
-      spacing.default,
-      style({ paddingTop: '8px' })
-    )($linkButton('Install Puppet Wallet', 'https://docs.puppet.fund', false))
+    $row(spacing.default, style({ paddingTop: '8px' }))($linkButton('Install Puppet Wallet', DOCS_URL, false))
   )
 
 const $humanNextStep = (): I$Node =>
@@ -481,7 +608,7 @@ const $humanNextStep = (): I$Node =>
     ]),
     $row(spacing.default, style({ paddingTop: '8px' }))(
       $linkButton('Leaderboard', '/', true),
-      $linkButton('Protocol docs', 'https://docs.puppet.fund', false)
+      $linkButton('Protocol docs', DOCS_URL, false)
     )
   )
 
@@ -494,18 +621,28 @@ const $step = (n: number, label: string, $extra?: I$Node): I$Node =>
     ...(($extra ? [$extra] : []) as I$Node[])
   )
 
-const $spinUpStep = (): I$Node =>
+const $spinUpStep = (templateState: IStream<ITemplate>, $picker: I$Node): I$Node =>
   $column(spacing.default)(
     $step(
       1,
-      'Start the GMX template on your machine:',
-      $codeBlock(['bunx @puppet.fund/templates my-operator gmx', 'cd my-operator', 'bun install', 'bun run dev'])
+      'Pick a template and scaffold it on your machine:',
+      $column(spacing.default)(
+        $picker,
+        switchLatest(
+          map(
+            (t: ITemplate) => $terminal([`bunx @puppet.fund/templates my-operator gmx ${t}`], TEMPLATE_DESC[t]),
+            templateState
+          )
+        ),
+        $node(style({ color: palette.foreground, fontSize: text.sm, lineHeight: '1.6' }))($text('Then:')),
+        $terminal(['cd my-operator', 'bun install', 'bun run dev'])
+      )
     ),
     $step(2, 'It prints a pair link. Open that link here, on this site.'),
     $step(3, 'Click “Send session to agent” in the banner at the top.'),
     $step(4, 'Done. The agent opens and maintains positions; you fund and redeem here.'),
     $callout(
-      'Shape the strategy in src/venues/gmx.ts. The agent only acts within the rules you signed, and it can never move funds out of your account.'
+      'Shape the strategy in src/index.ts. The agent only acts within the rules you signed, and it can never move funds out of your account.'
     )
   )
 
@@ -530,7 +667,7 @@ const $agentNextStep = (): I$Node =>
     ]),
     $row(spacing.default, style({ paddingTop: '8px' }))(
       $linkButton('Leaderboard', '/', true),
-      $linkButton('Agent guide', 'https://github.com/PuppetCopy/monorepo/blob/main/operator/README.md', false),
-      $linkButton('Protocol docs', 'https://docs.puppet.fund', false)
+      $linkButton('Agent guide', OPERATOR_GUIDE_URL, false),
+      $linkButton('Protocol docs', DOCS_URL, false)
     )
   )

@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "VITE_PWA_DEV=true bun --bun vite",
     "dev:generate-pwa-assets": "bun --bun pwa-assets-generator",
-    "build": "bun --bun vite build",
+    "build": "NODE_ENV=production bun --bun vite build",
     "clean": "bun run clean:rimraf && tsgo -build --clean",
     "clean:rimraf": "rimraf dist && tsgo -build --clean",
     "preview": "bun --bun vite preview",
@@ -19,6 +19,7 @@
     "@puppet/sdk": "workspace:*",
     "@wagmi/connectors": "8.0.15",
     "@wagmi/core": "3.5.0",
+    "@wonderland/interop-cross-chain": "0.13.2",
     "abitype": "catalog:",
     "aelea": "catalog:",
     "color": "5.0.3",

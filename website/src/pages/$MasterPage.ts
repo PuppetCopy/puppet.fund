@@ -11,7 +11,19 @@ import {
 } from '@puppet/sdk/core'
 import { getTokenDescription } from '@puppet/sdk/gmx'
 import { getSubaccountState } from '@puppet/sdk/state'
-import { combine, empty, type IStream, just, map, nowWith, op, start, switchPromises } from 'aelea/stream'
+import {
+  combine,
+  constant,
+  empty,
+  type IStream,
+  just,
+  map,
+  merge,
+  nowWith,
+  op,
+  start,
+  switchPromises
+} from 'aelea/stream'
 import { type IBehavior, multicast, state } from 'aelea/stream-extended'
 import { $element, $node, $text, attr, component, effectProp, type I$Node, style, stylePseudo } from 'aelea/ui'
 
@@ -22,9 +34,11 @@ import type { Address } from 'viem/accounts'
 import {
   $anchor,
   $arrowRight,
+  $ButtonSecondary,
   $external,
   $icon,
   $infoLabel,
+  $infoTooltip,
   $intermediatePromise,
   $spinner,
   $Table,
@@ -32,11 +46,13 @@ import {
   type ISortBy,
   text
 } from '@/ui-components'
+import { $drawdownDisplay, $errorWithRetry } from '../common/$common.js'
+import { $roboAvatar } from '../common/$roboAvatar.js'
 import { $heading3 } from '../common/$text.js'
 import { $card, $responsiveFlex } from '../common/elements/$common.js'
-import { $profileAvatar } from '../components/$AccountProfile.js'
+import { $accountLabel, readableAccountName } from '../components/$AccountProfile.js'
 import { $MasterRouteTimeline } from '../components/participant/$ProfilePeformanceTimeline.js'
-import { $AllocationEditor, $defaultAllocationEditorContainer } from '../components/portfolio/$AllocationEditor.js'
+import { $defaultFundEditorContainer, $FundEditor } from '../components/portfolio/$FundEditor.js'
 import type { ISubscribeRule } from '../components/portfolio/$MatchingRuleEditor.js'
 import { entryColumn, pnlColumn, puppetsColumn, sizeColumn, timeColumn } from '../components/table/$TableColumn.js'
 import * as context from '../io/context.js'
@@ -69,9 +85,14 @@ export const $MasterPage = ({
       [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<any, IntervalTime>,
       [selectCollateralTokenList, selectCollateralTokenListTether]: IBehavior<Address[]>,
       [selectIndexTokenList, selectIndexTokenListTether]: IBehavior<Address[]>,
-      [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>
+      [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>,
+      // Retry control for the position-history fetch. A PointerEvent behavior (so a $Button
+      // `click` output tethers in directly) mapped to the default sortBy and merged into
+      // `sortByChange`, which re-emits through `sortBy` and re-runs the `pageParams` fetch.
+      [retryPositions, retryPositionsTether]: IBehavior<PointerEvent>
     ) => {
-      const sortBy = state({ direction: 'desc', selector: 'openTimestamp' } as const, sortByChange)
+      const defaultSortBy: ISortBy = { direction: 'desc', selector: 'openTimestamp' }
+      const sortBy = state(defaultSortBy, merge(sortByChange, constant(defaultSortBy, retryPositions)))
 
       const urlFragments = document.location.pathname.split('/')
       const account = urlFragments[urlFragments.length - 1].toLowerCase() as Address
@@ -171,12 +192,51 @@ export const $MasterPage = ({
             const roi = aum > 0 ? (realisedUsd / aum) * 100 : 0
             const totalTrades = summary.winCount + summary.lossCount
             const winRate = totalTrades > 0 ? (summary.winCount / totalTrades) * 100 : 0
-            const $value = (label: string, $v: I$Node) => $metric(label, $node(style({ fontWeight: '700' }))($v))
+
+            // Max drawdown: largest peak-to-trough decline of the running cumulative
+            // PnL over the timeframe, expressed in bps (2500 = 25%) relative to AUM.
+            // Worst trade: the single most negative realised PnL in the timeline.
+            let cumulative = 0n
+            let peak = 0n
+            let maxDrawdown = 0n
+            let worstTrade = 0n
+            for (const point of summary.pnlTimeline) {
+              if (point.value < worstTrade) worstTrade = point.value
+              cumulative += point.value
+              if (cumulative > peak) peak = cumulative
+              const decline = peak - cumulative
+              if (decline > maxDrawdown) maxDrawdown = decline
+            }
+            const maxDrawdownUsd = formatFixed(USD_DECIMALS, maxDrawdown)
+            const drawdownBps = aum > 0 ? BigInt(Math.round((maxDrawdownUsd / aum) * 10000)) : 0n
+
+            const $value = (label: string, $v: I$Node, tooltip?: string) =>
+              $column(spacing.tiny)(
+                tooltip
+                  ? $row(spacing.tiny, style({ alignItems: 'center' }))(
+                      $infoLabel($text(label)),
+                      $infoTooltip(tooltip, palette.foreground, '16px')
+                    )
+                  : $infoLabel($text(label)),
+                $node(style({ fontWeight: '700' }))($v)
+              )
             return $row(spacing.big, style({ flexWrap: 'wrap', rowGap: '12px' }))(
               $value('AUM', $node(style({ color: palette.message }))($text(`$${readableUnitAmount(aum)}`))),
               $value(
                 'ROI',
-                $node(style({ color: roi >= 0 ? palette.positive : palette.negative }))($text(`${roi.toFixed(1)}%`))
+                $node(style({ color: roi >= 0 ? palette.positive : palette.negative }))($text(`${roi.toFixed(1)}%`)),
+                'ROI = realised PnL / AUM. Total return over the selected timeframe relative to capital trusted by backers.'
+              ),
+              $value(
+                'Max drawdown',
+                $drawdownDisplay(drawdownBps),
+                'Max drawdown = the largest peak-to-trough decline of cumulative PnL over the timeframe, as a share of AUM. Lower is better.'
+              ),
+              $value(
+                'Worst trade',
+                $node(style({ color: worstTrade < 0n ? palette.negative : palette.message }))(
+                  $text(readableUsd(worstTrade))
+                )
               ),
               $value('Win rate', $node(style({ color: palette.message }))($text(`${winRate.toFixed(0)}%`))),
               $value('Subscribers', $node(style({ color: palette.message }))($text(`${subs.length}`)))
@@ -186,16 +246,32 @@ export const $MasterPage = ({
         )
       })
 
-      const $profileOverview = $column(spacing.default)(
-        $row(spacing.default, style({ alignItems: 'center' }))(
-          $profileAvatar({ address: account, size: 56 }),
-          $column(spacing.tiny)(
-            $heading3($text(readableAddress(account))),
+      const $identityHeader = (accountName?: string) =>
+        $column(spacing.tiny)(
+          $heading3($accountLabel({ address: account, ensName: accountName })),
+          // Show the truncated 0x address as a secondary, verifiable identifier when a name is set,
+          // alongside the 'View on explorer' link.
+          $row(spacing.small, style({ alignItems: 'center' }))(
+            accountName
+              ? $node(style({ color: palette.foreground, fontSize: text.sm }))($text(readableAddress(account)))
+              : empty,
             $anchor(
               attr({ href: getEtherscanMultichainUrl(account), target: '_blank' }),
               style({ color: palette.foreground, fontSize: text.sm })
             )($text('View on explorer'), $icon({ $content: $external, width: '11px' }))
           )
+        )
+
+      const $profileOverview = $column(spacing.default)(
+        $row(spacing.default, style({ alignItems: 'center' }))(
+          $roboAvatar(account, 56),
+          $intermediatePromise({
+            $loader: $identityHeader(),
+            $display: map(
+              async masterStateFuture => $identityHeader(readableAccountName((await masterStateFuture)?.name)),
+              masterStateQuery
+            )
+          })
         ),
         $vitals,
         $sectionLabel('Fund this trader'),
@@ -206,12 +282,13 @@ export const $MasterPage = ({
               if (!masterState) return $infoLabel($text('Master account not found'))
               const info = p.registry.get(HUB_CHAIN_ID)?.get(masterState.baseTokenId)
               if (!info) return $infoLabel($text('Unsupported collateral'))
-              return $AllocationEditor({
+              return $FundEditor({
                 collateralToken: info.token,
                 userMatchingRuleQuery,
                 draftMatchingRuleList,
                 master: account,
-                $container: $defaultAllocationEditorContainer(style({ marginLeft: '-12px' }))
+                prominent: true,
+                $container: $defaultFundEditorContainer(style({ marginLeft: '-12px' }))
               })({
                 changeMatchRuleList: changeMatchRuleListTether()
               })
@@ -239,7 +316,7 @@ export const $MasterPage = ({
                 const share = total > 0n ? Number((s.signedBalance * 10000n) / total) / 100 : 0
                 return $column(spacing.tiny)(
                   $row(spacing.small, style({ alignItems: 'center' }))(
-                    $profileAvatar({ address: s.puppet, size: 26 }),
+                    $roboAvatar(s.puppet, 26),
                     $node(style({ fontSize: text.sm, color: palette.message }))($text(readableAddress(s.puppet))),
                     $node(style({ flex: 1 }))(),
                     $node(style({ fontSize: text.sm, color: palette.foreground }))($text(`${share.toFixed(1)}%`))
@@ -324,6 +401,17 @@ export const $MasterPage = ({
         $sectionLabel('Position History'),
         $intermediatePromise({
           $loader: $spinner,
+          // The outer promise resolves the on-chain position fetch (fetchPositionIncrease/DecreaseList),
+          // so it can network-fail. Render the shared $errorCard with a Retry that re-emits sortBy to
+          // re-run `pageParams` (the inner $Table dataSource is a synchronous slice and cannot
+          // network-fail, so it keeps the default fail handling).
+          $$fail: error =>
+            $errorWithRetry(
+              error,
+              $ButtonSecondary({ $content: $text('Retry') })({
+                click: retryPositionsTether()
+              })
+            ),
           $display: map(async paramsQuery => {
             const params = await paramsQuery
             const paging = start({ offset: 0, pageSize: 20 }, scrollRequest)
@@ -385,7 +473,16 @@ export const $MasterPage = ({
               )
             )($text('Leaderboard')),
             $icon({ $content: $arrowRight, fill: palette.foreground, width: '8px' }),
-            $node(style({ color: palette.message }))($text(readableAddress(account)))
+            $intermediatePromise({
+              $loader: $node(style({ color: palette.message }))($text(readableAddress(account))),
+              $display: map(
+                async masterStateFuture =>
+                  $node(style({ color: palette.message }))(
+                    $text(readableAccountName((await masterStateFuture)?.name) ?? readableAddress(account))
+                  ),
+                masterStateQuery
+              )
+            })
           ),
 
           $hero,

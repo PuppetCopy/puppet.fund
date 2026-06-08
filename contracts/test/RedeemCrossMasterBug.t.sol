@@ -17,7 +17,6 @@ import {AllocateStore} from "src/hub/AllocateStore.sol";
 import {RuleLib} from "src/hub/RuleLib.sol";
 import {IAccount} from "src/core/interface/IAccount.sol";
 import {Attest} from "src/core/Attest.sol";
-import {Bridge} from "src/utils/Bridge.sol";
 import {
     RedeemModule,
     SELL_INTENT_TYPEHASH,
@@ -27,7 +26,8 @@ import {
 import {RedeemStore} from "src/hub/RedeemStore.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
 import {SubscribeModule, SUBSCRIBE_INTENT_TYPEHASH} from "src/hub/module/SubscribeModule.sol";
-import {HubGate} from "src/hub/HubGate.sol";
+import {BaseGate} from "src/utils/BaseGate.sol";
+import {HubGate} from "src/HubGate.sol";
 import {AccountLib, ACCOUNT_TYPEHASH} from "src/core/AccountLib.sol";
 import {Error} from "src/utils/Error.sol";
 
@@ -111,8 +111,6 @@ contract RedeemModuleCrossMasterBugTest is Test {
         redeemStore = new RedeemStore(dictate);
         allocateStore = new AllocateStore(dictate);
 
-        Bridge bridge = new Bridge(address(0), bytes32(0));
-
         router = new HubGate(
             dictate,
             accountGate,
@@ -123,8 +121,7 @@ contract RedeemModuleCrossMasterBugTest is Test {
             redeem,
             redeemStore,
             register,
-            bridge,
-            HubGate.Config({
+            BaseGate.Config({
                 attestor: attestor,
                 feeReceiver: feeReceiver,
                 transferGasLimit: TRANSFER_GAS_LIMIT,

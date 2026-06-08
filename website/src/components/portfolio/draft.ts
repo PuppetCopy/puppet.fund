@@ -1,40 +1,30 @@
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import type {
   IAllocateInput,
-  IBridgeHubInput,
   IBridgeInput,
   IBridgeToWalletInput,
   IClaimInput,
   ICreateMasterAccountInput,
   ICreateMasterInput,
   ICreatePuppetAccountInput,
+  IDepositRoute,
   IFulfillInput,
+  IRecognizeBalanceInput,
   ISellInput,
-  ISignTransientRouteBalanceInput,
   ISubscribeInput,
-  IWalletDepositRoute,
-  IWalletDepositWntRoute,
   IWithdrawInput
 } from '@puppet/sdk/attestation'
 import type { Address, Hex } from 'viem'
 import type { ISubscribeRule } from './$MatchingRuleEditor.js'
 
-export interface ITransferToMasterRoute {
-  chainId: number
-  master: Address
-  baseTokenId: Hex
-  amount: bigint
-  walletBalance: bigint
-}
-
 export type StepInput =
-  | { kind: 'walletDeposit'; input: IWalletDepositRoute }
-  | { kind: 'walletDepositWnt'; input: IWalletDepositWntRoute }
-  | { kind: 'transferToMaster'; input: ITransferToMasterRoute }
-  | { kind: 'bridgeHub'; input: IBridgeHubInput }
+  | { kind: 'walletDeposit'; input: IDepositRoute }
+  | { kind: 'walletDepositWnt'; input: IDepositRoute }
+  | { kind: 'transferToMaster'; input: IDepositRoute }
+  | { kind: 'transferToMasterWnt'; input: IDepositRoute }
   | { kind: 'bridge'; input: IBridgeInput }
   | { kind: 'bridgeToWallet'; input: IBridgeToWalletInput }
-  | { kind: 'signTransientRouteBalance'; input: ISignTransientRouteBalanceInput }
+  | { kind: 'recognize'; input: IRecognizeBalanceInput }
   | { kind: 'walletWithdraw'; input: IWithdrawInput }
   | { kind: 'subscribe'; input: ISubscribeInput }
   | { kind: 'createPuppetAccount'; input: ICreatePuppetAccountInput }
@@ -51,10 +41,10 @@ export const STEP_LABEL: Record<StepKind, string> = {
   walletDeposit: 'Fund',
   walletDepositWnt: 'Fund',
   transferToMaster: 'Fund',
-  bridgeHub: 'Bridge',
+  transferToMasterWnt: 'Fund',
   bridge: 'Bridge',
   bridgeToWallet: 'Bridge',
-  signTransientRouteBalance: 'Credit',
+  recognize: 'Credit',
   walletWithdraw: 'Withdraw',
   subscribe: 'Subscribe',
   createPuppetAccount: 'Create Puppet Account',
@@ -71,10 +61,12 @@ export const STEP_DESCRIPTION: Record<StepKind, string> = {
     'Sends tokens from your wallet to your deposit address. The next step confirms them into your balance.',
   walletDepositWnt: 'Sends native ETH from your wallet to your account. The next step confirms it into your balance.',
   transferToMaster: 'Sends tokens from your wallet to seed your master account.',
-  bridgeHub: 'Moves funds from this chain to your account on Arbitrum.',
-  bridge: 'Moves the seed to your master account on Arbitrum.',
-  bridgeToWallet: 'Moves funds from your account to your wallet on another chain.',
-  signTransientRouteBalance: 'Confirms the tokens you just sent so they show up in your balance.',
+  transferToMasterWnt: 'Sends native ETH from your wallet to seed your master account.',
+  bridge:
+    'Moves funds to your account on Arbitrum, usually within seconds. Your funds stay in transit and settle on-chain even if you wait. If it fails, they reappear in the deposit editor to recover.',
+  bridgeToWallet:
+    'Moves funds from your account to your wallet on another chain, usually within seconds. Your funds stay in transit and settle on-chain even if you wait.',
+  recognize: 'Confirms the tokens you just sent so they show up in your balance.',
   walletWithdraw: 'Moves funds from your account to your wallet.',
   subscribe: 'Lets a trader pull funds from your account under the rules you set.',
   createPuppetAccount: 'Creates your account on-chain.',
@@ -114,14 +106,12 @@ interface IAmountDraftBase extends IDraftBase {
   inputSteps: StepInput[]
 }
 
-type IWalletStep =
-  | { kind: 'walletDeposit'; input: IWalletDepositRoute }
-  | { kind: 'walletDepositWnt'; input: IWalletDepositWntRoute }
-type ISignTransientRouteBalanceStep = { kind: 'signTransientRouteBalance'; input: ISignTransientRouteBalanceInput }
-type IBridgeHubStep = { kind: 'bridgeHub'; input: IBridgeHubInput }
+type IWalletStep = { kind: 'walletDeposit'; input: IDepositRoute } | { kind: 'walletDepositWnt'; input: IDepositRoute }
+type IRecognizeStep = { kind: 'recognize'; input: IRecognizeBalanceInput }
+type IBridgeStep = { kind: 'bridge'; input: IBridgeInput }
 type ICreatePuppetStep = { kind: 'createPuppetAccount'; input: ICreatePuppetAccountInput }
 
-export type IDepositStep = ICreatePuppetStep | IWalletStep | ISignTransientRouteBalanceStep | IBridgeHubStep
+export type IDepositStep = ICreatePuppetStep | IWalletStep | IRecognizeStep | IBridgeStep
 
 export interface IDepositDraft extends IAmountDraftBase {
   kind: 'deposit'
@@ -147,7 +137,8 @@ export interface ISubscribeDraft extends IDraftBase, ISubscribeRule {
 }
 
 export type IMasterFundStep =
-  | { kind: 'transferToMaster'; input: ITransferToMasterRoute }
+  | { kind: 'transferToMaster'; input: IDepositRoute }
+  | { kind: 'transferToMasterWnt'; input: IDepositRoute }
   | { kind: 'createMasterAccount'; input: ICreateMasterAccountInput }
   | { kind: 'bridge'; input: IBridgeInput }
 

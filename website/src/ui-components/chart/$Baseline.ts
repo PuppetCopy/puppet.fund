@@ -80,7 +80,7 @@ export const $Baseline = ({ data, baselineOptions, chartConfig, markers }: I$Bas
     },
     baseLineStyle: LineStyle.Dashed,
     lineStyle: LineStyle.Solid,
-    lineType: LineType.Curved,
+    lineType: LineType.Simple,
     lineWidth: 2,
     topLineColor: positive,
     bottomLineColor: negative,

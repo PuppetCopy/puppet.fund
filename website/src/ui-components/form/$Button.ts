@@ -1,5 +1,6 @@
 import { empty } from 'aelea/stream'
-import { type I$Node, type INodeCompose, style, stylePseudo } from 'aelea/ui'
+import type { IBehavior } from 'aelea/stream-extended'
+import { component, type I$Node, type INode, type INodeCompose, nodeEvent, style, stylePseudo } from 'aelea/ui'
 import {
   $ButtonToggle as $aeleaButtonToggle,
   $Button,
@@ -67,19 +68,9 @@ export const $defaultMiniButtonSecondary = $defaultButtonSecondary(
   })
 )
 
-export const $ButtonPrimary = (config: I$Button) => {
-  return $Button({
-    $container: $defaultButtonPrimary,
-    ...config
-  })
-}
+export const $ButtonPrimary = (config: I$Button) => $keyboardOperableButton($Button, $defaultButtonPrimary, config)
 
-export const $ButtonSecondary = (config: I$Button) => {
-  return $Button({
-    $container: $defaultButtonSecondary,
-    ...config
-  })
-}
+export const $ButtonSecondary = (config: I$Button) => $keyboardOperableButton($Button, $defaultButtonSecondary, config)
 
 interface I$ButtonCircular extends Control {
   $iconPath: I$Node<SVGPathElement>
@@ -110,8 +101,31 @@ export const $ButtonCircular = ({
   disabled = empty,
   $container = $defaultButtonCircularContainer
 }: I$ButtonCircular) =>
-  $ButtonIcon({
-    $container,
-    disabled,
-    $content: $icon({ $content: $iconPath, viewBox: '0 0 32 32' })
-  })
+  // aelea's $ButtonIcon binds activation to `pointerup`, which never fires on Enter/Space.
+  // Wrap it so the exposed `click` output is driven by the native DOM `click` event instead,
+  // which fires exactly once per pointer tap AND once per Enter/Space on a native <button>.
+  component(([click, clickTether]: IBehavior<INode<HTMLButtonElement>, PointerEvent>) => [
+    $ButtonIcon({
+      $container: $container(clickTether(nodeEvent('click'))),
+      disabled,
+      $content: $icon({ $content: $iconPath, viewBox: '0 0 32 32' })
+    })({}),
+    { click }
+  ])
+
+// Shared wrapper that restores keyboard operability for aelea's text buttons.
+// The upstream $Button binds activation to `pointerup` (never fires on Enter/Space), so we
+// discard its output and instead surface the native DOM `click` event — which a native <button>
+// emits exactly once for a pointer tap and once for keyboard Enter/Space, with no double-firing.
+const $keyboardOperableButton = (
+  $base: typeof $Button,
+  $defaultContainer: INodeCompose<HTMLButtonElement>,
+  { $container = $defaultContainer, ...config }: I$Button
+) =>
+  component(([click, clickTether]: IBehavior<INode<HTMLButtonElement>, PointerEvent>) => [
+    $base({
+      $container: $container(clickTether(nodeEvent('click'))),
+      ...config
+    })({}),
+    { click }
+  ])

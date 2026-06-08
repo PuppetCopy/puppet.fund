@@ -56,8 +56,15 @@ export interface ISubscribeAttestContext extends IDraftContext {
 }
 
 export function attestSubscribeIntent(ctx: ISubscribeAttestContext, input: ISubscribeInput) {
-  IntentLib.verifyTimeBounds(input.blockNumber, input.deadline, ctx.currentBlock)
-  const baseToken = IntentLib.verifyTokenAndCap(ctx.tokenRegistry, HUB_CHAIN_ID, input.params.baseTokenId, 0n)
+  const baseToken = IntentLib.verifyCommonIntent(ctx, {
+    blockNumber: input.blockNumber,
+    deadline: input.deadline,
+    baseTokenId: input.params.baseTokenId,
+    lookupChain: HUB_CHAIN_ID,
+    capAmount: 0n,
+    acceptableRelayFee: input.acceptableRelayFee,
+    relayFeeDenominator: ctx.signedBalance
+  })
 
   const n = input.rules.length
   if (n === 0) throw new CompactContractError('Subscribe__EmptyRules', [])
@@ -80,8 +87,6 @@ export function attestSubscribeIntent(ctx: ISubscribeAttestContext, input: ISubs
     }
     prev = master
   }
-
-  IntentLib.verifyRelayFee(input.acceptableRelayFee, ctx.signedBalance)
 
   // SDK-only preflight: subscribe deducts the relay fee from signedBalance at runtime (Account__OutflowExceedsSigned);
   // no contract revert covers an under-funded fee balance, so surface it off-chain before signing.

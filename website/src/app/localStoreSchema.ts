@@ -16,14 +16,15 @@ export const localStoreSchema = uiStorage.createStoreDefinition(DB_NAME, 1, {
     activityTimeframe: IntervalTime.WEEK,
     collateralTokenList: [] as string[],
     indexTokenList: [] as string[],
-    activeMasterByWallet: {} as Record<string, Address | null>
+    activeMasterByWallet: {} as Record<string, Address | null>,
+    firstVisitSeen: false
   },
   ruleEditor: {
     advancedRouteEditorEnabled: false
   },
   leaderboard: {
     view: 'masters' as ILeaderboardView,
-    performanceMetric: 'navPerShare' as IPerformanceMetric,
+    performanceMetric: 'realisedPnl' as IPerformanceMetric,
     account: undefined as string | undefined,
     shadowSort: { direction: 'desc', selector: 'size' } as { direction: 'asc' | 'desc'; selector: 'size' | 'pnlroi' }
   },

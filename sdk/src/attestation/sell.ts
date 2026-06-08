@@ -25,8 +25,15 @@ export interface ISellAttestContext extends IDraftContext {
 }
 
 export function attestSellIntent(ctx: ISellAttestContext, input: ISellInput) {
-  IntentLib.verifyTimeBounds(input.blockNumber, input.deadline, ctx.currentBlock)
-  IntentLib.verifyTokenAndCap(ctx.tokenRegistry, HUB_CHAIN_ID, input.masterParams.baseTokenId, 0n)
+  IntentLib.verifyCommonIntent(ctx, {
+    blockNumber: input.blockNumber,
+    deadline: input.deadline,
+    baseTokenId: input.masterParams.baseTokenId,
+    lookupChain: HUB_CHAIN_ID,
+    capAmount: 0n,
+    acceptableRelayFee: input.acceptableRelayFee,
+    relayFeeDenominator: ctx.signedBalance
+  })
   if (input.sharesOut === 0n) throw new CompactContractError('Share__ZeroShares', [])
   const stakeAdded =
     ctx.poolTotalStake === 0n ? input.sharesOut : (input.sharesOut * ctx.poolTotalStake) / ctx.queuedShares
@@ -37,7 +44,6 @@ export function attestSellIntent(ctx: ISellAttestContext, input: ISellInput) {
       `puppet base balance ${ctx.signedBalance} below sell relay fee ${input.acceptableRelayFee}; deposit a small amount first`
     )
   }
-  IntentLib.verifyRelayFee(input.acceptableRelayFee, ctx.signedBalance)
 
   const intent: IRedeemModule__SellIntent = {
     params: input.params,

@@ -1,7 +1,26 @@
-import { empty, type IStream, map } from 'aelea/stream'
-import { type I$Slottable, type IStyleCSS, style, styleBehavior, stylePseudo } from 'aelea/ui'
+import { empty, type IStream, map, nowWith } from 'aelea/stream'
+import {
+  $element,
+  attr,
+  effectProp,
+  type I$Slottable,
+  type INodeCompose,
+  type IStyleCSS,
+  style,
+  styleBehavior,
+  stylePseudo
+} from 'aelea/ui'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $Link as $aeleaLink, $defaultAnchor, type I$Link as I$AeleaLink } from 'aelea/ui-router'
+import {
+  $Link as $aeleaLink,
+  $defaultAnchor,
+  href,
+  type I$Link as I$AeleaLink,
+  type ParamsOf,
+  pushUrl,
+  type RouteNode,
+  type RouteSpec
+} from 'aelea/ui-router'
 
 export interface I$Link extends Omit<I$AeleaLink, '$anchor' | '$content'> {
   $content: I$Slottable
@@ -25,3 +44,32 @@ const $underlineAnchor = $defaultLinkAnchor(
 
 export const $anchorLink = ({ disabled = empty, $content, ...rest }: I$Link) =>
   $aeleaLink({ ...rest, $content, $anchor: $underlineAnchor(disabledStyle(disabled)) })({})
+
+export interface I$NavLink<T extends RouteSpec> {
+  route: RouteNode<T>
+  params?: ParamsOf<T>
+  $content: I$Slottable
+  $anchor?: INodeCompose<HTMLAnchorElement>
+}
+
+const $plainAnchor = $element('a')(style({ color: 'inherit', textDecoration: 'none', cursor: 'pointer', minWidth: 0 }))
+
+export const $navLink = <T extends RouteSpec>({
+  route,
+  params,
+  $content,
+  $anchor = $plainAnchor
+}: I$NavLink<T>): I$Slottable => {
+  const url = href(route, params)
+  return $anchor(
+    attr({ href: url }),
+    effectProp(
+      'onclick',
+      nowWith(() => (ev: MouseEvent) => {
+        if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return
+        ev.preventDefault()
+        pushUrl(url)
+      })
+    )
+  )($content)
+}

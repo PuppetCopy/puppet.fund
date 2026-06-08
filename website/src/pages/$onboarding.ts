@@ -1,32 +1,32 @@
-import { $element, $node, $text, attr, type I$Node, style } from 'aelea/ui'
+import { nowWith } from 'aelea/stream'
+import { $element, $node, $text, attr, effectProp, type I$Node, style, stylePseudo } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { text } from '@/ui-components'
+import { $copy, $icon, text } from '@/ui-components'
 import { $card } from '../common/elements/$common.js'
 
-export const $stage = (n: number, title: string, $content: I$Node): I$Node =>
-  $card(spacing.default)(
-    $row(spacing.default, style({ alignItems: 'center' }))(
-      $node(
-        style({
-          width: '32px',
-          height: '32px',
-          borderRadius: '50%',
-          background: colorShade(palette.foreground, 18),
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontSize: text.sm,
-          fontWeight: '600',
-          color: palette.message,
-          flexShrink: '0'
-        })
-      )($text(String(n))),
-      $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text(title))
-    ),
-    $node(style({ height: '8px' }))(),
-    $content
+export const $stageHeader = (n: number, title: string): I$Node =>
+  $row(spacing.default, style({ alignItems: 'center' }))(
+    $node(
+      style({
+        width: '32px',
+        height: '32px',
+        borderRadius: '50%',
+        background: colorShade(palette.foreground, 18),
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontSize: text.sm,
+        fontWeight: '600',
+        color: palette.message,
+        flexShrink: '0'
+      })
+    )($text(String(n))),
+    $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text(title))
   )
+
+export const $stage = (n: number, title: string, $content: I$Node): I$Node =>
+  $card(spacing.default)($stageHeader(n, title), $content)
 
 export const $body = (s: string): I$Node =>
   $node(style({ color: palette.message, fontSize: text.sm, lineHeight: '1.6' }))($text(s))
@@ -62,6 +62,73 @@ export const $codeBlock = (lines: string[]): I$Node =>
       margin: '0'
     })
   )($text(lines.join('\n')))
+
+// A terminal-style command card: a header (>_ label + copy button) over a dark body where each line
+// renders as a `$ ` prompt + the command (leading binary tinted). The copy button writes all lines to
+// the clipboard. Used for scaffold / setup commands in the onboarding guide.
+export const $terminal = (lines: string[], label = 'terminal'): I$Node =>
+  $column(
+    style({
+      border: `1px solid ${colorShade(palette.foreground, 30)}`,
+      borderRadius: '10px',
+      overflow: 'hidden'
+    })
+  )(
+    $row(
+      style({
+        alignItems: 'baseline',
+        gap: '8px',
+        padding: '8px 14px',
+        color: palette.foreground,
+        fontSize: text.sm,
+        lineHeight: '1.5',
+        borderBottom: `1px solid ${colorShade(palette.foreground, 18)}`
+      })
+    )(
+      $node(style({ fontFamily: 'monospace', fontWeight: '700', flexShrink: '0' }))($text('>_')),
+      $node(style({ minWidth: '0', fontSize: text.xs }))($text(label))
+    ),
+    $node(
+      style({
+        position: 'relative',
+        padding: '12px 16px',
+        background: palette.background,
+        fontFamily: 'monospace',
+        fontSize: text.sm,
+        lineHeight: '1.7'
+      })
+    )(
+      $column(style({ paddingRight: '24px' }))(
+        ...lines.map(line => {
+          const [bin, ...rest] = line.split(' ')
+          return $row(style({ whiteSpace: 'pre-wrap', flexWrap: 'wrap' }))(
+            $node(style({ color: palette.foreground }))($text('$ ')),
+            $node(style({ color: palette.positive }))($text(bin)),
+            $node(style({ color: palette.message }))($text(rest.length ? ` ${rest.join(' ')}` : ''))
+          )
+        })
+      ),
+      // Copy button lives inside the command box, pinned to its top-right corner.
+      $node(
+        attr({ role: 'button', 'aria-label': 'Copy command' }),
+        style({
+          position: 'absolute',
+          top: '8px',
+          right: '10px',
+          display: 'flex',
+          cursor: 'pointer',
+          opacity: '0.6'
+        }),
+        stylePseudo(':hover', { opacity: '1' }),
+        effectProp(
+          'onclick',
+          nowWith(() => () => {
+            navigator.clipboard?.writeText(lines.join('\n'))
+          })
+        )
+      )($icon({ $content: $copy, width: '15px', viewBox: '0 0 24 24', fill: palette.foreground }))
+    )
+  )
 
 export const $envBlock = (rows: [string, string][]): I$Node =>
   $element('pre')(

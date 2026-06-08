@@ -76,6 +76,8 @@ const isIndexerHealthy = (health: IndexerHealth | null): boolean => {
 
 const $matchmakerServiceLine = (status: IMatchmakerStatus) => {
   if (status === 'open') return $serviceLine('Matchmaker', $text('Connected · ready to relay'), 'ok')
+  if (status === 'connecting')
+    return $serviceLine('Matchmaker', $text('Reconnecting… · submissions paused'), 'degraded')
   return $serviceLine('Matchmaker', $text('Disconnected · submissions paused'), 'down')
 }
 
@@ -116,10 +118,13 @@ export const $ServicesConnectivity = ({ matchmaker }: I$ServicesConnectivity) =>
 
     const color: IStream<string> = start(
       palette.foreground,
-      map(
-        p => (isIndexerHealthy(p.indexer) && p.matchmaker === 'open' ? palette.positive : palette.negative),
-        combine({ indexer, matchmaker })
-      )
+      map(p => {
+        if (isIndexerHealthy(p.indexer) && p.matchmaker === 'open') return palette.positive
+        // A transient matchmaker reconnect (with the indexer still healthy) is degraded,
+        // not down — show amber instead of red so it doesn't read as a permanent outage.
+        if (isIndexerHealthy(p.indexer) && p.matchmaker === 'connecting') return palette.indeterminate
+        return palette.negative
+      }, combine({ indexer, matchmaker }))
     )
     const pulsing: IStream<boolean> = start(
       true,

@@ -1,10 +1,13 @@
-import { HUB_CHAIN_ID, MAX_QUOTE_AGE_SEC } from '@puppet/contracts/const'
+import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type { IAccountLib__AccountInitParams, IHubGate__BridgeToWalletIntent } from '@puppet/contracts/types'
 import type { Address, TypedDataDefinition } from 'viem'
+import { predictPuppetAccount } from '../account/index.js'
 import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
 import type { ChainId } from '../const/index.js'
+import { acrossSpokePool, buildAcrossDeposit } from './acrossDeposit.js'
+import { verifyBridgeQuoteRatio } from './bridgeGuard.js'
 import * as IntentLib from './intentLib.js'
 import { HUB_DOMAIN, type IDraftContext } from './shared.js'
 
@@ -18,14 +21,16 @@ export interface IBridgeToWalletInput {
   destinationChainId: bigint
   exclusiveRelayer: Address
   quoteTimestamp: number
-  fillDeadline: number
-  exclusivityDeadline: number
+  exclusivityParameter: number
   outputAmount: bigint
+  expires: number
+  fillDeadline: number
 }
 
 export interface IBridgeToWalletAttestContext extends IDraftContext {
   currentBlock: bigint
   signedBalance: bigint
+  expectedOutputAmount: bigint | null
 }
 
 export function attestBridgeToWalletIntent(ctx: IBridgeToWalletAttestContext, input: IBridgeToWalletInput) {
@@ -37,24 +42,28 @@ export function attestBridgeToWalletIntent(ctx: IBridgeToWalletAttestContext, in
   if (input.destinationChainId === BigInt(ctx.chainId)) {
     throw new CompactContractError('Deposit__SameChainBridge', [input.destinationChainId])
   }
-  IntentLib.verifyTimeBounds(input.blockNumber, input.deadline, ctx.currentBlock)
-  const inputToken = IntentLib.verifyTokenAndCap(
-    ctx.tokenRegistry,
-    ctx.chainId,
-    input.params.baseTokenId,
-    input.inputAmount
-  )
+  const inputToken = IntentLib.verifyCommonIntent(ctx, {
+    blockNumber: input.blockNumber,
+    deadline: input.deadline,
+    baseTokenId: input.params.baseTokenId,
+    lookupChain: ctx.chainId,
+    capAmount: input.inputAmount,
+    acceptableRelayFee: input.acceptableRelayFee,
+    relayFeeDenominator: input.inputAmount
+  })
   const outputToken = IntentLib.verifyTokenAndCap(
     ctx.tokenRegistry,
     Number(input.destinationChainId) as ChainId,
     input.params.baseTokenId,
     0n
   )
-  IntentLib.verifyRelayFee(input.acceptableRelayFee, input.inputAmount)
 
-  const quoteAge = BigInt(Math.floor(Date.now() / 1000)) - BigInt(input.quoteTimestamp)
-  if (quoteAge > MAX_QUOTE_AGE_SEC) {
-    throw new CompactError('STALE_QUOTE', `Across quote age ${quoteAge}s > max ${MAX_QUOTE_AGE_SEC}s`)
+  const nowSec = Math.floor(Date.now() / 1000)
+  if (input.expires <= nowSec) {
+    throw new CompactError('STALE_QUOTE', `OIF order expires ${input.expires} is in the past`)
+  }
+  if (input.fillDeadline > input.expires) {
+    throw new CompactError('BAD_REQUEST', `fillDeadline ${input.fillDeadline} exceeds expires ${input.expires}`)
   }
 
   if (ctx.signedBalance < input.inputAmount) {
@@ -64,17 +73,26 @@ export function attestBridgeToWalletIntent(ctx: IBridgeToWalletAttestContext, in
     throw new CompactContractError('Deposit__InsufficientBalance', [input.inputAmount, input.acceptableRelayFee])
   }
 
-  const acrossInputAmount = input.inputAmount - input.acceptableRelayFee
-  if (input.outputAmount > acrossInputAmount) {
-    throw new CompactError(
-      'STALE_QUOTE',
-      `Across outputAmount ${input.outputAmount} exceeds bridged input ${acrossInputAmount}; refetch quote`
-    )
+  if (input.outputAmount === 0n) {
+    throw new CompactContractError('Deposit__ZeroBridgeOutput', [])
   }
-  const bridgeFee = acrossInputAmount - input.outputAmount
-  if (bridgeFee >= acrossInputAmount) {
-    throw new CompactContractError('Deposit__BridgeFeeExceedsInput', [bridgeFee, acrossInputAmount])
-  }
+  verifyBridgeQuoteRatio(input.outputAmount, ctx.expectedOutputAmount)
+
+  const account = predictPuppetAccount(input.params)
+  const provider = acrossSpokePool(ctx.chainId)
+  const providerCallData = buildAcrossDeposit({
+    depositor: account,
+    recipient: input.params.user,
+    inputToken,
+    outputToken,
+    inputAmount: input.inputAmount - input.acceptableRelayFee,
+    outputAmount: input.outputAmount,
+    destinationChainId: input.destinationChainId,
+    exclusiveRelayer: input.exclusiveRelayer,
+    quoteTimestamp: input.quoteTimestamp,
+    fillDeadline: input.fillDeadline,
+    exclusivityParameter: input.exclusivityParameter
+  })
 
   const intent: IHubGate__BridgeToWalletIntent = {
     params: input.params,
@@ -86,12 +104,12 @@ export function attestBridgeToWalletIntent(ctx: IBridgeToWalletAttestContext, in
     inputToken,
     outputToken,
     inputAmount: input.inputAmount,
-    bridgeFee,
+    outputAmount: input.outputAmount,
     destinationChainId: input.destinationChainId,
-    exclusiveRelayer: input.exclusiveRelayer,
-    quoteTimestamp: input.quoteTimestamp,
-    fillDeadline: input.fillDeadline,
-    exclusivityDeadline: input.exclusivityDeadline
+    provider,
+    providerCallData,
+    expires: input.expires,
+    fillDeadline: input.fillDeadline
   }
 
   const typedData: TypedDataDefinition = {

@@ -91,18 +91,31 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
 
       const isSubscribed = !!model && model.allocationRate > 0n
 
+      // Allocate % bounds: bps with 4 decimals where parseBps(1) === 100%
+      const maxAllocationRate = parseBps(1)
+      const allocationValidation = map(
+        rate => (rate <= 0n || rate > maxAllocationRate ? 'Enter a value between 1% and 100%' : null),
+        allocationRate
+      )
+
       return [
         $column(spacing.default, style({ maxWidth: '350px' }))(
           $text('These rules apply whenever this master opens and maintains a position'),
 
           $FieldLabeled({
             label: 'Allocate %',
-            value: map(x => (x ? `${formatFixed(4, x) * 100}` : ''), allocationRate),
+            value: map(x => (x ? `${Math.round(formatFixed(4, x) * 100 * 100) / 100}` : ''), allocationRate),
             placeholder: `${formatFixed(4, defaultDraft.allocationRate) * 100}`,
             labelWidth: 150,
+            validation: allocationValidation,
             hint: '% of your deposited balance committed each match. Lower values reduce risk and allow greater monitoring'
           })({
-            change: inputAllocationRateTether(map(x => parseBps(Number(x) / 100)))
+            change: inputAllocationRateTether(
+              map(x => {
+                const rate = parseBps(Number(x) / 100)
+                return rate > maxAllocationRate ? maxAllocationRate : rate
+              })
+            )
           }),
 
           style({ margin: '10px 0' })(
@@ -172,7 +185,10 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
             }),
             $ButtonSecondary({
               $content: $text('Save'),
-              disabled: map(params => !params.allocationRate, draft)
+              disabled: map(
+                ({ draft, validationMessage }) => !draft.allocationRate || validationMessage !== null,
+                combine({ draft, validationMessage: allocationValidation })
+              )
             })({ click: saveTether() })
           )
         ),

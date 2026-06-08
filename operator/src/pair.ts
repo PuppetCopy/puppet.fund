@@ -1,4 +1,4 @@
-import { deriveSessionKey, generatePairingKeypair, type ISealedPayload, openPairingPayload } from '@puppet/sdk/account'
+import { generatePairingKeypair, type ISealedPayload, openPairingPayload } from '@puppet/sdk/account'
 import type { Address, Hex } from 'viem'
 
 // Connection endpoints the site shares over the tunnel so a paired operator needs
@@ -16,9 +16,11 @@ export interface IPairedSession {
 }
 
 // One-time loopback pairing: the operator opens a 127.0.0.1 listener, prints a URL
-// you open on the site, and the browser posts back the bindSig sealed to the
-// operator's ephemeral public key (carried in the printed link). The session key is
-// derived from bindSig in memory only — nothing is written or logged.
+// you open on the site, and the browser posts back the session signer key sealed to
+// the operator's ephemeral public key (carried in the printed link). The key lives
+// in memory only — nothing is written or logged. The browser seals the *derived*
+// session key, never the wallet's bind signature, so a paired operator can sign
+// operate intents (its delegated authority) but cannot deploy accounts under the user.
 //
 // Three gates, all required: origin check authenticates browser senders to the
 // configured site (the Origin header is browser-enforced, not script-spoofable);
@@ -50,12 +52,12 @@ export async function pairOverBrowser(
           return new Response('forbidden', { status: 403, headers: cors })
         }
         const sealed = (await req.json()) as ISealedPayload
-        const { user, bindSig, endpoints } = await openPairingPayload<{
+        const { user, signerKey, endpoints } = await openPairingPayload<{
           user: Address
-          bindSig: Hex
+          signerKey: Hex
           endpoints?: IPairedEndpoints
         }>(privateKey, sealed)
-        const result: IPairedSession = { signerKey: deriveSessionKey(bindSig), user, endpoints: endpoints ?? {} }
+        const result: IPairedSession = { signerKey, user, endpoints: endpoints ?? {} }
         queueMicrotask(() => {
           server.stop(true)
           resolve(result)

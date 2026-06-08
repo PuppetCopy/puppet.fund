@@ -9,7 +9,6 @@ import masteraccountAbi from '../abi/puppetMasterAccount.js'
 import attestAbi from '../abi/puppetAttest.js'
 import accountmoduleAbi from '../abi/puppetAccountModule.js'
 import walletdepositmoduleAbi from '../abi/puppetWalletDepositModule.js'
-import bridgeAbi from '../abi/puppetBridge.js'
 import coregateAbi from '../abi/puppetCoreGate.js'
 import sharetokenAbi from '../abi/puppetShareToken.js'
 import sharemoduleAbi from '../abi/puppetShareModule.js'
@@ -19,6 +18,8 @@ import allocatestoreAbi from '../abi/puppetAllocateStore.js'
 import subscribemoduleAbi from '../abi/puppetSubscribeModule.js'
 import allocatemoduleAbi from '../abi/puppetAllocateModule.js'
 import hubgateAbi from '../abi/puppetHubGate.js'
+import puppetgateAbi from '../abi/puppetPuppetGate.js'
+import mastergateAbi from '../abi/puppetMasterGate.js'
 
 export const CORE_CONTRACT_MAP = {
   Dictate: {
@@ -63,8 +64,7 @@ export const CORE_CONTRACT_MAP = {
   },
   Bridge: {
     address: '0xa7554196D089E4A5edc56b5A5b9c0Eb04dc0C357',
-    chainBlockMap: { 8453: 46944971, 42161: 470377598 },
-    abi: bridgeAbi
+    chainBlockMap: { 8453: 46944971, 42161: 470377598 }
   }
 } as const
 
@@ -113,6 +113,16 @@ export const HUB_CONTRACT_MAP = {
     address: '0x45D8b0FD376234dcE2457E6D258c377B734019DF',
     chainAddresses: { 42161: '0x45D8b0FD376234dcE2457E6D258c377B734019DF' },
     abi: hubgateAbi
+  },
+  PuppetGate: {
+    address: '0xC1498923CF2613472015364665e7b523D7CBb4e3',
+    chainAddresses: { 8453: '0xC1498923CF2613472015364665e7b523D7CBb4e3', 42161: '0xC1498923CF2613472015364665e7b523D7CBb4e3' },
+    abi: puppetgateAbi
+  },
+  MasterGate: {
+    address: '0x8F87a0ef025E67A0DDaf7bF4A87FB1807C2fECe4',
+    chainAddresses: { 8453: '0x8F87a0ef025E67A0DDaf7bF4A87FB1807C2fECe4', 42161: '0x8F87a0ef025E67A0DDaf7bF4A87FB1807C2fECe4' },
+    abi: mastergateAbi
   }
 } as const
 
@@ -121,6 +131,16 @@ export const SPOKE_CONTRACT_MAP = {
     address: '0xFBFc9643E2b7B21Db28d2d240AFB2266706575d3',
     chainAddresses: { 8453: '0xFBFc9643E2b7B21Db28d2d240AFB2266706575d3', 42161: '0xFBFc9643E2b7B21Db28d2d240AFB2266706575d3' },
     abi: coregateAbi
+  },
+  PuppetGate: {
+    address: '0xC1498923CF2613472015364665e7b523D7CBb4e3',
+    chainAddresses: { 8453: '0xC1498923CF2613472015364665e7b523D7CBb4e3', 42161: '0xC1498923CF2613472015364665e7b523D7CBb4e3' },
+    abi: puppetgateAbi
+  },
+  MasterGate: {
+    address: '0x8F87a0ef025E67A0DDaf7bF4A87FB1807C2fECe4',
+    chainAddresses: { 8453: '0x8F87a0ef025E67A0DDaf7bF4A87FB1807C2fECe4', 42161: '0x8F87a0ef025E67A0DDaf7bF4A87FB1807C2fECe4' },
+    abi: mastergateAbi
   }
 } as const
 

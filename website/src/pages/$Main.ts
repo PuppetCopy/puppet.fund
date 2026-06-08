@@ -101,7 +101,7 @@ function applySubaccountAttest(list: ISubaccountState[], settled: IAttestation):
     return [...list, { ...leaf, chains: new Map([[cid, leaf]]) }]
   }
 
-  if (request.kind === 'createMaster') {
+  if (request.kind === 'seedMasterAccount') {
     const params = request.input.params
     const account = predictMasterAccount(params)
     if (list.some(s => s.account === account)) return list
@@ -168,8 +168,7 @@ export const $Main = (_config: IApp = {}) =>
       [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IFulfillDraft>,
       [clearDrafts, clearDraftsTether]: IBehavior<null>,
       [releaseDraft, releaseDraftTether]: IBehavior<string>,
-      [changeAttest, changeAttestTether]: IBehavior<IAttestation>,
-      [changeActiveSubaccount, changeActiveSubaccountTether]: IBehavior<Address>
+      [changeAttest, changeAttestTether]: IBehavior<IAttestation>
     ) => {
       const activityTimeframe = uiStorage.replayWrite(
         localStoreSchema.global.activityTimeframe,
@@ -226,7 +225,7 @@ export const $Main = (_config: IApp = {}) =>
             (wallet, addr) =>
               wallet ? (activeMasterByWallet = { ...activeMasterByWallet, [wallet]: addr }) : activeMasterByWallet,
             walletAddress,
-            merge(autoDefaultActive.stream, changeActiveSubaccount)
+            autoDefaultActive.stream
           )
         ),
         tap(m => {
@@ -480,9 +479,7 @@ export const $Main = (_config: IApp = {}) =>
             )
           }, pwaUpgradeNotification),
 
-          $MainMenu({ subaccountList, selectedSubaccount })({
-            changeActiveSubaccount: changeActiveSubaccountTether()
-          }),
+          $MainMenu({ subaccountList, selectedSubaccount })({}),
 
           $PairBanner({ walletQuery, subaccountList })({}),
 

@@ -3,7 +3,6 @@ import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type { IAccountLib__AccountInitParams, IAllocateModule__AllocateIntent } from '@puppet/contracts/types'
 import { type Address, concat, type Hex, keccak256, type TypedDataDefinition, toHex } from 'viem'
 import { CompactContractError } from '../compact/error.js'
-import { CompactError } from '../compact/index.js'
 import * as IntentLib from './intentLib.js'
 import { HUB_DOMAIN, type IDraftContext } from './shared.js'
 
@@ -34,13 +33,14 @@ export interface IAllocateAttestContext extends IDraftContext {
 }
 
 export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAllocateInput) {
-  IntentLib.verifyTimeBounds(input.blockNumber, input.deadline, ctx.currentBlock)
-  const baseToken = IntentLib.verifyTokenAndCap(
-    ctx.tokenRegistry,
-    HUB_CHAIN_ID,
-    input.params.baseTokenId,
-    input.masterAmount
-  )
+  const baseToken = IntentLib.verifyCommonIntent(ctx, {
+    blockNumber: input.blockNumber,
+    deadline: input.deadline,
+    baseTokenId: input.params.baseTokenId,
+    lookupChain: HUB_CHAIN_ID,
+    capAmount: input.masterAmount,
+    acceptableRelayFee: input.acceptableRelayFee
+  })
 
   if (input.acceptableNetAssetValue === 0n) throw new CompactContractError('Allocate__ZeroAcceptableNav', [])
   const n = input.puppetList.length
@@ -60,35 +60,29 @@ export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAlloca
     if (BigInt(curr) <= BigInt(prev)) throw new CompactContractError('Allocate__PuppetListNotSorted', [prev, curr])
   }
 
+  let effectiveMasterAmount = input.masterAmount
   if (input.masterAmount > 0n) {
     const ownerNewShares =
       ctx.totalShareSupply === 0n
         ? input.masterAmount
         : (input.masterAmount * ctx.totalShareSupply) / input.acceptableNetAssetValue
-    if (ownerNewShares === 0n) {
-      throw new CompactContractError('Allocate__ZeroSharesMinted', [input.params.user, input.masterAmount])
-    }
+    if (ownerNewShares === 0n) effectiveMasterAmount = 0n
   }
 
-  if (n === 0 && input.masterAmount === 0n) throw new CompactContractError('Allocate__ZeroAmount', [])
-
   const totalMatched = input.matchedAmountList.reduce((sum, a) => sum + a, 0n)
-  IntentLib.verifyRelayFee(input.acceptableRelayFee, input.masterAmount + totalMatched)
+  if (effectiveMasterAmount === 0n && totalMatched === 0n) {
+    throw new CompactContractError('Allocate__ZeroAmount', [])
+  }
+  IntentLib.verifyRelayFee(input.acceptableRelayFee, effectiveMasterAmount + totalMatched)
 
   const byPuppet = new Map<string, { body: Hex; mandate: Hex }>()
   for (const row of ctx.positions) {
-    byPuppet.set(row.puppet, { body: row.body, mandate: row.mandate })
+    byPuppet.set(row.puppet.toLowerCase(), { body: row.body, mandate: row.mandate })
   }
   const bodyList: Hex[] = []
   const mandateList: Hex[] = []
   for (let i = 0; i < input.puppetList.length; i++) {
-    const found = byPuppet.get(input.puppetList[i]!.toLowerCase() as Hex)
-    if (input.matchedAmountList[i] !== 0n && !found) {
-      throw new CompactError(
-        'SUBSCRIPTION_MISSING',
-        `puppet ${input.puppetList[i]} has matchedAmount ${input.matchedAmountList[i]} but no standing-auth subscription`
-      )
-    }
+    const found = byPuppet.get(input.puppetList[i]!.toLowerCase())
     bodyList.push(found?.body ?? ('0x' as Hex))
     mandateList.push(found?.mandate ?? ('0x' as Hex))
   }

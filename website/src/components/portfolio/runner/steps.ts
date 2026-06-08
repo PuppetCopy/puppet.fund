@@ -1,9 +1,8 @@
 import { PUPPET_CONTRACT_MAP } from '@puppet/contracts'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
-import { predictMasterAccount, predictPuppetAccount, predictTransientRoute } from '@puppet/sdk/account'
+import { predictDepositRoute, predictMasterAccount, predictPuppetAccount } from '@puppet/sdk/account'
 import {
   attestAllocateIntent,
-  attestBridgeHubIntent,
   attestBridgeIntent,
   attestBridgeToWalletIntent,
   attestClaimIntent,
@@ -11,26 +10,24 @@ import {
   attestCreateMasterIntent,
   attestCreatePuppetAccountIntent,
   attestFulfillIntent,
+  attestRecognizeBalanceIntent,
   attestSellIntent,
-  attestSignTransientRouteBalanceIntent,
   attestSubscribeIntent,
   attestWithdrawIntent,
   fetchAccountOrThrow,
   type IAllocateInput,
   type IAllocateRulePosition,
-  type IBridgeHubInput,
   type IBridgeInput,
   type IBridgeToWalletInput,
   type IClaimInput,
   type ICreateMasterAccountInput,
   type ICreateMasterInput,
   type ICreatePuppetAccountInput,
+  type IDepositRoute,
   type IFulfillInput,
+  type IRecognizeBalanceInput,
   type ISellInput,
-  type ISignTransientRouteBalanceInput,
   type ISubscribeInput,
-  type IWalletDepositRoute,
-  type IWalletDepositWntRoute,
   type IWithdrawInput,
   resolveDispatchChainId,
   resolveDispatchNetwork
@@ -63,16 +60,14 @@ export function computeSignedDelta(request: IRelayRequest, actualRelayFee: bigin
     fromTransientRoute?: boolean
   }
   switch (request.kind) {
-    case 'signTransientRouteBalance':
+    case 'recognize':
       return (intent.amount ?? 0n) - actualRelayFee
     case 'walletWithdraw':
     case 'walletWithdrawWnt':
       return -(intent.amount ?? 0n)
     case 'bridgeToWallet':
       return -(intent.inputAmount ?? 0n)
-    case 'bridgeHub':
-      // fromTransientRoute funds never entered signedBalance — they bridge from
-      // the TransientRoute, so signedBalance is untouched.
+    case 'bridge':
       return intent.fromTransientRoute ? 0n : -(intent.inputAmount ?? 0n)
     case 'createPuppetAccount':
       return (intent.initialDepositAmount ?? 0n) - actualRelayFee
@@ -88,17 +83,18 @@ import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import type { ChainId } from '@puppet/sdk/const'
 import {
   awaitWalletDeposit,
-  fetchTransientRouteBalance,
+  fetchDepositRouteBalance,
   getAcceptableRelayFee,
   indexerBlock,
-  pollTransientRouteBalance,
+  pollDepositRouteBalance,
+  pollRouteBalance,
   randomNonce,
   tokenInfoFor
 } from '@puppet/sdk/state'
 import { getPublicClient } from '@wagmi/core'
 import { type Address, erc20Abi, type Hex, isAddressEqual, type PublicClient } from 'viem'
-import { sendCalls, writeContract } from 'viem/actions'
-import { fetchAcrossQuote } from '../../../io/bridge/across.js'
+import { readContract, sendCalls, writeContract } from 'viem/actions'
+import { fetchAcrossBridgeQuote } from '../../../io/bridge/across.js'
 import { fetchMasterPoolState, fetchMasterSubscribers } from '../../../io/indexer/query.js'
 import { compact } from '../../../io/matchmaker/index.js'
 import { awaitStreamMatch } from '../../../utils/awaitStreamMatch.js'
@@ -116,89 +112,133 @@ import { buildAllocateInput, buildCreateMasterInput } from './allocate.js'
 import { buildClaimInput, buildFulfillInput, buildSellInput } from './redeem.js'
 import { buildSubscribeInput } from './subscribe.js'
 
-const CORE_GATE_ABI = PUPPET_CONTRACT_MAP.CoreGate.abi
-const CORE_GATE_ADDRESS = PUPPET_CONTRACT_MAP.CoreGate.address
+const PUPPET_GATE_ABI = PUPPET_CONTRACT_MAP.PuppetGate.abi
+const PUPPET_GATE_ADDRESS = PUPPET_CONTRACT_MAP.PuppetGate.address
+const MASTER_GATE_ABI = PUPPET_CONTRACT_MAP.MasterGate.abi
+const MASTER_GATE_ADDRESS = PUPPET_CONTRACT_MAP.MasterGate.address
 
-async function runWalletDeposit(input: IWalletDepositRoute, ctx: ExecContext): Promise<bigint> {
+async function runDeposit(input: IDepositRoute, ctx: ExecContext): Promise<bigint> {
+  if (input.amount <= 0n) return 0n
   if (input.walletBalance < input.amount) {
     throw new Error(`wallet balance ${input.walletBalance} below required ${input.amount}`)
   }
-  const needsApprove = input.walletAllowance < input.amount
-  const wallet = ctx.wallet.walletClient
-  const chain = wallet.chain
-  if (!chain || chain.id !== input.chainId) {
-    throw new Error(`wallet not on chain ${input.chainId} (current: ${chain?.id ?? 'none'})`)
+
+  const isMaster = input.accountKind === 'master'
+  const account = isMaster ? predictMasterAccount(input.params) : predictPuppetAccount(input.params)
+  const gateAddress = isMaster ? MASTER_GATE_ADDRESS : PUPPET_GATE_ADDRESS
+  const gateAbi = isMaster ? MASTER_GATE_ABI : PUPPET_GATE_ABI
+  const settle = async (depositHash: Hex): Promise<void> => {
+    if (isMaster) {
+      await pollRouteBalance(
+        publicClientForChain(input.chainId),
+        input.token,
+        predictDepositRoute(account),
+        input.amount,
+        BRIDGE_FILL_TIMEOUT_MS
+      )
+    } else {
+      await awaitWalletDeposit(ctx.sql, depositHash, BRIDGE_FILL_TIMEOUT_MS)
+    }
   }
+  const walletFor = async () =>
+    isMaster ? walletClientForChain(ctx.wallet.walletClient, input.chainId) : ctx.wallet.walletClient
 
-  const depositCall = {
-    to: CORE_GATE_ADDRESS,
-    abi: CORE_GATE_ABI,
-    functionName: 'walletDeposit',
-    args: [input.params, input.token, input.amount]
-  } as const
-
-  let depositHash: Hex
-  if (needsApprove && (await supportsAtomicBatch(wallet, chain.id))) {
-    const result = await sendCalls(wallet, {
-      account: ctx.wallet.address,
-      chain,
-      calls: [
-        { to: input.token, abi: erc20Abi, functionName: 'approve', args: [input.spender, input.amount] },
-        depositCall
-      ]
+  if (input.mode === 'erc20Gate') {
+    if (!input.spender) throw new Error('erc20Gate deposit requires a spender')
+    const liveAllowance = await readContract(publicClientForChain(input.chainId), {
+      address: input.token,
+      abi: erc20Abi,
+      functionName: 'allowance',
+      args: [ctx.wallet.address, input.spender]
     })
-    const final = await pollCallsStatus(wallet, result.id)
-    if (final.status !== 'success') throw new Error(`deposit batch reverted (id ${result.id})`)
-    const depositReceipt = final.receipts?.[final.receipts.length - 1]
-    if (!depositReceipt) throw new Error(`no deposit receipt in batch (id ${result.id})`)
-    depositHash = depositReceipt.transactionHash as Hex
-  } else {
-    if (needsApprove) {
-      await writeContract(wallet, {
-        address: input.token,
-        abi: erc20Abi,
-        functionName: 'approve',
-        args: [input.spender, input.amount],
+    const needsApprove = liveAllowance < input.amount
+    const wallet = await walletFor()
+    const chain = wallet.chain
+    if (!chain || chain.id !== input.chainId) {
+      throw new Error(`wallet not on chain ${input.chainId} (current: ${chain?.id ?? 'none'})`)
+    }
+    const depositCall = {
+      to: gateAddress,
+      abi: gateAbi,
+      functionName: 'deposit',
+      args: [input.params, input.amount]
+    } as const
+
+    let depositHash: Hex
+    if (needsApprove && (await supportsAtomicBatch(wallet, chain.id))) {
+      const result = await sendCalls(wallet, {
+        account: ctx.wallet.address,
+        chain,
+        calls: [
+          { to: input.token, abi: erc20Abi, functionName: 'approve', args: [input.spender, input.amount] },
+          depositCall
+        ]
+      })
+      const final = await pollCallsStatus(wallet, result.id)
+      if (final.status !== 'success') throw new Error(`deposit batch reverted (id ${result.id})`)
+      const depositReceipt = final.receipts?.[final.receipts.length - 1]
+      if (!depositReceipt) throw new Error(`no deposit receipt in batch (id ${result.id})`)
+      depositHash = depositReceipt.transactionHash as Hex
+    } else {
+      if (needsApprove) {
+        await writeContract(wallet, {
+          address: input.token,
+          abi: erc20Abi,
+          functionName: 'approve',
+          args: [input.spender, input.amount],
+          account: ctx.wallet.address,
+          chain
+        })
+      }
+      depositHash = await writeContract(wallet, {
+        address: gateAddress,
+        abi: gateAbi,
+        functionName: 'deposit',
+        args: [input.params, input.amount],
         account: ctx.wallet.address,
         chain
       })
     }
-    depositHash = await writeContract(wallet, {
-      address: CORE_GATE_ADDRESS,
-      abi: CORE_GATE_ABI,
-      functionName: 'walletDeposit',
-      args: [input.params, input.token, input.amount],
+    await settle(depositHash)
+    return 0n
+  }
+
+  if (input.mode === 'native') {
+    const wallet = await walletFor()
+    const chain = wallet.chain
+    if (!chain || chain.id !== input.chainId) {
+      throw new Error(`wallet not on chain ${input.chainId} (current: ${chain?.id ?? 'none'})`)
+    }
+    const depositHash = await writeContract(wallet, {
+      address: gateAddress,
+      abi: gateAbi,
+      functionName: 'depositWnt',
+      args: [input.params],
+      value: input.amount,
       account: ctx.wallet.address,
       chain
     })
+    await settle(depositHash)
+    return 0n
   }
-  await awaitWalletDeposit(ctx.sql, depositHash, BRIDGE_FILL_TIMEOUT_MS)
-  return 0n
-}
 
-async function transferToMasterTransientRoute(
-  master: Address,
-  baseTokenId: Hex,
-  amount: bigint,
-  chainId: number,
-  ctx: ExecContext,
-  walletBalance?: bigint
-): Promise<void> {
-  if (amount <= 0n) return
-  if (walletBalance !== undefined && walletBalance < amount) {
-    throw new Error(`wallet balance ${walletBalance} below required ${amount}`)
-  }
-  const token = resolveTokenAddress(ctx, chainId, baseTokenId)
-  const wallet = await walletClientForChain(ctx.wallet.walletClient, chainId)
+  const wallet = await walletClientForChain(ctx.wallet.walletClient, input.chainId)
   await writeContract(wallet, {
-    address: token,
+    address: input.token,
     abi: erc20Abi,
     functionName: 'transfer',
-    args: [predictTransientRoute(master), amount],
+    args: [predictDepositRoute(account), input.amount],
     account: ctx.wallet.address,
     chain: wallet.chain
   })
-  await pollTransientRouteBalance(publicClientForChain(chainId), token, master, amount, BRIDGE_FILL_TIMEOUT_MS)
+  await pollRouteBalance(
+    publicClientForChain(input.chainId),
+    input.token,
+    predictDepositRoute(account),
+    input.amount,
+    BRIDGE_FILL_TIMEOUT_MS
+  )
+  return 0n
 }
 
 async function runCreateMasterAccountStep(
@@ -232,7 +272,7 @@ async function runBridgeStep(
   const hubToken = resolveTokenAddress(ctx, HUB_CHAIN_ID, input.params.baseTokenId)
   const spokeClient = publicClientForChain(spokeChainId)
 
-  await pollTransientRouteBalance(
+  await pollDepositRouteBalance(
     spokeClient,
     spokeToken,
     master,
@@ -240,48 +280,50 @@ async function runBridgeStep(
     BRIDGE_FILL_TIMEOUT_MS
   )
 
-  const acceptableRelayFee = await getAcceptableRelayFee(ctx.gasPrice, 'SpokeGate', 'bridge', spokeToken, spokeClient)
+  const hubClient = publicClientForChain(HUB_CHAIN_ID)
+  const hubSurplusBefore = await fetchDepositRouteBalance(hubClient, hubToken, master)
+  const acceptableRelayFee = await getAcceptableRelayFee(ctx.gasPrice, 'PuppetGate', 'bridge', spokeToken, spokeClient)
   const acrossInput = input.inputAmount > acceptableRelayFee ? input.inputAmount - acceptableRelayFee : 0n
-  const quote = await fetchAcrossQuote({
+  const quote = await fetchAcrossBridgeQuote({
     originChainId: spokeChainId,
     destinationChainId: HUB_CHAIN_ID,
     inputToken: spokeToken,
     outputToken: hubToken,
     inputAmount: acrossInput,
-    recipient: predictTransientRoute(master)
+    recipient: predictDepositRoute(master)
   })
   const fresh = refreshBlock(
     {
       ...input,
       acceptableRelayFee,
-      exclusiveRelayer: quote.exclusiveRelayer,
-      quoteTimestamp: quote.quoteTimestamp,
+      route: quote.route,
+      expires: quote.expires,
       fillDeadline: quote.fillDeadline,
-      exclusivityDeadline: quote.exclusivityDeadline,
       outputAmount: quote.outputAmount
     },
     ctx,
     spokeChainId
   )
-  const transientRouteBalance = await fetchTransientRouteBalance(spokeClient, spokeToken, master)
+  const depositRouteBalance = await fetchDepositRouteBalance(spokeClient, spokeToken, master)
   const { intent, typedData } = attestBridgeIntent(
     {
       chainId: resolveDispatchChainId(spokeChainId),
       tokenRegistry: ctx.tokenRegistry,
       currentBlock: fresh.blockNumber,
       signedBalance: 0n,
-      transientRouteBalance
+      routeBalance: depositRouteBalance,
+      expectedOutputAmount: null
     },
     fresh
   )
   const signature = await ctx.session.account.signTypedData(typedData)
   const request = { kind: 'bridge' as const, input: fresh, intent, signature }
   const attestation = { request, result: await compact.attest(request) }
-  const bridgedAmount = await pollTransientRouteBalance(
-    publicClientForChain(HUB_CHAIN_ID),
+  const bridgedAmount = await pollDepositRouteBalance(
+    hubClient,
     hubToken,
     master,
-    quote.outputAmount,
+    hubSurplusBefore + quote.outputAmount,
     BRIDGE_FILL_TIMEOUT_MS
   )
   return { attestation, bridgedAmount }
@@ -292,14 +334,8 @@ async function runFundSteps(steps: IMasterFundStep[], ctx: ExecContext, out: IAt
   for (const step of steps) {
     switch (step.kind) {
       case 'transferToMaster':
-        await transferToMasterTransientRoute(
-          step.input.master,
-          step.input.baseTokenId,
-          step.input.amount,
-          step.input.chainId,
-          ctx,
-          step.input.walletBalance
-        )
+      case 'transferToMasterWnt':
+        await runDeposit(step.input, ctx)
         break
       case 'createMasterAccount':
         push(
@@ -333,7 +369,7 @@ async function runCreateMasterStep(input: ICreateMasterInput, ctx: ExecContext):
 
   const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
   const hubToken = resolveTokenAddress(ctx, HUB_CHAIN_ID, input.params.baseTokenId)
-  const transientRouteBalance = await fetchTransientRouteBalance(publicClientForChain(HUB_CHAIN_ID), hubToken, master)
+  const transientRouteBalance = await fetchDepositRouteBalance(publicClientForChain(HUB_CHAIN_ID), hubToken, master)
   const { intent, typedData } = attestCreateMasterIntent(
     {
       chainId: resolveDispatchChainId(HUB_CHAIN_ID),
@@ -345,31 +381,8 @@ async function runCreateMasterStep(input: ICreateMasterInput, ctx: ExecContext):
     fresh
   )
   const signature = await ctx.session.account.signTypedData(typedData)
-  const request = { kind: 'createMaster' as const, input: fresh, intent, signature }
+  const request = { kind: 'seedMasterAccount' as const, input: fresh, intent, signature }
   return { request, result: await compact.attest(request) }
-}
-
-async function runWalletDepositWnt(input: IWalletDepositWntRoute, ctx: ExecContext): Promise<bigint> {
-  if (input.walletBalance < input.amount) {
-    throw new Error(`wallet ETH balance ${input.walletBalance} below required ${input.amount}`)
-  }
-  const wallet = ctx.wallet.walletClient
-  const chain = wallet.chain
-  if (!chain || chain.id !== input.chainId) {
-    throw new Error(`wallet not on chain ${input.chainId} (current: ${chain?.id ?? 'none'})`)
-  }
-
-  const depositHash = await writeContract(wallet, {
-    address: CORE_GATE_ADDRESS,
-    abi: CORE_GATE_ABI,
-    functionName: 'walletDepositWnt',
-    args: [input.params],
-    value: input.amount,
-    account: ctx.wallet.address,
-    chain
-  })
-  await awaitWalletDeposit(ctx.sql, depositHash, BRIDGE_FILL_TIMEOUT_MS)
-  return 0n
 }
 
 function publicClientForChain(chainIdNum: number): PublicClient {
@@ -389,8 +402,8 @@ function refreshBlock<T extends { blockNumber: bigint }>(input: T, ctx: ExecCont
   return { ...input, blockNumber: indexerBlock(ctx.indexerHealth, network) }
 }
 
-async function runSignTransientRouteBalanceStep(
-  input: ISignTransientRouteBalanceInput,
+async function runRecognizeStep(
+  input: IRecognizeBalanceInput,
   ctx: ExecContext,
   signedBalance: bigint
 ): Promise<IAttestation> {
@@ -398,35 +411,25 @@ async function runSignTransientRouteBalanceStep(
   const chainIdNum = Number(input.chainId)
   const token = resolveTokenAddress(ctx, chainIdNum, input.params.baseTokenId)
   const publicClient = publicClientForChain(chainIdNum)
-  const transientRouteBalance = await pollTransientRouteBalance(
-    publicClient,
-    token,
-    account,
-    input.amount,
-    BRIDGE_FILL_TIMEOUT_MS
-  )
+  const routeBalance = await pollDepositRouteBalance(publicClient, token, account, input.amount, BRIDGE_FILL_TIMEOUT_MS)
 
-  const fresh = refreshBlock({ ...input, amount: transientRouteBalance }, ctx, chainIdNum)
-  const { intent, typedData } = attestSignTransientRouteBalanceIntent(
+  const fresh = refreshBlock({ ...input, amount: routeBalance }, ctx, chainIdNum)
+  const { intent, typedData } = attestRecognizeBalanceIntent(
     {
       chainId: chainIdNum as ChainId,
       tokenRegistry: ctx.tokenRegistry,
       currentBlock: fresh.blockNumber,
       signedBalance,
-      transientRouteBalance
+      routeBalance
     },
     fresh
   )
   const signature = await ctx.session.account.signTypedData(typedData)
-  const request = { kind: 'signTransientRouteBalance' as const, input: fresh, intent, signature }
+  const request = { kind: 'recognize' as const, input: fresh, intent, signature }
   return { request, result: await compact.attest(request) }
 }
 
-async function runBridgeHubStep(
-  input: IBridgeHubInput,
-  ctx: ExecContext,
-  signedBalance: bigint
-): Promise<IAttestation> {
+async function runBridgeHubStep(input: IBridgeInput, ctx: ExecContext, signedBalance: bigint): Promise<IAttestation> {
   const account = predictPuppetAccount(input.params)
   const spokeChainId = Number(input.chainId)
   const token = resolveTokenAddress(ctx, spokeChainId, input.params.baseTokenId)
@@ -434,7 +437,7 @@ async function runBridgeHubStep(
 
   if (input.fromTransientRoute) {
     const minAmount = input.inputAmount > 0n ? input.inputAmount : 1n
-    await pollTransientRouteBalance(publicClient, token, account, minAmount, BRIDGE_FILL_TIMEOUT_MS)
+    await pollDepositRouteBalance(publicClient, token, account, minAmount, BRIDGE_FILL_TIMEOUT_MS)
   } else {
     await awaitStreamMatch(
       ctx.subaccountList,
@@ -446,24 +449,25 @@ async function runBridgeHubStep(
       },
       BRIDGE_FILL_TIMEOUT_MS
     ).catch(err => {
-      throw new Error(`indexer did not reflect ${account} signedBalance for bridgeHub: ${err.message}`)
+      throw new Error(`indexer did not reflect ${account} signedBalance for bridge: ${err.message}`)
     })
   }
 
   const fresh = refreshBlock(input, ctx, spokeChainId)
-  const transientRouteBalance = await fetchTransientRouteBalance(publicClient, token, account)
-  const { intent, typedData } = attestBridgeHubIntent(
+  const routeBalance = await fetchDepositRouteBalance(publicClient, token, account)
+  const { intent, typedData } = attestBridgeIntent(
     {
       chainId: resolveDispatchChainId(spokeChainId),
       tokenRegistry: ctx.tokenRegistry,
       currentBlock: fresh.blockNumber,
       signedBalance,
-      transientRouteBalance
+      routeBalance,
+      expectedOutputAmount: null
     },
     fresh
   )
   const signature = await ctx.session.account.signTypedData(typedData)
-  const request = { kind: 'bridgeHub' as const, input: fresh, intent, signature }
+  const request = { kind: 'bridge' as const, input: fresh, intent, signature }
   return { request, result: await compact.attest(request) }
 }
 
@@ -478,7 +482,8 @@ async function runBridgeToWalletStep(
       chainId: resolveDispatchChainId(HUB_CHAIN_ID),
       tokenRegistry: ctx.tokenRegistry,
       currentBlock: fresh.blockNumber,
-      signedBalance
+      signedBalance,
+      expectedOutputAmount: null
     },
     fresh
   )
@@ -577,7 +582,8 @@ async function runFulfillStep(input: IFulfillInput, ctx: ExecContext, signedBala
       currentBlock: fresh.blockNumber,
       signedBalance,
       totalShareSupply: pool?.totalShareSupply ?? 0n,
-      queuedShares: pool?.queuedShares ?? 0n
+      queuedShares: pool?.queuedShares ?? 0n,
+      poolTotalStake: pool?.totalStake ?? 0n
     },
     fresh
   )
@@ -618,8 +624,8 @@ export async function runCreatePuppetAccountStep(
   const publicClient = publicClientForChain(chainIdNum)
   const transientRouteBalance =
     fresh.initialDepositAmount > 0n
-      ? await pollTransientRouteBalance(publicClient, token, puppet, fresh.initialDepositAmount, BRIDGE_FILL_TIMEOUT_MS)
-      : await fetchTransientRouteBalance(publicClient, token, puppet)
+      ? await pollDepositRouteBalance(publicClient, token, puppet, fresh.initialDepositAmount, BRIDGE_FILL_TIMEOUT_MS)
+      : await fetchDepositRouteBalance(publicClient, token, puppet)
   const { intent, typedData } = attestCreatePuppetAccountIntent(
     {
       chainId: resolveDispatchChainId(chainIdNum),
@@ -640,7 +646,7 @@ const push = (out: IAttestation[], value: IAttestation | null): void => {
 
 const balanceKey = (account: Address, chainId: number): string => `${account.toLowerCase()}:${chainId}`
 
-const MASTER_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'fulfill', 'createMaster'])
+const MASTER_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'fulfill', 'seedMasterAccount'])
 function accountForRequest(req: IRelayRequest): Address {
   const params = req.input.params
   return MASTER_ROUTED.has(req.kind) ? predictMasterAccount(params) : predictPuppetAccount(params)
@@ -698,13 +704,17 @@ export async function runDraft(draft: IDraft, ctx: ExecContext): Promise<IAttest
   }
   if (draft.kind === 'allocate') {
     const bridged = await runFundSteps(draft.inputSteps, ctx, out)
-    const input = await buildAllocateInput({ ...draft, masterAmount: bridged ?? draft.masterAmount }, ctx)
+    const masterAmount =
+      bridged ?? (await fetchDepositRouteBalance(publicClientForChain(HUB_CHAIN_ID), draft.baseToken, draft.master))
+    const input = await buildAllocateInput({ ...draft, masterAmount }, ctx)
     push(out, record(await runAllocateStep(input, ctx)))
     return out
   }
   if (draft.kind === 'createMaster') {
     const bridged = await runFundSteps(draft.inputSteps, ctx, out)
-    const input = await buildCreateMasterInput({ ...draft, masterAmount: bridged ?? draft.masterAmount }, ctx)
+    const masterAmount =
+      bridged ?? (await fetchDepositRouteBalance(publicClientForChain(HUB_CHAIN_ID), draft.baseToken, draft.master))
+    const input = await buildCreateMasterInput({ ...draft, masterAmount }, ctx)
     push(
       out,
       record(
@@ -758,12 +768,10 @@ export async function runDraft(draft: IDraft, ctx: ExecContext): Promise<IAttest
         )
         break
       case 'walletDeposit':
-        await runWalletDeposit(withParams(step.input), ctx)
-        break
       case 'walletDepositWnt':
-        await runWalletDepositWnt(withParams(step.input), ctx)
+        await runDeposit(withParams(step.input), ctx)
         break
-      case 'bridgeHub': {
+      case 'bridge': {
         const params = withParams(step.input)
         const puppet = predictPuppetAccount(params.params)
         push(out, record(await runBridgeHubStep(params, ctx, await getBalance(puppet, Number(params.chainId)))))
@@ -774,13 +782,10 @@ export async function runDraft(draft: IDraft, ctx: ExecContext): Promise<IAttest
         push(out, record(await runBridgeToWalletStep(step.input, ctx, await getBalance(puppet, HUB_CHAIN_ID))))
         break
       }
-      case 'signTransientRouteBalance': {
+      case 'recognize': {
         const params = withParams(step.input)
         const puppet = predictPuppetAccount(params.params)
-        push(
-          out,
-          record(await runSignTransientRouteBalanceStep(params, ctx, await getBalance(puppet, Number(params.chainId))))
-        )
+        push(out, record(await runRecognizeStep(params, ctx, await getBalance(puppet, Number(params.chainId)))))
         break
       }
       case 'walletWithdraw': {

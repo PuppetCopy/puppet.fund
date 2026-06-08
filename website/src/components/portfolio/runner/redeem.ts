@@ -1,18 +1,18 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import { EMPTY_NAME } from '@puppet/sdk/account'
 import {
-  fetchAccountOrThrow,
   type IClaimInput,
   type IFulfillInput,
   type ISellInput,
   resolveDispatchChainId,
   resolveDispatchNetwork
 } from '@puppet/sdk/attestation'
+import { evaluateAccountNav } from '@puppet/sdk/evaluation'
 import {
   getAcceptableRelayFee,
   getMasterPoolState,
   getSubaccountState,
+  type ISubaccountState,
   indexerBlock,
   randomNonce
 } from '@puppet/sdk/state'
@@ -23,14 +23,17 @@ import { DEFAULT_DEADLINE_SEC, type ExecContext } from './_shared.js'
 async function resolveMasterParams(
   draft: ISellDraft | IClaimDraft | IFulfillDraft,
   ctx: ExecContext
-): Promise<IAccountLib__AccountInitParams> {
-  const master = await getSubaccountState(ctx.sql, draft.masterAccount)
-  if (!master) throw new Error(`master ${draft.masterAccount} not in indexer`)
-  return { user: master.user, name: EMPTY_NAME, baseTokenId: master.baseTokenId, signer: master.signer }
+): Promise<{ params: IAccountLib__AccountInitParams; subaccount: ISubaccountState }> {
+  const subaccount = await getSubaccountState(ctx.sql, draft.masterAccount)
+  if (!subaccount) throw new Error(`master ${draft.masterAccount} not in indexer`)
+  return {
+    params: { user: subaccount.user, name: EMPTY_NAME, baseTokenId: subaccount.baseTokenId, signer: subaccount.signer },
+    subaccount
+  }
 }
 
 export async function buildSellInput(draft: ISellDraft, ctx: ExecContext): Promise<ISellInput> {
-  const masterParams = await resolveMasterParams(draft, ctx)
+  const { params: masterParams } = await resolveMasterParams(draft, ctx)
   const params: IAccountLib__AccountInitParams = {
     user: ctx.wallet.address,
     name: EMPTY_NAME,
@@ -56,11 +59,17 @@ export async function buildSellInput(draft: ISellDraft, ctx: ExecContext): Promi
 }
 
 export async function buildFulfillInput(draft: IFulfillDraft, ctx: ExecContext): Promise<IFulfillInput> {
-  const params = await resolveMasterParams(draft, ctx)
-  const [masterRow, pool, acceptableRelayFee] = await Promise.all([
-    fetchAccountOrThrow(ctx.sql, draft.masterAccount, HUB_CHAIN_ID),
+  const { params, subaccount } = await resolveMasterParams(draft, ctx)
+  const [pool, acceptableRelayFee, fulfillEval] = await Promise.all([
     getMasterPoolState(ctx.sql, draft.masterAccount),
-    getAcceptableRelayFee(ctx.gasPrice, 'HubGate', 'fulfill', draft.baseToken, homePublicClient)
+    getAcceptableRelayFee(ctx.gasPrice, 'HubGate', 'fulfill', draft.baseToken, homePublicClient),
+    evaluateAccountNav(ctx.sql, {
+      master: draft.masterAccount,
+      baseToken: draft.baseToken,
+      health: ctx.indexerHealth,
+      kind: 'fulfill',
+      subaccount
+    })
   ])
   return {
     params,
@@ -68,14 +77,14 @@ export async function buildFulfillInput(draft: IFulfillDraft, ctx: ExecContext):
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,
     nonce: randomNonce(),
-    acceptableNetAssetValue: masterRow.signedBalance,
+    acceptableNetAssetValue: fulfillEval.navSigned,
     totalShareSupply: pool.totalShareSupply,
     acceptableShares: draft.acceptableShares
   }
 }
 
 export async function buildClaimInput(draft: IClaimDraft, ctx: ExecContext): Promise<IClaimInput> {
-  const masterParams = await resolveMasterParams(draft, ctx)
+  const { params: masterParams } = await resolveMasterParams(draft, ctx)
   const params: IAccountLib__AccountInitParams = {
     user: ctx.wallet.address,
     name: EMPTY_NAME,

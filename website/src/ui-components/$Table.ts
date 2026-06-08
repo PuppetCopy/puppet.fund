@@ -108,6 +108,16 @@ export const $Table = <T>({
         display: 'grid',
         gridTemplateColumns: columns.map(col => col.gridTemplate || '1fr').join(' ')
       })
+
+      // Sum the columns' intended widths so a mobile horizontal-scroll wrapper can keep
+      // them at their declared sizes instead of squeezing them into the viewport.
+      // Fixed `px` widths are summed directly; `minmax(<px>, ...)` contributes its px floor;
+      // flexible (`1fr`/`auto`) columns fall back to a sensible minimum.
+      const columnsMinWidth = columns.reduce((sum, col) => {
+        const template = col.gridTemplate || '1fr'
+        const pxMatch = template.match(/(\d+(?:\.\d+)?)px/)
+        return sum + (pxMatch ? Number(pxMatch[1]) : 80)
+      }, 0)
       const $bodyContainer = scrollConfig?.$container ?? $defaultVScrollContainer
       const $emptyMessage =
         scrollConfig?.$emptyMessage ??
@@ -201,8 +211,18 @@ export const $Table = <T>({
           )
         : empty
 
+      // On non-desktop (phone/tablet) widths the fixed-pixel grid is wider than the screen.
+      // Wrap the header + body in a horizontally scrollable element with a min-width equal to
+      // the sum of the column widths so columns keep their intended sizes and the table can be
+      // swiped sideways, instead of being squeezed or forcing the whole page to scroll.
+      const $tableBody = isDesktopScreen
+        ? $container($header, $between, bodyNode)
+        : $node(style({ overflowX: 'auto', WebkitOverflowScrolling: 'touch', maxWidth: '100%' }))(
+            $container(style({ minWidth: `${columnsMinWidth}px` }))($header, $between, bodyNode)
+          )
+
       return [
-        $container($header, $between, bodyNode),
+        $tableBody,
 
         {
           scrollRequest,
