@@ -1,4 +1,4 @@
-// This file is auto-generated from forge-artifacts/RedeemModule.sol/RedeemModule.json
+// This file is auto-generated from forge-artifacts/Redeem.sol/Redeem.json
 // Do not edit manually.
 
 export default [
@@ -52,7 +52,7 @@ export default [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct RedeemModule.ClaimIntent",
+        "internalType": "struct Redeem.ClaimIntent",
         "components": [
           {
             "name": "params",
@@ -133,12 +133,12 @@ export default [
       {
         "name": "_accountGate",
         "type": "address",
-        "internalType": "contract AccountModule"
+        "internalType": "contract Account"
       },
       {
         "name": "_shareGate",
         "type": "address",
-        "internalType": "contract ShareModule"
+        "internalType": "contract Issue"
       },
       {
         "name": "_baseToken",
@@ -197,12 +197,70 @@ export default [
   },
   {
     "type": "function",
-    "name": "fulfill",
+    "name": "getClaimable",
+    "inputs": [
+      {
+        "name": "_store",
+        "type": "address",
+        "internalType": "contract RedeemStore"
+      },
+      {
+        "name": "_fund",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_holder",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getUnsoldShares",
+    "inputs": [
+      {
+        "name": "_store",
+        "type": "address",
+        "internalType": "contract RedeemStore"
+      },
+      {
+        "name": "_shareToken",
+        "type": "address",
+        "internalType": "contract ShareToken"
+      },
+      {
+        "name": "_holder",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "redeem",
     "inputs": [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct RedeemModule.FulfillIntent",
+        "internalType": "struct Redeem.RedeemIntent",
         "components": [
           {
             "name": "params",
@@ -298,12 +356,12 @@ export default [
       {
         "name": "_accountGate",
         "type": "address",
-        "internalType": "contract AccountModule"
+        "internalType": "contract Account"
       },
       {
         "name": "_shareGate",
         "type": "address",
-        "internalType": "contract ShareModule"
+        "internalType": "contract Issue"
       },
       {
         "name": "_baseToken",
@@ -356,70 +414,12 @@ export default [
   },
   {
     "type": "function",
-    "name": "getClaimable",
-    "inputs": [
-      {
-        "name": "_store",
-        "type": "address",
-        "internalType": "contract RedeemStore"
-      },
-      {
-        "name": "_fund",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_holder",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "getUnsoldShares",
-    "inputs": [
-      {
-        "name": "_store",
-        "type": "address",
-        "internalType": "contract RedeemStore"
-      },
-      {
-        "name": "_shareToken",
-        "type": "address",
-        "internalType": "contract ShareToken"
-      },
-      {
-        "name": "_holder",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "sell",
     "inputs": [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct RedeemModule.SellIntent",
+        "internalType": "struct Redeem.SellIntent",
         "components": [
           {
             "name": "params",
@@ -505,12 +505,12 @@ export default [
       {
         "name": "_accountGate",
         "type": "address",
-        "internalType": "contract AccountModule"
+        "internalType": "contract Account"
       },
       {
         "name": "_shareGate",
         "type": "address",
-        "internalType": "contract ShareModule"
+        "internalType": "contract Issue"
       },
       {
         "name": "_baseToken",
@@ -605,17 +605,32 @@ export default [
   },
   {
     "type": "error",
-    "name": "Fulfill__NothingToRetire",
+    "name": "Module__CallerNotAuthority",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "Fulfill__RelayFeeTooHigh",
+    "name": "Module__InvalidAuthority",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "Fulfill__SupplyMismatch",
+    "name": "Module__Reentrant",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Redeem__NothingToRetire",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Redeem__RelayFeeTooHigh",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Redeem__SupplyMismatch",
     "inputs": [
       {
         "name": "current",
@@ -631,22 +646,7 @@ export default [
   },
   {
     "type": "error",
-    "name": "Fulfill__ZeroAcceptableNav",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "Module__CallerNotAuthority",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "Module__InvalidAuthority",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "Module__Reentrant",
+    "name": "Redeem__ZeroAcceptableNav",
     "inputs": []
   },
   {

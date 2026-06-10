@@ -3,10 +3,10 @@ pragma solidity ^0.8.35;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {IAccount} from "../core/interface/IAccount.sol";
+import {IAccount} from "../utils/interfaces/IAccount.sol";
 import {PuppetAccount} from "../core/PuppetAccount.sol";
-import {AccountLib} from "../core/AccountLib.sol";
-import {AccountModule} from "../core/module/AccountModule.sol";
+import {AccountLib} from "../utils/AccountLib.sol";
+import {Account} from "../core/Account.sol";
 import {AllocateStore} from "./store/AllocateStore.sol";
 import {RuleLib} from "../utils/RuleLib.sol";
 import {Access} from "../utils/auth/Access.sol";
@@ -19,7 +19,7 @@ bytes32 constant SUBSCRIBE_INTENT_TYPEHASH = keccak256(
     "SubscribeIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 baseTokenId,SubscribeRule[] rules)AccountInitParams(address user,address signer)SubscribeRule(address fund,bytes body,bytes mandate)"
 );
 
-contract SubscribeModule is Access {
+contract Subscribe is Access {
     struct SubscribeIntent {
         AccountLib.AccountInitParams params;
         uint blockNumber;
@@ -37,7 +37,7 @@ contract SubscribeModule is Access {
 
     function subscribe(
         SubscribeIntent calldata _intent,
-        AccountModule _accountGate,
+        Account _accountGate,
         AllocateStore _store,
         IERC20 _base,
         bytes32 _baseTokenId,

@@ -9,23 +9,23 @@ import {stdToml} from "forge-std/src/StdToml.sol";
 import {BaseScript} from "./shared/BaseScript.s.sol";
 
 import {Dictate} from "src/core/Dictate.sol";
-import {RegisterModule} from "src/core/module/RegisterModule.sol";
-import {AccountModule} from "src/core/module/AccountModule.sol";
+import {RegisterToken} from "src/core/RegisterToken.sol";
+import {Account as AccountContract} from "src/core/Account.sol";
 import {Attest} from "src/core/Attest.sol";
 import {PuppetAccount} from "src/core/PuppetAccount.sol";
 import {FundAccount} from "src/core/FundAccount.sol";
-import {PassthroughRoute} from "src/core/PassthroughRoute.sol";
-import {WalletDepositModule} from "src/core/module/WalletDepositModule.sol";
+import {Route} from "src/core/Route.sol";
+import {Deposit} from "src/core/Deposit.sol";
 import {BaseGate} from "src/utils/BaseGate.sol";
 import {AccountGate} from "src/AccountGate.sol";
 import {MasterGate} from "src/MasterGate.sol";
 import {HubGate} from "src/HubGate.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
-import {ShareModule} from "src/hub/ShareModule.sol";
-import {RedeemModule} from "src/hub/RedeemModule.sol";
+import {Issue} from "src/hub/Issue.sol";
+import {Redeem} from "src/hub/Redeem.sol";
 import {RedeemStore} from "src/hub/store/RedeemStore.sol";
-import {SubscribeModule} from "src/hub/SubscribeModule.sol";
-import {AllocateModule} from "src/hub/AllocateModule.sol";
+import {Subscribe} from "src/hub/Subscribe.sol";
+import {Allocate} from "src/hub/Allocate.sol";
 import {AllocateStore} from "src/hub/store/AllocateStore.sol";
 
 contract Deploy is BaseScript {
@@ -93,7 +93,7 @@ contract Deploy is BaseScript {
 
     function _registerTokens() internal {
         Dictate dictate = Dictate(_specAddr("Dictate"));
-        RegisterModule register = RegisterModule(_specAddr("RegisterModule"));
+        RegisterToken register = RegisterToken(_specAddr("RegisterToken"));
         string[2] memory symbols = ["USDC", "WETH"];
         dictate.setAccess(register, DEPLOYER_ADDRESS);
         for (uint i; i < symbols.length; ++i) {
@@ -147,13 +147,13 @@ contract Deploy is BaseScript {
     function _coreContracts() internal pure returns (string[] memory names) {
         names = new string[](10);
         names[0] = "Dictate";
-        names[1] = "RegisterModule";
+        names[1] = "RegisterToken";
         names[2] = "PuppetAccount";
         names[3] = "FundAccount";
-        names[4] = "PassthroughRoute";
+        names[4] = "Route";
         names[5] = "Attest";
-        names[6] = "AccountModule";
-        names[7] = "WalletDepositModule";
+        names[6] = "Account";
+        names[7] = "Deposit";
         names[8] = "AccountGate";
         names[9] = "MasterGate";
     }
@@ -161,12 +161,12 @@ contract Deploy is BaseScript {
     function _hubContracts() internal pure returns (string[] memory names) {
         names = new string[](8);
         names[0] = "ShareToken";
-        names[1] = "ShareModule";
+        names[1] = "Issue";
         names[2] = "RedeemStore";
-        names[3] = "RedeemModule";
+        names[3] = "Redeem";
         names[4] = "AllocateStore";
-        names[5] = "SubscribeModule";
-        names[6] = "AllocateModule";
+        names[5] = "Subscribe";
+        names[6] = "Allocate";
         names[7] = "HubGate";
     }
 
@@ -191,10 +191,10 @@ contract Deploy is BaseScript {
 
     function _wireCore() internal {
         Dictate dictate = Dictate(_specAddr("Dictate"));
-        AccountModule accountModule = AccountModule(_specAddr("AccountModule"));
-        WalletDepositModule walletDeposit = WalletDepositModule(_specAddr("WalletDepositModule"));
+        AccountContract accountModule = AccountContract(_specAddr("Account"));
+        Deposit walletDeposit = Deposit(_specAddr("Deposit"));
 
-        // AccountModule is the ONLY authorized caller of Attest.execute/executeMandate (the account's gate).
+        // Account is the ONLY authorized caller of Attest.execute/executeMandate (the account's gate).
         dictate.setAccess(Attest(_specAddr("Attest")), address(accountModule));
 
         address accountGateImpl = _specAddr("AccountGate");
@@ -202,8 +202,8 @@ contract Deploy is BaseScript {
         _setChainAddress("AccountGateImpl", accountGateImpl);
         _setChainAddress("AccountGate", accountGateProxy);
 
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, accountGateProxy);
-        dictate.setPermission(accountModule, AccountModule.createPuppetAccount.selector, accountGateProxy);
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, accountGateProxy);
+        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, accountGateProxy);
         dictate.setAccess(walletDeposit, accountGateProxy);
 
         address masterGateImpl = _specAddr("MasterGate");
@@ -211,19 +211,19 @@ contract Deploy is BaseScript {
         _setChainAddress("MasterGateImpl", masterGateImpl);
         _setChainAddress("MasterGate", masterGateProxy);
 
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, masterGateProxy);
-        dictate.setPermission(accountModule, AccountModule.createFundAccount.selector, masterGateProxy);
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, masterGateProxy);
+        dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, masterGateProxy);
     }
 
     function _wireHub() internal {
         Dictate dictate = Dictate(_specAddr("Dictate"));
-        AccountModule accountModule = AccountModule(_specAddr("AccountModule"));
-        ShareModule shareModule = ShareModule(_specAddr("ShareModule"));
+        AccountContract accountModule = AccountContract(_specAddr("Account"));
+        Issue shareModule = Issue(_specAddr("Issue"));
         RedeemStore redeemStore = RedeemStore(_specAddr("RedeemStore"));
         AllocateStore allocateStore = AllocateStore(_specAddr("AllocateStore"));
-        RedeemModule redeem = RedeemModule(_specAddr("RedeemModule"));
-        SubscribeModule subscribe = SubscribeModule(_specAddr("SubscribeModule"));
-        AllocateModule allocate = AllocateModule(_specAddr("AllocateModule"));
+        Redeem redeem = Redeem(_specAddr("Redeem"));
+        Subscribe subscribe = Subscribe(_specAddr("Subscribe"));
+        Allocate allocate = Allocate(_specAddr("Allocate"));
 
         address hubImpl = _specAddr("HubGate");
         address hubProxy = dictate.setGate("HubGate", hubImpl);
@@ -239,12 +239,12 @@ contract Deploy is BaseScript {
         dictate.setAccess(allocate, hubProxy);
         dictate.setAccess(redeem, hubProxy);
 
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, hubProxy);
-        dictate.setPermission(accountModule, AccountModule.createFundAccount.selector, address(allocate));
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, address(subscribe));
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, address(allocate));
-        dictate.setPermission(accountModule, AccountModule.dispatchMandate.selector, address(allocate));
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, address(redeem));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, hubProxy);
+        dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, address(allocate));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(subscribe));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(allocate));
+        dictate.setPermission(accountModule, AccountContract.dispatchMandate.selector, address(allocate));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(redeem));
     }
 
     struct Meta {
@@ -269,9 +269,9 @@ contract Deploy is BaseScript {
             return
                 Meta({creationCode: type(Dictate).creationCode, ctorArgs: abi.encode(GOVERNOR_ADDRESS), isCore: true});
         }
-        if (k == keccak256("RegisterModule")) {
+        if (k == keccak256("RegisterToken")) {
             return Meta({
-                creationCode: type(RegisterModule).creationCode,
+                creationCode: type(RegisterToken).creationCode,
                 ctorArgs: abi.encode(_specAddr("Dictate"), _getHubChainId()),
                 isCore: true
             });
@@ -282,8 +282,8 @@ contract Deploy is BaseScript {
         if (k == keccak256("FundAccount")) {
             return Meta({creationCode: type(FundAccount).creationCode, ctorArgs: "", isCore: true});
         }
-        if (k == keccak256("PassthroughRoute")) {
-            return Meta({creationCode: type(PassthroughRoute).creationCode, ctorArgs: "", isCore: true});
+        if (k == keccak256("Route")) {
+            return Meta({creationCode: type(Route).creationCode, ctorArgs: "", isCore: true});
         }
         if (k == keccak256("Attest")) {
             return
@@ -291,34 +291,33 @@ contract Deploy is BaseScript {
                     creationCode: type(Attest).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: true
                 });
         }
-        if (k == keccak256("AccountModule")) {
+        if (k == keccak256("Account")) {
             return Meta({
-                creationCode: type(AccountModule).creationCode,
+                creationCode: type(AccountContract).creationCode,
                 ctorArgs: abi.encode(
                     _specAddr("Dictate"),
                     _specAddr("Attest"),
                     _specAddr("PuppetAccount"),
                     _specAddr("FundAccount"),
-                    _specAddr("PassthroughRoute")
+                    _specAddr("Route")
                 ),
                 isCore: true
             });
         }
-        if (k == keccak256("WalletDepositModule")) {
-            return Meta({
-                creationCode: type(WalletDepositModule).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate")),
-                isCore: true
-            });
+        if (k == keccak256("Deposit")) {
+            return
+                Meta({
+                    creationCode: type(Deposit).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: true
+                });
         }
         if (k == keccak256("AccountGate")) {
             return Meta({
                 creationCode: type(AccountGate).creationCode,
                 ctorArgs: abi.encode(
                     _specAddr("Dictate"),
-                    _specAddr("AccountModule"),
-                    _specAddr("WalletDepositModule"),
-                    _specAddr("RegisterModule"),
+                    _specAddr("Account"),
+                    _specAddr("Deposit"),
+                    _specAddr("RegisterToken"),
                     _getHubChainId(),
                     BaseGate.Config({
                         attestor: ATTESTOR_ADDRESS,
@@ -336,8 +335,8 @@ contract Deploy is BaseScript {
                 creationCode: type(MasterGate).creationCode,
                 ctorArgs: abi.encode(
                     _specAddr("Dictate"),
-                    _specAddr("AccountModule"),
-                    _specAddr("RegisterModule"),
+                    _specAddr("Account"),
+                    _specAddr("RegisterToken"),
                     BaseGate.Config({
                         attestor: ATTESTOR_ADDRESS,
                         feeReceiver: RELAYER_ADDRESS,
@@ -352,10 +351,10 @@ contract Deploy is BaseScript {
         if (k == keccak256("ShareToken")) {
             return Meta({creationCode: type(ShareToken).creationCode, ctorArgs: "", isCore: false});
         }
-        if (k == keccak256("ShareModule")) {
+        if (k == keccak256("Issue")) {
             return Meta({
-                creationCode: type(ShareModule).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate"), _specAddr("AccountModule"), _specAddr("ShareToken")),
+                creationCode: type(Issue).creationCode,
+                ctorArgs: abi.encode(_specAddr("Dictate"), _specAddr("Account"), _specAddr("ShareToken")),
                 isCore: false
             });
         }
@@ -364,10 +363,11 @@ contract Deploy is BaseScript {
                 creationCode: type(RedeemStore).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: false
             });
         }
-        if (k == keccak256("RedeemModule")) {
-            return Meta({
-                creationCode: type(RedeemModule).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: false
-            });
+        if (k == keccak256("Redeem")) {
+            return
+                Meta({
+                    creationCode: type(Redeem).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: false
+                });
         }
         if (k == keccak256("AllocateStore")) {
             return Meta({
@@ -376,18 +376,14 @@ contract Deploy is BaseScript {
                 isCore: false
             });
         }
-        if (k == keccak256("SubscribeModule")) {
+        if (k == keccak256("Subscribe")) {
             return Meta({
-                creationCode: type(SubscribeModule).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate")),
-                isCore: false
+                creationCode: type(Subscribe).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: false
             });
         }
-        if (k == keccak256("AllocateModule")) {
+        if (k == keccak256("Allocate")) {
             return Meta({
-                creationCode: type(AllocateModule).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate")),
-                isCore: false
+                creationCode: type(Allocate).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: false
             });
         }
         if (k == keccak256("HubGate")) {
@@ -395,14 +391,14 @@ contract Deploy is BaseScript {
                 creationCode: type(HubGate).creationCode,
                 ctorArgs: abi.encode(
                     _specAddr("Dictate"),
-                    _specAddr("AccountModule"),
-                    _specAddr("ShareModule"),
-                    _specAddr("AllocateModule"),
+                    _specAddr("Account"),
+                    _specAddr("Issue"),
+                    _specAddr("Allocate"),
                     _specAddr("AllocateStore"),
-                    _specAddr("SubscribeModule"),
-                    _specAddr("RedeemModule"),
+                    _specAddr("Subscribe"),
+                    _specAddr("Redeem"),
                     _specAddr("RedeemStore"),
-                    _specAddr("RegisterModule"),
+                    _specAddr("RegisterToken"),
                     BaseGate.Config({
                         attestor: ATTESTOR_ADDRESS,
                         feeReceiver: RELAYER_ADDRESS,

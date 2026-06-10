@@ -7,7 +7,7 @@ import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
 
 import {Error} from "../utils/Error.sol";
-import {IAccount} from "./interface/IAccount.sol";
+import {IAccount} from "../utils/interfaces/IAccount.sol";
 
 abstract contract AccountBase is IAccount, IERC165 {
     mapping(bytes32 tokenId => uint signed) internal _signedBalanceMap;

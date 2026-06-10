@@ -1,4 +1,4 @@
-// This file is auto-generated from forge-artifacts/RegisterModule.sol/RegisterModule.json
+// This file is auto-generated from forge-artifacts/RegisterToken.sol/RegisterToken.json
 // Do not edit manually.
 
 export default [
@@ -64,7 +64,7 @@ export default [
       {
         "name": "",
         "type": "tuple",
-        "internalType": "struct RegisterModule.TokenInfo",
+        "internalType": "struct RegisterToken.TokenInfo",
         "components": [
           {
             "name": "token",

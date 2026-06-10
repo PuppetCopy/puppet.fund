@@ -181,10 +181,10 @@ export const HUB_GATE_INTENTS = {
       ]
     }
   },
-  fulfill: {
-    primaryType: 'FulfillIntent',
+  redeem: {
+    primaryType: 'RedeemIntent',
     types: {
-      FulfillIntent: [
+      RedeemIntent: [
       { name: 'params', type: 'AccountInitParams' },
       { name: 'blockNumber', type: 'uint256' },
       { name: 'deadline', type: 'uint256' },

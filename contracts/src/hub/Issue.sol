@@ -4,19 +4,19 @@ pragma solidity ^0.8.35;
 import {LibClone} from "solady/utils/LibClone.sol";
 
 import {ShareToken} from "./ShareToken.sol";
-import {ShareLib} from "./ShareLib.sol";
-import {AccountModule} from "../core/module/AccountModule.sol";
+import {ShareLib} from "../utils/ShareLib.sol";
+import {Account} from "../core/Account.sol";
 import {Error} from "../utils/Error.sol";
 import {Access} from "../utils/auth/Access.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";
 
-contract ShareModule is Access {
-    AccountModule public immutable accountModule;
+contract Issue is Access {
+    Account public immutable accountModule;
     address public immutable shareTokenImpl;
 
     constructor(
         IAuthority _authority,
-        AccountModule _accountModule,
+        Account _accountModule,
         address _shareTokenImpl
     ) Access(_authority) {
         if (address(_accountModule) == address(0) || _shareTokenImpl == address(0)) revert Error.Share__InvalidImpl();

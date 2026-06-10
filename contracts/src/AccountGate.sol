@@ -8,14 +8,14 @@ import {BaseGate} from "./utils/BaseGate.sol";
 import {CallLib} from "./utils/CallLib.sol";
 import {Error} from "./utils/Error.sol";
 import {IntentLib} from "./utils/IntentLib.sol";
-import {AccountLib} from "./core/AccountLib.sol";
+import {AccountLib} from "./utils/AccountLib.sol";
 import {IAuthority} from "./utils/interfaces/IAuthority.sol";
 
-import {AccountModule, CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH} from "./core/module/AccountModule.sol";
-import {WalletDepositModule} from "./core/module/WalletDepositModule.sol";
-import {RegisterModule} from "./core/module/RegisterModule.sol";
+import {Account, CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH} from "./core/Account.sol";
+import {Deposit} from "./core/Deposit.sol";
+import {RegisterToken} from "./core/RegisterToken.sol";
 import {PuppetAccount} from "./core/PuppetAccount.sol";
-import {IAccount} from "./core/interface/IAccount.sol";
+import {IAccount} from "./utils/interfaces/IAccount.sol";
 
 bytes32 constant RECOGNIZE_INTENT_TYPEHASH = keccak256(
     "RecognizeIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 tokenId,uint256 amount)AccountInitParams(address user,address signer)"
@@ -54,14 +54,14 @@ contract AccountGate is BaseGate, EIP712 {
         uint32 fillDeadline;
     }
 
-    WalletDepositModule internal immutable walletDepositModule;
+    Deposit internal immutable walletDepositModule;
     uint internal immutable hubChainId;
 
     constructor(
         IAuthority _authority,
-        AccountModule _accountModule,
-        WalletDepositModule _walletDeposit,
-        RegisterModule _register,
+        Account _accountModule,
+        Deposit _walletDeposit,
+        RegisterToken _register,
         uint _hubChainId,
         Config memory _config
     ) BaseGate(_authority, _accountModule, _register, _config) EIP712("AccountGate", "1") {
@@ -91,7 +91,7 @@ contract AccountGate is BaseGate, EIP712 {
     }
 
     function createPuppetAccount(
-        AccountModule.CreatePuppetAccountIntent calldata _intent,
+        Account.CreatePuppetAccountIntent calldata _intent,
         bytes calldata _userDeploySig,
         bytes calldata _signerProof,
         bytes calldata _userSignature,

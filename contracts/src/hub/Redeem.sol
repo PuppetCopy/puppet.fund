@@ -4,17 +4,17 @@ pragma solidity ^0.8.35;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {IAccount} from "../core/interface/IAccount.sol";
-import {AccountLib} from "../core/AccountLib.sol";
-import {AccountModule} from "../core/module/AccountModule.sol";
-import {ShareModule} from "./ShareModule.sol";
+import {IAccount} from "../utils/interfaces/IAccount.sol";
+import {AccountLib} from "../utils/AccountLib.sol";
+import {Account} from "../core/Account.sol";
+import {Issue} from "./Issue.sol";
 import {Access} from "../utils/auth/Access.sol";
 import {CallLib} from "../utils/CallLib.sol";
 import {Error} from "../utils/Error.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";
 import {Precision} from "../utils/Precision.sol";
 import {RedeemStore} from "./store/RedeemStore.sol";
-import {ShareLib} from "./ShareLib.sol";
+import {ShareLib} from "../utils/ShareLib.sol";
 import {ShareToken} from "./ShareToken.sol";
 
 bytes32 constant SELL_INTENT_TYPEHASH = keccak256(
@@ -25,11 +25,11 @@ bytes32 constant CLAIM_INTENT_TYPEHASH = keccak256(
     "ClaimIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,ShareInitParams share,uint256 amount)AccountInitParams(address user,address signer)ShareInitParams(address master,bytes32 baseTokenId,bytes32 name)"
 );
 
-bytes32 constant FULFILL_INTENT_TYPEHASH = keccak256(
-    "FulfillIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,ShareInitParams share,uint256 sharesOut,uint256 acceptableNetAssetValue,uint256 totalShareSupply,uint256 acceptableShares)AccountInitParams(address user,address signer)ShareInitParams(address master,bytes32 baseTokenId,bytes32 name)"
+bytes32 constant REDEEM_INTENT_TYPEHASH = keccak256(
+    "RedeemIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,ShareInitParams share,uint256 sharesOut,uint256 acceptableNetAssetValue,uint256 totalShareSupply,uint256 acceptableShares)AccountInitParams(address user,address signer)ShareInitParams(address master,bytes32 baseTokenId,bytes32 name)"
 );
 
-contract RedeemModule is Access {
+contract Redeem is Access {
     struct SellIntent {
         AccountLib.AccountInitParams params;
         uint blockNumber;
@@ -52,7 +52,7 @@ contract RedeemModule is Access {
         uint amount;
     }
 
-    struct FulfillIntent {
+    struct RedeemIntent {
         AccountLib.AccountInitParams params;
         uint blockNumber;
         uint deadline;
@@ -102,8 +102,8 @@ contract RedeemModule is Access {
         SellIntent calldata _intent,
         IAccount _holder,
         RedeemStore _store,
-        AccountModule _accountGate,
-        ShareModule _shareGate,
+        Account _accountGate,
+        Issue _shareGate,
         IERC20 _baseToken,
         address _fund,
         bytes32 _digest,
@@ -166,8 +166,8 @@ contract RedeemModule is Access {
     function claim(
         ClaimIntent calldata _intent,
         RedeemStore _store,
-        AccountModule _accountGate,
-        ShareModule _shareGate,
+        Account _accountGate,
+        Issue _shareGate,
         IERC20 _baseToken,
         address _fund,
         bytes32 _digest,
@@ -237,11 +237,11 @@ contract RedeemModule is Access {
         );
     }
 
-    function fulfill(
-        FulfillIntent calldata _intent,
+    function redeem(
+        RedeemIntent calldata _intent,
         RedeemStore _store,
-        AccountModule _accountGate,
-        ShareModule _shareGate,
+        Account _accountGate,
+        Issue _shareGate,
         IERC20 _baseToken,
         address _fund,
         bytes32 _digest,
@@ -252,11 +252,11 @@ contract RedeemModule is Access {
         address _feeReceiver,
         uint _actualRelayFee
     ) external auth {
-        if (_intent.acceptableNetAssetValue == 0) revert Error.Fulfill__ZeroAcceptableNav();
+        if (_intent.acceptableNetAssetValue == 0) revert Error.Redeem__ZeroAcceptableNav();
         ShareToken _shareToken = ShareToken(_shareGate.verifyShareToken(_intent.share));
         uint _supply = _shareToken.totalSupply();
         if (_supply != _intent.totalShareSupply) {
-            revert Error.Fulfill__SupplyMismatch(_supply, _intent.totalShareSupply);
+            revert Error.Redeem__SupplyMismatch(_supply, _intent.totalShareSupply);
         }
 
         uint _poolShares = _shareToken.balanceOf(address(_store));
@@ -299,8 +299,8 @@ contract RedeemModule is Access {
         uint _maxRetirable = _poolShares == _supply ? _poolShares : _poolShares >= 2 ? _poolShares - 1 : 0;
         uint _sharesRetired = _intent.acceptableShares < _maxRetirable ? _intent.acceptableShares : _maxRetirable;
         uint _drainedBase = Math.mulDiv(_sharesRetired, _intent.acceptableNetAssetValue, _supply);
-        if (_sharesRetired == 0) revert Error.Fulfill__NothingToRetire();
-        if (_drainedBase <= _actualRelayFee) revert Error.Fulfill__RelayFeeTooHigh();
+        if (_sharesRetired == 0) revert Error.Redeem__NothingToRetire();
+        if (_drainedBase <= _actualRelayFee) revert Error.Redeem__RelayFeeTooHigh();
         uint _netDrainedBase = _drainedBase - _actualRelayFee;
 
         _accountGate.dispatch(
@@ -325,7 +325,7 @@ contract RedeemModule is Access {
         _shareGate.burn(_shareToken, address(_store), _sharesRetired);
 
         _logEvent(
-            "Fulfill",
+            "Redeem",
             abi.encode(
                 _intent,
                 _fund,

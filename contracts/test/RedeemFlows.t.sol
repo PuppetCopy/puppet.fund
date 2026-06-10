@@ -2,21 +2,16 @@
 pragma solidity ^0.8.35;
 
 import {V2Base} from "./Base.t.sol";
-import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "src/hub/AllocateModule.sol";
-import {SubscribeModule, SUBSCRIBE_INTENT_TYPEHASH} from "src/hub/SubscribeModule.sol";
-import {
-    RedeemModule,
-    SELL_INTENT_TYPEHASH,
-    FULFILL_INTENT_TYPEHASH,
-    CLAIM_INTENT_TYPEHASH
-} from "src/hub/RedeemModule.sol";
+import {Allocate, ALLOCATE_INTENT_TYPEHASH} from "src/hub/Allocate.sol";
+import {Subscribe, SUBSCRIBE_INTENT_TYPEHASH} from "src/hub/Subscribe.sol";
+import {Redeem, SELL_INTENT_TYPEHASH, REDEEM_INTENT_TYPEHASH, CLAIM_INTENT_TYPEHASH} from "src/hub/Redeem.sol";
 import {RuleLib} from "src/utils/RuleLib.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
 import {Error} from "src/utils/Error.sol";
 
 contract RedeemFlowsTest is V2Base {
     function _allocateDigest(
-        AllocateModule.AllocateIntent memory _i
+        Allocate.AllocateIntent memory _i
     ) internal view returns (bytes32) {
         return _digest(
             hubGateDomain,
@@ -47,7 +42,7 @@ contract RedeemFlowsTest is V2Base {
         master = _makePuppet(_label);
         usdc.mint(accountModule.predictRoute(address(master.acct)), 100e6);
         fund = accountModule.predictFundAccount(address(master.acct));
-        AllocateModule.AllocateIntent memory a = AllocateModule.AllocateIntent({
+        Allocate.AllocateIntent memory a = Allocate.AllocateIntent({
             params: _params(master.user),
             share: _share(address(master.acct)),
             blockNumber: block.number,
@@ -83,7 +78,7 @@ contract RedeemFlowsTest is V2Base {
         );
         bytes32 rulesHash = keccak256(abi.encodePacked(ruleHash));
 
-        SubscribeModule.SubscribeIntent memory intent = SubscribeModule.SubscribeIntent({
+        Subscribe.SubscribeIntent memory intent = Subscribe.SubscribeIntent({
             params: _params(p.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -120,8 +115,8 @@ contract RedeemFlowsTest is V2Base {
         Puppet memory master,
         uint nonce,
         uint amount
-    ) internal view returns (AllocateModule.AllocateIntent memory a, bytes32 ad) {
-        a = AllocateModule.AllocateIntent({
+    ) internal view returns (Allocate.AllocateIntent memory a, bytes32 ad) {
+        a = Allocate.AllocateIntent({
             params: _params(master.user),
             share: _share(address(master.acct)),
             blockNumber: block.number,
@@ -138,12 +133,12 @@ contract RedeemFlowsTest is V2Base {
         ad = _allocateDigest(a);
     }
 
-    function test_sell_fulfill_claim_full_redeem_then_reopen() public {
+    function test_sell_redeem_claim_full_unwind_then_reopen() public {
         (Puppet memory master, address fund) = _seedFund("M");
         ShareToken share = hubGate.predictShareToken(_share(address(master.acct)));
         assertEq(share.totalSupply(), 100e6 * SP, "shares minted at SHARE_PRECISION");
 
-        RedeemModule.SellIntent memory s = RedeemModule.SellIntent({
+        Redeem.SellIntent memory s = Redeem.SellIntent({
             params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -173,7 +168,7 @@ contract RedeemFlowsTest is V2Base {
         master.nonce = 3;
         assertEq(share.balanceOf(address(redeemStore)), 100e6 * SP, "shares queued to store");
 
-        RedeemModule.FulfillIntent memory f = RedeemModule.FulfillIntent({
+        Redeem.RedeemIntent memory f = Redeem.RedeemIntent({
             params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -190,7 +185,7 @@ contract RedeemFlowsTest is V2Base {
             hubGateDomain,
             keccak256(
                 abi.encode(
-                    FULFILL_INTENT_TYPEHASH,
+                    REDEEM_INTENT_TYPEHASH,
                     _hashAccount(f.params.user, address(0)),
                     f.blockNumber,
                     f.deadline,
@@ -205,19 +200,19 @@ contract RedeemFlowsTest is V2Base {
                 )
             )
         );
-        hubGate.fulfill(f, _sign(master.key, fd), _sign(attestorKey, fd), 0);
+        hubGate.redeem(f, _sign(master.key, fd), _sign(attestorKey, fd), 0);
         master.nonce = 4;
         assertEq(share.totalSupply(), 0, "full unwind retires the entire store-held supply");
         assertEq(usdc.balanceOf(fund), 0, "fund base fully drained at NAV");
 
-        (AllocateModule.AllocateIntent memory ra, bytes32 rad) = _buildAllocate(master, 5, 50e6);
+        (Allocate.AllocateIntent memory ra, bytes32 rad) = _buildAllocate(master, 5, 50e6);
         bytes memory raUser = _sign(master.key, rad);
         bytes memory raAttestor = _sign(attestorKey, rad);
         vm.expectRevert(Error.Share__Empty.selector);
         hubGate.allocate(ra, new bytes[](0), new bytes[](0), raUser, raAttestor, 0);
 
         uint claimable = redeem.getClaimable(redeemStore, fund, address(master.acct));
-        RedeemModule.ClaimIntent memory c = RedeemModule.ClaimIntent({
+        Redeem.ClaimIntent memory c = Redeem.ClaimIntent({
             params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -258,7 +253,7 @@ contract RedeemFlowsTest is V2Base {
     }
 
     function _sellDigest(
-        RedeemModule.SellIntent memory s
+        Redeem.SellIntent memory s
     ) internal view returns (bytes32) {
         return _digest(
             hubGateDomain,
@@ -282,8 +277,8 @@ contract RedeemFlowsTest is V2Base {
         Puppet memory holder,
         uint nonce,
         uint sharesOut
-    ) internal view returns (RedeemModule.SellIntent memory) {
-        return RedeemModule.SellIntent({
+    ) internal view returns (Redeem.SellIntent memory) {
+        return Redeem.SellIntent({
             params: _params(holder.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -298,12 +293,12 @@ contract RedeemFlowsTest is V2Base {
     function test_sell_flushes_claimable_into_signed() public {
         (Puppet memory master, address fund) = _seedFund("M");
 
-        RedeemModule.SellIntent memory s1 = _sellIntent(master, master.nonce, 40e6 * SP);
+        Redeem.SellIntent memory s1 = _sellIntent(master, master.nonce, 40e6 * SP);
         bytes32 s1d = _sellDigest(s1);
         hubGate.sell(s1, _sign(master.key, s1d), _sign(attestorKey, s1d), 0);
         master.nonce = 3;
 
-        RedeemModule.FulfillIntent memory f = RedeemModule.FulfillIntent({
+        Redeem.RedeemIntent memory f = Redeem.RedeemIntent({
             params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -320,7 +315,7 @@ contract RedeemFlowsTest is V2Base {
             hubGateDomain,
             keccak256(
                 abi.encode(
-                    FULFILL_INTENT_TYPEHASH,
+                    REDEEM_INTENT_TYPEHASH,
                     _hashAccount(f.params.user, address(0)),
                     f.blockNumber,
                     f.deadline,
@@ -335,14 +330,14 @@ contract RedeemFlowsTest is V2Base {
                 )
             )
         );
-        hubGate.fulfill(f, _sign(master.key, fd), _sign(attestorKey, fd), 0);
+        hubGate.redeem(f, _sign(master.key, fd), _sign(attestorKey, fd), 0);
         master.nonce = 4;
 
         uint claimable = redeem.getClaimable(redeemStore, fund, address(master.acct));
-        assertGt(claimable, 0, "partial fulfill accrued to queued stake");
+        assertGt(claimable, 0, "partial redeem accrued to queued stake");
         assertEq(usdc.balanceOf(address(master.acct)), 0, "nothing paid yet");
 
-        RedeemModule.SellIntent memory s2 = _sellIntent(master, master.nonce, 60e6 * SP);
+        Redeem.SellIntent memory s2 = _sellIntent(master, master.nonce, 60e6 * SP);
         bytes32 s2d = _sellDigest(s2);
         hubGate.sell(s2, _sign(master.key, s2d), _sign(attestorKey, s2d), 0);
 
@@ -351,14 +346,14 @@ contract RedeemFlowsTest is V2Base {
         assertEq(redeem.getClaimable(redeemStore, fund, address(master.acct)), 0, "accrued reset after flush");
     }
 
-    function _fulfillDigest(
-        RedeemModule.FulfillIntent memory f
+    function _redeemDigest(
+        Redeem.RedeemIntent memory f
     ) internal view returns (bytes32) {
         return _digest(
             hubGateDomain,
             keccak256(
                 abi.encode(
-                    FULFILL_INTENT_TYPEHASH,
+                    REDEEM_INTENT_TYPEHASH,
                     _hashAccount(f.params.user, address(0)),
                     f.blockNumber,
                     f.deadline,
@@ -375,10 +370,10 @@ contract RedeemFlowsTest is V2Base {
         );
     }
 
-    function test_fulfill_self_sell_then_claim_reopens() public {
+    function test_redeem_self_sell_then_claim_reopens() public {
         (Puppet memory master, address fund) = _seedFund("M");
 
-        RedeemModule.FulfillIntent memory f = RedeemModule.FulfillIntent({
+        Redeem.RedeemIntent memory f = Redeem.RedeemIntent({
             params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -391,8 +386,8 @@ contract RedeemFlowsTest is V2Base {
             totalShareSupply: 100e6 * SP,
             acceptableShares: type(uint).max
         });
-        bytes32 fd = _fulfillDigest(f);
-        hubGate.fulfill(f, _sign(master.key, fd), _sign(attestorKey, fd), 0);
+        bytes32 fd = _redeemDigest(f);
+        hubGate.redeem(f, _sign(master.key, fd), _sign(attestorKey, fd), 0);
         master.nonce = 3;
 
         ShareToken share = hubGate.predictShareToken(_share(address(master.acct)));
@@ -402,7 +397,7 @@ contract RedeemFlowsTest is V2Base {
         uint claimable = redeem.getClaimable(redeemStore, fund, address(master.acct));
         assertEq(claimable, 98e6, "drain accrued to the master stake");
 
-        RedeemModule.ClaimIntent memory c = RedeemModule.ClaimIntent({
+        Redeem.ClaimIntent memory c = Redeem.ClaimIntent({
             params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,

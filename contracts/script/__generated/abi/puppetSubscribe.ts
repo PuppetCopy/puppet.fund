@@ -1,4 +1,4 @@
-// This file is auto-generated from forge-artifacts/SubscribeModule.sol/SubscribeModule.json
+// This file is auto-generated from forge-artifacts/Subscribe.sol/Subscribe.json
 // Do not edit manually.
 
 export default [
@@ -70,7 +70,7 @@ export default [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct SubscribeModule.SubscribeIntent",
+        "internalType": "struct Subscribe.SubscribeIntent",
         "components": [
           {
             "name": "params",
@@ -146,7 +146,7 @@ export default [
       {
         "name": "_accountGate",
         "type": "address",
-        "internalType": "contract AccountModule"
+        "internalType": "contract Account"
       },
       {
         "name": "_store",

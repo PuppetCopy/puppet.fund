@@ -8,28 +8,23 @@ import {BaseGate} from "./utils/BaseGate.sol";
 import {CallLib} from "./utils/CallLib.sol";
 import {Error} from "./utils/Error.sol";
 import {IntentLib} from "./utils/IntentLib.sol";
-import {AccountLib} from "./core/AccountLib.sol";
+import {AccountLib} from "./utils/AccountLib.sol";
 import {RuleLib} from "./utils/RuleLib.sol";
 import {IAuthority} from "./utils/interfaces/IAuthority.sol";
 
-import {AccountModule} from "./core/module/AccountModule.sol";
+import {Account} from "./core/Account.sol";
 import {PuppetAccount} from "./core/PuppetAccount.sol";
 import {FundAccount} from "./core/FundAccount.sol";
-import {IAccount} from "./core/interface/IAccount.sol";
-import {ShareModule} from "./hub/ShareModule.sol";
+import {IAccount} from "./utils/interfaces/IAccount.sol";
+import {Issue} from "./hub/Issue.sol";
 import {ShareToken} from "./hub/ShareToken.sol";
-import {ShareLib} from "./hub/ShareLib.sol";
-import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "./hub/AllocateModule.sol";
+import {ShareLib} from "./utils/ShareLib.sol";
+import {Allocate, ALLOCATE_INTENT_TYPEHASH} from "./hub/Allocate.sol";
 import {AllocateStore} from "./hub/store/AllocateStore.sol";
-import {SubscribeModule, SUBSCRIBE_INTENT_TYPEHASH} from "./hub/SubscribeModule.sol";
-import {
-    RedeemModule,
-    SELL_INTENT_TYPEHASH,
-    CLAIM_INTENT_TYPEHASH,
-    FULFILL_INTENT_TYPEHASH
-} from "./hub/RedeemModule.sol";
+import {Subscribe, SUBSCRIBE_INTENT_TYPEHASH} from "./hub/Subscribe.sol";
+import {Redeem, SELL_INTENT_TYPEHASH, CLAIM_INTENT_TYPEHASH, REDEEM_INTENT_TYPEHASH} from "./hub/Redeem.sol";
 import {RedeemStore} from "./hub/store/RedeemStore.sol";
-import {RegisterModule} from "./core/module/RegisterModule.sol";
+import {RegisterToken} from "./core/RegisterToken.sol";
 
 bytes32 constant WITHDRAW_TO_WALLET_INTENT_TYPEHASH = keccak256(
     "WithdrawToWalletIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 tokenId,uint256 amount)AccountInitParams(address user,address signer)"
@@ -70,23 +65,23 @@ contract HubGate is BaseGate, EIP712 {
         uint32 fillDeadline;
     }
 
-    ShareModule internal immutable shareModule;
-    AllocateModule internal immutable allocateModule;
+    Issue internal immutable shareModule;
+    Allocate internal immutable allocateModule;
     AllocateStore internal immutable allocateStore;
-    SubscribeModule internal immutable subscribeModule;
-    RedeemModule internal immutable redeemModule;
+    Subscribe internal immutable subscribeModule;
+    Redeem internal immutable redeemModule;
     RedeemStore internal immutable redeemStore;
 
     constructor(
         IAuthority _authority,
-        AccountModule _accountGate,
-        ShareModule _shareGate,
-        AllocateModule _allocate,
+        Account _accountGate,
+        Issue _shareGate,
+        Allocate _allocate,
         AllocateStore _allocateStore,
-        SubscribeModule _subscribe,
-        RedeemModule _redeem,
+        Subscribe _subscribe,
+        Redeem _redeem,
         RedeemStore _redeemStore,
-        RegisterModule _register,
+        RegisterToken _register,
         Config memory _config
     ) BaseGate(_authority, _accountGate, _register, _config) EIP712("HubGate", "1") {
         if (
@@ -109,7 +104,7 @@ contract HubGate is BaseGate, EIP712 {
     }
 
     function subscribe(
-        SubscribeModule.SubscribeIntent calldata _intent,
+        Subscribe.SubscribeIntent calldata _intent,
         bytes calldata _userSignature,
         bytes calldata _attestorSignature,
         uint _actualRelayFee
@@ -158,7 +153,7 @@ contract HubGate is BaseGate, EIP712 {
     }
 
     function allocate(
-        AllocateModule.AllocateIntent calldata _intent,
+        Allocate.AllocateIntent calldata _intent,
         bytes[] calldata _bodyList,
         bytes[] calldata _mandateList,
         bytes calldata _userSignature,
@@ -170,10 +165,9 @@ contract HubGate is BaseGate, EIP712 {
         IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
         IERC20 _base =
             IntentLib.verifyTokenAndCap(registerModule, _intent.share.baseTokenId, address(0), _intent.masterAmount);
-        if (address(accountModule.verifyPuppetAccount(_intent.params)) != _intent.share.master) {
-            revert Error.Share__MasterMismatch(
-                address(accountModule.verifyPuppetAccount(_intent.params)), _intent.share.master
-            );
+        PuppetAccount _master = accountModule.verifyPuppetAccount(_intent.params);
+        if (address(_master) != _intent.share.master) {
+            revert Error.Share__MasterMismatch(address(_master), _intent.share.master);
         }
 
         bytes32 _digest = _hashTypedDataV4(
@@ -217,7 +211,7 @@ contract HubGate is BaseGate, EIP712 {
     }
 
     function sell(
-        RedeemModule.SellIntent calldata _intent,
+        Redeem.SellIntent calldata _intent,
         bytes calldata _userSignature,
         bytes calldata _attestorSignature,
         uint _actualRelayFee
@@ -275,7 +269,7 @@ contract HubGate is BaseGate, EIP712 {
     }
 
     function claim(
-        RedeemModule.ClaimIntent calldata _intent,
+        Redeem.ClaimIntent calldata _intent,
         bytes calldata _userSignature,
         bytes calldata _attestorSignature,
         uint _actualRelayFee
@@ -322,8 +316,8 @@ contract HubGate is BaseGate, EIP712 {
         );
     }
 
-    function fulfill(
-        RedeemModule.FulfillIntent calldata _intent,
+    function redeem(
+        Redeem.RedeemIntent calldata _intent,
         bytes calldata _userSignature,
         bytes calldata _attestorSignature,
         uint _actualRelayFee
@@ -341,7 +335,7 @@ contract HubGate is BaseGate, EIP712 {
         bytes32 _digest = _hashTypedDataV4(
             keccak256(
                 abi.encode(
-                    FULFILL_INTENT_TYPEHASH,
+                    REDEEM_INTENT_TYPEHASH,
                     AccountLib.hashAccount(_intent.params),
                     _intent.blockNumber,
                     _intent.deadline,
@@ -358,7 +352,7 @@ contract HubGate is BaseGate, EIP712 {
         );
 
         IntentLib.verifyRelayFeeRatio(_actualRelayFee, _intent.acceptableNetAssetValue, maxRelayFeeBps);
-        redeemModule.fulfill(
+        redeemModule.redeem(
             _intent,
             redeemStore,
             accountModule,

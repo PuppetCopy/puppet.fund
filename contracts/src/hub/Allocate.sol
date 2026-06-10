@@ -4,10 +4,10 @@ pragma solidity ^0.8.35;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
-import {IAccount} from "../core/interface/IAccount.sol";
-import {AccountLib} from "../core/AccountLib.sol";
-import {AccountModule} from "../core/module/AccountModule.sol";
-import {ShareModule} from "./ShareModule.sol";
+import {IAccount} from "../utils/interfaces/IAccount.sol";
+import {AccountLib} from "../utils/AccountLib.sol";
+import {Account} from "../core/Account.sol";
+import {Issue} from "./Issue.sol";
 import {RuleLib} from "../utils/RuleLib.sol";
 import {AllocateStore} from "./store/AllocateStore.sol";
 import {RedeemStore} from "./store/RedeemStore.sol";
@@ -16,7 +16,7 @@ import {CallLib} from "../utils/CallLib.sol";
 import {Error} from "../utils/Error.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";
 import {ShareToken} from "./ShareToken.sol";
-import {ShareLib} from "./ShareLib.sol";
+import {ShareLib} from "../utils/ShareLib.sol";
 
 bytes32 constant ALLOCATE_INTENT_TYPEHASH = keccak256(
     "AllocateIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,ShareInitParams share,uint256 acceptableNetAssetValue,uint256 totalShareSupply,uint256 masterAmount,bytes32 puppetListHash,bytes32 matchedAmountListHash)AccountInitParams(address user,address signer)ShareInitParams(address master,bytes32 baseTokenId,bytes32 name)"
@@ -24,7 +24,7 @@ bytes32 constant ALLOCATE_INTENT_TYPEHASH = keccak256(
 
 uint constant SHARE_PRECISION = 1e12;
 
-contract AllocateModule is Access {
+contract Allocate is Access {
     struct AllocateIntent {
         AccountLib.AccountInitParams params;
         uint blockNumber;
@@ -56,8 +56,8 @@ contract AllocateModule is Access {
         AllocateIntent calldata _intent,
         bytes[] calldata _bodyList,
         bytes[] calldata _mandateList,
-        AccountModule _accountGate,
-        ShareModule _shareGate,
+        Account _accountGate,
+        Issue _shareGate,
         AllocateStore _store,
         RedeemStore _redeemStore,
         IERC20 _base,

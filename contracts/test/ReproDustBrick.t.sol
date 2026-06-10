@@ -4,21 +4,16 @@ pragma solidity ^0.8.35;
 import {stdError} from "forge-std/src/Test.sol";
 
 import {V2Base} from "./Base.t.sol";
-import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "src/hub/AllocateModule.sol";
-import {SubscribeModule, SUBSCRIBE_INTENT_TYPEHASH} from "src/hub/SubscribeModule.sol";
-import {
-    RedeemModule,
-    SELL_INTENT_TYPEHASH,
-    FULFILL_INTENT_TYPEHASH,
-    CLAIM_INTENT_TYPEHASH
-} from "src/hub/RedeemModule.sol";
+import {Allocate, ALLOCATE_INTENT_TYPEHASH} from "src/hub/Allocate.sol";
+import {Subscribe, SUBSCRIBE_INTENT_TYPEHASH} from "src/hub/Subscribe.sol";
+import {Redeem, SELL_INTENT_TYPEHASH, REDEEM_INTENT_TYPEHASH, CLAIM_INTENT_TYPEHASH} from "src/hub/Redeem.sol";
 import {RuleLib, MANDATE_TYPEHASH} from "src/utils/RuleLib.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
 import {Error} from "src/utils/Error.sol";
 
 contract ReproDustBrickTest is V2Base {
     function _allocateDigest(
-        AllocateModule.AllocateIntent memory _i
+        Allocate.AllocateIntent memory _i
     ) internal view returns (bytes32) {
         return _digest(
             hubGateDomain,
@@ -43,7 +38,7 @@ contract ReproDustBrickTest is V2Base {
     }
 
     function _sellDigest(
-        RedeemModule.SellIntent memory _s
+        Redeem.SellIntent memory _s
     ) internal view returns (bytes32) {
         return _digest(
             hubGateDomain,
@@ -67,8 +62,8 @@ contract ReproDustBrickTest is V2Base {
         Puppet memory _holder,
         address _master,
         uint _sharesOut
-    ) internal view returns (RedeemModule.SellIntent memory) {
-        return RedeemModule.SellIntent({
+    ) internal view returns (Redeem.SellIntent memory) {
+        return Redeem.SellIntent({
             params: _params(_holder.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -103,7 +98,7 @@ contract ReproDustBrickTest is V2Base {
                 keccak256(rules[0].mandate)
             )
         );
-        SubscribeModule.SubscribeIntent memory sub = SubscribeModule.SubscribeIntent({
+        Subscribe.SubscribeIntent memory sub = Subscribe.SubscribeIntent({
             params: _params(p.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -141,7 +136,7 @@ contract ReproDustBrickTest is V2Base {
         bytes[] memory mandateList = new bytes[](1);
         mandateList[0] = mandateSig;
 
-        AllocateModule.AllocateIntent memory a = AllocateModule.AllocateIntent({
+        Allocate.AllocateIntent memory a = Allocate.AllocateIntent({
             params: _params(master.user),
             share: _share(address(master.acct)),
             blockNumber: block.number,
@@ -164,12 +159,12 @@ contract ReproDustBrickTest is V2Base {
         assertEq(share.balanceOf(address(master.acct)), 100e6 * SP, "master shares");
         assertEq(usdc.balanceOf(fund), 98e6 + 1, "fund base after fee");
 
-        RedeemModule.SellIntent memory sp = _sellIntent(p, address(master.acct), 1 * SP);
+        Redeem.SellIntent memory sp = _sellIntent(p, address(master.acct), 1 * SP);
         bytes32 spd = _sellDigest(sp);
         hubGate.sell(sp, _sign(p.key, spd), _sign(attestorKey, spd), 0);
         p.nonce = 3;
 
-        RedeemModule.SellIntent memory sm = _sellIntent(master, address(master.acct), 100e6 * SP);
+        Redeem.SellIntent memory sm = _sellIntent(master, address(master.acct), 100e6 * SP);
         bytes32 smd = _sellDigest(sm);
         hubGate.sell(sm, _sign(master.key, smd), _sign(attestorKey, smd), 0);
         master.nonce = 3;
@@ -177,7 +172,7 @@ contract ReproDustBrickTest is V2Base {
         uint supply = share.totalSupply();
         assertEq(share.balanceOf(address(redeemStore)), supply, "store holds entire supply");
 
-        RedeemModule.FulfillIntent memory f = RedeemModule.FulfillIntent({
+        Redeem.RedeemIntent memory f = Redeem.RedeemIntent({
             params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -194,7 +189,7 @@ contract ReproDustBrickTest is V2Base {
             hubGateDomain,
             keccak256(
                 abi.encode(
-                    FULFILL_INTENT_TYPEHASH,
+                    REDEEM_INTENT_TYPEHASH,
                     _hashAccount(f.params.user, address(0)),
                     f.blockNumber,
                     f.deadline,
@@ -209,11 +204,11 @@ contract ReproDustBrickTest is V2Base {
                 )
             )
         );
-        hubGate.fulfill(f, _sign(master.key, fd), _sign(attestorKey, fd), 0);
+        hubGate.redeem(f, _sign(master.key, fd), _sign(attestorKey, fd), 0);
         master.nonce = 4;
         assertEq(share.totalSupply(), 0, "full retire");
 
-        RedeemModule.SellIntent memory sBlocked = _sellIntent(master, address(master.acct), 1);
+        Redeem.SellIntent memory sBlocked = _sellIntent(master, address(master.acct), 1);
         bytes32 sbd = _sellDigest(sBlocked);
         bytes memory sbu = _sign(master.key, sbd);
         bytes memory sba = _sign(attestorKey, sbd);
@@ -227,7 +222,7 @@ contract ReproDustBrickTest is V2Base {
         emit log_named_uint("puppet stake", redeemStore.getPosition(fund, address(p.acct)).stake);
         assertEq(claimableP, 0, "dust staker entitlement floors to zero");
 
-        RedeemModule.ClaimIntent memory cm = RedeemModule.ClaimIntent({
+        Redeem.ClaimIntent memory cm = Redeem.ClaimIntent({
             params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -258,7 +253,7 @@ contract ReproDustBrickTest is V2Base {
 
         assertEq(redeemStore.getPool(fund).totalStake, 1 * SP, "dust stake stranded");
 
-        RedeemModule.ClaimIntent memory cp = RedeemModule.ClaimIntent({
+        Redeem.ClaimIntent memory cp = Redeem.ClaimIntent({
             params: _params(p.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -290,7 +285,7 @@ contract ReproDustBrickTest is V2Base {
         hubGate.claim(cp, cpu, cpa, 0);
 
         usdc.mint(accountModule.predictRoute(address(master.acct)), 50e6);
-        AllocateModule.AllocateIntent memory ra = AllocateModule.AllocateIntent({
+        Allocate.AllocateIntent memory ra = Allocate.AllocateIntent({
             params: _params(master.user),
             share: _share(address(master.acct)),
             blockNumber: block.number,
@@ -336,7 +331,7 @@ contract ReproDustBrickTest is V2Base {
                 keccak256(rules[0].mandate)
             )
         );
-        SubscribeModule.SubscribeIntent memory sub = SubscribeModule.SubscribeIntent({
+        Subscribe.SubscribeIntent memory sub = Subscribe.SubscribeIntent({
             params: _params(p.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -374,7 +369,7 @@ contract ReproDustBrickTest is V2Base {
         bytes[] memory mandateList = new bytes[](1);
         mandateList[0] = mandateSig;
 
-        AllocateModule.AllocateIntent memory a = AllocateModule.AllocateIntent({
+        Allocate.AllocateIntent memory a = Allocate.AllocateIntent({
             params: _params(master.user),
             share: _share(address(master.acct)),
             blockNumber: block.number,
@@ -395,18 +390,18 @@ contract ReproDustBrickTest is V2Base {
         ShareToken share = hubGate.predictShareToken(_share(address(master.acct)));
         assertEq(usdc.balanceOf(fund), 98e6, "fund base after fee");
 
-        RedeemModule.SellIntent memory sp = _sellIntent(p, address(master.acct), 40e6 * SP);
+        Redeem.SellIntent memory sp = _sellIntent(p, address(master.acct), 40e6 * SP);
         bytes32 spd = _sellDigest(sp);
         hubGate.sell(sp, _sign(p.key, spd), _sign(attestorKey, spd), 0);
         p.nonce = 3;
 
-        RedeemModule.SellIntent memory sm = _sellIntent(master, address(master.acct), 60e6 * SP);
+        Redeem.SellIntent memory sm = _sellIntent(master, address(master.acct), 60e6 * SP);
         bytes32 smd = _sellDigest(sm);
         hubGate.sell(sm, _sign(master.key, smd), _sign(attestorKey, smd), 0);
         master.nonce = 3;
 
         uint supply = share.totalSupply();
-        RedeemModule.FulfillIntent memory f = RedeemModule.FulfillIntent({
+        Redeem.RedeemIntent memory f = Redeem.RedeemIntent({
             params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -423,7 +418,7 @@ contract ReproDustBrickTest is V2Base {
             hubGateDomain,
             keccak256(
                 abi.encode(
-                    FULFILL_INTENT_TYPEHASH,
+                    REDEEM_INTENT_TYPEHASH,
                     _hashAccount(f.params.user, address(0)),
                     f.blockNumber,
                     f.deadline,
@@ -438,7 +433,7 @@ contract ReproDustBrickTest is V2Base {
                 )
             )
         );
-        hubGate.fulfill(f, _sign(master.key, fd), _sign(attestorKey, fd), 0);
+        hubGate.redeem(f, _sign(master.key, fd), _sign(attestorKey, fd), 0);
         master.nonce = 4;
 
         uint claimableP = redeem.getClaimable(redeemStore, fund, address(p.acct));
@@ -446,7 +441,7 @@ contract ReproDustBrickTest is V2Base {
         emit log_named_uint("puppet claimable", claimableP);
         emit log_named_uint("master claimable", claimableM);
 
-        RedeemModule.ClaimIntent memory cp = RedeemModule.ClaimIntent({
+        Redeem.ClaimIntent memory cp = Redeem.ClaimIntent({
             params: _params(p.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -475,7 +470,7 @@ contract ReproDustBrickTest is V2Base {
         hubGate.claim(cp, _sign(p.key, cpd), _sign(attestorKey, cpd), 0);
         p.nonce = 4;
 
-        RedeemModule.ClaimIntent memory cm = RedeemModule.ClaimIntent({
+        Redeem.ClaimIntent memory cm = Redeem.ClaimIntent({
             params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -508,7 +503,7 @@ contract ReproDustBrickTest is V2Base {
         emit log_named_uint("stranded store base", usdc.balanceOf(address(redeemStore)));
 
         usdc.mint(accountModule.predictRoute(address(master.acct)), 50e6);
-        AllocateModule.AllocateIntent memory ra = AllocateModule.AllocateIntent({
+        Allocate.AllocateIntent memory ra = Allocate.AllocateIntent({
             params: _params(master.user),
             share: _share(address(master.acct)),
             blockNumber: block.number,

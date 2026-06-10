@@ -2,13 +2,13 @@
 pragma solidity ^0.8.35;
 
 import {V2Base} from "./Base.t.sol";
-import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "src/hub/AllocateModule.sol";
+import {Allocate, ALLOCATE_INTENT_TYPEHASH} from "src/hub/Allocate.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
-import {ShareLib} from "src/hub/ShareLib.sol";
+import {ShareLib} from "src/utils/ShareLib.sol";
 
 contract HubFlowsTest is V2Base {
     function _allocateDigest(
-        AllocateModule.AllocateIntent memory _intent
+        Allocate.AllocateIntent memory _intent
     ) internal view returns (bytes32) {
         bytes32 structHash = keccak256(
             abi.encode(
@@ -35,7 +35,7 @@ contract HubFlowsTest is V2Base {
         usdc.mint(accountModule.predictRoute(address(master.acct)), 100e6); // master stake staged at its route
         address fund = accountModule.predictFundAccount(address(master.acct));
 
-        AllocateModule.AllocateIntent memory intent = AllocateModule.AllocateIntent({
+        Allocate.AllocateIntent memory intent = Allocate.AllocateIntent({
             params: _params(master.user),
             share: _share(address(master.acct)),
             blockNumber: block.number,
@@ -68,7 +68,7 @@ contract HubFlowsTest is V2Base {
         Puppet memory master = _makePuppet("M");
         address fund = accountModule.predictFundAccount(address(master.acct));
 
-        AllocateModule.AllocateIntent memory intent = AllocateModule.AllocateIntent({
+        Allocate.AllocateIntent memory intent = Allocate.AllocateIntent({
             params: _params(master.user),
             share: ShareLib.ShareInitParams({
                 master: address(master.acct), baseTokenId: USDC_ID, name: bytes32("Shadow")

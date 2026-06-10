@@ -3,13 +3,13 @@ pragma solidity ^0.8.35;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {Access} from "../../utils/auth/Access.sol";
-import {Error} from "../../utils/Error.sol";
-import {TransferUtils} from "../../utils/TransferUtils.sol";
-import {IAuthority} from "../../utils/interfaces/IAuthority.sol";
-import {IWNT} from "../../utils/interfaces/IWNT.sol";
+import {Access} from "../utils/auth/Access.sol";
+import {Error} from "../utils/Error.sol";
+import {TransferUtils} from "../utils/TransferUtils.sol";
+import {IAuthority} from "../utils/interfaces/IAuthority.sol";
+import {IWNT} from "../utils/interfaces/IWNT.sol";
 
-contract WalletDepositModule is Access {
+contract Deposit is Access {
     constructor(
         IAuthority _authority
     ) Access(_authority) {}
@@ -21,12 +21,10 @@ contract WalletDepositModule is Access {
         uint _amount,
         uint _gasLimit
     ) external auth {
-        if (_amount == 0) revert Error.WalletDeposit__ZeroAmount();
+        if (_amount == 0) revert Error.Deposit__ZeroAmount();
         TransferUtils.transferStrictlyFrom(_token, _depositor, _recipient, _amount, _gasLimit);
         uint _depositPostBalance = _token.balanceOf(_recipient);
-        _logEvent(
-            "WalletDeposit", abi.encode(block.chainid, _depositor, _recipient, _token, _amount, _depositPostBalance)
-        );
+        _logEvent("Deposit", abi.encode(block.chainid, _depositor, _recipient, _token, _amount, _depositPostBalance));
     }
 
     function depositWnt(
@@ -35,14 +33,13 @@ contract WalletDepositModule is Access {
         IWNT _wnt,
         uint _gasLimit
     ) external payable auth {
-        if (msg.value == 0) revert Error.WalletDeposit__ZeroAmount();
+        if (msg.value == 0) revert Error.Deposit__ZeroAmount();
         _wnt.deposit{value: msg.value}();
         IERC20 _wntErc20 = IERC20(address(_wnt));
         TransferUtils.transferStrictly(_wntErc20, _recipient, msg.value, _gasLimit);
         uint _depositPostBalance = _wntErc20.balanceOf(_recipient);
         _logEvent(
-            "WalletDeposit",
-            abi.encode(block.chainid, _depositor, _recipient, _wntErc20, msg.value, _depositPostBalance)
+            "Deposit", abi.encode(block.chainid, _depositor, _recipient, _wntErc20, msg.value, _depositPostBalance)
         );
     }
 }

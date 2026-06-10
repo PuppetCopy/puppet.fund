@@ -1,4 +1,4 @@
-// This file is auto-generated from forge-artifacts/AllocateModule.sol/AllocateModule.json
+// This file is auto-generated from forge-artifacts/Allocate.sol/Allocate.json
 // Do not edit manually.
 
 export default [
@@ -20,7 +20,7 @@ export default [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct AllocateModule.AllocateIntent",
+        "internalType": "struct Allocate.AllocateIntent",
         "components": [
           {
             "name": "params",
@@ -126,12 +126,12 @@ export default [
       {
         "name": "_accountGate",
         "type": "address",
-        "internalType": "contract AccountModule"
+        "internalType": "contract Account"
       },
       {
         "name": "_shareGate",
         "type": "address",
-        "internalType": "contract ShareModule"
+        "internalType": "contract Issue"
       },
       {
         "name": "_store",

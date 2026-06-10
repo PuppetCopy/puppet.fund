@@ -3,21 +3,21 @@ pragma solidity ^0.8.35;
 
 import {LibClone} from "solady/utils/LibClone.sol";
 
-import {IAccount} from "../interface/IAccount.sol";
-import {AccountLib} from "../AccountLib.sol";
-import {PuppetAccount} from "../PuppetAccount.sol";
-import {FundAccount} from "../FundAccount.sol";
-import {Attest} from "../Attest.sol";
-import {Permission} from "../../utils/auth/Permission.sol";
-import {Error} from "../../utils/Error.sol";
-import {NonceLib} from "../../utils/NonceLib.sol";
-import {IAuthority} from "../../utils/interfaces/IAuthority.sol";
+import {IAccount} from "../utils/interfaces/IAccount.sol";
+import {AccountLib} from "../utils/AccountLib.sol";
+import {PuppetAccount} from "./PuppetAccount.sol";
+import {FundAccount} from "./FundAccount.sol";
+import {Attest} from "./Attest.sol";
+import {Permission} from "../utils/auth/Permission.sol";
+import {Error} from "../utils/Error.sol";
+import {NonceLib} from "../utils/NonceLib.sol";
+import {IAuthority} from "../utils/interfaces/IAuthority.sol";
 
 bytes32 constant CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH = keccak256(
     "CreatePuppetAccountIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 tokenId,uint256 initialDepositAmount)AccountInitParams(address user,address signer)"
 );
 
-contract AccountModule is Permission {
+contract Account is Permission {
     struct CreatePuppetAccountIntent {
         AccountLib.AccountInitParams params;
         uint blockNumber;
@@ -34,25 +34,25 @@ contract AccountModule is Permission {
     Attest public immutable attest;
     address public immutable puppetAccountImpl;
     address public immutable fundAccountImpl;
-    address public immutable passthroughRouteImpl;
+    address public immutable routeImpl;
 
     constructor(
         IAuthority _authority,
         Attest _attest,
         address _puppetAccountImpl,
         address _fundAccountImpl,
-        address _passthroughRouteImpl
+        address _routeImpl
     ) Permission(_authority) {
         if (
             address(_attest) == address(0) || _puppetAccountImpl == address(0) || _fundAccountImpl == address(0)
-                || _passthroughRouteImpl == address(0)
+                || _routeImpl == address(0)
         ) {
             revert Error.Register__InvalidImpl();
         }
         attest = _attest;
         puppetAccountImpl = _puppetAccountImpl;
         fundAccountImpl = _fundAccountImpl;
-        passthroughRouteImpl = _passthroughRouteImpl;
+        routeImpl = _routeImpl;
     }
 
     function predictPuppetAccount(
@@ -82,7 +82,7 @@ contract AccountModule is Permission {
     function predictRoute(
         address _account
     ) external view returns (address) {
-        return AccountLib.predictRoute(passthroughRouteImpl, address(this), _account);
+        return AccountLib.predictRoute(routeImpl, address(this), _account);
     }
 
     function isNonceConsumed(
@@ -95,10 +95,7 @@ contract AccountModule is Permission {
     function _deployRoute(
         address _account
     ) private returns (address) {
-        return
-            LibClone.cloneDeterministic(
-                passthroughRouteImpl, abi.encodePacked(_account), bytes32(uint(uint160(_account)))
-            );
+        return LibClone.cloneDeterministic(routeImpl, abi.encodePacked(_account), bytes32(uint(uint160(_account))));
     }
 
     function createPuppetAccount(

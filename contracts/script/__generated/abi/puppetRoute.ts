@@ -1,4 +1,4 @@
-// This file is auto-generated from forge-artifacts/PassthroughRoute.sol/PassthroughRoute.json
+// This file is auto-generated from forge-artifacts/Route.sol/Route.json
 // Do not edit manually.
 
 export default [
@@ -62,7 +62,7 @@ export default [
   },
   {
     "type": "error",
-    "name": "PassthroughRoute__Unauthorized",
+    "name": "Route__Unauthorized",
     "inputs": []
   }
 ] as const

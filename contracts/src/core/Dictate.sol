@@ -4,7 +4,7 @@ pragma solidity ^0.8.35;
 import {Error} from "../utils/Error.sol";
 import {Access} from "../utils/auth/Access.sol";
 import {Permission} from "../utils/auth/Permission.sol";
-import {RouterProxy} from "../utils/ProxyRouter.sol";
+import {RouterProxy} from "../utils/RouterProxy.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";
 
 contract Dictate is IAuthority {

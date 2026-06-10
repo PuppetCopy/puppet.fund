@@ -2,6 +2,17 @@
 
 import type { Address, Hex } from 'viem'
 
+export interface IAccount__CreatePuppetAccountIntent {
+  params: IAccountLib__AccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  tokenId: Hex
+  initialDepositAmount: bigint
+}
+
 export interface IAccountGate__BridgeIntent {
   params: IAccountLib__AccountInitParams
   blockNumber: bigint
@@ -35,18 +46,7 @@ export interface IAccountLib__AccountInitParams {
   signer: Address
 }
 
-export interface IAccountModule__CreatePuppetAccountIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  tokenId: Hex
-  initialDepositAmount: bigint
-}
-
-export interface IAllocateModule__AllocateIntent {
+export interface IAllocate__AllocateIntent {
   params: IAccountLib__AccountInitParams
   blockNumber: bigint
   deadline: bigint
@@ -140,7 +140,7 @@ export interface IMasterGate__OperateIntent {
   transferList: IIAccount__SignTransfer[]
 }
 
-export interface IRedeemModule__ClaimIntent {
+export interface IRedeem__ClaimIntent {
   params: IAccountLib__AccountInitParams
   blockNumber: bigint
   deadline: bigint
@@ -151,7 +151,7 @@ export interface IRedeemModule__ClaimIntent {
   amount: bigint
 }
 
-export interface IRedeemModule__FulfillIntent {
+export interface IRedeem__RedeemIntent {
   params: IAccountLib__AccountInitParams
   blockNumber: bigint
   deadline: bigint
@@ -165,7 +165,7 @@ export interface IRedeemModule__FulfillIntent {
   acceptableShares: bigint
 }
 
-export interface IRedeemModule__SellIntent {
+export interface IRedeem__SellIntent {
   params: IAccountLib__AccountInitParams
   blockNumber: bigint
   deadline: bigint
@@ -187,7 +187,7 @@ export interface IRedeemStore__Position {
   accrued: bigint
 }
 
-export interface IRegisterModule__TokenInfo {
+export interface IRegisterToken__TokenInfo {
   token: Address
   cap: bigint
   hubToken: Address
@@ -205,7 +205,7 @@ export interface IShareLib__ShareInitParams {
   name: Hex
 }
 
-export interface ISubscribeModule__SubscribeIntent {
+export interface ISubscribe__SubscribeIntent {
   params: IAccountLib__AccountInitParams
   blockNumber: bigint
   deadline: bigint

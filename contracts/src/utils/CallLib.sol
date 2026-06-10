@@ -3,8 +3,8 @@ pragma solidity ^0.8.35;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {IAccount} from "../core/interface/IAccount.sol";
-import {PassthroughRoute} from "../core/PassthroughRoute.sol";
+import {IAccount} from "./interfaces/IAccount.sol";
+import {Route} from "../core/Route.sol";
 
 library CallLib {
     function wrap(
@@ -94,9 +94,7 @@ library CallLib {
         address _route,
         IAccount.Call[] memory _legs
     ) internal pure returns (IAccount.Call memory) {
-        return IAccount.Call({
-            target: _route, value: 0, gasLimit: 0, callData: abi.encodeCall(PassthroughRoute.execute, (_legs))
-        });
+        return IAccount.Call({target: _route, value: 0, gasLimit: 0, callData: abi.encodeCall(Route.execute, (_legs))});
     }
 
     function routeDeposit(

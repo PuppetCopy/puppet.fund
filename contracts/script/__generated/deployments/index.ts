@@ -2,64 +2,64 @@
 // Do not edit manually.
 
 import dictateAbi from '../abi/puppetDictate.js'
-import registermoduleAbi from '../abi/puppetRegisterModule.js'
+import registertokenAbi from '../abi/puppetRegisterToken.js'
 import puppetaccountAbi from '../abi/puppetPuppetAccount.js'
 import fundaccountAbi from '../abi/puppetFundAccount.js'
-import passthroughrouteAbi from '../abi/puppetPassthroughRoute.js'
+import routeAbi from '../abi/puppetRoute.js'
 import attestAbi from '../abi/puppetAttest.js'
-import accountmoduleAbi from '../abi/puppetAccountModule.js'
-import walletdepositmoduleAbi from '../abi/puppetWalletDepositModule.js'
+import accountAbi from '../abi/puppetAccount.js'
+import depositAbi from '../abi/puppetDeposit.js'
 import accountgateAbi from '../abi/puppetAccountGate.js'
 import mastergateAbi from '../abi/puppetMasterGate.js'
 import sharetokenAbi from '../abi/puppetShareToken.js'
-import sharemoduleAbi from '../abi/puppetShareModule.js'
+import issueAbi from '../abi/puppetIssue.js'
 import redeemstoreAbi from '../abi/puppetRedeemStore.js'
-import redeemmoduleAbi from '../abi/puppetRedeemModule.js'
+import redeemAbi from '../abi/puppetRedeem.js'
 import allocatestoreAbi from '../abi/puppetAllocateStore.js'
-import subscribemoduleAbi from '../abi/puppetSubscribeModule.js'
-import allocatemoduleAbi from '../abi/puppetAllocateModule.js'
+import subscribeAbi from '../abi/puppetSubscribe.js'
+import allocateAbi from '../abi/puppetAllocate.js'
 import hubgateAbi from '../abi/puppetHubGate.js'
 
 export const CORE_CONTRACT_MAP = {
   Dictate: {
     address: '0xE1Fd6291199f80a426881c597365FcA622dc6205',
-    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
+    chainBlockMap: { 8453: 47167532, 42161: 472149328 },
     abi: dictateAbi
   },
-  RegisterModule: {
+  RegisterToken: {
     address: '0x66Df4460571504569Bd54D6E073BF41f04b47884',
-    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
-    abi: registermoduleAbi
+    chainBlockMap: { 8453: 47167532, 42161: 472149328 },
+    abi: registertokenAbi
   },
   PuppetAccount: {
     address: '0x1004D143DCbE13F601634bf2942F23112384eA3E',
-    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
+    chainBlockMap: { 8453: 47167532, 42161: 472149328 },
     abi: puppetaccountAbi
   },
   FundAccount: {
     address: '0x0126AD8adb6Dfb118911502749cfdb285996d004',
-    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
+    chainBlockMap: { 8453: 47167532, 42161: 472149328 },
     abi: fundaccountAbi
   },
-  PassthroughRoute: {
-    address: '0xe00B242161c925b8AF662C6E08C6a5cBe73CE2C1',
-    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
-    abi: passthroughrouteAbi
+  Route: {
+    address: '0xbA7441d5785bfcaBB1204cE56d8a49BEe987c9a4',
+    chainBlockMap: { 8453: 47167532, 42161: 472149328 },
+    abi: routeAbi
   },
   Attest: {
     address: '0x581407dD72a7ab9E989c071956727d8D1271256c',
-    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
+    chainBlockMap: { 8453: 47167532, 42161: 472149328 },
     abi: attestAbi
   },
-  AccountModule: {
-    address: '0xB5f1Bb90e9e92864bb3d3255e89E32ABd09b30d0',
-    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
-    abi: accountmoduleAbi
+  Account: {
+    address: '0x3516Ef53326c16aaCB9E99C09BD7C1d260c129e2',
+    chainBlockMap: { 8453: 47167532, 42161: 472149328 },
+    abi: accountAbi
   },
-  WalletDepositModule: {
-    address: '0x8269652C3619d94b32cAa6C6A1100Bd6c67D4912',
-    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
-    abi: walletdepositmoduleAbi
+  Deposit: {
+    address: '0x2365faAF5e6f51F0CCeDf798Eb611B4E572a96ff',
+    chainBlockMap: { 8453: 47167532, 42161: 472149328 },
+    abi: depositAbi
   }
 } as const
 
@@ -75,39 +75,39 @@ export const HUB_CONTRACT_MAP = {
     abi: mastergateAbi
   },
   ShareToken: {
-    address: '0x39B234AA5F7B8A19f52FAF47167973ACaD279C79',
-    chainAddresses: { 42161: '0x39B234AA5F7B8A19f52FAF47167973ACaD279C79' },
+    address: '0x15Aaf4d66D9ca0730ae160726483D1497d2c58Fb',
+    chainAddresses: { 42161: '0x15Aaf4d66D9ca0730ae160726483D1497d2c58Fb' },
     abi: sharetokenAbi
   },
-  ShareModule: {
-    address: '0x1433fDbE7Bc8067b7F5DdaE7f5BBaC1F71184Aa2',
-    chainAddresses: { 42161: '0x1433fDbE7Bc8067b7F5DdaE7f5BBaC1F71184Aa2' },
-    abi: sharemoduleAbi
+  Issue: {
+    address: '0xB15aaA74Baed56d2639867088f24d5Db24AB19EA',
+    chainAddresses: { 42161: '0xB15aaA74Baed56d2639867088f24d5Db24AB19EA' },
+    abi: issueAbi
   },
   RedeemStore: {
-    address: '0xD39E505d21755ff9308250C1C2c3001585d1900f',
-    chainAddresses: { 42161: '0xD39E505d21755ff9308250C1C2c3001585d1900f' },
+    address: '0xe985998CDDC52a38fBfc3046071DAB807482651b',
+    chainAddresses: { 42161: '0xe985998CDDC52a38fBfc3046071DAB807482651b' },
     abi: redeemstoreAbi
   },
-  RedeemModule: {
-    address: '0x6863c70e16E0F010d21b83B93Bd63Efd85c29b2F',
-    chainAddresses: { 42161: '0x6863c70e16E0F010d21b83B93Bd63Efd85c29b2F' },
-    abi: redeemmoduleAbi
+  Redeem: {
+    address: '0xA86d6aBcF808f5e6cecaF737D01f91b84C1bDeBC',
+    chainAddresses: { 42161: '0xA86d6aBcF808f5e6cecaF737D01f91b84C1bDeBC' },
+    abi: redeemAbi
   },
   AllocateStore: {
-    address: '0xEa275D3872b203c2A5c074D947E971f78467c29A',
-    chainAddresses: { 42161: '0xEa275D3872b203c2A5c074D947E971f78467c29A' },
+    address: '0xe4aCAd99a1bb3d41f64C9B9220a7d51EA0a52f16',
+    chainAddresses: { 42161: '0xe4aCAd99a1bb3d41f64C9B9220a7d51EA0a52f16' },
     abi: allocatestoreAbi
   },
-  SubscribeModule: {
-    address: '0xd65d2cA3a48A43ae2DcD3B96b20eeB732f185d6e',
-    chainAddresses: { 42161: '0xd65d2cA3a48A43ae2DcD3B96b20eeB732f185d6e' },
-    abi: subscribemoduleAbi
+  Subscribe: {
+    address: '0xdE60Fb4429a8f8609F4Af7FB910889f87917A944',
+    chainAddresses: { 42161: '0xdE60Fb4429a8f8609F4Af7FB910889f87917A944' },
+    abi: subscribeAbi
   },
-  AllocateModule: {
-    address: '0x111Ec8f9BdEE7Aca46F979Ccda5022827B2e46c3',
-    chainAddresses: { 42161: '0x111Ec8f9BdEE7Aca46F979Ccda5022827B2e46c3' },
-    abi: allocatemoduleAbi
+  Allocate: {
+    address: '0x92e7258465b2c20F3F45D5a067a432481Af34F46',
+    chainAddresses: { 42161: '0x92e7258465b2c20F3F45D5a067a432481Af34F46' },
+    abi: allocateAbi
   },
   HubGate: {
     address: '0x7242D4538332ECF36b0Aa69a4f91F1370fbBC0B6',

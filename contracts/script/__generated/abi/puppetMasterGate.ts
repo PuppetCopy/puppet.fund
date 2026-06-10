@@ -13,12 +13,12 @@ export default [
       {
         "name": "_accountModule",
         "type": "address",
-        "internalType": "contract AccountModule"
+        "internalType": "contract Account"
       },
       {
         "name": "_register",
         "type": "address",
-        "internalType": "contract RegisterModule"
+        "internalType": "contract RegisterToken"
       },
       {
         "name": "_config",

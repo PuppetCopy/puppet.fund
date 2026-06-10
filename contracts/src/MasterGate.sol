@@ -7,13 +7,13 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {BaseGate} from "./utils/BaseGate.sol";
 import {CallLib} from "./utils/CallLib.sol";
 import {IntentLib} from "./utils/IntentLib.sol";
-import {AccountLib} from "./core/AccountLib.sol";
+import {AccountLib} from "./utils/AccountLib.sol";
 import {IAuthority} from "./utils/interfaces/IAuthority.sol";
 
-import {AccountModule} from "./core/module/AccountModule.sol";
-import {RegisterModule} from "./core/module/RegisterModule.sol";
+import {Account} from "./core/Account.sol";
+import {RegisterToken} from "./core/RegisterToken.sol";
 import {FundAccount} from "./core/FundAccount.sol";
-import {IAccount} from "./core/interface/IAccount.sol";
+import {IAccount} from "./utils/interfaces/IAccount.sol";
 
 bytes32 constant OPERATE_INTENT_TYPEHASH = keccak256(
     "OperateIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 callListHash,bytes32 transferListHash)AccountInitParams(address user,address signer)"
@@ -48,8 +48,8 @@ contract MasterGate is BaseGate, EIP712 {
 
     constructor(
         IAuthority _authority,
-        AccountModule _accountModule,
-        RegisterModule _register,
+        Account _accountModule,
+        RegisterToken _register,
         Config memory _config
     ) BaseGate(_authority, _accountModule, _register, _config) EIP712("MasterGate", "1") {}
 

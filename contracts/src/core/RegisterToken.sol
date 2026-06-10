@@ -3,12 +3,12 @@ pragma solidity ^0.8.35;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {Access} from "../../utils/auth/Access.sol";
-import {Error} from "../../utils/Error.sol";
-import {IAuthority} from "../../utils/interfaces/IAuthority.sol";
-import {IWNT} from "../../utils/interfaces/IWNT.sol";
+import {Access} from "../utils/auth/Access.sol";
+import {Error} from "../utils/Error.sol";
+import {IAuthority} from "../utils/interfaces/IAuthority.sol";
+import {IWNT} from "../utils/interfaces/IWNT.sol";
 
-contract RegisterModule is Access {
+contract RegisterToken is Access {
     struct TokenInfo {
         IERC20 token;
         uint cap;

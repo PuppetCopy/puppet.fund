@@ -51,11 +51,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Account__InvalidFlow",
-    inputs: []
-  },
-  {
-    type: "error",
     name: "Account__Shortfall",
     inputs: [
       {
@@ -98,12 +93,12 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "PassthroughRoute__Unauthorized",
+    name: "Route__Unauthorized",
     inputs: []
   },
   {
     type: "error",
-    name: "WalletDeposit__ZeroAmount",
+    name: "Deposit__ZeroAmount",
     inputs: []
   },
   {
@@ -138,21 +133,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Dictate__ContractAlreadyInitialized",
-    inputs: []
-  },
-  {
-    type: "error",
-    name: "Dictate__ConfigurationUpdateFailed",
-    inputs: []
-  },
-  {
-    type: "error",
-    name: "Dictate__InvalidModule",
-    inputs: []
-  },
-  {
-    type: "error",
     name: "Dictate__InvalidOwner",
     inputs: []
   },
@@ -160,17 +140,6 @@ export const puppetErrorAbi = [
     type: "error",
     name: "Dictate__Unauthorized",
     inputs: []
-  },
-  {
-    type: "error",
-    name: "Dictate__ModuleAlreadyRegistered",
-    inputs: [
-      {
-        name: "moduleId",
-        internalType: "bytes32",
-        type: "bytes32"
-      }
-    ]
   },
   {
     type: "error",
@@ -526,12 +495,12 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Fulfill__ZeroAcceptableNav",
+    name: "Redeem__ZeroAcceptableNav",
     inputs: []
   },
   {
     type: "error",
-    name: "Fulfill__SupplyMismatch",
+    name: "Redeem__SupplyMismatch",
     inputs: [
       {
         name: "current",
@@ -547,12 +516,12 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Fulfill__NothingToRetire",
+    name: "Redeem__NothingToRetire",
     inputs: []
   },
   {
     type: "error",
-    name: "Fulfill__RelayFeeTooHigh",
+    name: "Redeem__RelayFeeTooHigh",
     inputs: []
   },
   {
@@ -704,17 +673,6 @@ export const puppetErrorAbi = [
         name: "token",
         internalType: "contract IERC20",
         type: "address"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "NonceLib__InvalidNonce",
-    inputs: [
-      {
-        name: "nonce",
-        internalType: "uint256",
-        type: "uint256"
       }
     ]
   },

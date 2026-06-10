@@ -406,7 +406,7 @@ ${[...new Map(contracts.filter(c => c.abi).map(c => [c.name, c] as const)).value
   // Drift check: Solidity must match const.toml literals
   const intentLibSrc = await Bun.file('./src/utils/IntentLib.sol').text()
   const precisionSrc = await Bun.file('./src/utils/Precision.sol').text()
-  const accountLibSrc = await Bun.file('./src/core/AccountLib.sol').text()
+  const accountLibSrc = await Bun.file('./src/utils/AccountLib.sol').text()
   const basisPointsMatch = intentLibSrc.match(/BASIS_POINTS\s*=\s*([\d_]+)/)
   const floatPrecisionMatch = precisionSrc.match(/FLOAT_PRECISION\s*=\s*1e(\d+)/)
   const deployAuthMatch = accountLibSrc.match(/DEPLOY_AUTH_MESSAGE\s*=\s*"([^"]*)"/)

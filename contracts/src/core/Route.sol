@@ -4,9 +4,9 @@ pragma solidity ^0.8.35;
 import {LibClone} from "solady/utils/LibClone.sol";
 
 import {Error} from "../utils/Error.sol";
-import {IAccount} from "./interface/IAccount.sol";
+import {IAccount} from "../utils/interfaces/IAccount.sol";
 
-contract PassthroughRoute {
+contract Route {
     function account() public view returns (address _a) {
         bytes memory _b = LibClone.argsOnClone(address(this), 0, 20);
         assembly ("memory-safe") {
@@ -17,7 +17,7 @@ contract PassthroughRoute {
     function execute(
         IAccount.Call[] calldata _callList
     ) external payable returns (bytes[] memory _returnData) {
-        if (msg.sender != account()) revert Error.PassthroughRoute__Unauthorized();
+        if (msg.sender != account()) revert Error.Route__Unauthorized();
         uint _len = _callList.length;
         _returnData = new bytes[](_len);
         for (uint _i; _i < _len; ++_i) {

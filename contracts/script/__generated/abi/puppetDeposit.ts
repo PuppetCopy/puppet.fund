@@ -1,4 +1,4 @@
-// This file is auto-generated from forge-artifacts/WalletDepositModule.sol/WalletDepositModule.json
+// This file is auto-generated from forge-artifacts/Deposit.sol/Deposit.json
 // Do not edit manually.
 
 export default [
@@ -150,6 +150,11 @@ export default [
   },
   {
     "type": "error",
+    "name": "Deposit__ZeroAmount",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "Module__CallerNotAuthority",
     "inputs": []
   },
@@ -225,10 +230,5 @@ export default [
         "internalType": "uint256"
       }
     ]
-  },
-  {
-    "type": "error",
-    "name": "WalletDeposit__ZeroAmount",
-    "inputs": []
   }
 ] as const

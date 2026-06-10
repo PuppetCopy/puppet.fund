@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.35;
 
-import {IAccount} from "./interface/IAccount.sol";
+import {IAccount} from "../utils/interfaces/IAccount.sol";
 import {IntentLib} from "../utils/IntentLib.sol";
 import {Access} from "../utils/auth/Access.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";

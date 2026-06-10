@@ -1,4 +1,4 @@
-// This file is auto-generated from forge-artifacts/AccountModule.sol/AccountModule.json
+// This file is auto-generated from forge-artifacts/Account.sol/Account.json
 // Do not edit manually.
 
 export default [
@@ -26,7 +26,7 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_passthroughRouteImpl",
+        "name": "_routeImpl",
         "type": "address",
         "internalType": "address"
       }
@@ -393,19 +393,6 @@ export default [
   },
   {
     "type": "function",
-    "name": "passthroughRouteImpl",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "predictFundAccount",
     "inputs": [
       {
@@ -476,6 +463,19 @@ export default [
   {
     "type": "function",
     "name": "puppetAccountImpl",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "routeImpl",
     "inputs": [],
     "outputs": [
       {

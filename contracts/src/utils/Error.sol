@@ -14,14 +14,13 @@ library Error {
     error Account__InvalidUser();
     error Account__InvalidBaseTokenId();
     error Account__InvalidSignature();
-    error Account__InvalidFlow();
     error Account__Shortfall(address token, uint actual, uint expected);
     error Account__OutflowExceedsSigned(uint amountOut, uint signedSum);
     error Account__UnauthorizedDeploy();
 
-    error PassthroughRoute__Unauthorized();
+    error Route__Unauthorized();
 
-    error WalletDeposit__ZeroAmount();
+    error Deposit__ZeroAmount();
 
     error Module__InvalidAuthority();
     error Module__CallerNotAuthority();
@@ -32,12 +31,8 @@ library Error {
     error Permission__Unauthorized();
 
     error Dictate__ContractNotRegistered();
-    error Dictate__ContractAlreadyInitialized();
-    error Dictate__ConfigurationUpdateFailed();
-    error Dictate__InvalidModule();
     error Dictate__InvalidOwner();
     error Dictate__Unauthorized();
-    error Dictate__ModuleAlreadyRegistered(bytes32 moduleId);
 
     error Register__InvalidImpl();
     error Register__InvalidHubToken();
@@ -76,10 +71,10 @@ library Error {
     error Share__NotCreated();
     error Share__MasterMismatch(address derived, address declared);
 
-    error Fulfill__ZeroAcceptableNav();
-    error Fulfill__SupplyMismatch(uint current, uint expected);
-    error Fulfill__NothingToRetire();
-    error Fulfill__RelayFeeTooHigh();
+    error Redeem__ZeroAcceptableNav();
+    error Redeem__SupplyMismatch(uint current, uint expected);
+    error Redeem__NothingToRetire();
+    error Redeem__RelayFeeTooHigh();
 
     error ShareToken__NotShareGate();
     error ShareToken__NotHubChain(uint expected, uint current);
@@ -98,6 +93,5 @@ library Error {
     error TransferUtils__InvalidReceiver();
     error TransferUtils__EmptyTokenTransferGasLimit(IERC20 token);
 
-    error NonceLib__InvalidNonce(uint nonce);
     error NonceLib__InvalidNonceForAccount(address account, uint nonce);
 }

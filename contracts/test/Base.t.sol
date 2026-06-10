@@ -6,13 +6,13 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {Dictate} from "src/core/Dictate.sol";
 import {Attest} from "src/core/Attest.sol";
-import {AccountModule, CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH} from "src/core/module/AccountModule.sol";
-import {RegisterModule} from "src/core/module/RegisterModule.sol";
-import {WalletDepositModule} from "src/core/module/WalletDepositModule.sol";
+import {Account as AccountContract, CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH} from "src/core/Account.sol";
+import {RegisterToken} from "src/core/RegisterToken.sol";
+import {Deposit} from "src/core/Deposit.sol";
 import {PuppetAccount} from "src/core/PuppetAccount.sol";
 import {FundAccount} from "src/core/FundAccount.sol";
-import {PassthroughRoute} from "src/core/PassthroughRoute.sol";
-import {AccountLib, ACCOUNT_TYPEHASH} from "src/core/AccountLib.sol";
+import {Route} from "src/core/Route.sol";
+import {AccountLib, ACCOUNT_TYPEHASH} from "src/utils/AccountLib.sol";
 
 import {BaseGate} from "src/utils/BaseGate.sol";
 import {AccountGate} from "src/AccountGate.sol";
@@ -20,13 +20,13 @@ import {MasterGate} from "src/MasterGate.sol";
 import {HubGate} from "src/HubGate.sol";
 
 import {ShareToken} from "src/hub/ShareToken.sol";
-import {ShareModule} from "src/hub/ShareModule.sol";
-import {AllocateModule} from "src/hub/AllocateModule.sol";
+import {Issue} from "src/hub/Issue.sol";
+import {Allocate} from "src/hub/Allocate.sol";
 import {AllocateStore} from "src/hub/store/AllocateStore.sol";
-import {SubscribeModule} from "src/hub/SubscribeModule.sol";
-import {RedeemModule} from "src/hub/RedeemModule.sol";
+import {Subscribe} from "src/hub/Subscribe.sol";
+import {Redeem} from "src/hub/Redeem.sol";
 import {RedeemStore} from "src/hub/store/RedeemStore.sol";
-import {ShareLib, SHARE_INIT_TYPEHASH} from "src/hub/ShareLib.sol";
+import {ShareLib, SHARE_INIT_TYPEHASH} from "src/utils/ShareLib.sol";
 
 import {MockERC20} from "./mock/MockERC20.t.sol";
 import {MockWNT} from "./mock/MockWNT.t.sol";
@@ -49,17 +49,17 @@ contract V2Base is Test {
     MockWNT wnt;
 
     Dictate dictate;
-    RegisterModule register;
-    AccountModule accountModule;
-    WalletDepositModule walletDeposit;
+    RegisterToken register;
+    AccountContract accountModule;
+    Deposit walletDeposit;
     AccountGate accountGate;
     MasterGate masterGate;
     HubGate hubGate;
-    ShareModule shareGate;
-    AllocateModule allocate;
+    Issue shareGate;
+    Allocate allocate;
     AllocateStore allocateStore;
-    SubscribeModule subscribe;
-    RedeemModule redeem;
+    Subscribe subscribe;
+    Redeem redeem;
     RedeemStore redeemStore;
 
     bytes32 accountGateDomain;
@@ -74,20 +74,20 @@ contract V2Base is Test {
         usdc = new MockERC20("USDC", "USDC", 6);
         wnt = new MockWNT();
         dictate = new Dictate(owner);
-        register = new RegisterModule(dictate, HUB_CHAIN_ID);
+        register = new RegisterToken(dictate, HUB_CHAIN_ID);
 
         Attest attest = new Attest(dictate);
-        accountModule = new AccountModule(
-            dictate, attest, address(new PuppetAccount()), address(new FundAccount()), address(new PassthroughRoute())
+        accountModule = new AccountContract(
+            dictate, attest, address(new PuppetAccount()), address(new FundAccount()), address(new Route())
         );
         dictate.setAccess(attest, address(accountModule));
-        walletDeposit = new WalletDepositModule(dictate);
+        walletDeposit = new Deposit(dictate);
 
-        shareGate = new ShareModule(dictate, accountModule, address(new ShareToken()));
-        allocate = new AllocateModule(dictate);
+        shareGate = new Issue(dictate, accountModule, address(new ShareToken()));
+        allocate = new Allocate(dictate);
         allocateStore = new AllocateStore(dictate);
-        subscribe = new SubscribeModule(dictate);
-        redeem = new RedeemModule(dictate);
+        subscribe = new Subscribe(dictate);
+        redeem = new Redeem(dictate);
         redeemStore = new RedeemStore(dictate);
 
         BaseGate.Config memory cfg = BaseGate.Config({
@@ -100,12 +100,12 @@ contract V2Base is Test {
             dictate, accountModule, shareGate, allocate, allocateStore, subscribe, redeem, redeemStore, register, cfg
         );
 
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, address(accountGate));
-        dictate.setPermission(accountModule, AccountModule.createPuppetAccount.selector, address(accountGate));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(accountGate));
+        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, address(accountGate));
         dictate.setAccess(walletDeposit, address(accountGate));
 
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, address(masterGate));
-        dictate.setPermission(accountModule, AccountModule.createFundAccount.selector, address(masterGate));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(masterGate));
+        dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, address(masterGate));
 
         dictate.setAccess(allocateStore, address(subscribe));
         dictate.setAccess(allocateStore, address(allocate));
@@ -115,12 +115,12 @@ contract V2Base is Test {
         dictate.setAccess(subscribe, address(hubGate));
         dictate.setAccess(allocate, address(hubGate));
         dictate.setAccess(redeem, address(hubGate));
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, address(hubGate));
-        dictate.setPermission(accountModule, AccountModule.createFundAccount.selector, address(allocate));
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, address(subscribe));
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, address(allocate));
-        dictate.setPermission(accountModule, AccountModule.dispatchMandate.selector, address(allocate));
-        dictate.setPermission(accountModule, AccountModule.dispatch.selector, address(redeem));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(hubGate));
+        dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, address(allocate));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(subscribe));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(allocate));
+        dictate.setPermission(accountModule, AccountContract.dispatchMandate.selector, address(allocate));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(redeem));
 
         dictate.setAccess(register, owner);
         register.registerToken(USDC_ID, IERC20(address(usdc)), 0, address(usdc));
@@ -215,7 +215,7 @@ contract V2Base is Test {
         string memory _label
     ) internal returns (Puppet memory p) {
         (p.user, p.key) = makeAddrAndKey(_label);
-        AccountModule.CreatePuppetAccountIntent memory intent = AccountModule.CreatePuppetAccountIntent({
+        AccountContract.CreatePuppetAccountIntent memory intent = AccountContract.CreatePuppetAccountIntent({
             params: _params(p.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,

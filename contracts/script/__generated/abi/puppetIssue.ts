@@ -1,4 +1,4 @@
-// This file is auto-generated from forge-artifacts/ShareModule.sol/ShareModule.json
+// This file is auto-generated from forge-artifacts/Issue.sol/Issue.json
 // Do not edit manually.
 
 export default [
@@ -13,7 +13,7 @@ export default [
       {
         "name": "_accountModule",
         "type": "address",
-        "internalType": "contract AccountModule"
+        "internalType": "contract Account"
       },
       {
         "name": "_shareTokenImpl",
@@ -31,7 +31,7 @@ export default [
       {
         "name": "",
         "type": "address",
-        "internalType": "contract AccountModule"
+        "internalType": "contract Account"
       }
     ],
     "stateMutability": "view"

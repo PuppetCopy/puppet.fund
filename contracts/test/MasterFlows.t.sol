@@ -5,7 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {V2Base} from "./Base.t.sol";
 import {MasterGate, OPERATE_INTENT_TYPEHASH, CREATE_FUND_ACCOUNT_INTENT_TYPEHASH} from "src/MasterGate.sol";
-import {IAccount} from "src/core/interface/IAccount.sol";
+import {IAccount} from "src/utils/interfaces/IAccount.sol";
 
 contract MasterFlowsTest is V2Base {
     struct Fund {

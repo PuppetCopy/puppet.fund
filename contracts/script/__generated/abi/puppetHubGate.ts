@@ -13,17 +13,17 @@ export default [
       {
         "name": "_accountGate",
         "type": "address",
-        "internalType": "contract AccountModule"
+        "internalType": "contract Account"
       },
       {
         "name": "_shareGate",
         "type": "address",
-        "internalType": "contract ShareModule"
+        "internalType": "contract Issue"
       },
       {
         "name": "_allocate",
         "type": "address",
-        "internalType": "contract AllocateModule"
+        "internalType": "contract Allocate"
       },
       {
         "name": "_allocateStore",
@@ -33,12 +33,12 @@ export default [
       {
         "name": "_subscribe",
         "type": "address",
-        "internalType": "contract SubscribeModule"
+        "internalType": "contract Subscribe"
       },
       {
         "name": "_redeem",
         "type": "address",
-        "internalType": "contract RedeemModule"
+        "internalType": "contract Redeem"
       },
       {
         "name": "_redeemStore",
@@ -48,7 +48,7 @@ export default [
       {
         "name": "_register",
         "type": "address",
-        "internalType": "contract RegisterModule"
+        "internalType": "contract RegisterToken"
       },
       {
         "name": "_config",
@@ -92,7 +92,7 @@ export default [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct AllocateModule.AllocateIntent",
+        "internalType": "struct Allocate.AllocateIntent",
         "components": [
           {
             "name": "params",
@@ -258,7 +258,7 @@ export default [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct RedeemModule.ClaimIntent",
+        "internalType": "struct Redeem.ClaimIntent",
         "components": [
           {
             "name": "params",
@@ -401,12 +401,88 @@ export default [
   },
   {
     "type": "function",
-    "name": "fulfill",
+    "name": "getConfig",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct BaseGate.Config",
+        "components": [
+          {
+            "name": "attestor",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "feeReceiver",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "transferGasLimit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxBlockDelay",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "predictShareToken",
+    "inputs": [
+      {
+        "name": "_shareParams",
+        "type": "tuple",
+        "internalType": "struct ShareLib.ShareInitParams",
+        "components": [
+          {
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract ShareToken"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "redeem",
     "inputs": [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct RedeemModule.FulfillIntent",
+        "internalType": "struct Redeem.RedeemIntent",
         "components": [
           {
             "name": "params",
@@ -515,88 +591,12 @@ export default [
   },
   {
     "type": "function",
-    "name": "getConfig",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "tuple",
-        "internalType": "struct BaseGate.Config",
-        "components": [
-          {
-            "name": "attestor",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "feeReceiver",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "transferGasLimit",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxBlockDelay",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxRelayFeeBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "predictShareToken",
-    "inputs": [
-      {
-        "name": "_shareParams",
-        "type": "tuple",
-        "internalType": "struct ShareLib.ShareInitParams",
-        "components": [
-          {
-            "name": "master",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "baseTokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "name",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          }
-        ]
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract ShareToken"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "sell",
     "inputs": [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct RedeemModule.SellIntent",
+        "internalType": "struct Redeem.SellIntent",
         "components": [
           {
             "name": "params",
@@ -718,7 +718,7 @@ export default [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct SubscribeModule.SubscribeIntent",
+        "internalType": "struct Subscribe.SubscribeIntent",
         "components": [
           {
             "name": "params",

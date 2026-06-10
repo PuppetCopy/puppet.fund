@@ -13,17 +13,17 @@ export default [
       {
         "name": "_accountModule",
         "type": "address",
-        "internalType": "contract AccountModule"
+        "internalType": "contract Account"
       },
       {
         "name": "_walletDeposit",
         "type": "address",
-        "internalType": "contract WalletDepositModule"
+        "internalType": "contract Deposit"
       },
       {
         "name": "_register",
         "type": "address",
-        "internalType": "contract RegisterModule"
+        "internalType": "contract RegisterToken"
       },
       {
         "name": "_hubChainId",
@@ -221,7 +221,7 @@ export default [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct AccountModule.CreatePuppetAccountIntent",
+        "internalType": "struct Account.CreatePuppetAccountIntent",
         "components": [
           {
             "name": "params",

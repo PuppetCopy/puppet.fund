@@ -7,15 +7,15 @@ export const router__gasLimit = {
     recognize: 218157n
   },
   MasterGate: {
-    createFundAccount: 298933n,
+    createFundAccount: 298955n,
     operate: 157940n
   },
   HubGate: {
-    allocate: 619635n,
+    allocate: 619672n,
     claim: 234607n,
-    fulfill: 309326n,
+    redeem: 309236n,
     sell: 266331n,
-    subscribe: 204378n,
+    subscribe: 204382n,
     withdrawToBridge: 365066n,
     withdrawToWallet: 183710n
   }
