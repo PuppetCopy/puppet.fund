@@ -35,7 +35,7 @@ export interface IDispatchedFrame {
   actualRelayFee: bigint
 }
 
-const FUND_ROUTED_KINDS: ReadonlySet<IActionKind> = new Set(['operate', 'allocate', 'fulfill', 'createFundAccount'])
+const FUND_ROUTED_KINDS: ReadonlySet<IActionKind> = new Set(['operate', 'allocate', 'redeem', 'createFundAccount'])
 
 function accountForRequest(request: IRelayRequest): Address {
   const params = (request.input as { params: Parameters<typeof predictPuppetAccount>[0] }).params

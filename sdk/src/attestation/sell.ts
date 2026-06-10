@@ -2,7 +2,7 @@ import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
-  IRedeemModule__SellIntent,
+  IRedeem__SellIntent,
   IShareLib__ShareInitParams
 } from '@puppet/contracts/types'
 import { type Address, isAddressEqual, type TypedDataDefinition } from 'viem'
@@ -60,7 +60,7 @@ export function attestSellIntent(ctx: ISellAttestContext, input: ISellInput) {
     )
   }
 
-  const intent: IRedeemModule__SellIntent = {
+  const intent: IRedeem__SellIntent = {
     params: input.params,
     blockNumber: input.blockNumber,
     deadline: input.deadline,

@@ -4,9 +4,9 @@ import type { IClaimInput } from './claim.js'
 import type { ICreatePuppetAccountInput } from './createAccount.js'
 import type { ICreateFundAccountInput } from './createFundAccount.js'
 import type { IDepositRoute } from './depositRoute.js'
-import type { IFulfillInput } from './fulfill.js'
 import type { IOperateInput } from './operate.js'
 import type { IRecognizeBalanceInput } from './recognizeBalance.js'
+import type { IRedeemInput } from './redeem.js'
 import type { ISellInput } from './sell.js'
 import type { ISubscribeInput } from './subscribe.js'
 import type { IWithdrawToBridgeInput } from './withdrawToBridge.js'
@@ -20,7 +20,7 @@ export type IInputByKind = {
   operate: IOperateInput
   sell: ISellInput
   claim: IClaimInput
-  fulfill: IFulfillInput
+  redeem: IRedeemInput
   recognize: IRecognizeBalanceInput
   withdrawToWallet: IWithdrawToWalletInput
   bridge: IBridgeInput
@@ -55,7 +55,6 @@ export {
 } from './createFundAccount.js'
 export type { IDepositMode, IDepositRoute } from './depositRoute.js'
 export { resolveDispatchChainId, resolveDispatchNetwork } from './dispatch.js'
-export { attestFulfillIntent, type IFulfillAttestContext, type IFulfillInput } from './fulfill.js'
 export * as IntentLib from './intentLib.js'
 export { attestOperateIntent, type IOperateAttestContext, type IOperateInput } from './operate.js'
 export {
@@ -63,6 +62,7 @@ export {
   type IRecognizeBalanceAttestContext,
   type IRecognizeBalanceInput
 } from './recognizeBalance.js'
+export { attestRedeemIntent, type IRedeemAttestContext, type IRedeemInput } from './redeem.js'
 export * from './rule.js'
 export { attestSellIntent, type ISellAttestContext, type ISellInput } from './sell.js'
 export type { IActionKind, IDraftContext, IIntentByKind } from './shared.js'

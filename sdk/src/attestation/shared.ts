@@ -1,18 +1,18 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_DOMAIN_MAP } from '@puppet/contracts/intents'
 import type {
+  IAccount__CreatePuppetAccountIntent,
   IAccountGate__BridgeIntent,
   IAccountGate__RecognizeIntent,
-  IAccountModule__CreatePuppetAccountIntent,
-  IAllocateModule__AllocateIntent,
+  IAllocate__AllocateIntent,
   IHubGate__WithdrawToBridgeIntent,
   IHubGate__WithdrawToWalletIntent,
   IMasterGate__CreateFundAccountIntent,
   IMasterGate__OperateIntent,
-  IRedeemModule__ClaimIntent,
-  IRedeemModule__FulfillIntent,
-  IRedeemModule__SellIntent,
-  ISubscribeModule__SubscribeIntent
+  IRedeem__ClaimIntent,
+  IRedeem__RedeemIntent,
+  IRedeem__SellIntent,
+  ISubscribe__SubscribeIntent
 } from '@puppet/contracts/types'
 import { type Address, getAddress } from 'viem'
 import { CompactContractError } from '../compact/error.js'
@@ -25,12 +25,12 @@ export { ACCOUNT_GATE_DOMAIN_MAP, MASTER_GATE_DOMAIN_MAP } from '@puppet/contrac
 export const HUB_DOMAIN = HUB_GATE_DOMAIN_MAP[HUB_CHAIN_ID]
 
 export interface IIntentByKind {
-  subscribe: ISubscribeModule__SubscribeIntent
-  allocate: IAllocateModule__AllocateIntent
-  sell: IRedeemModule__SellIntent
-  claim: IRedeemModule__ClaimIntent
-  fulfill: IRedeemModule__FulfillIntent
-  createPuppetAccount: IAccountModule__CreatePuppetAccountIntent
+  subscribe: ISubscribe__SubscribeIntent
+  allocate: IAllocate__AllocateIntent
+  sell: IRedeem__SellIntent
+  claim: IRedeem__ClaimIntent
+  redeem: IRedeem__RedeemIntent
+  createPuppetAccount: IAccount__CreatePuppetAccountIntent
   createFundAccount: IMasterGate__CreateFundAccountIntent
   operate: IMasterGate__OperateIntent
   recognize: IAccountGate__RecognizeIntent

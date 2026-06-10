@@ -2,7 +2,7 @@ import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
-  IAllocateModule__AllocateIntent,
+  IAllocate__AllocateIntent,
   IShareLib__ShareInitParams
 } from '@puppet/contracts/types'
 import { type Address, encodePacked, type Hex, isAddressEqual, keccak256, type TypedDataDefinition } from 'viem'
@@ -99,7 +99,7 @@ export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAlloca
     mandateList.push(found?.mandate ?? ('0x' as Hex))
   }
 
-  const intent: IAllocateModule__AllocateIntent = {
+  const intent: IAllocate__AllocateIntent = {
     params: input.params,
     blockNumber: input.blockNumber,
     deadline: input.deadline,

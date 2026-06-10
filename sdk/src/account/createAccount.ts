@@ -27,7 +27,7 @@ function packAccountArgs(params: IAccountLib__AccountInitParams): Hex {
 export function predictPuppetAccount(params: IAccountLib__AccountInitParams): Address {
   const args = packAccountArgs(params)
   return getCreate2Address({
-    from: PUPPET_CONTRACT_MAP.AccountModule.address,
+    from: PUPPET_CONTRACT_MAP.Account.address,
     salt: keccak256(args),
     bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.PuppetAccount.address, args)
   })
@@ -36,9 +36,9 @@ export function predictPuppetAccount(params: IAccountLib__AccountInitParams): Ad
 export function predictRoute(account: Address): Address {
   const args = encodePacked(['address'], [account])
   return getCreate2Address({
-    from: PUPPET_CONTRACT_MAP.AccountModule.address,
+    from: PUPPET_CONTRACT_MAP.Account.address,
     salt: pad(account, { size: 32 }),
-    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.PassthroughRoute.address, args)
+    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.Route.address, args)
   })
 }
 
@@ -49,7 +49,7 @@ export function predictDepositRoute(account: Address): Address {
 export function predictFundAccount(signer: Address): Address {
   const args = encodePacked(['address', 'address'], [PUPPET_CONTRACT_MAP.Attest.address, signer])
   return getCreate2Address({
-    from: PUPPET_CONTRACT_MAP.AccountModule.address,
+    from: PUPPET_CONTRACT_MAP.Account.address,
     salt: keccak256(args),
     bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.FundAccount.address, args)
   })
@@ -59,10 +59,10 @@ export function predictShareToken(master: Address, baseTokenId: Hex, name: Hex):
   const fund = predictFundAccount(master)
   const args = encodePacked(
     ['address', 'address', 'bytes32', 'bytes32'],
-    [fund, PUPPET_CONTRACT_MAP.ShareModule.address, baseTokenId, name]
+    [fund, PUPPET_CONTRACT_MAP.Issue.address, baseTokenId, name]
   )
   return getCreate2Address({
-    from: PUPPET_CONTRACT_MAP.ShareModule.address,
+    from: PUPPET_CONTRACT_MAP.Issue.address,
     salt: pad(fund, { size: 32 }),
     bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.ShareToken.address, args)
   })

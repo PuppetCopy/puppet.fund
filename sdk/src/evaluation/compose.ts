@@ -55,7 +55,7 @@ export function computeNavValues(
   let navSigned: bigint
   if (kind === 'view') {
     navSigned = navMark
-  } else if (kind === 'fulfill') {
+  } else if (kind === 'redeem') {
     navSigned = navFloor
   } else {
     let positionAllocBase = 0n

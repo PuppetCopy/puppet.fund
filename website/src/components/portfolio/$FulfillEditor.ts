@@ -29,7 +29,7 @@ import { colorShade, palette } from 'aelea/ui-components-theme'
 import type { Address, Hex } from 'viem'
 import { $ButtonSecondary, $Checkbox, $defaultSliderContainer, $Slider, $TokenAmountInput, text } from '@/ui-components'
 import { sqlClient } from '../../io/indexer/sql.js'
-import { type IFulfillDraft, SHARE_DECIMALS } from './draft.js'
+import { type IRedeemDraft, SHARE_DECIMALS } from './draft.js'
 
 export interface I$FulfillEditor {
   master: Address
@@ -106,9 +106,9 @@ export const $FulfillEditor = ({
 
       const focused: IStream<boolean> = state(false, merge(constant(true, focusShares), constant(false, blurShares)))
 
-      const fulfillDraft: IStream<IFulfillDraft> = sampleMap(
-        (params): IFulfillDraft => ({
-          kind: 'fulfill',
+      const fulfillDraft: IStream<IRedeemDraft> = sampleMap(
+        (params): IRedeemDraft => ({
+          kind: 'redeem',
           id: `fulfill:${masterAccount}`,
           account: masterAccount,
           title: 'Fulfill',

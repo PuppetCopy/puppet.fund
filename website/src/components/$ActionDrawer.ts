@@ -99,7 +99,7 @@ import {
   type IClaimDraft,
   type IDepositDraft,
   type IDraft,
-  type IFulfillDraft,
+  type IRedeemDraft,
   type ISellDraft,
   type ISubscribeDraft,
   type IWithdrawDraft,
@@ -131,7 +131,7 @@ const DRAFT_VERB: Record<IDraft['kind'], string> = {
   allocate: 'Allocate',
   sell: 'Sell',
   claim: 'Claim',
-  fulfill: 'Fulfill'
+  redeem: 'Fulfill'
 }
 
 type BindStep = { kind: 'bind'; key: typeof SESSION_BIND_KEY; query: Promise<ISessionKey> }
@@ -439,7 +439,7 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
                 else if (d.kind === 'allocate') addRelay(token, feeMap.allocate.relayFee)
                 else if (d.kind === 'sell') addRelay(token, feeMap.sell.relayFee)
                 else if (d.kind === 'claim') addRelay(token, feeMap.claim.relayFee)
-                else if (d.kind === 'fulfill') addRelay(token, feeMap.fulfill.relayFee)
+                else if (d.kind === 'redeem') addRelay(token, feeMap.redeem.relayFee)
                 else if (d.kind === 'deposit' || d.kind === 'withdraw') {
                   for (const step of d.inputSteps) {
                     if (step.kind === 'walletDeposit' || step.kind === 'walletDepositWnt') continue
@@ -794,7 +794,7 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         )
       }
 
-      const $fulfillDesc = (draft: IFulfillDraft, registry: ITokenRegistryMap): I$Node => {
+      const $redeemDesc = (draft: IRedeemDraft, registry: ITokenRegistryMap): I$Node => {
         const { desc } = renderToken(registry, draft.baseTokenId)
         return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
           $text(`${readableTokenAmount(SHARE_DECIMALS, draft.acceptableShares)} shares`),
@@ -813,7 +813,7 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         if (draft.kind === 'allocate') return $allocateDesc(draft, registry)
         if (draft.kind === 'sell') return $sellDesc(draft)
         if (draft.kind === 'claim') return $claimDesc(draft, registry)
-        if (draft.kind === 'fulfill') return $fulfillDesc(draft, registry)
+        if (draft.kind === 'redeem') return $redeemDesc(draft, registry)
         return $metaText((draft as { title?: string; kind: string }).title ?? (draft as { kind: string }).kind)
       }
 

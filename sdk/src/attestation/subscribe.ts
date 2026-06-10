@@ -3,7 +3,7 @@ import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
   IRuleLib__Rule,
-  ISubscribeModule__SubscribeIntent
+  ISubscribe__SubscribeIntent
 } from '@puppet/contracts/types'
 import { type Address, type Hex, keccak256, type TypedDataDefinition } from 'viem'
 import type { LocalAccount } from 'viem/accounts'
@@ -96,7 +96,7 @@ export function attestSubscribeIntent(ctx: ISubscribeAttestContext, input: ISubs
     )
   }
 
-  const intent: ISubscribeModule__SubscribeIntent = {
+  const intent: ISubscribe__SubscribeIntent = {
     params: input.params,
     blockNumber: input.blockNumber,
     deadline: input.deadline,

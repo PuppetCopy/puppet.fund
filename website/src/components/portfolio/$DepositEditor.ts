@@ -305,7 +305,7 @@ export const $DepositEditor = ({
               address: sel.address,
               abi: erc20Abi,
               functionName: 'allowance',
-              args: [walletAccount.address, PUPPET_CONTRACT_MAP.WalletDepositModule.address]
+              args: [walletAccount.address, PUPPET_CONTRACT_MAP.Deposit.address]
             })
           } catch {
             return 0n
@@ -807,7 +807,7 @@ export const $DepositEditor = ({
                             mode: 'erc20Gate',
                             token: swapToken,
                             amount: inputAmount,
-                            spender: PUPPET_CONTRACT_MAP.WalletDepositModule.address,
+                            spender: PUPPET_CONTRACT_MAP.Deposit.address,
                             walletBalance: params.balance ?? 0n,
                             walletAllowance: params.allowance
                           }
@@ -931,7 +931,7 @@ export const $DepositEditor = ({
                           mode: 'erc20Gate',
                           token: inputToken,
                           amount: topUp,
-                          spender: PUPPET_CONTRACT_MAP.WalletDepositModule.address,
+                          spender: PUPPET_CONTRACT_MAP.Deposit.address,
                           walletBalance: params.balance ?? 0n,
                           walletAllowance: params.allowance
                         }

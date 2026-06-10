@@ -60,7 +60,7 @@ export function checkNavGate(
   }
 
   if (opts?.clientNav !== undefined && opts.kind !== 'view') {
-    const overstatedBy = opts.kind === 'fulfill' ? opts.clientNav - navSigned : navSigned - opts.clientNav
+    const overstatedBy = opts.kind === 'redeem' ? opts.clientNav - navSigned : navSigned - opts.clientNav
     if (overstatedBy > 0n) {
       const drift = navDriftBps(opts.clientNav, navSigned)
       if (drift > config.driftToleranceBps) {

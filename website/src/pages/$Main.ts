@@ -45,7 +45,7 @@ import type {
   IAllocateDraft,
   IClaimDraft,
   IDepositDraft,
-  IFulfillDraft,
+  IRedeemDraft,
   ISellDraft,
   ISubscribeDraft,
   IWithdrawDraft
@@ -64,7 +64,7 @@ import { $Portfolio } from './$Portfolio.js'
 
 interface IApp {}
 
-const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'fulfill', 'createFundAccount'])
+const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'redeem', 'createFundAccount'])
 
 const ZERO_TOKEN = '0x0000000000000000000000000000000000000000' as Address
 
@@ -204,7 +204,7 @@ export const $Main = (_config: IApp = {}) =>
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
       [changeAllocateDraft, changeAllocateDraftTether]: IBehavior<IAllocateDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
-      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IFulfillDraft>,
+      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft>,
       [clearDrafts, clearDraftsTether]: IBehavior<null>,
       [releaseDraft, releaseDraftTether]: IBehavior<string>,
       [changeAttest, changeAttestTether]: IBehavior<IAttestation>
@@ -319,8 +319,8 @@ export const $Main = (_config: IApp = {}) =>
         | { type: 'set-subscribes'; list: ISubscribeRule[] }
         | { type: 'upsert'; draft: IDepositDraft | IWithdrawDraft }
         | { type: 'allocate'; draft: IAllocateDraft }
-        | { type: 'redeem'; draft: ISellDraft | IClaimDraft }
-        | { type: 'fulfill'; draft: IFulfillDraft }
+        | { type: 'sell-claim'; draft: ISellDraft | IClaimDraft }
+        | { type: 'redeem'; draft: IRedeemDraft }
         | { type: 'release'; key: string }
         | { type: 'clear' }
 
@@ -331,7 +331,7 @@ export const $Main = (_config: IApp = {}) =>
         subscribe: 1,
         allocate: 2,
         sell: 3,
-        fulfill: 4,
+        redeem: 4,
         claim: 5,
         withdraw: 6
       }
@@ -355,13 +355,13 @@ export const $Main = (_config: IApp = {}) =>
                 const idx = list.findIndex(d => d.id === event.draft.id)
                 return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
               }
-              if (event.type === 'redeem') {
+              if (event.type === 'sell-claim') {
                 const amount = event.draft.kind === 'sell' ? event.draft.sharesOut : event.draft.amount
                 if (amount === 0n) return list.filter(d => d.id !== event.draft.id)
                 const idx = list.findIndex(d => d.id === event.draft.id)
                 return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
               }
-              if (event.type === 'fulfill') {
+              if (event.type === 'redeem') {
                 if (event.draft.acceptableShares === 0n) return list.filter(d => d.id !== event.draft.id)
                 const idx = list.findIndex(d => d.id === event.draft.id)
                 return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
@@ -420,8 +420,8 @@ export const $Main = (_config: IApp = {}) =>
             map((list): DraftEvent => ({ type: 'set-subscribes', list }), changeMatchRuleList),
             map((draft): DraftEvent => ({ type: 'upsert', draft }), changeDraft),
             map((draft): DraftEvent => ({ type: 'allocate', draft }), changeAllocateDraft),
-            map((draft): DraftEvent => ({ type: 'redeem', draft }), changeRedeemDraft),
-            map((draft): DraftEvent => ({ type: 'fulfill', draft }), changeFulfillDraft),
+            map((draft): DraftEvent => ({ type: 'sell-claim', draft }), changeRedeemDraft),
+            map((draft): DraftEvent => ({ type: 'redeem', draft }), changeFulfillDraft),
             map((key): DraftEvent => ({ type: 'release', key }), releaseDraft),
             map((): DraftEvent => ({ type: 'clear' }), clearDrafts),
             op(

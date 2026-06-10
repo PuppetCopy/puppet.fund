@@ -8,8 +8,8 @@ import {
   attestClaimIntent,
   attestCreateFundAccountIntent,
   attestCreatePuppetAccountIntent,
-  attestFulfillIntent,
   attestRecognizeBalanceIntent,
+  attestRedeemIntent,
   attestSellIntent,
   attestSubscribeIntent,
   attestWithdrawToBridgeIntent,
@@ -20,8 +20,8 @@ import {
   type ICreateFundAccountInput,
   type ICreatePuppetAccountInput,
   type IDepositRoute,
-  type IFulfillInput,
   type IRecognizeBalanceInput,
+  type IRedeemInput,
   type ISellInput,
   type ISubscribeInput,
   type IWithdrawToBridgeInput,
@@ -60,7 +60,7 @@ import {
   walletClientForChain
 } from './_shared.js'
 import { buildAllocateInput } from './allocate.js'
-import { buildClaimInput, buildFulfillInput, buildSellInput } from './redeem.js'
+import { buildClaimInput, buildRedeemInput, buildSellInput } from './redeem.js'
 import { buildSubscribeInput } from './subscribe.js'
 
 export type IAttestation = {
@@ -517,11 +517,11 @@ async function runClaimStep(input: IClaimInput, ctx: ExecContext): Promise<IAtte
   return { request, result: await compact.attest(request) }
 }
 
-async function runFulfillStep(input: IFulfillInput, ctx: ExecContext, signedBalance: bigint): Promise<IAttestation> {
+async function runRedeemStep(input: IRedeemInput, ctx: ExecContext, signedBalance: bigint): Promise<IAttestation> {
   const fund = predictFundAccount(input.share.master)
   const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
   const pool = await fetchMasterPoolState(fund)
-  const { intent, typedData } = attestFulfillIntent(
+  const { intent, typedData } = attestRedeemIntent(
     {
       chainId: resolveDispatchChainId(HUB_CHAIN_ID),
       tokenRegistry: ctx.tokenRegistry,
@@ -535,7 +535,7 @@ async function runFulfillStep(input: IFulfillInput, ctx: ExecContext, signedBala
     fresh
   )
   const signature = await ctx.session.account.signTypedData(typedData)
-  const request = { kind: 'fulfill' as const, input: fresh, intent, signature }
+  const request = { kind: 'redeem' as const, input: fresh, intent, signature }
   return { request, result: await compact.attest(request) }
 }
 
@@ -594,7 +594,7 @@ const push = (out: IAttestation[], value: IAttestation | null): void => {
 const balanceKey = (account: Address, chainId: number, tokenId: Hex): string =>
   `${account.toLowerCase()}:${chainId}:${tokenId.toLowerCase()}`
 
-const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'fulfill', 'createFundAccount'])
+const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'redeem', 'createFundAccount'])
 
 function accountForRequest(req: IRelayRequest): Address {
   const account = predictPuppetAccount((req.input as { params: IAccountLib__AccountInitParams }).params)
@@ -709,10 +709,10 @@ export async function runDraft(draft: IDraft, ctx: ExecContext): Promise<IAttest
     push(out, record(await runClaimStep(await buildClaimInput(draft, ctx), ctx)))
     return out
   }
-  if (draft.kind === 'fulfill') {
-    const input = await buildFulfillInput(draft, ctx)
+  if (draft.kind === 'redeem') {
+    const input = await buildRedeemInput(draft, ctx)
     const fund = predictFundAccount(input.share.master)
-    push(out, record(await runFulfillStep(input, ctx, await getBalance(fund, HUB_CHAIN_ID, input.share.baseTokenId))))
+    push(out, record(await runRedeemStep(input, ctx, await getBalance(fund, HUB_CHAIN_ID, input.share.baseTokenId))))
     return out
   }
 

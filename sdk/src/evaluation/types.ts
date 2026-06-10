@@ -4,7 +4,7 @@ import type { IndexerHealth, LagSeverity } from '../state/health.js'
 import type { ISubaccountState } from '../state/metric.js'
 import type { IIndexerClient } from '../state/shared.js'
 
-export type INavKind = 'allocate' | 'fulfill' | 'view'
+export type INavKind = 'allocate' | 'redeem' | 'view'
 
 export interface INavChainBalance {
   chainId: ChainId

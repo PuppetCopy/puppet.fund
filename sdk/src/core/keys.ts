@@ -49,7 +49,7 @@ export function getAllocationAdderess(allocationStoreImplementationHash: Hex, al
       keccak256(
         concat([
           CREATE2_PREFIX, //
-          PUPPET_CONTRACT_MAP.AllocateModule.address,
+          PUPPET_CONTRACT_MAP.Allocate.address,
           allocationKey,
           allocationStoreImplementationHash
         ])

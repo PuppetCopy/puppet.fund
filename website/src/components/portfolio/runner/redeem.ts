@@ -1,7 +1,7 @@
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import {
   type IClaimInput,
-  type IFulfillInput,
+  type IRedeemInput,
   type ISellInput,
   resolveDispatchChainId,
   resolveDispatchNetwork
@@ -19,11 +19,11 @@ import {
 import type { Address, Hex } from 'viem'
 import { fetchMasterPoolState } from '../../../io/indexer/query.js'
 import { homePublicClient } from '../../../wallet/index.js'
-import type { IClaimDraft, IFulfillDraft, ISellDraft } from '../draft.js'
+import type { IClaimDraft, IRedeemDraft, ISellDraft } from '../draft.js'
 import { DEFAULT_DEADLINE_SEC, type ExecContext } from './_shared.js'
 
 async function resolveFund(
-  draft: ISellDraft | IClaimDraft | IFulfillDraft,
+  draft: ISellDraft | IClaimDraft | IRedeemDraft,
   ctx: ExecContext
 ): Promise<ISubaccountState> {
   const fund = await getSubaccountState(ctx.sql, draft.masterAccount)
@@ -67,17 +67,17 @@ export async function buildSellInput(draft: ISellDraft, ctx: ExecContext): Promi
   }
 }
 
-export async function buildFulfillInput(draft: IFulfillDraft, ctx: ExecContext): Promise<IFulfillInput> {
+export async function buildRedeemInput(draft: IRedeemDraft, ctx: ExecContext): Promise<IRedeemInput> {
   const fund = await resolveFund(draft, ctx)
-  const [pool, acceptableRelayFee, fulfillEval, liveBalance] = await Promise.all([
+  const [pool, acceptableRelayFee, redeemEval, liveBalance] = await Promise.all([
     getFundPoolState(ctx.sql, draft.masterAccount),
-    getAcceptableRelayFee(ctx.gasPrice, 'HubGate', 'fulfill', draft.baseToken, homePublicClient),
+    getAcceptableRelayFee(ctx.gasPrice, 'HubGate', 'redeem', draft.baseToken, homePublicClient),
     evaluateAccountNav(ctx.sql, {
       master: draft.masterAccount,
       baseToken: draft.baseToken,
       baseTokenId: draft.baseTokenId,
       health: ctx.indexerHealth,
-      kind: 'fulfill',
+      kind: 'redeem',
       subaccount: fund
     }),
     fetchRouteBalance(homePublicClient, draft.baseToken, draft.masterAccount)
@@ -85,7 +85,7 @@ export async function buildFulfillInput(draft: IFulfillDraft, ctx: ExecContext):
   // The fund pays sharesRetired * nav / supply (payout + relay fee) out of its live token balance, so an
   // indexer-overstated signed balance (fee debits are invisible to events) reverts the dispatch on-chain.
   // Clamp the attested NAV to what the fund can actually pay.
-  const acceptableNetAssetValue = fulfillEval.navSigned < liveBalance ? fulfillEval.navSigned : liveBalance
+  const acceptableNetAssetValue = redeemEval.navSigned < liveBalance ? redeemEval.navSigned : liveBalance
   return {
     params: {
       user: ctx.wallet.address,

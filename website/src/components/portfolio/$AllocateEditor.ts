@@ -73,7 +73,7 @@ import { homePublicClient, type IConnectedWallet } from '../../wallet/index.js'
 import { $FulfillEditor } from './$FulfillEditor.js'
 import { $ClaimEditor, $RedeemEditor } from './$RedeemEditor.js'
 import { $optionRow, $tokenIconBySymbol, decorateOptionList, type ITokenInputOption } from './$tokenOption.js'
-import type { IAllocateDraft, IClaimDraft, IFulfillDraft, IMasterFundStep, ISellDraft } from './draft.js'
+import type { IAllocateDraft, IClaimDraft, IMasterFundStep, IRedeemDraft, ISellDraft } from './draft.js'
 import { DEFAULT_DEADLINE_SEC, walletClientForChain } from './runner/_shared.js'
 import { gatherMatched } from './runner/allocate.js'
 
@@ -107,7 +107,7 @@ export const $AllocateEditor = ({
       [clickMax, clickMaxTether]: IBehavior<INode<HTMLButtonElement>, MouseEvent>,
       [enterPress, enterPressTether]: IBehavior<KeyboardEvent>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
-      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IFulfillDraft>,
+      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft>,
       [selectOption, selectOptionTether]: IBehavior<ITokenInputOption>
     ) => {
       type ISelSource = { chainId: number; isNative: boolean; tokenId: Hex | null }

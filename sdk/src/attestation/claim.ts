@@ -2,7 +2,7 @@ import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
-  IRedeemModule__ClaimIntent,
+  IRedeem__ClaimIntent,
   IShareLib__ShareInitParams
 } from '@puppet/contracts/types'
 import type { TypedDataDefinition } from 'viem'
@@ -41,7 +41,7 @@ export function attestClaimIntent(ctx: IClaimAttestContext, input: IClaimInput) 
     throw new CompactContractError('Share__InsufficientClaimable', [])
   }
 
-  const intent: IRedeemModule__ClaimIntent = {
+  const intent: IRedeem__ClaimIntent = {
     params: input.params,
     blockNumber: input.blockNumber,
     deadline: input.deadline,

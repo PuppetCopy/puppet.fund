@@ -1,5 +1,5 @@
 import { ACCOUNT_GATE_INTENTS } from '@puppet/contracts/intents'
-import type { IAccountLib__AccountInitParams, IAccountModule__CreatePuppetAccountIntent } from '@puppet/contracts/types'
+import type { IAccount__CreatePuppetAccountIntent, IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import type { Hex, TypedDataDefinition } from 'viem'
 import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
@@ -49,7 +49,7 @@ export function attestCreatePuppetAccountIntent(
     )
   }
 
-  const intent: IAccountModule__CreatePuppetAccountIntent = {
+  const intent: IAccount__CreatePuppetAccountIntent = {
     params: input.params,
     tokenId: input.tokenId,
     blockNumber: input.blockNumber,

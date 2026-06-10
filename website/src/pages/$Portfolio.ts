@@ -26,7 +26,7 @@ import type {
   IAllocateDraft,
   IClaimDraft,
   IDepositDraft,
-  IFulfillDraft,
+  IRedeemDraft,
   ISellDraft,
   IWithdrawDraft
 } from '../components/portfolio/draft.js'
@@ -95,7 +95,7 @@ export const $Portfolio = ({
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
       [changeMasterDraft, changeMasterDraftTether]: IBehavior<IAllocateDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
-      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IFulfillDraft>,
+      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft>,
       // Wiring this through is what subscribes $WalletConnect's click → map(connectWallet)
       // operator chain. Without it, button clicks don't fire connect. Value is unused here.
       [_connect, connectTether]: IBehavior<ReturnType<typeof connectWallet>>

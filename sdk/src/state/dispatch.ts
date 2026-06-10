@@ -1,9 +1,9 @@
-import type { IAccountModule__AccountCall, IWalletDepositModule__WalletDeposit } from '@puppet/indexer-graphql/entities'
+import type { IAccount__AccountCall, IDeposit__Deposit } from '@puppet/indexer-graphql/entities'
 import { type Address, getAddress, type Hex } from 'viem'
 import { type IIndexerClient, selectOne } from './shared.js'
 
-export type IAccountCallRow = IAccountModule__AccountCall
-export type IWalletDepositRow = IWalletDepositModule__WalletDeposit
+export type IAccountCallRow = IAccount__AccountCall
+export type IWalletDepositRow = IDeposit__Deposit
 
 const SETTLEMENT_POLL_START_MS = 250
 const SETTLEMENT_POLL_MAX_MS = 500
@@ -28,7 +28,7 @@ export async function findAccountCallByNonce(
   chainId: number,
   nonce: bigint
 ): Promise<IAccountCallRow | undefined> {
-  return selectOne(sql, 'AccountModule__AccountCall', {
+  return selectOne(sql, 'Account__AccountCall', {
     where: { account: { _eq: getAddress(account) }, chainId: { _eq: BigInt(chainId) }, nonce: { _eq: nonce } }
   })
 }
@@ -68,7 +68,7 @@ export async function findWalletDepositByTxHash(
   sql: IIndexerClient,
   transactionHash: Hex
 ): Promise<IWalletDepositRow | undefined> {
-  return selectOne(sql, 'WalletDepositModule__WalletDeposit', {
+  return selectOne(sql, 'Deposit__Deposit', {
     where: { transactionHash: { _eq: transactionHash.toLowerCase() as Hex } }
   })
 }

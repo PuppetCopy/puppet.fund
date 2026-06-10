@@ -6,8 +6,8 @@ import type {
   ICreateFundAccountInput,
   ICreatePuppetAccountInput,
   IDepositRoute,
-  IFulfillInput,
   IRecognizeBalanceInput,
+  IRedeemInput,
   ISellInput,
   ISubscribeInput,
   IWithdrawToBridgeInput,
@@ -31,7 +31,7 @@ export type StepInput =
   | { kind: 'allocate'; input: IAllocateInput }
   | { kind: 'sell'; input: ISellInput }
   | { kind: 'claim'; input: IClaimInput }
-  | { kind: 'fulfill'; input: IFulfillInput }
+  | { kind: 'redeem'; input: IRedeemInput }
 
 export type StepKind = StepInput['kind']
 
@@ -50,7 +50,7 @@ export const STEP_LABEL: Record<StepKind, string> = {
   allocate: 'Allocate',
   sell: 'Sell',
   claim: 'Claim',
-  fulfill: 'Fulfill'
+  redeem: 'Fulfill'
 }
 
 export const STEP_DESCRIPTION: Record<StepKind, string> = {
@@ -71,7 +71,7 @@ export const STEP_DESCRIPTION: Record<StepKind, string> = {
   allocate: 'A trader pulls funds matched from subscribers into their fund.',
   sell: 'Queue your shares for redemption. The trader buys them back at the next fulfillment.',
   claim: 'Withdraw the base currency you accrued from a prior buyback.',
-  fulfill: 'Pay base from the master pool to retire queued shares at the current NAV.'
+  redeem: 'Pay base from the master pool to retire queued shares at the current NAV.'
 }
 
 export const SHARE_DECIMALS = 18
@@ -170,8 +170,8 @@ export interface IClaimDraft extends IDraftBase {
   amount: bigint
 }
 
-export interface IFulfillDraft extends IDraftBase {
-  kind: 'fulfill'
+export interface IRedeemDraft extends IDraftBase {
+  kind: 'redeem'
   master: Address
   masterAccount: Address
   baseToken: Address
@@ -188,7 +188,7 @@ export type IDraft =
   | IAllocateDraft
   | ISellDraft
   | IClaimDraft
-  | IFulfillDraft
+  | IRedeemDraft
 
 // Narrower union: amount-bearing drafts only (deposit + withdraw).
 export type IAmountDraft = IDepositDraft | IWithdrawDraft

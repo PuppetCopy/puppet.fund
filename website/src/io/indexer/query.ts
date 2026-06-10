@@ -52,7 +52,7 @@ async function tokenByBaseId(baseTokenIdList: Hex[]): Promise<Map<Hex, Address>>
 }
 
 export async function fetchUserSubscriptions(puppet: Address) {
-  const rows = await select(sqlClient, 'SubscribeModule__Subscribe', {
+  const rows = await select(sqlClient, 'Subscribe__Subscribe', {
     where: { puppetAccount: { _eq: getAddress(puppet) } }
   })
   if (rows.length === 0) return []
@@ -139,7 +139,7 @@ export async function findWalletDepositTxByRecipient(
   chainId: number,
   minBlock: bigint
 ): Promise<Hex | null> {
-  const row = await selectOne(sqlClient, 'WalletDepositModule__WalletDeposit', {
+  const row = await selectOne(sqlClient, 'Deposit__Deposit', {
     where: {
       recipient: { _eq: getAddress(recipient) },
       chainId: { _eq: BigInt(chainId) },

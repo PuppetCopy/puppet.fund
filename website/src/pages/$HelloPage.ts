@@ -53,7 +53,7 @@ import type {
   IAllocateDraft,
   IClaimDraft,
   IDepositDraft,
-  IFulfillDraft,
+  IRedeemDraft,
   ISellDraft,
   IWithdrawDraft
 } from '../components/portfolio/draft.js'
@@ -132,7 +132,7 @@ export const $HelloPage = ({
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
       [changeMasterDraft, changeMasterDraftTether]: IBehavior<IAllocateDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
-      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IFulfillDraft>,
+      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft>,
       [selectBaseToken, selectBaseTokenTether]: IBehavior<Hex>,
       [changeName, changeNameTether]: IBehavior<string>,
       [selectTrack, selectTrackTether]: IBehavior<INode, ITrack>,

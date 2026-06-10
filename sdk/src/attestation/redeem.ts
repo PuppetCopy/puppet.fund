@@ -2,7 +2,7 @@ import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
-  IRedeemModule__FulfillIntent,
+  IRedeem__RedeemIntent,
   IShareLib__ShareInitParams
 } from '@puppet/contracts/types'
 import { type Address, isAddressEqual, type TypedDataDefinition } from 'viem'
@@ -11,7 +11,7 @@ import { CompactContractError } from '../compact/error.js'
 import * as IntentLib from './intentLib.js'
 import { HUB_DOMAIN, type IDraftContext } from './shared.js'
 
-export interface IFulfillInput {
+export interface IRedeemInput {
   params: IAccountLib__AccountInitParams
   blockNumber: bigint
   deadline: bigint
@@ -24,7 +24,7 @@ export interface IFulfillInput {
   acceptableShares: bigint
 }
 
-export interface IFulfillAttestContext extends IDraftContext {
+export interface IRedeemAttestContext extends IDraftContext {
   currentBlock: bigint
   shareToken: Address | null
   totalShareSupply: bigint
@@ -33,7 +33,7 @@ export interface IFulfillAttestContext extends IDraftContext {
   poolTotalStake: bigint
 }
 
-export function attestFulfillIntent(ctx: IFulfillAttestContext, input: IFulfillInput) {
+export function attestRedeemIntent(ctx: IRedeemAttestContext, input: IRedeemInput) {
   IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
@@ -44,7 +44,7 @@ export function attestFulfillIntent(ctx: IFulfillAttestContext, input: IFulfillI
     relayFeeDenominator: input.acceptableNetAssetValue
   })
 
-  if (input.acceptableNetAssetValue === 0n) throw new CompactContractError('Fulfill__ZeroAcceptableNav', [])
+  if (input.acceptableNetAssetValue === 0n) throw new CompactContractError('Redeem__ZeroAcceptableNav', [])
 
   const master = predictPuppetAccount(input.params)
   if (!isAddressEqual(master, input.share.master)) {
@@ -57,7 +57,7 @@ export function attestFulfillIntent(ctx: IFulfillAttestContext, input: IFulfillI
     throw new CompactContractError('Share__NotCreated', [])
   }
   if (ctx.totalShareSupply !== input.totalShareSupply) {
-    throw new CompactContractError('Fulfill__SupplyMismatch', [ctx.totalShareSupply, input.totalShareSupply])
+    throw new CompactContractError('Redeem__SupplyMismatch', [ctx.totalShareSupply, input.totalShareSupply])
   }
 
   // sharesOut > 0 embeds a master self-sell before the drain: the master's shares join
@@ -77,12 +77,12 @@ export function attestFulfillIntent(ctx: IFulfillAttestContext, input: IFulfillI
   const sharesRetired = input.acceptableShares < maxRetirable ? input.acceptableShares : maxRetirable
   const drainedBase =
     ctx.totalShareSupply === 0n ? 0n : (sharesRetired * input.acceptableNetAssetValue) / ctx.totalShareSupply
-  if (sharesRetired === 0n) throw new CompactContractError('Fulfill__NothingToRetire', [])
-  if (drainedBase <= input.acceptableRelayFee) throw new CompactContractError('Fulfill__RelayFeeTooHigh', [])
+  if (sharesRetired === 0n) throw new CompactContractError('Redeem__NothingToRetire', [])
+  if (drainedBase <= input.acceptableRelayFee) throw new CompactContractError('Redeem__RelayFeeTooHigh', [])
   IntentLib.assertOutflowCovered(ctx, { amountIn: 0n, amountOut: drainedBase })
   if (poolTotalStake === 0n) throw new CompactContractError('Share__NoStakeToCredit', [])
 
-  const intent: IRedeemModule__FulfillIntent = {
+  const intent: IRedeem__RedeemIntent = {
     params: input.params,
     blockNumber: input.blockNumber,
     deadline: input.deadline,
@@ -98,7 +98,7 @@ export function attestFulfillIntent(ctx: IFulfillAttestContext, input: IFulfillI
 
   const typedData: TypedDataDefinition = {
     domain: HUB_DOMAIN,
-    ...HUB_GATE_INTENTS.fulfill,
+    ...HUB_GATE_INTENTS.redeem,
     message: intent as unknown as Record<string, unknown>
   }
   return { intent, typedData, args: [intent] }
