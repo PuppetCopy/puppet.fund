@@ -22,109 +22,109 @@ import hubgateAbi from '../abi/puppetHubGate.js'
 
 export const CORE_CONTRACT_MAP = {
   Dictate: {
-    address: '0x6CFFAc40bc3C73846E4f37B1AA1D021b6f7A2b2e',
-    chainBlockMap: { 8453: 47119549, 42161: 471766784 },
+    address: '0xE1Fd6291199f80a426881c597365FcA622dc6205',
+    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
     abi: dictateAbi
   },
   RegisterModule: {
-    address: '0x55844336c9FC50388550d4F6E077dec15cC06238',
-    chainBlockMap: { 8453: 47119549, 42161: 471766786 },
+    address: '0x66Df4460571504569Bd54D6E073BF41f04b47884',
+    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
     abi: registermoduleAbi
   },
   PuppetAccount: {
-    address: '0x79e8087F6D49295603707975B5FB45E6455597Eb',
-    chainBlockMap: { 8453: 47119549, 42161: 471766787 },
+    address: '0x1004D143DCbE13F601634bf2942F23112384eA3E',
+    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
     abi: puppetaccountAbi
   },
   FundAccount: {
-    address: '0x7ec98Eb2c55a2BcA959a998630F73789fa5E56FE',
-    chainBlockMap: { 8453: 47119549, 42161: 471766789 },
+    address: '0x0126AD8adb6Dfb118911502749cfdb285996d004',
+    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
     abi: fundaccountAbi
   },
   PassthroughRoute: {
-    address: '0xbA64f9f71ca52445c351Fc5d743294760326957C',
-    chainBlockMap: { 8453: 47119550, 42161: 471766791 },
+    address: '0xe00B242161c925b8AF662C6E08C6a5cBe73CE2C1',
+    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
     abi: passthroughrouteAbi
   },
   Attest: {
-    address: '0x9C55998FFCd7ef53240da20E163505F459ce82E0',
-    chainBlockMap: { 8453: 47119550, 42161: 471766792 },
+    address: '0x581407dD72a7ab9E989c071956727d8D1271256c',
+    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
     abi: attestAbi
   },
   AccountModule: {
-    address: '0xcd7a9B94DD2dC8A48ccC0b1dE7C974280aa8d504',
-    chainBlockMap: { 8453: 47119550, 42161: 471766794 },
+    address: '0xB5f1Bb90e9e92864bb3d3255e89E32ABd09b30d0',
+    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
     abi: accountmoduleAbi
   },
   WalletDepositModule: {
-    address: '0x3f229B7afE6acB348B48Fca47484E2C967505eFC',
-    chainBlockMap: { 8453: 47119550, 42161: 471766796 },
+    address: '0x8269652C3619d94b32cAa6C6A1100Bd6c67D4912',
+    chainBlockMap: { 8453: 47158193, 42161: 472074724 },
     abi: walletdepositmoduleAbi
   }
 } as const
 
 export const HUB_CONTRACT_MAP = {
   AccountGate: {
-    address: '0xe7c107A6a799902a20eB0EBd5F12CFFd5655Fa39',
-    chainAddresses: { 8453: '0xe7c107A6a799902a20eB0EBd5F12CFFd5655Fa39', 42161: '0xe7c107A6a799902a20eB0EBd5F12CFFd5655Fa39' },
+    address: '0x188C164eFb1248f6e77317FEc9f39A0D5E62Ca7C',
+    chainAddresses: { 8453: '0x188C164eFb1248f6e77317FEc9f39A0D5E62Ca7C', 42161: '0x188C164eFb1248f6e77317FEc9f39A0D5E62Ca7C' },
     abi: accountgateAbi
   },
   MasterGate: {
-    address: '0x27aB79F4196ABb5FfAB66Bb47a8dD14bA331A4A9',
-    chainAddresses: { 8453: '0x27aB79F4196ABb5FfAB66Bb47a8dD14bA331A4A9', 42161: '0x27aB79F4196ABb5FfAB66Bb47a8dD14bA331A4A9' },
+    address: '0xd332b13C8C8B7B8E5B00de6Eb5EA91404Ed0fB43',
+    chainAddresses: { 8453: '0xd332b13C8C8B7B8E5B00de6Eb5EA91404Ed0fB43', 42161: '0xd332b13C8C8B7B8E5B00de6Eb5EA91404Ed0fB43' },
     abi: mastergateAbi
   },
   ShareToken: {
-    address: '0x2DCf6D774A5C0225205a1fA9a078094C73c0B9B7',
-    chainAddresses: { 42161: '0x2DCf6D774A5C0225205a1fA9a078094C73c0B9B7' },
+    address: '0x39B234AA5F7B8A19f52FAF47167973ACaD279C79',
+    chainAddresses: { 42161: '0x39B234AA5F7B8A19f52FAF47167973ACaD279C79' },
     abi: sharetokenAbi
   },
   ShareModule: {
-    address: '0xF43eEC8A87E08Bf052Df54E8d2416C451e272ce1',
-    chainAddresses: { 42161: '0xF43eEC8A87E08Bf052Df54E8d2416C451e272ce1' },
+    address: '0x1433fDbE7Bc8067b7F5DdaE7f5BBaC1F71184Aa2',
+    chainAddresses: { 42161: '0x1433fDbE7Bc8067b7F5DdaE7f5BBaC1F71184Aa2' },
     abi: sharemoduleAbi
   },
   RedeemStore: {
-    address: '0x7b3A012Ff9e23D2600f2DC38e26d25242b9509b9',
-    chainAddresses: { 42161: '0x7b3A012Ff9e23D2600f2DC38e26d25242b9509b9' },
+    address: '0xD39E505d21755ff9308250C1C2c3001585d1900f',
+    chainAddresses: { 42161: '0xD39E505d21755ff9308250C1C2c3001585d1900f' },
     abi: redeemstoreAbi
   },
   RedeemModule: {
-    address: '0xCb9b11cbFda164ee99eA4a0FF7BAc49713a8C632',
-    chainAddresses: { 42161: '0xCb9b11cbFda164ee99eA4a0FF7BAc49713a8C632' },
+    address: '0x6863c70e16E0F010d21b83B93Bd63Efd85c29b2F',
+    chainAddresses: { 42161: '0x6863c70e16E0F010d21b83B93Bd63Efd85c29b2F' },
     abi: redeemmoduleAbi
   },
   AllocateStore: {
-    address: '0xA4811051E6f6Be29Dc7F627020915DaB45319F89',
-    chainAddresses: { 42161: '0xA4811051E6f6Be29Dc7F627020915DaB45319F89' },
+    address: '0xEa275D3872b203c2A5c074D947E971f78467c29A',
+    chainAddresses: { 42161: '0xEa275D3872b203c2A5c074D947E971f78467c29A' },
     abi: allocatestoreAbi
   },
   SubscribeModule: {
-    address: '0xadC0E6984B1E008A6A6B258693d1bDdFDe4cA48a',
-    chainAddresses: { 42161: '0xadC0E6984B1E008A6A6B258693d1bDdFDe4cA48a' },
+    address: '0xd65d2cA3a48A43ae2DcD3B96b20eeB732f185d6e',
+    chainAddresses: { 42161: '0xd65d2cA3a48A43ae2DcD3B96b20eeB732f185d6e' },
     abi: subscribemoduleAbi
   },
   AllocateModule: {
-    address: '0x4fC781BEeD39ceEF6454A8B1f145BAEA9cB1F30C',
-    chainAddresses: { 42161: '0x4fC781BEeD39ceEF6454A8B1f145BAEA9cB1F30C' },
+    address: '0x111Ec8f9BdEE7Aca46F979Ccda5022827B2e46c3',
+    chainAddresses: { 42161: '0x111Ec8f9BdEE7Aca46F979Ccda5022827B2e46c3' },
     abi: allocatemoduleAbi
   },
   HubGate: {
-    address: '0x2d9Df68632368A50754836Ecd90157Cdee26aF05',
-    chainAddresses: { 42161: '0x2d9Df68632368A50754836Ecd90157Cdee26aF05' },
+    address: '0x7242D4538332ECF36b0Aa69a4f91F1370fbBC0B6',
+    chainAddresses: { 42161: '0x7242D4538332ECF36b0Aa69a4f91F1370fbBC0B6' },
     abi: hubgateAbi
   }
 } as const
 
 export const SPOKE_CONTRACT_MAP = {
   AccountGate: {
-    address: '0xe7c107A6a799902a20eB0EBd5F12CFFd5655Fa39',
-    chainAddresses: { 8453: '0xe7c107A6a799902a20eB0EBd5F12CFFd5655Fa39', 42161: '0xe7c107A6a799902a20eB0EBd5F12CFFd5655Fa39' },
+    address: '0x188C164eFb1248f6e77317FEc9f39A0D5E62Ca7C',
+    chainAddresses: { 8453: '0x188C164eFb1248f6e77317FEc9f39A0D5E62Ca7C', 42161: '0x188C164eFb1248f6e77317FEc9f39A0D5E62Ca7C' },
     abi: accountgateAbi
   },
   MasterGate: {
-    address: '0x27aB79F4196ABb5FfAB66Bb47a8dD14bA331A4A9',
-    chainAddresses: { 8453: '0x27aB79F4196ABb5FfAB66Bb47a8dD14bA331A4A9', 42161: '0x27aB79F4196ABb5FfAB66Bb47a8dD14bA331A4A9' },
+    address: '0xd332b13C8C8B7B8E5B00de6Eb5EA91404Ed0fB43',
+    chainAddresses: { 8453: '0xd332b13C8C8B7B8E5B00de6Eb5EA91404Ed0fB43', 42161: '0xd332b13C8C8B7B8E5B00de6Eb5EA91404Ed0fB43' },
     abi: mastergateAbi
   }
 } as const

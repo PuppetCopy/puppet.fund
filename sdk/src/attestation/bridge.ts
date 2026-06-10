@@ -54,6 +54,9 @@ export function attestBridgeIntent(ctx: IBridgeAttestContext, input: IBridgeInpu
   if (input.destinationChainId !== BigInt(HUB_CHAIN_ID)) {
     throw new CompactContractError('Deposit__InvalidDestinationChain', [BigInt(HUB_CHAIN_ID), input.destinationChainId])
   }
+  if (BigInt(ctx.chainId) === input.destinationChainId) {
+    throw new CompactContractError('Deposit__SameChainBridge', [input.destinationChainId])
+  }
   const outputToken = IntentLib.verifyTokenAndCap(ctx.tokenRegistry, HUB_CHAIN_ID as ChainId, input.tokenId, 0n)
 
   const nowSec = Math.floor(Date.now() / 1000)

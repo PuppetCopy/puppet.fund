@@ -271,7 +271,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
         )
       )
 
-      const $chainOption = (id: number) => $chainLabel(id, 20)
+      const $chainOption = (id: number) => $node(style({ display: 'flex', padding: '8px 10px' }))($chainLabel(id, 20))
 
       const tokenPrice = priceFor(token)
 

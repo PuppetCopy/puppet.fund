@@ -1,7 +1,12 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
-import type { IAllocateModule__AllocateIntent } from '@puppet/contracts/types'
-import { type Address, encodePacked, type Hex, keccak256, type TypedDataDefinition } from 'viem'
+import type {
+  IAccountLib__AccountInitParams,
+  IAllocateModule__AllocateIntent,
+  IShareLib__ShareInitParams
+} from '@puppet/contracts/types'
+import { type Address, encodePacked, type Hex, isAddressEqual, keccak256, type TypedDataDefinition } from 'viem'
+import { predictPuppetAccount } from '../account/index.js'
 import { CompactContractError } from '../compact/error.js'
 import * as IntentLib from './intentLib.js'
 import { HUB_DOMAIN, type IDraftContext } from './shared.js'
@@ -13,9 +18,8 @@ export interface IAllocateRulePosition {
 }
 
 export interface IAllocateInput {
-  master: Address
-  baseTokenId: Hex
-  name: Hex
+  params: IAccountLib__AccountInitParams
+  share: IShareLib__ShareInitParams
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
@@ -31,6 +35,7 @@ export interface IAllocateAttestContext extends IDraftContext {
   currentBlock: bigint
   totalShareSupply: bigint
   seeded: boolean
+  poolTotalStake: bigint
   positions: readonly IAllocateRulePosition[]
 }
 
@@ -38,19 +43,24 @@ export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAlloca
   IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
-    baseTokenId: input.baseTokenId,
+    baseTokenId: input.share.baseTokenId,
     lookupChain: HUB_CHAIN_ID,
     capAmount: input.masterAmount,
     acceptableRelayFee: input.acceptableRelayFee
   })
 
   if (input.acceptableNetAssetValue === 0n) throw new CompactContractError('Allocate__ZeroAcceptableNav', [])
+  const derivedMaster = predictPuppetAccount(input.params)
+  if (!isAddressEqual(derivedMaster, input.share.master)) {
+    throw new CompactContractError('Share__MasterMismatch', [derivedMaster, input.share.master])
+  }
   const n = input.puppetList.length
   if (input.matchedAmountList.length !== n) {
     throw new CompactContractError('Allocate__ListLengthMismatch', [BigInt(n), BigInt(n), BigInt(n)])
   }
 
-  if (ctx.totalShareSupply === 0n && ctx.seeded) throw new CompactContractError('Share__Empty', [])
+  if (ctx.totalShareSupply === 0n && ctx.seeded && ctx.poolTotalStake > 0n)
+    throw new CompactContractError('Share__Empty', [])
 
   if (ctx.totalShareSupply !== input.totalShareSupply) {
     throw new CompactContractError('Allocate__PreMintSupplyMismatch', [ctx.totalShareSupply, input.totalShareSupply])
@@ -90,14 +100,13 @@ export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAlloca
   }
 
   const intent: IAllocateModule__AllocateIntent = {
-    master: input.master,
+    params: input.params,
     blockNumber: input.blockNumber,
     deadline: input.deadline,
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: BigInt(ctx.chainId),
-    baseTokenId: input.baseTokenId,
-    name: input.name,
+    share: input.share,
     acceptableNetAssetValue: input.acceptableNetAssetValue,
     totalShareSupply: input.totalShareSupply,
     masterAmount: input.masterAmount,

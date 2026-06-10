@@ -355,7 +355,7 @@ contract Deploy is BaseScript {
         if (k == keccak256("ShareModule")) {
             return Meta({
                 creationCode: type(ShareModule).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate"), _specAddr("ShareToken")),
+                ctorArgs: abi.encode(_specAddr("Dictate"), _specAddr("AccountModule"), _specAddr("ShareToken")),
                 isCore: false
             });
         }

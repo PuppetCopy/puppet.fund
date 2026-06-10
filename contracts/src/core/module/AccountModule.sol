@@ -14,18 +14,18 @@ import {NonceLib} from "../../utils/NonceLib.sol";
 import {IAuthority} from "../../utils/interfaces/IAuthority.sol";
 
 bytes32 constant CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH = keccak256(
-    "CreatePuppetAccountIntent(AccountInitParams params,bytes32 tokenId,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,uint256 initialDepositAmount)AccountInitParams(address user,address signer)"
+    "CreatePuppetAccountIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 tokenId,uint256 initialDepositAmount)AccountInitParams(address user,address signer)"
 );
 
 contract AccountModule is Permission {
     struct CreatePuppetAccountIntent {
         AccountLib.AccountInitParams params;
-        bytes32 tokenId;
         uint blockNumber;
         uint deadline;
         uint acceptableRelayFee;
         uint nonce;
         uint chainId;
+        bytes32 tokenId;
         uint initialDepositAmount;
     }
 

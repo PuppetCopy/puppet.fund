@@ -102,14 +102,21 @@ export default [
         "internalType": "struct MasterGate.CreateFundAccountIntent",
         "components": [
           {
-            "name": "master",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "tokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
+            "name": "params",
+            "type": "tuple",
+            "internalType": "struct AccountLib.AccountInitParams",
+            "components": [
+              {
+                "name": "user",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "signer",
+                "type": "address",
+                "internalType": "address"
+              }
+            ]
           },
           {
             "name": "blockNumber",
@@ -135,6 +142,11 @@ export default [
             "name": "chainId",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
             "name": "sweepAmount",
@@ -255,9 +267,21 @@ export default [
         "internalType": "struct MasterGate.OperateIntent",
         "components": [
           {
-            "name": "master",
-            "type": "address",
-            "internalType": "address"
+            "name": "params",
+            "type": "tuple",
+            "internalType": "struct AccountLib.AccountInitParams",
+            "components": [
+              {
+                "name": "user",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "signer",
+                "type": "address",
+                "internalType": "address"
+              }
+            ]
           },
           {
             "name": "blockNumber",
@@ -412,17 +436,6 @@ export default [
     "name": "EIP712DomainChanged",
     "inputs": [],
     "anonymous": false
-  },
-  {
-    "type": "error",
-    "name": "Account__NotDeployed",
-    "inputs": [
-      {
-        "name": "predicted",
-        "type": "address",
-        "internalType": "address"
-      }
-    ]
   },
   {
     "type": "error",

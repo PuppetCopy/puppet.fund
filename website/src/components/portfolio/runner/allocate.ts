@@ -94,9 +94,15 @@ export async function buildAllocateInput(draft: IAllocateDraft, ctx: ExecContext
   )
 
   return {
-    master,
-    baseTokenId: draft.baseTokenId,
-    name: draft.name,
+    params: {
+      user: ctx.wallet.address,
+      signer: ctx.session.signer
+    },
+    share: {
+      master,
+      baseTokenId: draft.baseTokenId,
+      name: draft.name
+    },
     blockNumber,
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,

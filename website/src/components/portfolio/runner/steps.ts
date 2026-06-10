@@ -33,7 +33,9 @@ import type { IAttestResult, IRelayRequest } from '@puppet/sdk/compact'
 import type { ChainId } from '@puppet/sdk/const'
 import {
   awaitWalletDeposit,
+  computeClaimable,
   fetchDepositRouteBalance,
+  getPuppetRedeemPosition,
   indexerBlock,
   pollDepositRouteBalance,
   pollRouteBalance,
@@ -270,7 +272,7 @@ async function runCreateFundAccountStep(
   input: ICreateFundAccountInput,
   ctx: ExecContext
 ): Promise<IAttestation | null> {
-  const fund = predictFundAccount(input.master)
+  const fund = predictFundAccount(predictPuppetAccount(input.params))
   const chainIdNum = Number(input.chainId)
   if (await isDeployed(fund, chainIdNum)) return null
   const token = resolveTokenAddress(ctx, chainIdNum, input.tokenId)
@@ -458,7 +460,7 @@ async function runWithdrawToWalletStep(
 }
 
 async function runAllocateStep(input: IAllocateInput, ctx: ExecContext): Promise<IAttestation> {
-  const fund = predictFundAccount(input.master)
+  const fund = predictFundAccount(input.share.master)
   const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
   const [positions, fundState] = await Promise.all([fetchMasterSubscribers(fund), fetchMasterPoolState(fund)])
   const { intent, typedData } = attestAllocateIntent(
@@ -468,6 +470,7 @@ async function runAllocateStep(input: IAllocateInput, ctx: ExecContext): Promise
       currentBlock: fresh.blockNumber,
       totalShareSupply: fundState?.totalShareSupply ?? 0n,
       seeded: fundState?.seeded ?? false,
+      poolTotalStake: fundState?.totalStake ?? 0n,
       positions
     },
     fresh
@@ -478,7 +481,7 @@ async function runAllocateStep(input: IAllocateInput, ctx: ExecContext): Promise
 }
 
 async function runSellStep(input: ISellInput, ctx: ExecContext, signedBalance: bigint): Promise<IAttestation> {
-  const fund = predictFundAccount(input.master)
+  const fund = predictFundAccount(input.share.master)
   const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
   const pool = await fetchMasterPoolState(fund)
   const { intent, typedData } = attestSellIntent(
@@ -487,6 +490,8 @@ async function runSellStep(input: ISellInput, ctx: ExecContext, signedBalance: b
       tokenRegistry: ctx.tokenRegistry,
       currentBlock: fresh.blockNumber,
       signedBalance,
+      claimable: computeClaimable(await getPuppetRedeemPosition(ctx.sql, predictPuppetAccount(input.params), fund)),
+      shareToken: (pool?.shareToken as Address | undefined) ?? null,
       poolTotalStake: pool?.totalStake ?? 0n,
       queuedShares: pool?.queuedShares ?? 0n
     },
@@ -513,7 +518,7 @@ async function runClaimStep(input: IClaimInput, ctx: ExecContext): Promise<IAtte
 }
 
 async function runFulfillStep(input: IFulfillInput, ctx: ExecContext, signedBalance: bigint): Promise<IAttestation> {
-  const fund = predictFundAccount(input.master)
+  const fund = predictFundAccount(input.share.master)
   const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
   const pool = await fetchMasterPoolState(fund)
   const { intent, typedData } = attestFulfillIntent(
@@ -522,6 +527,7 @@ async function runFulfillStep(input: IFulfillInput, ctx: ExecContext, signedBala
       tokenRegistry: ctx.tokenRegistry,
       currentBlock: fresh.blockNumber,
       signedBalance,
+      shareToken: (pool?.shareToken as Address | undefined) ?? null,
       totalShareSupply: pool?.totalShareSupply ?? 0n,
       queuedShares: pool?.queuedShares ?? 0n,
       poolTotalStake: pool?.totalStake ?? 0n
@@ -591,8 +597,8 @@ const balanceKey = (account: Address, chainId: number, tokenId: Hex): string =>
 const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'fulfill', 'createFundAccount'])
 
 function accountForRequest(req: IRelayRequest): Address {
-  if (FUND_ROUTED.has(req.kind)) return predictFundAccount((req.input as { master: Address }).master)
-  return predictPuppetAccount((req.input as { params: IAccountLib__AccountInitParams }).params)
+  const account = predictPuppetAccount((req.input as { params: IAccountLib__AccountInitParams }).params)
+  return FUND_ROUTED.has(req.kind) ? predictFundAccount(account) : account
 }
 
 function tokenIdForRequest(req: IRelayRequest): Hex {
@@ -696,7 +702,7 @@ export async function runDraft(draft: IDraft, ctx: ExecContext): Promise<IAttest
   if (draft.kind === 'sell') {
     const input = await buildSellInput(draft, ctx)
     const puppet = predictPuppetAccount(input.params)
-    push(out, record(await runSellStep(input, ctx, await getBalance(puppet, HUB_CHAIN_ID, input.baseTokenId))))
+    push(out, record(await runSellStep(input, ctx, await getBalance(puppet, HUB_CHAIN_ID, input.share.baseTokenId))))
     return out
   }
   if (draft.kind === 'claim') {
@@ -705,8 +711,8 @@ export async function runDraft(draft: IDraft, ctx: ExecContext): Promise<IAttest
   }
   if (draft.kind === 'fulfill') {
     const input = await buildFulfillInput(draft, ctx)
-    const fund = predictFundAccount(input.master)
-    push(out, record(await runFulfillStep(input, ctx, await getBalance(fund, HUB_CHAIN_ID, input.baseTokenId))))
+    const fund = predictFundAccount(input.share.master)
+    push(out, record(await runFulfillStep(input, ctx, await getBalance(fund, HUB_CHAIN_ID, input.share.baseTokenId))))
     return out
   }
 

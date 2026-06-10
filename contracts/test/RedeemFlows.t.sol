@@ -23,14 +23,13 @@ contract RedeemFlowsTest is V2Base {
             keccak256(
                 abi.encode(
                     ALLOCATE_INTENT_TYPEHASH,
-                    _i.master,
+                    _hashAccount(_i.params.user, address(0)),
                     _i.blockNumber,
                     _i.deadline,
                     _i.acceptableRelayFee,
                     _i.nonce,
                     _i.chainId,
-                    _i.baseTokenId,
-                    _i.name,
+                    _hashShare(_i.share),
                     _i.acceptableNetAssetValue,
                     _i.totalShareSupply,
                     _i.masterAmount,
@@ -49,14 +48,13 @@ contract RedeemFlowsTest is V2Base {
         usdc.mint(accountModule.predictRoute(address(master.acct)), 100e6);
         fund = accountModule.predictFundAccount(address(master.acct));
         AllocateModule.AllocateIntent memory a = AllocateModule.AllocateIntent({
-            master: address(master.acct),
+            params: _params(master.user),
+            share: _share(address(master.acct)),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 2e6,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
             acceptableNetAssetValue: 100e6,
             totalShareSupply: 0,
             masterAmount: 100e6,
@@ -124,14 +122,13 @@ contract RedeemFlowsTest is V2Base {
         uint amount
     ) internal view returns (AllocateModule.AllocateIntent memory a, bytes32 ad) {
         a = AllocateModule.AllocateIntent({
-            master: address(master.acct),
+            params: _params(master.user),
+            share: _share(address(master.acct)),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 0,
             nonce: nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
             acceptableNetAssetValue: amount,
             totalShareSupply: 0,
             masterAmount: amount,
@@ -143,7 +140,7 @@ contract RedeemFlowsTest is V2Base {
 
     function test_sell_fulfill_claim_full_redeem_then_reopen() public {
         (Puppet memory master, address fund) = _seedFund("M");
-        ShareToken share = hubGate.predictShareToken(fund, USDC_ID, bytes32("Fund"));
+        ShareToken share = hubGate.predictShareToken(_share(address(master.acct)));
         assertEq(share.totalSupply(), 100e6 * SP, "shares minted at SHARE_PRECISION");
 
         RedeemModule.SellIntent memory s = RedeemModule.SellIntent({
@@ -153,9 +150,7 @@ contract RedeemFlowsTest is V2Base {
             acceptableRelayFee: 0,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
-            master: address(master.acct),
+            share: _share(address(master.acct)),
             sharesOut: 100e6 * SP
         });
         bytes32 sd = _digest(
@@ -169,9 +164,7 @@ contract RedeemFlowsTest is V2Base {
                     s.acceptableRelayFee,
                     s.nonce,
                     s.chainId,
-                    s.baseTokenId,
-                    s.name,
-                    s.master,
+                    _hashShare(s.share),
                     s.sharesOut
                 )
             )
@@ -181,14 +174,14 @@ contract RedeemFlowsTest is V2Base {
         assertEq(share.balanceOf(address(redeemStore)), 100e6 * SP, "shares queued to store");
 
         RedeemModule.FulfillIntent memory f = RedeemModule.FulfillIntent({
-            master: address(master.acct),
+            params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 0,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
+            share: _share(address(master.acct)),
+            sharesOut: 0,
             acceptableNetAssetValue: 98e6,
             totalShareSupply: 100e6 * SP,
             acceptableShares: type(uint).max
@@ -198,14 +191,14 @@ contract RedeemFlowsTest is V2Base {
             keccak256(
                 abi.encode(
                     FULFILL_INTENT_TYPEHASH,
-                    f.master,
+                    _hashAccount(f.params.user, address(0)),
                     f.blockNumber,
                     f.deadline,
                     f.acceptableRelayFee,
                     f.nonce,
                     f.chainId,
-                    f.baseTokenId,
-                    f.name,
+                    _hashShare(f.share),
+                    f.sharesOut,
                     f.acceptableNetAssetValue,
                     f.totalShareSupply,
                     f.acceptableShares
@@ -231,9 +224,7 @@ contract RedeemFlowsTest is V2Base {
             acceptableRelayFee: 0,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
-            master: address(master.acct),
+            share: _share(address(master.acct)),
             amount: claimable
         });
         bytes32 cd = _digest(
@@ -247,9 +238,7 @@ contract RedeemFlowsTest is V2Base {
                     c.acceptableRelayFee,
                     c.nonce,
                     c.chainId,
-                    c.baseTokenId,
-                    c.name,
-                    c.master,
+                    _hashShare(c.share),
                     c.amount
                 )
             )
@@ -282,9 +271,7 @@ contract RedeemFlowsTest is V2Base {
                     s.acceptableRelayFee,
                     s.nonce,
                     s.chainId,
-                    s.baseTokenId,
-                    s.name,
-                    s.master,
+                    _hashShare(s.share),
                     s.sharesOut
                 )
             )
@@ -303,9 +290,7 @@ contract RedeemFlowsTest is V2Base {
             acceptableRelayFee: 0,
             nonce: nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
-            master: address(holder.acct),
+            share: _share(address(holder.acct)),
             sharesOut: sharesOut
         });
     }
@@ -319,14 +304,14 @@ contract RedeemFlowsTest is V2Base {
         master.nonce = 3;
 
         RedeemModule.FulfillIntent memory f = RedeemModule.FulfillIntent({
-            master: address(master.acct),
+            params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 0,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
+            share: _share(address(master.acct)),
+            sharesOut: 0,
             acceptableNetAssetValue: 98e6,
             totalShareSupply: 100e6 * SP,
             acceptableShares: type(uint).max
@@ -336,14 +321,14 @@ contract RedeemFlowsTest is V2Base {
             keccak256(
                 abi.encode(
                     FULFILL_INTENT_TYPEHASH,
-                    f.master,
+                    _hashAccount(f.params.user, address(0)),
                     f.blockNumber,
                     f.deadline,
                     f.acceptableRelayFee,
                     f.nonce,
                     f.chainId,
-                    f.baseTokenId,
-                    f.name,
+                    _hashShare(f.share),
+                    f.sharesOut,
                     f.acceptableNetAssetValue,
                     f.totalShareSupply,
                     f.acceptableShares
@@ -364,5 +349,89 @@ contract RedeemFlowsTest is V2Base {
         assertEq(usdc.balanceOf(address(master.acct)), claimable, "sell flushed claimable to the account");
         assertEq(master.acct.signedBalanceOf(USDC_ID), claimable, "flushed amount is signed");
         assertEq(redeem.getClaimable(redeemStore, fund, address(master.acct)), 0, "accrued reset after flush");
+    }
+
+    function _fulfillDigest(
+        RedeemModule.FulfillIntent memory f
+    ) internal view returns (bytes32) {
+        return _digest(
+            hubGateDomain,
+            keccak256(
+                abi.encode(
+                    FULFILL_INTENT_TYPEHASH,
+                    _hashAccount(f.params.user, address(0)),
+                    f.blockNumber,
+                    f.deadline,
+                    f.acceptableRelayFee,
+                    f.nonce,
+                    f.chainId,
+                    _hashShare(f.share),
+                    f.sharesOut,
+                    f.acceptableNetAssetValue,
+                    f.totalShareSupply,
+                    f.acceptableShares
+                )
+            )
+        );
+    }
+
+    function test_fulfill_self_sell_then_claim_reopens() public {
+        (Puppet memory master, address fund) = _seedFund("M");
+
+        RedeemModule.FulfillIntent memory f = RedeemModule.FulfillIntent({
+            params: _params(master.user),
+            blockNumber: block.number,
+            deadline: block.timestamp + 60,
+            acceptableRelayFee: 0,
+            nonce: master.nonce,
+            chainId: block.chainid,
+            share: _share(address(master.acct)),
+            sharesOut: 100e6 * SP,
+            acceptableNetAssetValue: 98e6,
+            totalShareSupply: 100e6 * SP,
+            acceptableShares: type(uint).max
+        });
+        bytes32 fd = _fulfillDigest(f);
+        hubGate.fulfill(f, _sign(master.key, fd), _sign(attestorKey, fd), 0);
+        master.nonce = 3;
+
+        ShareToken share = hubGate.predictShareToken(_share(address(master.acct)));
+        assertEq(share.totalSupply(), 0, "self-sell queued and entire supply retired in one intent");
+        assertEq(usdc.balanceOf(fund), 0, "fund base fully drained at NAV");
+
+        uint claimable = redeem.getClaimable(redeemStore, fund, address(master.acct));
+        assertEq(claimable, 98e6, "drain accrued to the master stake");
+
+        RedeemModule.ClaimIntent memory c = RedeemModule.ClaimIntent({
+            params: _params(master.user),
+            blockNumber: block.number,
+            deadline: block.timestamp + 60,
+            acceptableRelayFee: 0,
+            nonce: master.nonce,
+            chainId: block.chainid,
+            share: _share(address(master.acct)),
+            amount: claimable
+        });
+        bytes32 cd = _digest(
+            hubGateDomain,
+            keccak256(
+                abi.encode(
+                    CLAIM_INTENT_TYPEHASH,
+                    _hashAccount(master.user, address(0)),
+                    c.blockNumber,
+                    c.deadline,
+                    c.acceptableRelayFee,
+                    c.nonce,
+                    c.chainId,
+                    _hashShare(c.share),
+                    c.amount
+                )
+            )
+        );
+        hubGate.claim(c, _sign(master.key, cd), _sign(attestorKey, cd), 0);
+
+        assertEq(usdc.balanceOf(address(master.acct)), 98e6, "master received full NAV");
+        assertEq(master.acct.signedBalanceOf(USDC_ID), 98e6, "proceeds signed");
+        assertEq(redeemStore.getPool(fund).totalStake, 0, "stake purged, fund reopenable");
     }
 }

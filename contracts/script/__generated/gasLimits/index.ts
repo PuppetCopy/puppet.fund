@@ -2,21 +2,21 @@
 
 export const router__gasLimit = {
   AccountGate: {
-    bridge: 390061n,
-    createPuppetAccount: 262355n,
-    recognize: 218167n
+    bridge: 389750n,
+    createPuppetAccount: 262202n,
+    recognize: 218157n
   },
   MasterGate: {
-    createFundAccount: 296818n,
-    operate: 154631n
+    createFundAccount: 298933n,
+    operate: 157940n
   },
   HubGate: {
-    allocate: 610940n,
-    claim: 233094n,
-    fulfill: 256122n,
-    sell: 263765n,
-    subscribe: 204397n,
-    withdrawToBridge: 365074n,
-    withdrawToWallet: 183482n
+    allocate: 619635n,
+    claim: 234607n,
+    fulfill: 309326n,
+    sell: 266331n,
+    subscribe: 204378n,
+    withdrawToBridge: 365066n,
+    withdrawToWallet: 183710n
   }
 } as const

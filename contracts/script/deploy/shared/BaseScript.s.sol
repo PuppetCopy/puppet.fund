@@ -154,9 +154,14 @@ abstract contract BaseScript is Script {
 
     function _l2BlockNumber() internal returns (uint) {
         // Foundry sets `block.number` on Arbitrum to the L1 block, and the
-        // ArbSys precompile (0x64) isn't simulated. Query the live RPC for
-        // the actual L2 block instead. vm.rpc returns the ABI-decoded result
-        // as variable-length bytes; left-align into a uint.
+        // ArbSys precompile (0x64) isn't simulated. Prefer an env-provided
+        // snapshot (L2_BLOCK_NUMBER, fetched via `cast block-number` right
+        // before the run) — vm.rpc mid-script rides a connection that has
+        // gone stale during the long local simulation. Fall back to a live
+        // query; vm.rpc returns the ABI-decoded result as variable-length
+        // bytes; left-align into a uint.
+        uint hint = vm.envOr("L2_BLOCK_NUMBER", uint(0));
+        if (hint != 0) return hint;
         bytes memory raw = vm.rpc("eth_blockNumber", "[]");
         return uint(bytes32(raw)) >> (8 * (32 - raw.length));
     }

@@ -71,7 +71,7 @@ contract RedeemStore is BankStore {
     ) external auth returns (uint accruedPerStake_, uint totalStake_) {
         Pool storage _pool = poolMap[_fund];
         if (_pool.totalStake == 0) revert Error.Share__NoStakeToCredit();
-        _transferIn(_gasLimit, _token, _depositor, _amount);
+        _transferIn(_token, _depositor, _amount, _gasLimit);
         _pool.accruedPerStake += Precision.toFactor(_amount, _pool.totalStake);
         return (_pool.accruedPerStake, _pool.totalStake);
     }
@@ -82,6 +82,6 @@ contract RedeemStore is BankStore {
         uint _amount,
         uint _gasLimit
     ) external auth {
-        _transferOut(_gasLimit, _token, _receiver, _amount);
+        _transferOut(_token, _receiver, _amount, _gasLimit);
     }
 }

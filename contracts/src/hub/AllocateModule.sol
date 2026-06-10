@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 import {IAccount} from "../core/interface/IAccount.sol";
+import {AccountLib} from "../core/AccountLib.sol";
 import {AccountModule} from "../core/module/AccountModule.sol";
 import {ShareModule} from "./ShareModule.sol";
 import {RuleLib} from "../utils/RuleLib.sol";
@@ -15,23 +16,23 @@ import {CallLib} from "../utils/CallLib.sol";
 import {Error} from "../utils/Error.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";
 import {ShareToken} from "./ShareToken.sol";
+import {ShareLib} from "./ShareLib.sol";
 
 bytes32 constant ALLOCATE_INTENT_TYPEHASH = keccak256(
-    "AllocateIntent(address master,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 baseTokenId,bytes32 name,uint256 acceptableNetAssetValue,uint256 totalShareSupply,uint256 masterAmount,bytes32 puppetListHash,bytes32 matchedAmountListHash)"
+    "AllocateIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,ShareInitParams share,uint256 acceptableNetAssetValue,uint256 totalShareSupply,uint256 masterAmount,bytes32 puppetListHash,bytes32 matchedAmountListHash)AccountInitParams(address user,address signer)ShareInitParams(address master,bytes32 baseTokenId,bytes32 name)"
 );
 
 uint constant SHARE_PRECISION = 1e12;
 
 contract AllocateModule is Access {
     struct AllocateIntent {
-        address master;
+        AccountLib.AccountInitParams params;
         uint blockNumber;
         uint deadline;
         uint acceptableRelayFee;
         uint nonce;
         uint chainId;
-        bytes32 baseTokenId;
-        bytes32 name;
+        ShareLib.ShareInitParams share;
         uint acceptableNetAssetValue;
         uint totalShareSupply;
         uint masterAmount;
@@ -75,15 +76,12 @@ contract AllocateModule is Access {
             revert Error.Allocate__ListLengthMismatch(_n, _bodyList.length, _mandateList.length);
         }
 
-        if (_intent.master.code.length == 0) revert Error.Account__NotDeployed(_intent.master);
-        address _fundAccount = _accountGate.predictFundAccount(_intent.master);
-        if (_fundAccount.code.length == 0) _accountGate.createFundAccount(_intent.master);
-        ShareToken _shareToken = ShareToken(_shareGate.predict(_fundAccount, _intent.baseTokenId, _intent.name));
+        address _fundAccount = _accountGate.predictFundAccount(_intent.share.master);
+        if (_fundAccount.code.length == 0) _accountGate.createFundAccount(_intent.share.master);
+        ShareToken _shareToken = ShareToken(_shareGate.predict(_intent.share));
         uint _preMintSupply;
         if (address(_shareToken).code.length == 0) {
-            _shareGate.createShareToken(
-                _fundAccount, _intent.baseTokenId, _intent.masterAmount * SHARE_PRECISION, _intent.name
-            );
+            _shareGate.createShareToken(_intent.share);
         } else {
             _preMintSupply = _shareToken.totalSupply();
             if (_preMintSupply == 0 && _redeemStore.getPool(_fundAccount).totalStake != 0) {
@@ -127,7 +125,7 @@ contract AllocateModule is Access {
                 _mandateDigest,
                 _mandateList[_i],
                 CallLib.wrap(CallLib.transferCall(_base, _fundAccount, _amount, _transferGasLimit)),
-                CallLib.signTransfer(_intent.baseTokenId, _base, 0, _amount)
+                CallLib.signTransfer(_intent.share.baseTokenId, _base, 0, _amount)
             ) returns (
                 uint[] memory, uint[] memory, bytes[] memory
             ) {
@@ -151,10 +149,14 @@ contract AllocateModule is Access {
 
         if (_masterIn > 0) {
             _accountGate.dispatch(
-                IAccount(_intent.master),
+                IAccount(_intent.share.master),
                 CallLib.wrap(
                     CallLib.routeDeposit(
-                        _accountGate.predictRoute(_intent.master), _base, _fundAccount, _masterIn, _transferGasLimit
+                        _accountGate.predictRoute(_intent.share.master),
+                        _base,
+                        _fundAccount,
+                        _masterIn,
+                        _transferGasLimit
                     )
                 ),
                 CallLib.noTransfers(),
@@ -176,7 +178,7 @@ contract AllocateModule is Access {
             _intent.nonce
         );
 
-        if (_ownerNewShares > 0) _shareGate.mint(_shareToken, _intent.master, _ownerNewShares);
+        if (_ownerNewShares > 0) _shareGate.mint(_shareToken, _intent.share.master, _ownerNewShares);
         if (_totalPuppetMinted > 0) {
             _shareGate.mintMany(_shareToken, _intent.puppetList, _puppetSharesMintedList);
             _store.setLastAllocatedAtMany(_intent.puppetList, _puppetSharesMintedList, _fundAccount, block.timestamp);

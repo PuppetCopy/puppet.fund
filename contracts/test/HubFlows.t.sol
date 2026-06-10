@@ -4,6 +4,7 @@ pragma solidity ^0.8.35;
 import {V2Base} from "./Base.t.sol";
 import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "src/hub/AllocateModule.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
+import {ShareLib} from "src/hub/ShareLib.sol";
 
 contract HubFlowsTest is V2Base {
     function _allocateDigest(
@@ -12,14 +13,13 @@ contract HubFlowsTest is V2Base {
         bytes32 structHash = keccak256(
             abi.encode(
                 ALLOCATE_INTENT_TYPEHASH,
-                _intent.master,
+                _hashAccount(_intent.params.user, address(0)),
                 _intent.blockNumber,
                 _intent.deadline,
                 _intent.acceptableRelayFee,
                 _intent.nonce,
                 _intent.chainId,
-                _intent.baseTokenId,
-                _intent.name,
+                _hashShare(_intent.share),
                 _intent.acceptableNetAssetValue,
                 _intent.totalShareSupply,
                 _intent.masterAmount,
@@ -36,14 +36,13 @@ contract HubFlowsTest is V2Base {
         address fund = accountModule.predictFundAccount(address(master.acct));
 
         AllocateModule.AllocateIntent memory intent = AllocateModule.AllocateIntent({
-            master: address(master.acct),
+            params: _params(master.user),
+            share: _share(address(master.acct)),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 2e6,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
             acceptableNetAssetValue: 100e6,
             totalShareSupply: 0,
             masterAmount: 100e6,
@@ -55,7 +54,7 @@ contract HubFlowsTest is V2Base {
             intent, new bytes[](0), new bytes[](0), _sign(master.key, digest), _sign(attestorKey, digest), 2e6
         );
 
-        ShareToken share = hubGate.predictShareToken(fund, USDC_ID, bytes32("Fund"));
+        ShareToken share = hubGate.predictShareToken(_share(address(master.acct)));
         assertEq(share.getName(), bytes32("Fund"), "name from clone args");
         assertEq(share.balanceOf(address(master.acct)), 100e6 * SP, "owner shares = stake at share precision");
         assertEq(usdc.balanceOf(fund), 98e6, "fund holds stake minus socialized fee");
@@ -70,14 +69,15 @@ contract HubFlowsTest is V2Base {
         address fund = accountModule.predictFundAccount(address(master.acct));
 
         AllocateModule.AllocateIntent memory intent = AllocateModule.AllocateIntent({
-            master: address(master.acct),
+            params: _params(master.user),
+            share: ShareLib.ShareInitParams({
+                master: address(master.acct), baseTokenId: USDC_ID, name: bytes32("Shadow")
+            }),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 0,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Shadow"),
             acceptableNetAssetValue: 1,
             totalShareSupply: 0,
             masterAmount: 0,

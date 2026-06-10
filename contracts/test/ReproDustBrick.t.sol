@@ -25,14 +25,13 @@ contract ReproDustBrickTest is V2Base {
             keccak256(
                 abi.encode(
                     ALLOCATE_INTENT_TYPEHASH,
-                    _i.master,
+                    _hashAccount(_i.params.user, address(0)),
                     _i.blockNumber,
                     _i.deadline,
                     _i.acceptableRelayFee,
                     _i.nonce,
                     _i.chainId,
-                    _i.baseTokenId,
-                    _i.name,
+                    _hashShare(_i.share),
                     _i.acceptableNetAssetValue,
                     _i.totalShareSupply,
                     _i.masterAmount,
@@ -57,9 +56,7 @@ contract ReproDustBrickTest is V2Base {
                     _s.acceptableRelayFee,
                     _s.nonce,
                     _s.chainId,
-                    _s.baseTokenId,
-                    _s.name,
-                    _s.master,
+                    _hashShare(_s.share),
                     _s.sharesOut
                 )
             )
@@ -78,9 +75,7 @@ contract ReproDustBrickTest is V2Base {
             acceptableRelayFee: 0,
             nonce: _holder.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
-            master: _master,
+            share: _share(_master),
             sharesOut: _sharesOut
         });
     }
@@ -147,14 +142,13 @@ contract ReproDustBrickTest is V2Base {
         mandateList[0] = mandateSig;
 
         AllocateModule.AllocateIntent memory a = AllocateModule.AllocateIntent({
-            master: address(master.acct),
+            params: _params(master.user),
+            share: _share(address(master.acct)),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 2e6,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
             acceptableNetAssetValue: 100e6,
             totalShareSupply: 0,
             masterAmount: 100e6,
@@ -165,7 +159,7 @@ contract ReproDustBrickTest is V2Base {
         hubGate.allocate(a, bodyList, mandateList, _sign(master.key, ad), _sign(attestorKey, ad), 2e6);
         master.nonce = 2;
 
-        ShareToken share = hubGate.predictShareToken(fund, USDC_ID, bytes32("Fund"));
+        ShareToken share = hubGate.predictShareToken(_share(address(master.acct)));
         assertEq(share.balanceOf(address(p.acct)), 1 * SP, "puppet got 1e12 shares for 1 wei");
         assertEq(share.balanceOf(address(master.acct)), 100e6 * SP, "master shares");
         assertEq(usdc.balanceOf(fund), 98e6 + 1, "fund base after fee");
@@ -184,14 +178,14 @@ contract ReproDustBrickTest is V2Base {
         assertEq(share.balanceOf(address(redeemStore)), supply, "store holds entire supply");
 
         RedeemModule.FulfillIntent memory f = RedeemModule.FulfillIntent({
-            master: address(master.acct),
+            params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 0,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
+            share: _share(address(master.acct)),
+            sharesOut: 0,
             acceptableNetAssetValue: 98e6 + 1,
             totalShareSupply: supply,
             acceptableShares: type(uint).max
@@ -201,14 +195,14 @@ contract ReproDustBrickTest is V2Base {
             keccak256(
                 abi.encode(
                     FULFILL_INTENT_TYPEHASH,
-                    f.master,
+                    _hashAccount(f.params.user, address(0)),
                     f.blockNumber,
                     f.deadline,
                     f.acceptableRelayFee,
                     f.nonce,
                     f.chainId,
-                    f.baseTokenId,
-                    f.name,
+                    _hashShare(f.share),
+                    f.sharesOut,
                     f.acceptableNetAssetValue,
                     f.totalShareSupply,
                     f.acceptableShares
@@ -240,9 +234,7 @@ contract ReproDustBrickTest is V2Base {
             acceptableRelayFee: 0,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
-            master: address(master.acct),
+            share: _share(address(master.acct)),
             amount: claimableM
         });
         bytes32 cmd = _digest(
@@ -256,9 +248,7 @@ contract ReproDustBrickTest is V2Base {
                     cm.acceptableRelayFee,
                     cm.nonce,
                     cm.chainId,
-                    cm.baseTokenId,
-                    cm.name,
-                    cm.master,
+                    _hashShare(cm.share),
                     cm.amount
                 )
             )
@@ -275,9 +265,7 @@ contract ReproDustBrickTest is V2Base {
             acceptableRelayFee: 0,
             nonce: p.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
-            master: address(master.acct),
+            share: _share(address(master.acct)),
             amount: 1
         });
         bytes32 cpd = _digest(
@@ -291,9 +279,7 @@ contract ReproDustBrickTest is V2Base {
                     cp.acceptableRelayFee,
                     cp.nonce,
                     cp.chainId,
-                    cp.baseTokenId,
-                    cp.name,
-                    cp.master,
+                    _hashShare(cp.share),
                     cp.amount
                 )
             )
@@ -305,14 +291,13 @@ contract ReproDustBrickTest is V2Base {
 
         usdc.mint(accountModule.predictRoute(address(master.acct)), 50e6);
         AllocateModule.AllocateIntent memory ra = AllocateModule.AllocateIntent({
-            master: address(master.acct),
+            params: _params(master.user),
+            share: _share(address(master.acct)),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 0,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
             acceptableNetAssetValue: 50e6,
             totalShareSupply: 0,
             masterAmount: 50e6,
@@ -390,14 +375,13 @@ contract ReproDustBrickTest is V2Base {
         mandateList[0] = mandateSig;
 
         AllocateModule.AllocateIntent memory a = AllocateModule.AllocateIntent({
-            master: address(master.acct),
+            params: _params(master.user),
+            share: _share(address(master.acct)),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 2e6,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
             acceptableNetAssetValue: 100e6,
             totalShareSupply: 0,
             masterAmount: 60e6,
@@ -408,7 +392,7 @@ contract ReproDustBrickTest is V2Base {
         hubGate.allocate(a, bodyList, mandateList, _sign(master.key, ad), _sign(attestorKey, ad), 2e6);
         master.nonce = 2;
 
-        ShareToken share = hubGate.predictShareToken(fund, USDC_ID, bytes32("Fund"));
+        ShareToken share = hubGate.predictShareToken(_share(address(master.acct)));
         assertEq(usdc.balanceOf(fund), 98e6, "fund base after fee");
 
         RedeemModule.SellIntent memory sp = _sellIntent(p, address(master.acct), 40e6 * SP);
@@ -423,14 +407,14 @@ contract ReproDustBrickTest is V2Base {
 
         uint supply = share.totalSupply();
         RedeemModule.FulfillIntent memory f = RedeemModule.FulfillIntent({
-            master: address(master.acct),
+            params: _params(master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 0,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
+            share: _share(address(master.acct)),
+            sharesOut: 0,
             acceptableNetAssetValue: 98e6,
             totalShareSupply: supply,
             acceptableShares: type(uint).max
@@ -440,14 +424,14 @@ contract ReproDustBrickTest is V2Base {
             keccak256(
                 abi.encode(
                     FULFILL_INTENT_TYPEHASH,
-                    f.master,
+                    _hashAccount(f.params.user, address(0)),
                     f.blockNumber,
                     f.deadline,
                     f.acceptableRelayFee,
                     f.nonce,
                     f.chainId,
-                    f.baseTokenId,
-                    f.name,
+                    _hashShare(f.share),
+                    f.sharesOut,
                     f.acceptableNetAssetValue,
                     f.totalShareSupply,
                     f.acceptableShares
@@ -469,9 +453,7 @@ contract ReproDustBrickTest is V2Base {
             acceptableRelayFee: 0,
             nonce: p.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
-            master: address(master.acct),
+            share: _share(address(master.acct)),
             amount: claimableP
         });
         bytes32 cpd = _digest(
@@ -485,9 +467,7 @@ contract ReproDustBrickTest is V2Base {
                     cp.acceptableRelayFee,
                     cp.nonce,
                     cp.chainId,
-                    cp.baseTokenId,
-                    cp.name,
-                    cp.master,
+                    _hashShare(cp.share),
                     cp.amount
                 )
             )
@@ -502,9 +482,7 @@ contract ReproDustBrickTest is V2Base {
             acceptableRelayFee: 0,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
-            master: address(master.acct),
+            share: _share(address(master.acct)),
             amount: claimableM
         });
         bytes32 cmd = _digest(
@@ -518,9 +496,7 @@ contract ReproDustBrickTest is V2Base {
                     cm.acceptableRelayFee,
                     cm.nonce,
                     cm.chainId,
-                    cm.baseTokenId,
-                    cm.name,
-                    cm.master,
+                    _hashShare(cm.share),
                     cm.amount
                 )
             )
@@ -533,14 +509,13 @@ contract ReproDustBrickTest is V2Base {
 
         usdc.mint(accountModule.predictRoute(address(master.acct)), 50e6);
         AllocateModule.AllocateIntent memory ra = AllocateModule.AllocateIntent({
-            master: address(master.acct),
+            params: _params(master.user),
+            share: _share(address(master.acct)),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 0,
             nonce: master.nonce,
             chainId: block.chainid,
-            baseTokenId: USDC_ID,
-            name: bytes32("Fund"),
             acceptableNetAssetValue: 50e6,
             totalShareSupply: 0,
             masterAmount: 50e6,

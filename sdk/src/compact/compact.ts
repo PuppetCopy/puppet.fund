@@ -38,10 +38,9 @@ export interface IDispatchedFrame {
 const FUND_ROUTED_KINDS: ReadonlySet<IActionKind> = new Set(['operate', 'allocate', 'fulfill', 'createFundAccount'])
 
 function accountForRequest(request: IRelayRequest): Address {
-  if (FUND_ROUTED_KINDS.has(request.kind)) {
-    return predictFundAccount((request.input as { master: Address }).master)
-  }
-  return predictPuppetAccount((request.input as { params: Parameters<typeof predictPuppetAccount>[0] }).params)
+  const params = (request.input as { params: Parameters<typeof predictPuppetAccount>[0] }).params
+  const account = predictPuppetAccount(params)
+  return FUND_ROUTED_KINDS.has(request.kind) ? predictFundAccount(account) : account
 }
 
 export type IMatchmakerStatus = 'open' | 'connecting' | 'closed'

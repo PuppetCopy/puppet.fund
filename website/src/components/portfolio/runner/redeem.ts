@@ -58,9 +58,11 @@ export async function buildSellInput(draft: ISellDraft, ctx: ExecContext): Promi
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,
     nonce: randomNonce(),
-    baseTokenId: draft.baseTokenId,
-    master: fund.signer,
-    name: await fundName(draft.masterAccount),
+    share: {
+      master: fund.signer,
+      baseTokenId: draft.baseTokenId,
+      name: await fundName(draft.masterAccount)
+    },
     sharesOut: draft.sharesOut
   }
 }
@@ -85,14 +87,21 @@ export async function buildFulfillInput(draft: IFulfillDraft, ctx: ExecContext):
   // Clamp the attested NAV to what the fund can actually pay.
   const acceptableNetAssetValue = fulfillEval.navSigned < liveBalance ? fulfillEval.navSigned : liveBalance
   return {
-    master: fund.signer,
-    baseTokenId: draft.baseTokenId,
+    params: {
+      user: ctx.wallet.address,
+      signer: ctx.session.signer
+    },
     blockNumber: indexerBlock(ctx.indexerHealth, resolveDispatchNetwork(resolveDispatchChainId(undefined))),
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,
     nonce: randomNonce(),
+    share: {
+      master: fund.signer,
+      baseTokenId: draft.baseTokenId,
+      name: await fundName(draft.masterAccount)
+    },
+    sharesOut: draft.sharesOut,
     acceptableNetAssetValue,
-    name: await fundName(draft.masterAccount),
     totalShareSupply: pool.totalShareSupply,
     acceptableShares: draft.acceptableShares
   }
@@ -117,9 +126,11 @@ export async function buildClaimInput(draft: IClaimDraft, ctx: ExecContext): Pro
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,
     nonce: randomNonce(),
-    baseTokenId: draft.baseTokenId,
-    master: fund.signer,
-    name: await fundName(draft.masterAccount),
+    share: {
+      master: fund.signer,
+      baseTokenId: draft.baseTokenId,
+      name: await fundName(draft.masterAccount)
+    },
     amount: draft.amount
   }
 }

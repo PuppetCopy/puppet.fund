@@ -1,7 +1,11 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
-import type { IAccountLib__AccountInitParams, IRedeemModule__ClaimIntent } from '@puppet/contracts/types'
-import type { Address, Hex, TypedDataDefinition } from 'viem'
+import type {
+  IAccountLib__AccountInitParams,
+  IRedeemModule__ClaimIntent,
+  IShareLib__ShareInitParams
+} from '@puppet/contracts/types'
+import type { TypedDataDefinition } from 'viem'
 import { CompactContractError } from '../compact/error.js'
 import * as IntentLib from './intentLib.js'
 import { HUB_DOMAIN, type IDraftContext } from './shared.js'
@@ -12,9 +16,7 @@ export interface IClaimInput {
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
-  baseTokenId: Hex
-  name: Hex
-  master: Address
+  share: IShareLib__ShareInitParams
   amount: bigint
 }
 
@@ -27,7 +29,7 @@ export function attestClaimIntent(ctx: IClaimAttestContext, input: IClaimInput) 
   IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
-    baseTokenId: input.baseTokenId,
+    baseTokenId: input.share.baseTokenId,
     lookupChain: HUB_CHAIN_ID,
     capAmount: 0n,
     acceptableRelayFee: input.acceptableRelayFee,
@@ -46,9 +48,7 @@ export function attestClaimIntent(ctx: IClaimAttestContext, input: IClaimInput) 
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: BigInt(ctx.chainId),
-    baseTokenId: input.baseTokenId,
-    name: input.name,
-    master: input.master,
+    share: input.share,
     amount: input.amount
   }
 

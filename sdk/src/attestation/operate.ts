@@ -1,6 +1,11 @@
 import { MASTER_GATE_INTENTS } from '@puppet/contracts/intents'
-import type { IIAccount__Call, IIAccount__SignTransfer, IMasterGate__OperateIntent } from '@puppet/contracts/types'
-import { type Address, encodeAbiParameters, type Hex, keccak256, type TypedDataDefinition } from 'viem'
+import type {
+  IAccountLib__AccountInitParams,
+  IIAccount__Call,
+  IIAccount__SignTransfer,
+  IMasterGate__OperateIntent
+} from '@puppet/contracts/types'
+import { encodeAbiParameters, type Hex, keccak256, type TypedDataDefinition } from 'viem'
 import { CompactError } from '../compact/index.js'
 import * as IntentLib from './intentLib.js'
 import { type IDraftContext, MASTER_GATE_DOMAIN_MAP } from './shared.js'
@@ -30,7 +35,7 @@ const TRANSFER_TUPLE_ARRAY = [
 ] as const
 
 export interface IOperateInput {
-  master: Address
+  params: IAccountLib__AccountInitParams
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
@@ -57,7 +62,7 @@ export function attestOperateIntent(ctx: IOperateAttestContext, input: IOperateI
   }
 
   const intent: IMasterGate__OperateIntent = {
-    master: input.master,
+    params: input.params,
     blockNumber: input.blockNumber,
     deadline: input.deadline,
     acceptableRelayFee: input.acceptableRelayFee,

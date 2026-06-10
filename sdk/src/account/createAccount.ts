@@ -55,7 +55,8 @@ export function predictFundAccount(signer: Address): Address {
   })
 }
 
-export function predictShareToken(fund: Address, baseTokenId: Hex, name: Hex): Address {
+export function predictShareToken(master: Address, baseTokenId: Hex, name: Hex): Address {
+  const fund = predictFundAccount(master)
   const args = encodePacked(
     ['address', 'address', 'bytes32', 'bytes32'],
     [fund, PUPPET_CONTRACT_MAP.ShareModule.address, baseTokenId, name]

@@ -29,7 +29,7 @@ import { colorShade, palette } from 'aelea/ui-components-theme'
 import type { Address, Hex } from 'viem'
 import { $ButtonSecondary, $defaultSliderContainer, $Slider, $TokenAmountInput, text } from '@/ui-components'
 import { sqlClient } from '../../io/indexer/sql.js'
-import type { IClaimDraft, ISellDraft } from './draft.js'
+import { type IClaimDraft, type ISellDraft, SHARE_DECIMALS } from './draft.js'
 
 export interface I$RedeemEditor {
   puppet: Address
@@ -109,7 +109,7 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
         const held = position.sharesHeld
 
         const valueToShow: IStream<string> = map(
-          (p: { amt: bigint; focused: boolean }) => (p.amt === 0n ? '' : readableTokenAmount(desc.decimals, p.amt)),
+          (p: { amt: bigint; focused: boolean }) => (p.amt === 0n ? '' : readableTokenAmount(SHARE_DECIMALS, p.amt)),
           filter((p: { amt: bigint; focused: boolean }) => !p.focused, combine({ amt: sharesValue, focused }))
         )
 
@@ -120,7 +120,7 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
 
         const sellDisabled: IStream<boolean> = map(amt => amt === 0n || amt > held, sharesValue)
 
-        const $field = $TokenAmountInput({ decimals: desc.decimals, valueToShow })({
+        const $field = $TokenAmountInput({ decimals: SHARE_DECIMALS, valueToShow })({
           inputAmount: inputSharesTether(),
           focus: focusSharesTether(),
           blur: blurSharesTether(),
@@ -154,7 +154,9 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
           })
         )(
           $node(style({ fontWeight: '600', fontSize: text.sm }))($text('shares')),
-          $node(style({ color: palette.foreground, fontSize: text.xs }))($text(readableTokenAmount(desc, held)))
+          $node(style({ color: palette.foreground, fontSize: text.xs }))(
+            $text(readableTokenAmount(SHARE_DECIMALS, held))
+          )
         )
 
         return $column(spacing.default, style({ minWidth: '380px' }))(
@@ -206,7 +208,7 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
                   )
                 : empty,
               $node(style({ color: palette.message, fontWeight: '600' }))(
-                $text(`${readableTokenAmount(desc, queued)} shares`)
+                $text(`${readableTokenAmount(SHARE_DECIMALS, queued)} shares`)
               )
             )
           ),
@@ -258,7 +260,7 @@ export const $ClaimEditor = ({ puppet, masterAccount, baseToken, baseTokenId, to
         ),
         queued > 0n
           ? $node(style({ color: palette.foreground, fontSize: text.xs }))(
-              $text(`${readableTokenAmount(desc, queued)} shares queued, waiting on master fulfillment.`)
+              $text(`${readableTokenAmount(SHARE_DECIMALS, queued)} shares queued, waiting on master fulfillment.`)
             )
           : $node(style({ color: palette.foreground, fontSize: text.xs }))(
               $text('Nothing queued. Sell shares first, then claim once the master fulfills.')

@@ -14,18 +14,19 @@ import {Error} from "../utils/Error.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";
 import {Precision} from "../utils/Precision.sol";
 import {RedeemStore} from "./store/RedeemStore.sol";
+import {ShareLib} from "./ShareLib.sol";
 import {ShareToken} from "./ShareToken.sol";
 
 bytes32 constant SELL_INTENT_TYPEHASH = keccak256(
-    "SellIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 baseTokenId,bytes32 name,address master,uint256 sharesOut)AccountInitParams(address user,address signer)"
+    "SellIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,ShareInitParams share,uint256 sharesOut)AccountInitParams(address user,address signer)ShareInitParams(address master,bytes32 baseTokenId,bytes32 name)"
 );
 
 bytes32 constant CLAIM_INTENT_TYPEHASH = keccak256(
-    "ClaimIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 baseTokenId,bytes32 name,address master,uint256 amount)AccountInitParams(address user,address signer)"
+    "ClaimIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,ShareInitParams share,uint256 amount)AccountInitParams(address user,address signer)ShareInitParams(address master,bytes32 baseTokenId,bytes32 name)"
 );
 
 bytes32 constant FULFILL_INTENT_TYPEHASH = keccak256(
-    "FulfillIntent(address master,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 baseTokenId,bytes32 name,uint256 acceptableNetAssetValue,uint256 totalShareSupply,uint256 acceptableShares)"
+    "FulfillIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,ShareInitParams share,uint256 sharesOut,uint256 acceptableNetAssetValue,uint256 totalShareSupply,uint256 acceptableShares)AccountInitParams(address user,address signer)ShareInitParams(address master,bytes32 baseTokenId,bytes32 name)"
 );
 
 contract RedeemModule is Access {
@@ -36,9 +37,7 @@ contract RedeemModule is Access {
         uint acceptableRelayFee;
         uint nonce;
         uint chainId;
-        bytes32 baseTokenId;
-        bytes32 name;
-        address master;
+        ShareLib.ShareInitParams share;
         uint sharesOut;
     }
 
@@ -49,21 +48,19 @@ contract RedeemModule is Access {
         uint acceptableRelayFee;
         uint nonce;
         uint chainId;
-        bytes32 baseTokenId;
-        bytes32 name;
-        address master;
+        ShareLib.ShareInitParams share;
         uint amount;
     }
 
     struct FulfillIntent {
-        address master;
+        AccountLib.AccountInitParams params;
         uint blockNumber;
         uint deadline;
         uint acceptableRelayFee;
         uint nonce;
         uint chainId;
-        bytes32 baseTokenId;
-        bytes32 name;
+        ShareLib.ShareInitParams share;
+        uint sharesOut;
         uint acceptableNetAssetValue;
         uint totalShareSupply;
         uint acceptableShares;
@@ -119,7 +116,7 @@ contract RedeemModule is Access {
     ) external auth {
         if (_intent.sharesOut == 0) revert Error.Share__ZeroShares();
 
-        ShareToken _shareToken = ShareToken(_shareGate.verifyShareToken(_fund, _intent.baseTokenId, _intent.name));
+        ShareToken _shareToken = ShareToken(_shareGate.verifyShareToken(_intent.share));
         RedeemStore.Pool memory _pool = _store.getPool(_fund);
         RedeemStore.Position memory _position = _store.getPosition(_fund, address(_holder));
 
@@ -134,7 +131,7 @@ contract RedeemModule is Access {
         _accountGate.dispatch(
             _holder,
             CallLib.feeOnly(_baseToken, _feeReceiver, _actualRelayFee, _transferGasLimit),
-            CallLib.signTransfer(_intent.baseTokenId, _baseToken, _claimed, _actualRelayFee),
+            CallLib.signTransfer(_intent.share.baseTokenId, _baseToken, _claimed, _actualRelayFee),
             _digest,
             _userSignature,
             _attestorSignature,
@@ -186,7 +183,7 @@ contract RedeemModule is Access {
         paidAmount_ = _intent.amount;
         if (_actualRelayFee >= paidAmount_) revert Error.Share__RelayFeeTooHigh();
 
-        ShareToken _shareToken = ShareToken(_shareGate.verifyShareToken(_fund, _intent.baseTokenId, _intent.name));
+        ShareToken _shareToken = ShareToken(_shareGate.verifyShareToken(_intent.share));
         RedeemStore.Pool memory _pool = _store.getPool(_fund);
         RedeemStore.Position memory _position = _store.getPosition(_fund, address(_holder));
         uint _stake = _position.stake;
@@ -206,7 +203,7 @@ contract RedeemModule is Access {
         _accountGate.dispatch(
             _holder,
             CallLib.feeOnly(_baseToken, _feeReceiver, _actualRelayFee, _transferGasLimit),
-            CallLib.signTransfer(_intent.baseTokenId, _baseToken, paidAmount_, _actualRelayFee),
+            CallLib.signTransfer(_intent.share.baseTokenId, _baseToken, paidAmount_, _actualRelayFee),
             _digest,
             _userSignature,
             _attestorSignature,
@@ -256,13 +253,49 @@ contract RedeemModule is Access {
         uint _actualRelayFee
     ) external auth {
         if (_intent.acceptableNetAssetValue == 0) revert Error.Fulfill__ZeroAcceptableNav();
-        ShareToken _shareToken = ShareToken(_shareGate.verifyShareToken(_fund, _intent.baseTokenId, _intent.name));
+        ShareToken _shareToken = ShareToken(_shareGate.verifyShareToken(_intent.share));
         uint _supply = _shareToken.totalSupply();
         if (_supply != _intent.totalShareSupply) {
             revert Error.Fulfill__SupplyMismatch(_supply, _intent.totalShareSupply);
         }
 
         uint _poolShares = _shareToken.balanceOf(address(_store));
+        uint _claimed;
+        if (_intent.sharesOut > 0) {
+            address _master = _intent.share.master;
+            RedeemStore.Pool memory _pool = _store.getPool(_fund);
+            RedeemStore.Position memory _position = _store.getPosition(_fund, _master);
+            uint _added = _pool.totalStake == 0
+                ? _intent.sharesOut
+                : Math.mulDiv(_intent.sharesOut, _pool.totalStake, _poolShares);
+            if (_added == 0) revert Error.Share__ZeroStakeAdded();
+
+            _claimed = _syncAccrued(_position, _pool.accruedPerStake);
+            _position.accrued = 0;
+            _position.cursor = _pool.accruedPerStake;
+            _position.stake += _added;
+            _pool.totalStake += _added;
+            _store.setPool(_fund, _pool);
+            _store.setPosition(_fund, _master, _position);
+
+            _shareGate.transferFrom(_shareToken, _master, address(_store), _intent.sharesOut);
+            _poolShares += _intent.sharesOut;
+
+            if (_claimed > 0) {
+                _store.transferOut(_baseToken, _master, _claimed, _transferGasLimit);
+                _accountGate.dispatch(
+                    IAccount(_master),
+                    new IAccount.Call[](0),
+                    CallLib.signTransfer(_intent.share.baseTokenId, _baseToken, _claimed, 0),
+                    _digest,
+                    _userSignature,
+                    _attestorSignature,
+                    _attestor,
+                    _intent.nonce
+                );
+            }
+        }
+
         uint _maxRetirable = _poolShares == _supply ? _poolShares : _poolShares >= 2 ? _poolShares - 1 : 0;
         uint _sharesRetired = _intent.acceptableShares < _maxRetirable ? _intent.acceptableShares : _maxRetirable;
         uint _drainedBase = Math.mulDiv(_sharesRetired, _intent.acceptableNetAssetValue, _supply);
@@ -302,7 +335,8 @@ contract RedeemModule is Access {
                 _accruedPerStake,
                 _totalStake,
                 _poolShares,
-                _supply - _sharesRetired
+                _supply - _sharesRetired,
+                _claimed
             )
         );
     }

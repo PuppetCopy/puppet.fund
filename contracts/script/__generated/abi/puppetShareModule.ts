@@ -11,12 +11,30 @@ export default [
         "internalType": "contract IAuthority"
       },
       {
+        "name": "_accountModule",
+        "type": "address",
+        "internalType": "contract AccountModule"
+      },
+      {
         "name": "_shareTokenImpl",
         "type": "address",
         "internalType": "address"
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "accountModule",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract AccountModule"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -78,24 +96,26 @@ export default [
     "name": "createShareToken",
     "inputs": [
       {
-        "name": "_fund",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_baseTokenId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "_initialSupply",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_name",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "name": "_shareParams",
+        "type": "tuple",
+        "internalType": "struct ShareLib.ShareInitParams",
+        "components": [
+          {
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
       }
     ],
     "outputs": [],
@@ -152,19 +172,62 @@ export default [
     "name": "predict",
     "inputs": [
       {
-        "name": "_fund",
+        "name": "_shareParams",
+        "type": "tuple",
+        "internalType": "struct ShareLib.ShareInitParams",
+        "components": [
+          {
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
         "type": "address",
         "internalType": "address"
-      },
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "predictFund",
+    "inputs": [
       {
-        "name": "_baseTokenId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "_name",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "name": "_shareParams",
+        "type": "tuple",
+        "internalType": "struct ShareLib.ShareInitParams",
+        "components": [
+          {
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
       }
     ],
     "outputs": [
@@ -259,19 +322,26 @@ export default [
     "name": "verifyShareToken",
     "inputs": [
       {
-        "name": "_fund",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_baseTokenId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "_name",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "name": "_shareParams",
+        "type": "tuple",
+        "internalType": "struct ShareLib.ShareInitParams",
+        "components": [
+          {
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          }
+        ]
       }
     ],
     "outputs": [

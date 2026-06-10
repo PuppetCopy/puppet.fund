@@ -22,7 +22,7 @@ contract WalletDepositModule is Access {
         uint _gasLimit
     ) external auth {
         if (_amount == 0) revert Error.WalletDeposit__ZeroAmount();
-        TransferUtils.transferStrictlyFrom(_gasLimit, _token, _depositor, _recipient, _amount);
+        TransferUtils.transferStrictlyFrom(_token, _depositor, _recipient, _amount, _gasLimit);
         uint _depositPostBalance = _token.balanceOf(_recipient);
         _logEvent(
             "WalletDeposit", abi.encode(block.chainid, _depositor, _recipient, _token, _amount, _depositPostBalance)
@@ -38,7 +38,7 @@ contract WalletDepositModule is Access {
         if (msg.value == 0) revert Error.WalletDeposit__ZeroAmount();
         _wnt.deposit{value: msg.value}();
         IERC20 _wntErc20 = IERC20(address(_wnt));
-        TransferUtils.transferStrictly(_gasLimit, _wntErc20, _recipient, msg.value);
+        TransferUtils.transferStrictly(_wntErc20, _recipient, msg.value, _gasLimit);
         uint _depositPostBalance = _wntErc20.balanceOf(_recipient);
         _logEvent(
             "WalletDeposit",

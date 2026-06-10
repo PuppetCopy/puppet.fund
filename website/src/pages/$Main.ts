@@ -69,8 +69,8 @@ const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'fulfil
 const ZERO_TOKEN = '0x0000000000000000000000000000000000000000' as Address
 
 function accountForRequest(req: IAttestation['request']): Address {
-  if (FUND_ROUTED.has(req.kind)) return predictFundAccount((req.input as { master: Address }).master)
-  return predictPuppetAccount((req.input as { params: { user: Address; signer: Address } }).params)
+  const account = predictPuppetAccount((req.input as { params: { user: Address; signer: Address } }).params)
+  return FUND_ROUTED.has(req.kind) ? predictFundAccount(account) : account
 }
 
 function tokenIdForRequest(req: IAttestation['request']): Hex {
@@ -128,7 +128,7 @@ function applySubaccountAttest(list: ISubaccountState[], settled: IAttestation):
   }
 
   if (request.kind === 'createFundAccount') {
-    const master = (request.input as { master: Address }).master
+    const master = predictPuppetAccount((request.input as { params: { user: Address; signer: Address } }).params)
     const account = predictFundAccount(master)
     if (list.some(s => s.account === account)) return list
     const sweepAmount = (request.input as { sweepAmount: bigint }).sweepAmount
@@ -156,7 +156,7 @@ function applySubaccountAttest(list: ISubaccountState[], settled: IAttestation):
   const delta = computeSignedDelta(request, fee)
 
   if (request.kind === 'allocate' && !list.some(s => s.account === target)) {
-    const master = getAddress((request.input as { master: Address }).master)
+    const master = predictPuppetAccount((request.input as { params: { user: Address; signer: Address } }).params)
     const leaf: IAccountRow = {
       id: `${chainId}-${target}`,
       account: target,

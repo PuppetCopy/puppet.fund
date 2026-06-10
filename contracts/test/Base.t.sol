@@ -26,6 +26,7 @@ import {AllocateStore} from "src/hub/store/AllocateStore.sol";
 import {SubscribeModule} from "src/hub/SubscribeModule.sol";
 import {RedeemModule} from "src/hub/RedeemModule.sol";
 import {RedeemStore} from "src/hub/store/RedeemStore.sol";
+import {ShareLib, SHARE_INIT_TYPEHASH} from "src/hub/ShareLib.sol";
 
 import {MockERC20} from "./mock/MockERC20.t.sol";
 import {MockWNT} from "./mock/MockWNT.t.sol";
@@ -82,7 +83,7 @@ contract V2Base is Test {
         dictate.setAccess(attest, address(accountModule));
         walletDeposit = new WalletDepositModule(dictate);
 
-        shareGate = new ShareModule(dictate, address(new ShareToken()));
+        shareGate = new ShareModule(dictate, accountModule, address(new ShareToken()));
         allocate = new AllocateModule(dictate);
         allocateStore = new AllocateStore(dictate);
         subscribe = new SubscribeModule(dictate);
@@ -177,6 +178,18 @@ contract V2Base is Test {
         return keccak256(abi.encode(ACCOUNT_TYPEHASH, _user, _signer));
     }
 
+    function _share(
+        address _master
+    ) internal pure returns (ShareLib.ShareInitParams memory) {
+        return ShareLib.ShareInitParams({master: _master, baseTokenId: USDC_ID, name: bytes32("Fund")});
+    }
+
+    function _hashShare(
+        ShareLib.ShareInitParams memory _p
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(SHARE_INIT_TYPEHASH, _p.master, _p.baseTokenId, _p.name));
+    }
+
     function _seedSignedUsdc(
         address _acct,
         uint _amount
@@ -204,24 +217,24 @@ contract V2Base is Test {
         (p.user, p.key) = makeAddrAndKey(_label);
         AccountModule.CreatePuppetAccountIntent memory intent = AccountModule.CreatePuppetAccountIntent({
             params: _params(p.user),
-            tokenId: USDC_ID,
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 0,
             nonce: 0,
             chainId: block.chainid,
+            tokenId: USDC_ID,
             initialDepositAmount: 0
         });
         bytes32 structHash = keccak256(
             abi.encode(
                 CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH,
                 _hashAccount(p.user, address(0)),
-                intent.tokenId,
                 intent.blockNumber,
                 intent.deadline,
                 intent.acceptableRelayFee,
                 intent.nonce,
                 intent.chainId,
+                intent.tokenId,
                 intent.initialDepositAmount
             )
         );

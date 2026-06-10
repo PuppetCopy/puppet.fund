@@ -35,12 +35,10 @@ export const $defaultDropSelectAnchor = $row(
   }),
   // Hover brightens the border, matching the icon-circular controls / choice cards.
   stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) }),
-  // While the list is open the anchor joins the panel below it: flattened bottom corners
-  // and the same brightened border the panel uses, so the two read as one control.
+  // While the list is open the anchor brightens to the same border the panel uses; its
+  // own radius is preserved (the panel tucks under it at rect.bottom - 1).
   stylePseudo('[aria-expanded="true"]', {
-    borderColor: colorShade(palette.foreground, 60),
-    borderBottomLeftRadius: '0',
-    borderBottomRightRadius: '0'
+    borderColor: colorShade(palette.foreground, 60)
   })
 )
 

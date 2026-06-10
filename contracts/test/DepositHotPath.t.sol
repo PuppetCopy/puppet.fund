@@ -20,24 +20,24 @@ contract DepositHotPathTest is V2Base {
     ) internal view returns (bytes32 digest, HubGate.WithdrawToWalletIntent memory intent) {
         intent = HubGate.WithdrawToWalletIntent({
             params: _params(p.user),
-            tokenId: USDC_ID,
             blockNumber: block.number,
             deadline: block.timestamp + 1,
             acceptableRelayFee: fee,
             nonce: p.nonce,
             chainId: block.chainid,
+            tokenId: USDC_ID,
             amount: amount
         });
         bytes32 structHash = keccak256(
             abi.encode(
                 WITHDRAW_TO_WALLET_INTENT_TYPEHASH,
                 _hashAccount(p.user, address(0)),
-                intent.tokenId,
                 intent.blockNumber,
                 intent.deadline,
                 intent.acceptableRelayFee,
                 intent.nonce,
                 intent.chainId,
+                intent.tokenId,
                 intent.amount
             )
         );
@@ -88,24 +88,24 @@ contract DepositHotPathTest is V2Base {
 
         AccountGate.RecognizeIntent memory intent = AccountGate.RecognizeIntent({
             params: _params(p.user),
-            tokenId: USDC_ID,
             blockNumber: block.number,
             deadline: block.timestamp + 1,
             acceptableRelayFee: 2e6,
             nonce: p.nonce,
             chainId: block.chainid,
+            tokenId: USDC_ID,
             amount: 100e6
         });
         bytes32 structHash = keccak256(
             abi.encode(
                 RECOGNIZE_INTENT_TYPEHASH,
                 _hashAccount(p.user, address(0)),
-                intent.tokenId,
                 intent.blockNumber,
                 intent.deadline,
                 intent.acceptableRelayFee,
                 intent.nonce,
                 intent.chainId,
+                intent.tokenId,
                 intent.amount
             )
         );

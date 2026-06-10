@@ -74,6 +74,8 @@ export const STEP_DESCRIPTION: Record<StepKind, string> = {
   fulfill: 'Pay base from the master pool to retire queued shares at the current NAV.'
 }
 
+export const SHARE_DECIMALS = 18
+
 export const stepNonce = (step: StepInput): bigint | null => ('nonce' in step.input ? step.input.nonce : null)
 
 export interface IDraftAmount {
@@ -141,6 +143,7 @@ export type IMasterFundStep =
 export interface IAllocateDraft extends IDraftBase {
   kind: 'allocate'
   master: Address
+  masterSigner: Address
   baseToken: Address
   baseTokenId: Hex
   name: Hex
@@ -173,6 +176,7 @@ export interface IFulfillDraft extends IDraftBase {
   masterAccount: Address
   baseToken: Address
   baseTokenId: Hex
+  sharesOut: bigint
   acceptableShares: bigint
 }
 

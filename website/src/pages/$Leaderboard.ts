@@ -465,7 +465,11 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                 $valueLabel: map(tf =>
                   $node(style({ whiteSpace: 'nowrap' }))($text(getMappedValue(activityOptionPeriodLabelMap, tf)))
                 ),
-                $$option: map(tf => $node($text(getMappedValue(activityOptionPeriodLabelMap, tf))))
+                $$option: map(tf =>
+                  $node(style({ display: 'block', padding: '8px 12px', whiteSpace: 'nowrap' }))(
+                    $text(getMappedValue(activityOptionPeriodLabelMap, tf))
+                  )
+                )
               })({
                 select: changeActivityTimeframeTether()
               })

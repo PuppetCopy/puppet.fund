@@ -94,7 +94,7 @@ export async function createOperatorCore(config: IOperatorConfig): Promise<IOper
       BigInt(callList.length)
     )
     const input: IOperateInput = {
-      master: account,
+      params,
       blockNumber,
       deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
       acceptableRelayFee,

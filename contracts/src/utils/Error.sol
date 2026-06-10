@@ -74,6 +74,7 @@ library Error {
     error Share__RelayFeeTooHigh();
     error Share__NoStakeToCredit();
     error Share__NotCreated();
+    error Share__MasterMismatch(address derived, address declared);
 
     error Fulfill__ZeroAcceptableNav();
     error Fulfill__SupplyMismatch(uint current, uint expected);

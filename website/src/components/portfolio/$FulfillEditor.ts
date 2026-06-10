@@ -7,6 +7,7 @@ import {
   type ISubaccountState,
   type ITokenRegistryMap,
   liveFundPoolState,
+  livePuppetRedeemPosition,
   tokenInfoFor
 } from '@puppet/sdk/state'
 import {
@@ -26,9 +27,9 @@ import { $element, $node, $text, attr, component, type INode, nodeEvent, style }
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import type { Address, Hex } from 'viem'
-import { $ButtonSecondary, $defaultSliderContainer, $Slider, $TokenAmountInput, text } from '@/ui-components'
+import { $ButtonSecondary, $Checkbox, $defaultSliderContainer, $Slider, $TokenAmountInput, text } from '@/ui-components'
 import { sqlClient } from '../../io/indexer/sql.js'
-import type { IFulfillDraft } from './draft.js'
+import { type IFulfillDraft, SHARE_DECIMALS } from './draft.js'
 
 export interface I$FulfillEditor {
   master: Address
@@ -55,7 +56,8 @@ export const $FulfillEditor = ({
       [enterShares, enterSharesTether]: IBehavior<KeyboardEvent>,
       [sliderPercent, sliderPercentTether]: IBehavior<number>,
       [clickMax, clickMaxTether]: IBehavior<INode<HTMLButtonElement>, MouseEvent>,
-      [clickFulfill, clickFulfillTether]: IBehavior<PointerEvent>
+      [clickFulfill, clickFulfillTether]: IBehavior<PointerEvent>,
+      [toggleQueueOwn, toggleQueueOwnTether]: IBehavior<boolean>
     ) => {
       const desc = getTokenDescription(tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseTokenId).token)
 
@@ -68,10 +70,27 @@ export const $FulfillEditor = ({
         map(acc => acc.balances.get(baseTokenId)?.signedBalance ?? 0n),
         state(0n)
       )
-      // The contract caps acceptableShares at queuedShares - 1 (Fulfill__NothingToRetire guard).
+      // Master close composite: queueing the master's own held shares in the same fulfill
+      // (an embedded self-sell on-chain, sell -> fulfill -> claim collapses to fulfill -> claim).
+      const heldShares: IStream<bigint> = op(
+        livePuppetRedeemPosition(sqlClient, master, masterAccount),
+        map(pos => pos.sharesHeld),
+        state(0n)
+      )
+      const queueOwn: IStream<boolean> = state(false, toggleQueueOwn)
+      const sharesOutValue: IStream<bigint> = op(
+        combine({ on: queueOwn, held: heldShares }),
+        map(p => (p.on ? p.held : 0n))
+      )
+      // Retire ceiling mirrors the contract: the master's queued self-sell joins the pool
+      // first, and the FULL pool retires when the store would hold the entire supply;
+      // otherwise one share always remains.
       const maxRetirableStream: IStream<bigint> = map(
-        p => (p.queuedShares >= 2n ? p.queuedShares - 1n : 0n),
-        poolStream
+        p => {
+          const poolShares = p.pool.queuedShares + p.out
+          return poolShares === p.pool.totalShareSupply ? poolShares : poolShares >= 2n ? poolShares - 1n : 0n
+        },
+        combine({ pool: poolStream, out: sharesOutValue })
       )
 
       const sliderShares: IStream<bigint> = sampleMap(
@@ -98,9 +117,10 @@ export const $FulfillEditor = ({
           masterAccount,
           baseToken,
           baseTokenId,
+          sharesOut: params.out,
           acceptableShares: params.shares
         }),
-        combine({ shares: sharesValue }),
+        combine({ shares: sharesValue, out: sharesOutValue }),
         merge(clickFulfill, enterShares)
       )
 
@@ -112,7 +132,7 @@ export const $FulfillEditor = ({
           const drained = p.pool.totalShareSupply > 0n ? (amt * nav) / p.pool.totalShareSupply : 0n
 
           const valueToShow: IStream<string> = map(
-            (x: { amt: bigint; focused: boolean }) => (x.amt === 0n ? '' : readableTokenAmount(desc.decimals, x.amt)),
+            (x: { amt: bigint; focused: boolean }) => (x.amt === 0n ? '' : readableTokenAmount(SHARE_DECIMALS, x.amt)),
             filter((x: { amt: bigint; focused: boolean }) => !x.focused, combine({ amt: sharesValue, focused }))
           )
 
@@ -123,7 +143,7 @@ export const $FulfillEditor = ({
 
           const fulfillDisabled: IStream<boolean> = map(cur => cur === 0n || cur > max, sharesValue)
 
-          const $field = $TokenAmountInput({ decimals: desc.decimals, valueToShow })({
+          const $field = $TokenAmountInput({ decimals: SHARE_DECIMALS, valueToShow })({
             inputAmount: inputSharesTether(),
             focus: focusSharesTether(),
             blur: blurSharesTether(),
@@ -152,7 +172,7 @@ export const $FulfillEditor = ({
               $node(style({ color: palette.message, fontWeight: '600' }))($text(value))
             )
 
-          const queuedLabel = readableTokenAmount(desc, p.pool.queuedShares)
+          const queuedLabel = readableTokenAmount(SHARE_DECIMALS, p.pool.queuedShares)
           const navLabel = `${readableTokenAmount(desc, nav)} ${desc.symbol}`
           const drainedLabel = `${readableTokenAmount(desc, drained)} ${desc.symbol}`
 
@@ -198,6 +218,18 @@ export const $FulfillEditor = ({
               })({ change: sliderPercentTether() })
             ),
             $column(spacing.small)(
+              ...(p.held > 0n
+                ? [
+                    $row(spacing.small, style({ alignItems: 'center', justifyContent: 'space-between' }))(
+                      $Checkbox({ value: queueOwn, label: 'Queue my held shares' })({
+                        check: toggleQueueOwnTether()
+                      }),
+                      $node(style({ color: palette.message, fontWeight: '600', fontSize: text.xs }))(
+                        $text(`${readableTokenAmount(SHARE_DECIMALS, p.held)} shares`)
+                      )
+                    )
+                  ]
+                : []),
               $statRow('Queued', `${queuedLabel} shares`),
               $statRow('NAV', navLabel),
               $statRow('Pay', drainedLabel)
@@ -210,7 +242,13 @@ export const $FulfillEditor = ({
             )
           )
         },
-        combine({ pool: poolStream, nav: navStream, maxRetirable: maxRetirableStream, amt: sharesValue })
+        combine({
+          pool: poolStream,
+          nav: navStream,
+          maxRetirable: maxRetirableStream,
+          amt: sharesValue,
+          held: heldShares
+        })
       )
 
       return [$editor, { changeDraft: fulfillDraft }]

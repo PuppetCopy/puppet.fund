@@ -103,6 +103,7 @@ import {
   type ISellDraft,
   type ISubscribeDraft,
   type IWithdrawDraft,
+  SHARE_DECIMALS,
   STEP_DESCRIPTION,
   STEP_LABEL,
   type StepKind,
@@ -769,13 +770,17 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
           $text(`${readableTokenAmount(desc, draft.masterAmount)} ${symbol}`),
           $metaText('to'),
-          $accountProfile(draft.master, draft.name, predictShareToken(draft.master, draft.baseTokenId, draft.name))
+          $accountProfile(
+            draft.master,
+            draft.name,
+            predictShareToken(draft.masterSigner, draft.baseTokenId, draft.name)
+          )
         )
       }
 
       const $sellDesc = (draft: ISellDraft): I$Node =>
         $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $text(`${draft.sharesOut.toString()} shares`),
+          $text(`${readableTokenAmount(SHARE_DECIMALS, draft.sharesOut)} shares`),
           $metaText('queued from'),
           $addressOnChain(draft.masterAccount, HUB_CHAIN_ID)
         )
@@ -792,7 +797,10 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
       const $fulfillDesc = (draft: IFulfillDraft, registry: ITokenRegistryMap): I$Node => {
         const { desc } = renderToken(registry, draft.baseTokenId)
         return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $text(`${readableTokenAmount(desc, draft.acceptableShares)} shares`),
+          $text(`${readableTokenAmount(SHARE_DECIMALS, draft.acceptableShares)} shares`),
+          ...(draft.sharesOut > 0n
+            ? [$metaText(`incl. ${readableTokenAmount(SHARE_DECIMALS, draft.sharesOut)} of yours queued`)]
+            : []),
           $metaText('retired by'),
           $addressOnChain(draft.masterAccount, HUB_CHAIN_ID)
         )
@@ -823,7 +831,9 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
               }
             }
             const account =
-              step.kind === 'createFundAccount' ? predictFundAccount(step.input.master) : step.input.params.signer
+              step.kind === 'createFundAccount'
+                ? predictFundAccount(predictPuppetAccount(step.input.params))
+                : step.input.params.signer
             return {
               kind: step.kind,
               nonce: stepNonce(step),

@@ -510,6 +510,22 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
+    name: "Share__MasterMismatch",
+    inputs: [
+      {
+        name: "derived",
+        internalType: "address",
+        type: "address"
+      },
+      {
+        name: "declared",
+        internalType: "address",
+        type: "address"
+      }
+    ]
+  },
+  {
+    type: "error",
     name: "Fulfill__ZeroAcceptableNav",
     inputs: []
   },

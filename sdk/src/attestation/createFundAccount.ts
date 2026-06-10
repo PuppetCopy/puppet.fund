@@ -1,6 +1,6 @@
 import { MASTER_GATE_INTENTS } from '@puppet/contracts/intents'
-import type { IMasterGate__CreateFundAccountIntent } from '@puppet/contracts/types'
-import type { Address, Hex, TypedDataDefinition } from 'viem'
+import type { IAccountLib__AccountInitParams, IMasterGate__CreateFundAccountIntent } from '@puppet/contracts/types'
+import type { Hex, TypedDataDefinition } from 'viem'
 import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
 import * as IntentLib from './intentLib.js'
@@ -9,7 +9,7 @@ import { type IDraftContext, MASTER_GATE_DOMAIN_MAP } from './shared.js'
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 
 export interface ICreateFundAccountInput {
-  master: Address
+  params: IAccountLib__AccountInitParams
   tokenId: Hex
   blockNumber: bigint
   deadline: bigint
@@ -35,7 +35,7 @@ export function attestCreateFundAccountIntent(ctx: ICreateFundAccountAttestConte
     acceptableRelayFee: input.acceptableRelayFee,
     relayFeeDenominator: input.sweepAmount
   })
-  if (input.master === ZERO_ADDRESS) throw new CompactContractError('Account__InvalidUser', [])
+  if (input.params.user === ZERO_ADDRESS) throw new CompactContractError('Account__InvalidUser', [])
 
   if (input.sweepAmount > 0n && ctx.routeBalance < input.sweepAmount) {
     throw new CompactError(
@@ -45,13 +45,13 @@ export function attestCreateFundAccountIntent(ctx: ICreateFundAccountAttestConte
   }
 
   const intent: IMasterGate__CreateFundAccountIntent = {
-    master: input.master,
-    tokenId: input.tokenId,
+    params: input.params,
     blockNumber: input.blockNumber,
     deadline: input.deadline,
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: input.chainId,
+    tokenId: input.tokenId,
     sweepAmount: input.sweepAmount
   }
 

@@ -105,11 +105,6 @@ export default [
             ]
           },
           {
-            "name": "tokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
             "name": "blockNumber",
             "type": "uint256",
             "internalType": "uint256"
@@ -133,6 +128,11 @@ export default [
             "name": "chainId",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
             "name": "provider",
@@ -241,11 +241,6 @@ export default [
             ]
           },
           {
-            "name": "tokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
             "name": "blockNumber",
             "type": "uint256",
             "internalType": "uint256"
@@ -269,6 +264,11 @@ export default [
             "name": "chainId",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
             "name": "initialDepositAmount",
@@ -476,11 +476,6 @@ export default [
             ]
           },
           {
-            "name": "tokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
             "name": "blockNumber",
             "type": "uint256",
             "internalType": "uint256"
@@ -504,6 +499,11 @@ export default [
             "name": "chainId",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
             "name": "amount",

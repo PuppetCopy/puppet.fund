@@ -6,8 +6,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {BaseGate} from "./utils/BaseGate.sol";
 import {CallLib} from "./utils/CallLib.sol";
-import {Error} from "./utils/Error.sol";
 import {IntentLib} from "./utils/IntentLib.sol";
+import {AccountLib} from "./core/AccountLib.sol";
 import {IAuthority} from "./utils/interfaces/IAuthority.sol";
 
 import {AccountModule} from "./core/module/AccountModule.sol";
@@ -16,16 +16,16 @@ import {FundAccount} from "./core/FundAccount.sol";
 import {IAccount} from "./core/interface/IAccount.sol";
 
 bytes32 constant OPERATE_INTENT_TYPEHASH = keccak256(
-    "OperateIntent(address master,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 callListHash,bytes32 transferListHash)"
+    "OperateIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 callListHash,bytes32 transferListHash)AccountInitParams(address user,address signer)"
 );
 
 bytes32 constant CREATE_FUND_ACCOUNT_INTENT_TYPEHASH = keccak256(
-    "CreateFundAccountIntent(address master,bytes32 tokenId,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,uint256 sweepAmount)"
+    "CreateFundAccountIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 tokenId,uint256 sweepAmount)AccountInitParams(address user,address signer)"
 );
 
 contract MasterGate is BaseGate, EIP712 {
     struct OperateIntent {
-        address master;
+        AccountLib.AccountInitParams params;
         uint blockNumber;
         uint deadline;
         uint acceptableRelayFee;
@@ -36,13 +36,13 @@ contract MasterGate is BaseGate, EIP712 {
     }
 
     struct CreateFundAccountIntent {
-        address master;
-        bytes32 tokenId;
+        AccountLib.AccountInitParams params;
         uint blockNumber;
         uint deadline;
         uint acceptableRelayFee;
         uint nonce;
         uint chainId;
+        bytes32 tokenId;
         uint sweepAmount;
     }
 
@@ -64,9 +64,9 @@ contract MasterGate is BaseGate, EIP712 {
         IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
         IntentLib.verifyRelayFeeRatio(_actualRelayFee, _intent.sweepAmount, maxRelayFeeBps);
         IERC20 _token = IntentLib.verifyTokenAndCap(registerModule, _intent.tokenId, address(0), _intent.sweepAmount);
-        if (_intent.master.code.length == 0) revert Error.Account__NotDeployed(_intent.master);
 
-        (FundAccount _account, address _route) = accountModule.createFundAccount(_intent.master);
+        (FundAccount _account, address _route) =
+            accountModule.createFundAccount(address(accountModule.verifyPuppetAccount(_intent.params)));
 
         accountModule.dispatch(
             IAccount(address(_account)),
@@ -82,13 +82,13 @@ contract MasterGate is BaseGate, EIP712 {
                 keccak256(
                     abi.encode(
                         CREATE_FUND_ACCOUNT_INTENT_TYPEHASH,
-                        _intent.master,
-                        _intent.tokenId,
+                        AccountLib.hashAccount(_intent.params),
                         _intent.blockNumber,
                         _intent.deadline,
                         _intent.acceptableRelayFee,
                         _intent.nonce,
                         _intent.chainId,
+                        _intent.tokenId,
                         _intent.sweepAmount
                     )
                 )
@@ -110,7 +110,8 @@ contract MasterGate is BaseGate, EIP712 {
         IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, _blockNumber(), maxBlockDelay);
         IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
 
-        FundAccount _account = accountModule.verifyFundAccount(_intent.master);
+        FundAccount _account =
+            accountModule.verifyFundAccount(address(accountModule.verifyPuppetAccount(_intent.params)));
 
         (,, result_) = accountModule.dispatch{value: msg.value}(
             IAccount(address(_account)),
@@ -120,7 +121,7 @@ contract MasterGate is BaseGate, EIP712 {
                 keccak256(
                     abi.encode(
                         OPERATE_INTENT_TYPEHASH,
-                        _intent.master,
+                        AccountLib.hashAccount(_intent.params),
                         _intent.blockNumber,
                         _intent.deadline,
                         _intent.acceptableRelayFee,

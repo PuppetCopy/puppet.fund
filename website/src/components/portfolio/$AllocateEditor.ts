@@ -475,6 +475,7 @@ export const $AllocateEditor = ({
               title: 'Allocate',
               alert: null,
               master,
+              masterSigner: p.acc.signer,
               baseToken,
               baseTokenId: p.bid,
               name: p.name,
@@ -521,7 +522,8 @@ export const $AllocateEditor = ({
               if (!chainMap) return []
               const entries: SourceRef[] = []
               for (const [tid, info] of chainMap) {
-                if (tid !== initialBaseTokenId && !context.relayFeeMapByToken.has(tid)) continue
+                if (tid !== initialBaseTokenId && (chain.id === HUB_CHAIN_ID || !context.relayFeeMapByToken.has(tid)))
+                  continue
                 const srcDesc = getTokenDescription(info.hubToken)
                 entries.push({
                   chainId: chain.id,
@@ -642,6 +644,8 @@ export const $AllocateEditor = ({
                   nav,
                   aum: ((f?.totalShareSupply ?? 0n) * nav) / FLOAT_PRECISION,
                   pending: ((f?.queuedShares ?? 0n) * nav) / FLOAT_PRECISION,
+                  totalShareSupply: f?.totalShareSupply ?? 0n,
+                  draining: (f?.seeded ?? false) && (f?.totalShareSupply ?? 0n) === 0n && (f?.totalStake ?? 0n) > 0n,
                   queuedShares: f?.queuedShares ?? 0n
                 }
               })
@@ -753,9 +757,12 @@ export const $AllocateEditor = ({
                 floor: allocationFloor,
                 nameOk,
                 q: quoteQuery,
-                sel: sourceSelection
+                sel: sourceSelection,
+                v: fundValues
               }),
               map(p => {
+                if (p.v.draining && p.value > 0n)
+                  return 'Fund is draining: queued sellers must claim their proceeds before it can reopen'
                 if (p.value > p.balance)
                   return `Exceeds available ${readableTokenAmountLabel({ decimals: p.sel.decimals, symbol: p.sel.symbol }, p.balance)}`
                 if (p.value > 0n && p.q.status === 'error') return p.q.message
@@ -1000,9 +1007,12 @@ export const $AllocateEditor = ({
               map(p => computeClaimable(p) === 0n),
               start(true)
             )
+            // Fulfill can retire poolShares - 1 normally, or the ENTIRE pool when the store
+            // holds the whole supply (full unwind), so 1 queued wei-share is only
+            // fulfillable when it IS the supply.
             const fulfillDisabled: IStream<boolean> = op(
               fundValues,
-              map(v => v.queuedShares <= 1n),
+              map(v => !(v.queuedShares >= 2n || (v.queuedShares > 0n && v.queuedShares === v.totalShareSupply))),
               start(true)
             )
 

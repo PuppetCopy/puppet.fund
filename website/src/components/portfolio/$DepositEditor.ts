@@ -137,7 +137,7 @@ export const $DepositEditor = ({
           isNative: boolean
         ) => {
           const isSwap = routeTokenId !== baseTokenId
-          if (isSwap && !context.relayFeeMapByToken.has(routeTokenId)) return
+          if (isSwap && (chain.id === HUB_CHAIN_ID || !context.relayFeeMapByToken.has(routeTokenId))) return
           entries.push({
             chainId: chain.id,
             address,

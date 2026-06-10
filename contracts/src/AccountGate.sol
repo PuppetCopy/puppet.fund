@@ -18,33 +18,33 @@ import {PuppetAccount} from "./core/PuppetAccount.sol";
 import {IAccount} from "./core/interface/IAccount.sol";
 
 bytes32 constant RECOGNIZE_INTENT_TYPEHASH = keccak256(
-    "RecognizeIntent(AccountInitParams params,bytes32 tokenId,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,uint256 amount)AccountInitParams(address user,address signer)"
+    "RecognizeIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 tokenId,uint256 amount)AccountInitParams(address user,address signer)"
 );
 
 bytes32 constant BRIDGE_INTENT_TYPEHASH = keccak256(
-    "BridgeIntent(AccountInitParams params,bytes32 tokenId,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,address provider,bytes providerCallData,uint256 inputAmount,uint256 outputAmount,uint256 destinationChainId,uint32 expires,uint32 fillDeadline)AccountInitParams(address user,address signer)"
+    "BridgeIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 tokenId,address provider,bytes providerCallData,uint256 inputAmount,uint256 outputAmount,uint256 destinationChainId,uint32 expires,uint32 fillDeadline)AccountInitParams(address user,address signer)"
 );
 
 contract AccountGate is BaseGate, EIP712 {
     struct RecognizeIntent {
         AccountLib.AccountInitParams params;
-        bytes32 tokenId;
         uint blockNumber;
         uint deadline;
         uint acceptableRelayFee;
         uint nonce;
         uint chainId;
+        bytes32 tokenId;
         uint amount;
     }
 
     struct BridgeIntent {
         AccountLib.AccountInitParams params;
-        bytes32 tokenId;
         uint blockNumber;
         uint deadline;
         uint acceptableRelayFee;
         uint nonce;
         uint chainId;
+        bytes32 tokenId;
         address provider;
         bytes providerCallData;
         uint inputAmount;
@@ -123,12 +123,12 @@ contract AccountGate is BaseGate, EIP712 {
                     abi.encode(
                         CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH,
                         AccountLib.hashAccount(_intent.params),
-                        _intent.tokenId,
                         _intent.blockNumber,
                         _intent.deadline,
                         _intent.acceptableRelayFee,
                         _intent.nonce,
                         _intent.chainId,
+                        _intent.tokenId,
                         _intent.initialDepositAmount
                     )
                 )
@@ -241,12 +241,12 @@ contract AccountGate is BaseGate, EIP712 {
                 abi.encode(
                     RECOGNIZE_INTENT_TYPEHASH,
                     AccountLib.hashAccount(_intent.params),
-                    _intent.tokenId,
                     _intent.blockNumber,
                     _intent.deadline,
                     _intent.acceptableRelayFee,
                     _intent.nonce,
                     _intent.chainId,
+                    _intent.tokenId,
                     _intent.amount
                 )
             )
@@ -261,12 +261,12 @@ contract AccountGate is BaseGate, EIP712 {
                 abi.encode(
                     BRIDGE_INTENT_TYPEHASH,
                     AccountLib.hashAccount(_intent.params),
-                    _intent.tokenId,
                     _intent.blockNumber,
                     _intent.deadline,
                     _intent.acceptableRelayFee,
                     _intent.nonce,
                     _intent.chainId,
+                    _intent.tokenId,
                     _intent.provider,
                     keccak256(_intent.providerCallData),
                     _intent.inputAmount,

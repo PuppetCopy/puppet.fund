@@ -21,22 +21,22 @@ abstract contract BankStore is Access {
     }
 
     function _transferIn(
-        uint _gasLimit,
         IERC20 _token,
         address _depositor,
-        uint _amount
+        uint _amount,
+        uint _gasLimit
     ) internal {
-        TransferUtils.transferStrictlyFrom(_gasLimit, _token, _depositor, address(this), _amount);
+        TransferUtils.transferStrictlyFrom(_token, _depositor, address(this), _amount, _gasLimit);
         signedBalanceMap[_token] += _amount;
     }
 
     function _transferOut(
-        uint _gasLimit,
         IERC20 _token,
         address _receiver,
-        uint _amount
+        uint _amount,
+        uint _gasLimit
     ) internal {
         signedBalanceMap[_token] -= _amount;
-        TransferUtils.transferStrictly(_gasLimit, _token, _receiver, _amount);
+        TransferUtils.transferStrictly(_token, _receiver, _amount, _gasLimit);
     }
 }

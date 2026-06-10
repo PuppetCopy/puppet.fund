@@ -25,7 +25,7 @@ contract MasterFlowsTest is V2Base {
         usdc.mint(accountModule.predictRoute(f.fund), _sweep);
 
         MasterGate.CreateFundAccountIntent memory intent = MasterGate.CreateFundAccountIntent({
-            master: address(f.master.acct),
+            params: _params(f.master.user),
             tokenId: USDC_ID,
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -37,13 +37,13 @@ contract MasterFlowsTest is V2Base {
         bytes32 structHash = keccak256(
             abi.encode(
                 CREATE_FUND_ACCOUNT_INTENT_TYPEHASH,
-                intent.master,
-                intent.tokenId,
+                _hashAccount(intent.params.user, address(0)),
                 intent.blockNumber,
                 intent.deadline,
                 intent.acceptableRelayFee,
                 intent.nonce,
                 intent.chainId,
+                intent.tokenId,
                 intent.sweepAmount
             )
         );
@@ -65,7 +65,7 @@ contract MasterFlowsTest is V2Base {
         usdc.mint(accountModule.predictRoute(fund), 100e6);
 
         MasterGate.CreateFundAccountIntent memory intent = MasterGate.CreateFundAccountIntent({
-            master: address(master.acct),
+            params: _params(master.user),
             tokenId: USDC_ID,
             blockNumber: block.number,
             deadline: block.timestamp + 60,
@@ -77,13 +77,13 @@ contract MasterFlowsTest is V2Base {
         bytes32 structHash = keccak256(
             abi.encode(
                 CREATE_FUND_ACCOUNT_INTENT_TYPEHASH,
-                intent.master,
-                intent.tokenId,
+                _hashAccount(intent.params.user, address(0)),
                 intent.blockNumber,
                 intent.deadline,
                 intent.acceptableRelayFee,
                 intent.nonce,
                 intent.chainId,
+                intent.tokenId,
                 intent.sweepAmount
             )
         );
@@ -100,7 +100,7 @@ contract MasterFlowsTest is V2Base {
         IAccount.SignTransfer[] memory transfers
     ) internal {
         MasterGate.OperateIntent memory intent = MasterGate.OperateIntent({
-            master: address(f.master.acct),
+            params: _params(f.master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 0,
@@ -112,7 +112,7 @@ contract MasterFlowsTest is V2Base {
         bytes32 structHash = keccak256(
             abi.encode(
                 OPERATE_INTENT_TYPEHASH,
-                intent.master,
+                _hashAccount(intent.params.user, address(0)),
                 intent.blockNumber,
                 intent.deadline,
                 intent.acceptableRelayFee,

@@ -269,8 +269,7 @@ export const $HelloPage = ({
             // The ShareToken address derives from the fund name, so the identity preview
             // (avatar + address) updates live as the user types.
             const shareToken: IStream<Address> = map(
-              name =>
-                predictShareToken(fundStub.account, effectiveBid, toHex(name.trim() || defaultName, { size: 32 })),
+              name => predictShareToken(fundMaster, effectiveBid, toHex(name.trim() || defaultName, { size: 32 })),
               fundName
             )
 

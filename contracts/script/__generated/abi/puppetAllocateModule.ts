@@ -23,9 +23,21 @@ export default [
         "internalType": "struct AllocateModule.AllocateIntent",
         "components": [
           {
-            "name": "master",
-            "type": "address",
-            "internalType": "address"
+            "name": "params",
+            "type": "tuple",
+            "internalType": "struct AccountLib.AccountInitParams",
+            "components": [
+              {
+                "name": "user",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "signer",
+                "type": "address",
+                "internalType": "address"
+              }
+            ]
           },
           {
             "name": "blockNumber",
@@ -53,14 +65,26 @@ export default [
             "internalType": "uint256"
           },
           {
-            "name": "baseTokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "name",
-            "type": "bytes32",
-            "internalType": "bytes32"
+            "name": "share",
+            "type": "tuple",
+            "internalType": "struct ShareLib.ShareInitParams",
+            "components": [
+              {
+                "name": "master",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "baseTokenId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "name",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              }
+            ]
           },
           {
             "name": "acceptableNetAssetValue",
@@ -247,17 +271,6 @@ export default [
     "type": "error",
     "name": "Access__Unauthorized",
     "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "Account__NotDeployed",
-    "inputs": [
-      {
-        "name": "predicted",
-        "type": "address",
-        "internalType": "address"
-      }
-    ]
   },
   {
     "type": "error",
