@@ -11,24 +11,14 @@ export default [
         "internalType": "contract IAuthority"
       },
       {
-        "name": "_accountGate",
+        "name": "_accountModule",
         "type": "address",
         "internalType": "contract AccountModule"
-      },
-      {
-        "name": "_walletDeposit",
-        "type": "address",
-        "internalType": "contract WalletDepositModule"
       },
       {
         "name": "_register",
         "type": "address",
         "internalType": "contract RegisterModule"
-      },
-      {
-        "name": "_hubChainId",
-        "type": "uint256",
-        "internalType": "uint256"
       },
       {
         "name": "_config",
@@ -80,138 +70,6 @@ export default [
   },
   {
     "type": "function",
-    "name": "bridge",
-    "inputs": [
-      {
-        "name": "_intent",
-        "type": "tuple",
-        "internalType": "struct MasterGate.BridgeIntent",
-        "components": [
-          {
-            "name": "params",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
-          },
-          {
-            "name": "blockNumber",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "deadline",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "acceptableRelayFee",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "nonce",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "chainId",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "fromTransientRoute",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "inputToken",
-            "type": "address",
-            "internalType": "contract IERC20"
-          },
-          {
-            "name": "outputToken",
-            "type": "address",
-            "internalType": "contract IERC20"
-          },
-          {
-            "name": "inputAmount",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "outputAmount",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "destinationChainId",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "provider",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "providerCallData",
-            "type": "bytes",
-            "internalType": "bytes"
-          },
-          {
-            "name": "expires",
-            "type": "uint32",
-            "internalType": "uint32"
-          },
-          {
-            "name": "fillDeadline",
-            "type": "uint32",
-            "internalType": "uint32"
-          }
-        ]
-      },
-      {
-        "name": "_userSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_attestorSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_actualRelayFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "canCall",
     "inputs": [
       {
@@ -236,39 +94,22 @@ export default [
   },
   {
     "type": "function",
-    "name": "createMasterAccount",
+    "name": "createFundAccount",
     "inputs": [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct AccountModule.CreateMasterAccountIntent",
+        "internalType": "struct MasterGate.CreateFundAccountIntent",
         "components": [
           {
-            "name": "params",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
             "name": "blockNumber",
@@ -296,21 +137,11 @@ export default [
             "internalType": "uint256"
           },
           {
-            "name": "initialDepositAmount",
+            "name": "sweepAmount",
             "type": "uint256",
             "internalType": "uint256"
           }
         ]
-      },
-      {
-        "name": "_userDeploySig",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_signerProof",
-        "type": "bytes",
-        "internalType": "bytes"
       },
       {
         "name": "_userSignature",
@@ -330,81 +161,6 @@ export default [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "deposit",
-    "inputs": [
-      {
-        "name": "_params",
-        "type": "tuple",
-        "internalType": "struct AccountLib.AccountInitParams",
-        "components": [
-          {
-            "name": "user",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "name",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "baseTokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "signer",
-            "type": "address",
-            "internalType": "address"
-          }
-        ]
-      },
-      {
-        "name": "_amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "depositWnt",
-    "inputs": [
-      {
-        "name": "_params",
-        "type": "tuple",
-        "internalType": "struct AccountLib.AccountInitParams",
-        "components": [
-          {
-            "name": "user",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "name",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "baseTokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "signer",
-            "type": "address",
-            "internalType": "address"
-          }
-        ]
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "payable"
   },
   {
     "type": "function",
@@ -499,31 +255,9 @@ export default [
         "internalType": "struct MasterGate.OperateIntent",
         "components": [
           {
-            "name": "params",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
           },
           {
             "name": "blockNumber",
@@ -549,11 +283,6 @@ export default [
             "name": "chainId",
             "type": "uint256",
             "internalType": "uint256"
-          },
-          {
-            "name": "baseToken",
-            "type": "address",
-            "internalType": "contract IERC20"
           },
           {
             "name": "callList",
@@ -583,14 +312,31 @@ export default [
             ]
           },
           {
-            "name": "amountIn",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "amountOut",
-            "type": "uint256",
-            "internalType": "uint256"
+            "name": "transferList",
+            "type": "tuple[]",
+            "internalType": "struct IAccount.SignTransfer[]",
+            "components": [
+              {
+                "name": "tokenId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "token",
+                "type": "address",
+                "internalType": "contract IERC20"
+              },
+              {
+                "name": "amountIn",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "amountOut",
+                "type": "uint256",
+                "internalType": "uint256"
+              }
+            ]
           }
         ]
       },
@@ -612,104 +358,12 @@ export default [
     ],
     "outputs": [
       {
-        "name": "returnCallData_",
+        "name": "result_",
         "type": "bytes[]",
         "internalType": "bytes[]"
       }
     ],
     "stateMutability": "payable"
-  },
-  {
-    "type": "function",
-    "name": "recognize",
-    "inputs": [
-      {
-        "name": "_intent",
-        "type": "tuple",
-        "internalType": "struct MasterGate.RecognizeIntent",
-        "components": [
-          {
-            "name": "params",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
-          },
-          {
-            "name": "blockNumber",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "deadline",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "acceptableRelayFee",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "nonce",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "chainId",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "fromTransientRoute",
-            "type": "bool",
-            "internalType": "bool"
-          },
-          {
-            "name": "amount",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      },
-      {
-        "name": "_userSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_attestorSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_actualRelayFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -761,45 +415,14 @@ export default [
   },
   {
     "type": "error",
-    "name": "Deposit__InsufficientBalance",
+    "name": "Account__NotDeployed",
     "inputs": [
       {
-        "name": "balance",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "required",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "predicted",
+        "type": "address",
+        "internalType": "address"
       }
     ]
-  },
-  {
-    "type": "error",
-    "name": "Deposit__NothingToBridge",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "Deposit__NothingToRecord",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "Deposit__SameChainBridge",
-    "inputs": [
-      {
-        "name": "destinationChainId",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Deposit__ZeroBridgeOutput",
-    "inputs": []
   },
   {
     "type": "error",

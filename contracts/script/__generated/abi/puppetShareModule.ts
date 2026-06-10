@@ -78,23 +78,27 @@ export default [
     "name": "createShareToken",
     "inputs": [
       {
-        "name": "_master",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "_baseTokenId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       },
       {
         "name": "_initialSupply",
         "type": "uint256",
         "internalType": "uint256"
-      }
-    ],
-    "outputs": [
+      },
       {
-        "name": "shareToken_",
-        "type": "address",
-        "internalType": "address"
+        "name": "_name",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
+    "outputs": [],
     "stateMutability": "nonpayable"
   },
   {
@@ -148,9 +152,19 @@ export default [
     "name": "predict",
     "inputs": [
       {
-        "name": "_master",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "_baseTokenId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "_name",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
     "outputs": [
@@ -241,6 +255,35 @@ export default [
     "stateMutability": "nonpayable"
   },
   {
+    "type": "function",
+    "name": "verifyShareToken",
+    "inputs": [
+      {
+        "name": "_fund",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_baseTokenId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "_name",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "shareToken_",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
     "type": "error",
     "name": "Access__Unauthorized",
     "inputs": []
@@ -263,6 +306,11 @@ export default [
   {
     "type": "error",
     "name": "Share__InvalidImpl",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Share__NotCreated",
     "inputs": []
   }
 ] as const

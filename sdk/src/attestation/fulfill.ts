@@ -1,13 +1,15 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
-import type { IAccountLib__AccountInitParams, IRedeemModule__FulfillIntent } from '@puppet/contracts/types'
-import type { TypedDataDefinition } from 'viem'
+import type { IRedeemModule__FulfillIntent } from '@puppet/contracts/types'
+import type { Address, Hex, TypedDataDefinition } from 'viem'
 import { CompactContractError } from '../compact/error.js'
 import * as IntentLib from './intentLib.js'
 import { HUB_DOMAIN, type IDraftContext } from './shared.js'
 
 export interface IFulfillInput {
-  params: IAccountLib__AccountInitParams
+  master: Address
+  baseTokenId: Hex
+  name: Hex
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
@@ -29,14 +31,13 @@ export function attestFulfillIntent(ctx: IFulfillAttestContext, input: IFulfillI
   IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
-    baseTokenId: input.params.baseTokenId,
+    baseTokenId: input.baseTokenId,
     lookupChain: HUB_CHAIN_ID,
     capAmount: 0n,
     acceptableRelayFee: input.acceptableRelayFee,
-    relayFeeDenominator: ctx.signedBalance
+    relayFeeDenominator: input.acceptableNetAssetValue
   })
 
-  // RedeemModule.fulfill body, in source order
   if (input.acceptableNetAssetValue === 0n) throw new CompactContractError('Fulfill__ZeroAcceptableNav', [])
 
   if (ctx.totalShareSupply !== input.totalShareSupply) {
@@ -53,12 +54,14 @@ export function attestFulfillIntent(ctx: IFulfillAttestContext, input: IFulfillI
   if (ctx.poolTotalStake === 0n) throw new CompactContractError('Share__NoStakeToCredit', [])
 
   const intent: IRedeemModule__FulfillIntent = {
-    params: input.params,
+    master: input.master,
     blockNumber: input.blockNumber,
     deadline: input.deadline,
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: BigInt(ctx.chainId),
+    baseTokenId: input.baseTokenId,
+    name: input.name,
     acceptableNetAssetValue: input.acceptableNetAssetValue,
     totalShareSupply: input.totalShareSupply,
     acceptableShares: input.acceptableShares

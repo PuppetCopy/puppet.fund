@@ -1,7 +1,7 @@
 import { BASIS_POINTS } from '@puppet/contracts/const'
 import { CompactError } from '../compact/error.js'
 import { delta } from '../core/math.js'
-import type { IEvaluationConfig, INavBreakdown, INavGate, INavGateReason } from './types.js'
+import type { IEvaluationConfig, INavBreakdown, INavGate, INavGateReason, INavKind } from './types.js'
 
 export function navDriftBps(clientNav: bigint, computedNav: bigint): bigint {
   const denom = computedNav === 0n ? 1n : computedNav
@@ -12,7 +12,7 @@ export function checkNavGate(
   breakdown: INavBreakdown,
   navSigned: bigint,
   config: IEvaluationConfig,
-  opts?: { clientNav?: bigint }
+  opts?: { clientNav?: bigint; kind?: INavKind }
 ): INavGate {
   const reasons: INavGateReason[] = []
 
@@ -59,13 +59,16 @@ export function checkNavGate(
     })
   }
 
-  if (opts?.clientNav !== undefined) {
-    const drift = navDriftBps(opts.clientNav, navSigned)
-    if (drift > config.driftToleranceBps) {
-      reasons.push({
-        code: 'NAV_MISMATCH',
-        detail: `client NAV ${opts.clientNav} drifts ${drift}bps from computed ${navSigned} (max ${config.driftToleranceBps}bps)`
-      })
+  if (opts?.clientNav !== undefined && opts.kind !== 'view') {
+    const overstatedBy = opts.kind === 'fulfill' ? opts.clientNav - navSigned : navSigned - opts.clientNav
+    if (overstatedBy > 0n) {
+      const drift = navDriftBps(opts.clientNav, navSigned)
+      if (drift > config.driftToleranceBps) {
+        reasons.push({
+          code: 'NAV_MISMATCH',
+          detail: `client NAV ${opts.clientNav} overstates computed ${navSigned} by ${drift}bps for ${opts.kind} (max ${config.driftToleranceBps}bps)`
+        })
+      }
     }
   }
 

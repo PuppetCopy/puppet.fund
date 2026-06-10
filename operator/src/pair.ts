@@ -1,12 +1,9 @@
 import { generatePairingKeypair, type ISealedPayload, openPairingPayload } from '@puppet/sdk/account'
 import type { Address, Hex } from 'viem'
 
-// Connection endpoints the site shares over the tunnel so a paired operator needs
-// no URL config of its own. Each is optional; the operator falls back per-URL.
 export interface IPairedEndpoints {
   matchmakerUrl?: string
   indexerUrl?: string
-  rpcUrl?: string
 }
 
 export interface IPairedSession {
@@ -15,19 +12,6 @@ export interface IPairedSession {
   endpoints: IPairedEndpoints
 }
 
-// One-time loopback pairing: the operator opens a 127.0.0.1 listener, prints a URL
-// you open on the site, and the browser posts back the session signer key sealed to
-// the operator's ephemeral public key (carried in the printed link). The key lives
-// in memory only — nothing is written or logged. The browser seals the *derived*
-// session key, never the wallet's bind signature, so a paired operator can sign
-// operate intents (its delegated authority) but cannot deploy accounts under the user.
-//
-// Three gates, all required: origin check authenticates browser senders to the
-// configured site (the Origin header is browser-enforced, not script-spoofable);
-// the one-time token gates non-browser local processes; the ephemeral seal means
-// even a local listener that intercepts the POST (port squat, loopback sniff)
-// gets ciphertext it cannot open, because the public key it was sealed to came
-// from the operator's own terminal and the matching private key never left memory.
 export async function pairOverBrowser(
   siteUrl: string | URL = 'https://puppet.fund',
   port = 42071

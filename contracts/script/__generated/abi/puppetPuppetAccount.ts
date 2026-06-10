@@ -42,49 +42,46 @@ export default [
         ]
       },
       {
-        "name": "_baseToken",
-        "type": "address",
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "_amountIn",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_amountOut",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_relayFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_feeReceiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_transferGasLimit",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "_transferList",
+        "type": "tuple[]",
+        "internalType": "struct IAccount.SignTransfer[]",
+        "components": [
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "contract IERC20"
+          },
+          {
+            "name": "amountIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "amountOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "outputs": [
       {
-        "name": "_signedPostBalance",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "signedPostBalanceList_",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
       },
       {
-        "name": "_postBalance",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "postBalanceList_",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
       },
       {
-        "name": "_returnData",
+        "name": "returnDataList_",
         "type": "bytes[]",
         "internalType": "bytes[]"
       }
@@ -100,32 +97,6 @@ export default [
         "name": "_attest",
         "type": "address",
         "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "getBaseTokenId",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "_id",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "getName",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "_name",
-        "type": "bytes32",
-        "internalType": "bytes32"
       }
     ],
     "stateMutability": "view"
@@ -182,8 +153,14 @@ export default [
   },
   {
     "type": "function",
-    "name": "signedBalance",
-    "inputs": [],
+    "name": "signedBalanceOf",
+    "inputs": [
+      {
+        "name": "_tokenId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
     "outputs": [
       {
         "name": "",
@@ -225,11 +202,6 @@ export default [
   },
   {
     "type": "error",
-    "name": "Account__InvalidFlow",
-    "inputs": []
-  },
-  {
-    "type": "error",
     "name": "Account__InvalidSignature",
     "inputs": []
   },
@@ -254,6 +226,11 @@ export default [
     "name": "Account__Shortfall",
     "inputs": [
       {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
         "name": "actual",
         "type": "uint256",
         "internalType": "uint256"
@@ -269,42 +246,5 @@ export default [
     "type": "error",
     "name": "Account__UnauthorizedCaller",
     "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "TransferUtils__EmptyTokenTransferGasLimit",
-    "inputs": [
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "contract IERC20"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "TransferUtils__InvalidReceiver",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "TransferUtils__TokenTransferError",
-    "inputs": [
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
   }
 ] as const

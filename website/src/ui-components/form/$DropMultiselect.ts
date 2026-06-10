@@ -25,12 +25,7 @@ import {
   style,
   stylePseudo
 } from 'aelea/ui'
-import {
-  $defaultDropListContainer as $aeleaDropListContainer,
-  $defaultOptionContainer as $aeleaOptionContainer,
-  $row,
-  spacing
-} from 'aelea/ui-components'
+import { $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import {
   $caretDown,
@@ -43,6 +38,10 @@ import {
   keyActivate,
   listboxKeyNav
 } from '@/ui-components'
+import {
+  $defaultDropListContainer as $aeleaDropListContainer,
+  $defaultOptionContainer as $aeleaOptionContainer
+} from './$Dropdown.js'
 
 // Array utility functions (previously from @most/prelude)
 const append = <T>(item: T, array: T[]): T[] => [...array, item]

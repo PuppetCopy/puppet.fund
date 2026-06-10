@@ -82,6 +82,33 @@ export default [
         ]
       },
       {
+        "name": "_transferList",
+        "type": "tuple[]",
+        "internalType": "struct IAccount.SignTransfer[]",
+        "components": [
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "contract IERC20"
+          },
+          {
+            "name": "amountIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "amountOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
         "name": "_digest",
         "type": "bytes32",
         "internalType": "bytes32"
@@ -100,51 +127,21 @@ export default [
         "name": "_attestor",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "_baseToken",
-        "type": "address",
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "_amountIn",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_amountOut",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_relayFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_feeReceiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_transferGasLimit",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "outputs": [
       {
-        "name": "signedPostBalance_",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "signedPostBalanceList_",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
       },
       {
-        "name": "postBalance_",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "postBalanceList_",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
       },
       {
-        "name": "results_",
+        "name": "resultList_",
         "type": "bytes[]",
         "internalType": "bytes[]"
       }
@@ -188,6 +185,33 @@ export default [
         ]
       },
       {
+        "name": "_transferList",
+        "type": "tuple[]",
+        "internalType": "struct IAccount.SignTransfer[]",
+        "components": [
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "contract IERC20"
+          },
+          {
+            "name": "amountIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "amountOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
         "name": "_mandateDigest",
         "type": "bytes32",
         "internalType": "bytes32"
@@ -196,36 +220,21 @@ export default [
         "name": "_mandate",
         "type": "bytes",
         "internalType": "bytes"
-      },
-      {
-        "name": "_baseToken",
-        "type": "address",
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "_amountOut",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_transferGasLimit",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "outputs": [
       {
-        "name": "signedPostBalance_",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "signedPostBalanceList_",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
       },
       {
-        "name": "postBalance_",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "postBalanceList_",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
       },
       {
-        "name": "results_",
+        "name": "resultList_",
         "type": "bytes[]",
         "internalType": "bytes[]"
       }

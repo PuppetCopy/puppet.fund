@@ -7,23 +7,12 @@ import {
   readableUnitAmount,
   resampleTimeSeries
 } from '@puppet/sdk/core'
-import {
-  combine,
-  empty,
-  filterNull,
-  type IStream,
-  map,
-  skipRepeatsWith,
-  start,
-  switchLatest,
-  switchMap
-} from 'aelea/stream'
+import { combine, empty, type IStream, map, skipRepeatsWith, start, switchLatest, switchMap } from 'aelea/stream'
 import { type IBehavior, multicast } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, motion, style } from 'aelea/ui'
 import { $column, $defaultNumberTickerSlot, $NumberTicker, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { type BaselineData, LineType, type MouseEventParams } from 'lightweight-charts'
-import type { Hex } from 'viem'
 import type { Address } from 'viem/accounts'
 import { $Baseline, $infoLabel, $infoTooltip, $intermediatePromise, type ISeriesTime, text } from '@/ui-components'
 import type { IMasterMetricSummary, IPageFilterParams } from '../../pages/types.js'
@@ -84,24 +73,24 @@ export const $usdTimeline = ({
                   return empty
                 }
 
-                const crossTimeChange = multicast(
-                  start(
-                    null,
-                    skipRepeatsWith((xsx, xsy) => xsx.time === xsy.time, crosshairMove)
-                  )
-                )
-                const hoverValue = filterNull(
+                const lastValue = timeline[timeline.length - 1].value ?? 0
+                const crossTimeChange = multicast(skipRepeatsWith((xsx, xsy) => xsx.time === xsy.time, crosshairMove))
+                const hoverValue = start(
+                  lastValue,
                   map(cross => {
                     if (cross?.point) {
                       const seriesData = cross.seriesData.values().next().value as any
                       return (seriesData?.value || 0) as number
                     }
-                    return timeline[timeline.length - 1].value ?? null
+                    return lastValue
                   }, crossTimeChange)
                 )
-                const hoverDate = map(
-                  cross => (cross?.point && cross.time != null ? readableDate(Number(cross.time)) : null),
-                  crossTimeChange
+                const hoverDate = start(
+                  null,
+                  map(
+                    cross => (cross?.point && cross.time != null ? readableDate(Number(cross.time)) : null),
+                    crossTimeChange
+                  )
                 )
 
                 return $column(style({ flex: 1, alignItems: 'center' }))(
@@ -214,19 +203,19 @@ export const $MasterRouteTimeline = ({
         const endTime = getUnixTimestamp()
         const startTime = endTime - params.activityTimeframe
         const sourceList = [
-          { value: 0n, time: startTime, master: pos.pnlTimeline[0].master },
+          { value: 0n, time: startTime, fund: pos.pnlTimeline[0].fund },
           ...pos.pnlTimeline.filter(item => item.time > startTime),
-          { value: 0n, time: endTime, master: '0xdead' as Hex }
+          { value: 0n, time: endTime, fund: '0x000000000000000000000000000000000000dEaD' as Address }
         ]
 
-        const sumMap = new Map<Hex, bigint>()
+        const sumMap = new Map<Address, bigint>()
 
         return resampleTimeSeries({
           sourceList,
           ticks: 280,
           getTime: item => item.time,
           mapSource: next => {
-            sumMap.set(next.master, next.value)
+            sumMap.set(next.fund, next.value)
             const sum = [...sumMap.values()].reduce((acc, curr) => acc + curr, 0n)
             return formatFixed(USD_DECIMALS, sum)
           }

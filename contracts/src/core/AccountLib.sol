@@ -6,40 +6,70 @@ import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
 
 import {Error} from "../utils/Error.sol";
 
-bytes32 constant ACCOUNT_TYPEHASH =
-    keccak256("AccountInitParams(address user,bytes32 name,bytes32 baseTokenId,address signer)");
+bytes32 constant ACCOUNT_TYPEHASH = keccak256("AccountInitParams(address user,address signer)");
 
 string constant DEPLOY_AUTH_MESSAGE = "Puppet: Authorize session key";
 
 library AccountLib {
     struct AccountInitParams {
         address user;
-        bytes32 name;
-        bytes32 baseTokenId;
         address signer;
     }
 
     function hashAccount(
         AccountInitParams calldata _p
     ) internal pure returns (bytes32) {
-        return keccak256(abi.encode(ACCOUNT_TYPEHASH, _p.user, _p.name, _p.baseTokenId, _p.signer));
+        return keccak256(abi.encode(ACCOUNT_TYPEHASH, _p.user, _p.signer));
     }
 
-    function predict(
+    function accountArgs(
+        address _attest,
+        AccountInitParams calldata _p
+    ) internal pure returns (bytes memory) {
+        return abi.encodePacked(_attest, _p.signer, _p.user);
+    }
+
+    function predictAccount(
         address _impl,
         address _attest,
         AccountInitParams calldata _params
     ) internal view returns (address) {
-        bytes memory _args = abi.encodePacked(_attest, _params.signer, _params.user, _params.name, _params.baseTokenId);
+        bytes memory _args = accountArgs(_attest, _params);
         return LibClone.predictDeterministicAddress(_impl, _args, keccak256(_args), address(this));
     }
 
-    function verify(
+    function verifyAccount(
         address _impl,
         address _attest,
         AccountInitParams calldata _params
     ) internal view returns (address) {
-        address _predicted = predict(_impl, _attest, _params);
+        address _predicted = predictAccount(_impl, _attest, _params);
+        if (_predicted.code.length == 0) revert Error.Account__NotDeployed(_predicted);
+        return _predicted;
+    }
+
+    function fundArgs(
+        address _attest,
+        address _signer
+    ) internal pure returns (bytes memory) {
+        return abi.encodePacked(_attest, _signer);
+    }
+
+    function predictFund(
+        address _impl,
+        address _attest,
+        address _signer
+    ) internal view returns (address) {
+        bytes memory _args = fundArgs(_attest, _signer);
+        return LibClone.predictDeterministicAddress(_impl, _args, keccak256(_args), address(this));
+    }
+
+    function verifyFund(
+        address _impl,
+        address _attest,
+        address _signer
+    ) internal view returns (address) {
+        address _predicted = predictFund(_impl, _attest, _signer);
         if (_predicted.code.length == 0) revert Error.Account__NotDeployed(_predicted);
         return _predicted;
     }
@@ -62,29 +92,13 @@ library AccountLib {
         }
     }
 
-    function predictTransientRoute(
+    function predictRoute(
         address _impl,
         address _factory,
         address _account
     ) internal pure returns (address) {
-        bytes memory _args = abi.encodePacked(_account);
-        return LibClone.predictDeterministicAddress(_impl, _args, bytes32(uint(uint160(_account))), _factory);
-    }
-
-    function predictDepositRoute(
-        address _impl,
-        address _factory,
-        address _account
-    ) internal pure returns (address) {
-        return
-            LibClone.predictDeterministicAddress(
-                _impl, abi.encodePacked(_account), depositRouteSalt(_account), _factory
-            );
-    }
-
-    function depositRouteSalt(
-        address _account
-    ) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked("DEPOSIT_ROUTE", _account));
+        return LibClone.predictDeterministicAddress(
+            _impl, abi.encodePacked(_account), bytes32(uint(uint160(_account))), _factory
+        );
     }
 }

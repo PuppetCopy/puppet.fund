@@ -50,7 +50,7 @@ export default [
     "name": "creditPool",
     "inputs": [
       {
-        "name": "_master",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
       },
@@ -94,14 +94,9 @@ export default [
     "name": "deletePosition",
     "inputs": [
       {
-        "name": "_master",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "contract IERC20"
       },
       {
         "name": "_holder",
@@ -117,14 +112,9 @@ export default [
     "name": "getPool",
     "inputs": [
       {
-        "name": "_master",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "contract IERC20"
       }
     ],
     "outputs": [
@@ -153,14 +143,9 @@ export default [
     "name": "getPosition",
     "inputs": [
       {
-        "name": "_master",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "contract IERC20"
       },
       {
         "name": "_holder",
@@ -218,14 +203,9 @@ export default [
     "name": "poolMap",
     "inputs": [
       {
-        "name": "master",
+        "name": "fund",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "contract IERC20"
       }
     ],
     "outputs": [
@@ -247,14 +227,9 @@ export default [
     "name": "positionMap",
     "inputs": [
       {
-        "name": "master",
+        "name": "fund",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "contract IERC20"
       },
       {
         "name": "holder",
@@ -304,14 +279,9 @@ export default [
     "name": "setPool",
     "inputs": [
       {
-        "name": "_master",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "contract IERC20"
       },
       {
         "name": "_pool",
@@ -339,14 +309,9 @@ export default [
     "name": "setPosition",
     "inputs": [
       {
-        "name": "_master",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "contract IERC20"
       },
       {
         "name": "_holder",

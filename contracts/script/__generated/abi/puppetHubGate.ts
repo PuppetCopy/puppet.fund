@@ -95,31 +95,9 @@ export default [
         "internalType": "struct AllocateModule.AllocateIntent",
         "components": [
           {
-            "name": "params",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
           },
           {
             "name": "blockNumber",
@@ -147,9 +125,14 @@ export default [
             "internalType": "uint256"
           },
           {
-            "name": "baseToken",
-            "type": "address",
-            "internalType": "contract IERC20"
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
             "name": "acceptableNetAssetValue",
@@ -222,12 +205,36 @@ export default [
   },
   {
     "type": "function",
-    "name": "bridgeToWallet",
+    "name": "canCall",
+    "inputs": [
+      {
+        "name": "_selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      },
+      {
+        "name": "_user",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "claim",
     "inputs": [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct HubGate.BridgeToWalletIntent",
+        "internalType": "struct RedeemModule.ClaimIntent",
         "components": [
           {
             "name": "params",
@@ -240,14 +247,299 @@ export default [
                 "internalType": "address"
               },
               {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
+                "name": "signer",
+                "type": "address",
+                "internalType": "address"
+              }
+            ]
+          },
+          {
+            "name": "blockNumber",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "acceptableRelayFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "nonce",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "chainId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "amount",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "name": "_userSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_attestorSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_actualRelayFee",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "eip712Domain",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "fields",
+        "type": "bytes1",
+        "internalType": "bytes1"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "version",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "chainId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "verifyingContract",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "salt",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "extensions",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "fulfill",
+    "inputs": [
+      {
+        "name": "_intent",
+        "type": "tuple",
+        "internalType": "struct RedeemModule.FulfillIntent",
+        "components": [
+          {
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "blockNumber",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "acceptableRelayFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "nonce",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "chainId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "acceptableNetAssetValue",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "totalShareSupply",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "acceptableShares",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "name": "_userSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_attestorSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_actualRelayFee",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "getConfig",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct BaseGate.Config",
+        "components": [
+          {
+            "name": "attestor",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "feeReceiver",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "transferGasLimit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxBlockDelay",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "predictShareToken",
+    "inputs": [
+      {
+        "name": "_fundAccount",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_baseTokenId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "_name",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract ShareToken"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "sell",
+    "inputs": [
+      {
+        "name": "_intent",
+        "type": "tuple",
+        "internalType": "struct RedeemModule.SellIntent",
+        "components": [
+          {
+            "name": "params",
+            "type": "tuple",
+            "internalType": "struct AccountLib.AccountInitParams",
+            "components": [
               {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
+                "name": "user",
+                "type": "address",
+                "internalType": "address"
               },
               {
                 "name": "signer",
@@ -255,6 +547,244 @@ export default [
                 "internalType": "address"
               }
             ]
+          },
+          {
+            "name": "blockNumber",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "acceptableRelayFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "nonce",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "chainId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "sharesOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "name": "_userSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_attestorSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_actualRelayFee",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setPermission",
+    "inputs": [
+      {
+        "name": "_selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      },
+      {
+        "name": "_user",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_enabled",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "subscribe",
+    "inputs": [
+      {
+        "name": "_intent",
+        "type": "tuple",
+        "internalType": "struct SubscribeModule.SubscribeIntent",
+        "components": [
+          {
+            "name": "params",
+            "type": "tuple",
+            "internalType": "struct AccountLib.AccountInitParams",
+            "components": [
+              {
+                "name": "user",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "signer",
+                "type": "address",
+                "internalType": "address"
+              }
+            ]
+          },
+          {
+            "name": "blockNumber",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "acceptableRelayFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "nonce",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "chainId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "rules",
+            "type": "tuple[]",
+            "internalType": "struct RuleLib.Rule[]",
+            "components": [
+              {
+                "name": "fund",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "body",
+                "type": "bytes",
+                "internalType": "bytes"
+              },
+              {
+                "name": "mandate",
+                "type": "bytes",
+                "internalType": "bytes"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "_userSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_attestorSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_actualRelayFee",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "supportsInterface",
+    "inputs": [
+      {
+        "name": "_interfaceId",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "withdrawToBridge",
+    "inputs": [
+      {
+        "name": "_intent",
+        "type": "tuple",
+        "internalType": "struct HubGate.WithdrawToBridgeIntent",
+        "components": [
+          {
+            "name": "params",
+            "type": "tuple",
+            "internalType": "struct AccountLib.AccountInitParams",
+            "components": [
+              {
+                "name": "user",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "signer",
+                "type": "address",
+                "internalType": "address"
+              }
+            ]
+          },
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
             "name": "blockNumber",
@@ -349,36 +879,12 @@ export default [
   },
   {
     "type": "function",
-    "name": "canCall",
-    "inputs": [
-      {
-        "name": "_selector",
-        "type": "bytes4",
-        "internalType": "bytes4"
-      },
-      {
-        "name": "_user",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bool",
-        "internalType": "bool"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "claim",
+    "name": "withdrawToWallet",
     "inputs": [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct RedeemModule.ClaimIntent",
+        "internalType": "struct HubGate.WithdrawToWalletIntent",
         "components": [
           {
             "name": "params",
@@ -391,21 +897,16 @@ export default [
                 "internalType": "address"
               },
               {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
                 "name": "signer",
                 "type": "address",
                 "internalType": "address"
               }
             ]
+          },
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
             "name": "blockNumber",
@@ -431,33 +932,6 @@ export default [
             "name": "chainId",
             "type": "uint256",
             "internalType": "uint256"
-          },
-          {
-            "name": "masterParams",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
           },
           {
             "name": "amount",
@@ -482,632 +956,8 @@ export default [
         "internalType": "uint256"
       }
     ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "eip712Domain",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "fields",
-        "type": "bytes1",
-        "internalType": "bytes1"
-      },
-      {
-        "name": "name",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "version",
-        "type": "string",
-        "internalType": "string"
-      },
-      {
-        "name": "chainId",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "verifyingContract",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "salt",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "extensions",
-        "type": "uint256[]",
-        "internalType": "uint256[]"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "fulfill",
-    "inputs": [
-      {
-        "name": "_intent",
-        "type": "tuple",
-        "internalType": "struct RedeemModule.FulfillIntent",
-        "components": [
-          {
-            "name": "params",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
-          },
-          {
-            "name": "blockNumber",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "deadline",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "acceptableRelayFee",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "nonce",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "chainId",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "acceptableNetAssetValue",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "totalShareSupply",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "acceptableShares",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      },
-      {
-        "name": "_userSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_attestorSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_actualRelayFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
     "outputs": [],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "getConfig",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "tuple",
-        "internalType": "struct BaseGate.Config",
-        "components": [
-          {
-            "name": "attestor",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "feeReceiver",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "transferGasLimit",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxBlockDelay",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxRelayFeeBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "predictShareToken",
-    "inputs": [
-      {
-        "name": "_masterAccount",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract ShareToken"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "seedMasterAccount",
-    "inputs": [
-      {
-        "name": "_intent",
-        "type": "tuple",
-        "internalType": "struct AllocateModule.AllocateIntent",
-        "components": [
-          {
-            "name": "params",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
-          },
-          {
-            "name": "blockNumber",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "deadline",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "acceptableRelayFee",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "nonce",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "chainId",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "baseToken",
-            "type": "address",
-            "internalType": "contract IERC20"
-          },
-          {
-            "name": "acceptableNetAssetValue",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "totalShareSupply",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "masterAmount",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "puppetList",
-            "type": "address[]",
-            "internalType": "address[]"
-          },
-          {
-            "name": "matchedAmountList",
-            "type": "uint256[]",
-            "internalType": "uint256[]"
-          }
-        ]
-      },
-      {
-        "name": "_bodyList",
-        "type": "bytes[]",
-        "internalType": "bytes[]"
-      },
-      {
-        "name": "_mandateList",
-        "type": "bytes[]",
-        "internalType": "bytes[]"
-      },
-      {
-        "name": "_userDeploySig",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_signerProof",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_userSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_attestorSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_actualRelayFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "sell",
-    "inputs": [
-      {
-        "name": "_intent",
-        "type": "tuple",
-        "internalType": "struct RedeemModule.SellIntent",
-        "components": [
-          {
-            "name": "params",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
-          },
-          {
-            "name": "blockNumber",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "deadline",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "acceptableRelayFee",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "nonce",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "chainId",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "masterParams",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
-          },
-          {
-            "name": "sharesOut",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      },
-      {
-        "name": "_userSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_attestorSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_actualRelayFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setPermission",
-    "inputs": [
-      {
-        "name": "_selector",
-        "type": "bytes4",
-        "internalType": "bytes4"
-      },
-      {
-        "name": "_user",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_enabled",
-        "type": "bool",
-        "internalType": "bool"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "subscribe",
-    "inputs": [
-      {
-        "name": "_intent",
-        "type": "tuple",
-        "internalType": "struct SubscribeModule.SubscribeIntent",
-        "components": [
-          {
-            "name": "params",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
-          },
-          {
-            "name": "blockNumber",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "deadline",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "acceptableRelayFee",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "nonce",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "chainId",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "baseToken",
-            "type": "address",
-            "internalType": "contract IERC20"
-          },
-          {
-            "name": "rules",
-            "type": "tuple[]",
-            "internalType": "struct RuleLib.Rule[]",
-            "components": [
-              {
-                "name": "masterParams",
-                "type": "tuple",
-                "internalType": "struct AccountLib.AccountInitParams",
-                "components": [
-                  {
-                    "name": "user",
-                    "type": "address",
-                    "internalType": "address"
-                  },
-                  {
-                    "name": "name",
-                    "type": "bytes32",
-                    "internalType": "bytes32"
-                  },
-                  {
-                    "name": "baseTokenId",
-                    "type": "bytes32",
-                    "internalType": "bytes32"
-                  },
-                  {
-                    "name": "signer",
-                    "type": "address",
-                    "internalType": "address"
-                  }
-                ]
-              },
-              {
-                "name": "body",
-                "type": "bytes",
-                "internalType": "bytes"
-              },
-              {
-                "name": "mandate",
-                "type": "bytes",
-                "internalType": "bytes"
-              }
-            ]
-          }
-        ]
-      },
-      {
-        "name": "_userSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_attestorSignature",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_actualRelayFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "supportsInterface",
-    "inputs": [
-      {
-        "name": "_interfaceId",
-        "type": "bytes4",
-        "internalType": "bytes4"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bool",
-        "internalType": "bool"
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "event",
@@ -1134,6 +984,16 @@ export default [
   {
     "type": "error",
     "name": "Deposit__NothingToBridge",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Deposit__NothingToWithdraw",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Deposit__RelayFeeTooHigh",
     "inputs": []
   },
   {

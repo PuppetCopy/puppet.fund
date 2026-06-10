@@ -1,5 +1,5 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import type { IMasterLatestMetric, IPuppetAllocation, IShareTokenMetric } from '@puppet/indexer-graphql/entities'
+import type { IFund, IFundLatestMetric, IFundPosition } from '@puppet/indexer-graphql/entities'
 import { decodeRuleBody, type IAllocationPuppet } from '@puppet/sdk/attestation'
 import { BALANCE_TIMELINE_BUCKETS, type IntervalTime, USD_DECIMALS } from '@puppet/sdk/const'
 import { formatFixed, getMasterMatchingKey, getUnixTimestamp, resampleTimeSeries } from '@puppet/sdk/core'
@@ -7,7 +7,7 @@ import { type ISubaccountState, select, selectOne } from '@puppet/sdk/state'
 import { type Address, getAddress, type Hex } from 'viem'
 import { sqlClient } from './sql.js'
 
-export type { IMasterLatestMetric } from '@puppet/indexer-graphql/entities'
+export type { IFundLatestMetric } from '@puppet/indexer-graphql/entities'
 export type ILeaderboardView = 'masters' | 'shadow'
 export type IPerformanceMetric = 'navPerShare' | 'realisedPnl'
 interface IGmxPositionBase {
@@ -35,70 +35,100 @@ export interface IGmxPositionDecrease extends IGmxPositionBase {
 export type ISubscribeRule = Awaited<ReturnType<typeof fetchUserSubscriptions>>[number]
 
 export async function fetchUserSigner(user: Address): Promise<Address | null> {
-  const row = await selectOne(sqlClient, 'AccountState', {
+  const row = await selectOne(sqlClient, 'Account', {
     where: { user: { _eq: getAddress(user) } },
     fields: ['signer']
   })
   return row?.signer ?? null
 }
 
+async function tokenByBaseId(baseTokenIdList: Hex[]): Promise<Map<Hex, Address>> {
+  if (baseTokenIdList.length === 0) return new Map()
+  const rows = await select(sqlClient, 'TokenRegistry', {
+    where: { tokenId: { _in: baseTokenIdList }, chainId: { _eq: BigInt(HUB_CHAIN_ID) } },
+    fields: ['tokenId', 'token']
+  })
+  return new Map(rows.map(row => [row.tokenId, row.token]))
+}
+
 export async function fetchUserSubscriptions(puppet: Address) {
   const rows = await select(sqlClient, 'SubscribeModule__Subscribe', {
     where: { puppetAccount: { _eq: getAddress(puppet) } }
   })
+  if (rows.length === 0) return []
+
+  const fundList = [...new Set(rows.map(row => getAddress(row.fund)))]
+  const fundRows = await select(sqlClient, 'Fund', { where: { id: { _in: fundList } } })
+  const fundById = new Map(fundRows.map(row => [getAddress(row.fund), row]))
+  const tokenMap = await tokenByBaseId([...new Set(fundRows.map(row => row.baseTokenId))])
+
   return rows.map(row => {
     const body = decodeRuleBody(row.body)
+    const fund = fundById.get(getAddress(row.fund))
+    const master = (fund?.master ?? getAddress(row.fund)) as Address
+    const baseTokenId = fund?.baseTokenId ?? ('0x' as Hex)
+    const baseToken = (tokenMap.get(baseTokenId) ?? master) as Address
     return {
       ...row,
       ...body,
-      master: row.masterAddr,
-      baseToken: row.baseToken,
-      masterMatchingKey: getMasterMatchingKey(row.baseToken, row.masterAddr) as Hex
+      master,
+      baseToken,
+      masterMatchingKey: getMasterMatchingKey(baseToken, master) as Hex
     }
   })
 }
 
-export async function fetchMasterPoolState(masterAccount: Address): Promise<IShareTokenMetric | undefined> {
-  return selectOne(sqlClient, 'ShareTokenMetric', { where: { id: { _eq: getAddress(masterAccount) } } })
+export async function fetchMasterPoolState(fund: Address): Promise<IFund | undefined> {
+  return selectOne(sqlClient, 'Fund', { where: { id: { _eq: getAddress(fund) } } })
 }
 
 export type IPuppetAllocationRow = Awaited<ReturnType<typeof fetchPuppetAllocationList>>[number]
 
 export async function fetchPuppetAllocationList(
-  puppetAccounts: Address[]
-): Promise<(IPuppetAllocation & { shareToken: IShareTokenMetric | null })[]> {
-  if (puppetAccounts.length === 0) return []
-  const allocationList = await select(sqlClient, 'PuppetAllocation', {
+  holderAccounts: Address[]
+): Promise<(IFundPosition & { fundState: IFund | null })[]> {
+  if (holderAccounts.length === 0) return []
+  const positionList = await select(sqlClient, 'FundPosition', {
     where: {
-      puppet: { _in: puppetAccounts.map(getAddress) },
+      holder: { _in: holderAccounts.map(getAddress) },
       _or: [{ sharesHeld: { _gt: 0n } }, { stake: { _gt: 0n } }, { allocated: { _gt: 0n } }]
     }
   })
-  if (allocationList.length === 0) return []
+  if (positionList.length === 0) return []
 
-  const masterAccountList = [...new Set(allocationList.map(a => a.masterAccount))]
-  const shareList = await select(sqlClient, 'ShareTokenMetric', { where: { id: { _in: masterAccountList } } })
-  const shareByMaster = new Map(shareList.map(row => [row.id, row]))
-  return allocationList.map(a => ({ ...a, shareToken: shareByMaster.get(a.masterAccount) ?? null }))
+  const fundList = [...new Set(positionList.map(p => getAddress(p.fund)))]
+  const fundRows = await select(sqlClient, 'Fund', { where: { id: { _in: fundList } } })
+  const fundById = new Map(fundRows.map(row => [getAddress(row.fund), row]))
+  return positionList.map(p => ({ ...p, fundState: fundById.get(getAddress(p.fund)) ?? null }))
 }
 
-export async function fetchMasterSubscribers(master: Address): Promise<IAllocationPuppet[]> {
-  const subscribed = await select(sqlClient, 'PuppetAllocation', {
-    where: { master: { _eq: getAddress(master) }, body: { _is_null: false }, mandate: { _is_null: false } },
-    fields: ['puppet', 'body', 'mandate', 'lastAllocatedAt', 'stake']
+export async function fetchMasterSubscribers(fund: Address): Promise<IAllocationPuppet[]> {
+  const fundRow = await selectOne(sqlClient, 'Fund', {
+    where: { id: { _eq: getAddress(fund) } },
+    fields: ['baseTokenId']
+  })
+  if (!fundRow) return []
+
+  const subscribed = await select(sqlClient, 'FundPosition', {
+    where: { fund: { _eq: getAddress(fund) }, body: { _is_null: false }, mandate: { _is_null: false } },
+    fields: ['holder', 'body', 'mandate', 'lastAllocatedAt', 'stake']
   })
   if (subscribed.length === 0) return []
 
-  const metrics = await select(sqlClient, 'AccountState', {
-    where: { account: { _in: subscribed.map(p => p.puppet) }, chainId: { _eq: BigInt(HUB_CHAIN_ID) } },
+  const balanceRows = await select(sqlClient, 'AccountBalance', {
+    where: {
+      account: { _in: subscribed.map(p => p.holder) },
+      chainId: { _eq: BigInt(HUB_CHAIN_ID) },
+      tokenId: { _eq: fundRow.baseTokenId }
+    },
     fields: ['account', 'signedBalance']
   })
-  const signedBalanceByPuppet = new Map(metrics.map(m => [m.account, m.signedBalance]))
+  const signedBalanceByHolder = new Map(balanceRows.map(b => [getAddress(b.account), b.signedBalance]))
   return subscribed.map(p => ({
-    puppet: p.puppet,
+    puppet: getAddress(p.holder),
     body: p.body as Hex,
     mandate: p.mandate as Hex,
-    signedBalance: signedBalanceByPuppet.get(p.puppet) ?? 0n,
+    signedBalance: signedBalanceByHolder.get(getAddress(p.holder)) ?? 0n,
     lastAllocatedAt: p.lastAllocatedAt,
     hasOpenRedeem: p.stake > 0n
   }))
@@ -122,29 +152,70 @@ export async function findWalletDepositTxByRecipient(
 }
 
 export async function fetchMasterRouteMetricList(params: {
-  master: Address
+  fund: Address
   activityTimeframe: IntervalTime
-  collateralTokenList: Address[]
-}): Promise<IMasterLatestMetric[]> {
+  collateralTokenList: Hex[]
+}): Promise<IFundLatestMetric[]> {
   const startActivityTimeframe = getUnixTimestamp() - params.activityTimeframe
-  return select(sqlClient, 'MasterLatestMetric', {
+  return select(sqlClient, 'FundLatestMetric', {
     where: {
-      master: { _eq: getAddress(params.master) },
+      fund: { _eq: getAddress(params.fund) },
       interval: { _eq: params.activityTimeframe },
       lastUpdatedTimestamp: { _gte: startActivityTimeframe },
-      ...(params.collateralTokenList.length > 0
-        ? { baseTokenId: { _in: params.collateralTokenList.map(getAddress) } }
-        : {})
+      ...(params.collateralTokenList.length > 0 ? { baseTokenId: { _in: params.collateralTokenList } } : {})
     }
   })
 }
 
-export type ILeaderboardRow = IMasterLatestMetric & {
+// Build a VALID bucketed timeline before cumulating. The indexed per-period series (pnlList/
+// pnlTimestampList inlined on the metric entities) can arrive out of block-time order, so we bucket
+// each (timestamp, pnl) into a fixed time-slot, sum per slot, sort by time, then cumulate in TIME order.
+function buildPnlTimeline(params: {
+  pnlList: readonly bigint[]
+  pnlTimestampList: readonly number[]
+  activityTimeframe: IntervalTime
+  now: number
+}): IBalanceTimelinePoint[] {
+  const startActivityTimeframe = params.now - params.activityTimeframe
+  const slotSize = Math.max(1, Math.floor(params.activityTimeframe / BALANCE_TIMELINE_BUCKETS))
+  const pnlBySlot = new Map<number, bigint>()
+  for (let i = 0; i < params.pnlTimestampList.length; i++) {
+    const slot = Math.floor(params.pnlTimestampList[i] / slotSize) * slotSize
+    pnlBySlot.set(slot, (pnlBySlot.get(slot) ?? 0n) + (params.pnlList[i] ?? 0n))
+  }
+  let cum = 0n
+  const points = [...pnlBySlot.keys()]
+    .sort((a, b) => a - b)
+    .map(slot => {
+      cum += pnlBySlot.get(slot) as bigint
+      return { time: slot, cum }
+    })
+  // No activity in the window still renders a flat zero line so the row keeps some graph visual.
+  if (points.length === 0) {
+    return [
+      { time: startActivityTimeframe, value: 0 },
+      { time: params.now, value: 0 }
+    ]
+  }
+  // Slots are pruned indexer-side against the LAST EVENT's time, not wall-clock now, so the oldest
+  // slot can predate startActivityTimeframe (now - interval). Clamp the 0-anchor to <= the first point.
+  const anchorTime = Math.min(startActivityTimeframe, points[0].time)
+  return resampleTimeSeries({
+    sourceList: [{ time: anchorTime, cum: 0n }, ...points, { time: params.now, cum: points[points.length - 1].cum }],
+    ticks: BALANCE_TIMELINE_BUCKETS,
+    getTime: s => s.time,
+    mapSource: s => formatFixed(USD_DECIMALS, s.cum)
+  })
+}
+
+export type ILeaderboardRow = IFundLatestMetric & {
+  master: Address
   name: Hex | null
+  shareToken: Address | null
   puppetList: Address[]
-  navTimeline: IBalanceTimelinePoint[]
+  pnlTimeline: IBalanceTimelinePoint[]
   // Consistency metric derived on the website from the per-trade `pnlList` the indexer already exposes.
-  // TODO(indexer): needs maxDrawdown (bps) and sharpeRatio on MasterLatestMetric to surface downside/risk-adjusted
+  // TODO(indexer): needs maxDrawdown (bps) and sharpeRatio on FundLatestMetric to surface downside/risk-adjusted
   // return alongside win-rate; drawdown/Sharpe can't be reconstructed from the leaderboard payload alone.
   winCount: number
   lossCount: number
@@ -153,24 +224,22 @@ export type ILeaderboardRow = IMasterLatestMetric & {
 export async function fetchLeaderboardPage(params: {
   activityTimeframe: IntervalTime
   account?: Address
-  collateralTokenList: Address[]
-  sortBy: { direction: 'asc' | 'desc'; selector: keyof IMasterLatestMetric }
+  collateralTokenList: Hex[]
+  sortBy: { direction: 'asc' | 'desc'; selector: keyof IFundLatestMetric }
   paging: { pageSize: number; offset: number }
 }): Promise<ILeaderboardRow[]> {
   const startActivityTimeframe = getUnixTimestamp() - params.activityTimeframe
 
-  const metricList = await select(sqlClient, 'MasterLatestMetric', {
+  const metricList = await select(sqlClient, 'FundLatestMetric', {
     where: {
       interval: { _eq: params.activityTimeframe },
       lastUpdatedTimestamp: { _gte: startActivityTimeframe },
       // Match either stored casing (event-derived rows are lowercase; predicted accounts are checksummed),
       // so the "Find trader" address search isn't silently filtered out by a case mismatch.
       ...(params.account
-        ? { master: { _in: [params.account.toLowerCase() as Address, getAddress(params.account)] } }
+        ? { fund: { _in: [params.account.toLowerCase() as Address, getAddress(params.account)] } }
         : {}),
-      ...(params.collateralTokenList.length > 0
-        ? { baseTokenId: { _in: params.collateralTokenList.map(getAddress) } }
-        : {})
+      ...(params.collateralTokenList.length > 0 ? { baseTokenId: { _in: params.collateralTokenList } } : {})
     },
     orderBy: { [params.sortBy.selector]: params.sortBy.direction },
     limit: params.paging.pageSize,
@@ -178,55 +247,29 @@ export async function fetchLeaderboardPage(params: {
   })
   if (metricList.length === 0) return []
 
-  const masterList = metricList.map(m => m.master)
-  const [subscriberList, checkpointList, nameRows] = await Promise.all([
-    select(sqlClient, 'PuppetAllocation', {
-      where: { master: { _in: masterList }, body: { _is_null: false }, mandate: { _is_null: false } },
-      fields: ['master', 'puppet']
+  const fundList = metricList.map(m => m.fund)
+  const [positionList, fundRows] = await Promise.all([
+    select(sqlClient, 'FundPosition', {
+      where: { fund: { _in: fundList }, body: { _is_null: false }, mandate: { _is_null: false } },
+      fields: ['fund', 'holder']
     }),
-    select(sqlClient, 'MasterCheckpoint', {
-      where: { masterAccount: { _in: masterList }, blockTimestamp: { _gte: startActivityTimeframe } },
-      orderBy: { blockTimestamp: 'asc' },
-      fields: ['masterAccount', 'blockTimestamp', 'navPerShare']
-    }),
-    select(sqlClient, 'AccountState', {
-      where: { account: { _in: masterList }, chainId: { _eq: BigInt(HUB_CHAIN_ID) } },
-      fields: ['account', 'name']
+    select(sqlClient, 'Fund', {
+      where: { id: { _in: fundList } },
+      fields: ['fund', 'master', 'name', 'shareToken']
     })
   ])
 
-  const puppetsByMaster = new Map<string, Address[]>()
-  for (const s of subscriberList) {
-    const list = puppetsByMaster.get(s.master) ?? []
-    list.push(s.puppet)
-    puppetsByMaster.set(s.master, list)
+  const puppetsByFund = new Map<string, Address[]>()
+  for (const s of positionList) {
+    const list = puppetsByFund.get(s.fund) ?? []
+    list.push(s.holder)
+    puppetsByFund.set(s.fund, list)
   }
 
-  const nameByMaster = new Map(nameRows.map(r => [r.account, r.name]))
-
-  const navSourceByMaster = new Map<string, { time: number; nav: bigint }[]>()
-  for (const c of checkpointList) {
-    const list = navSourceByMaster.get(c.masterAccount) ?? []
-    list.push({ time: c.blockTimestamp, nav: c.navPerShare })
-    navSourceByMaster.set(c.masterAccount, list)
-  }
+  const fundById = new Map(fundRows.map(r => [getAddress(r.fund), r]))
 
   const endTime = getUnixTimestamp()
   return metricList.map(m => {
-    const source = navSourceByMaster.get(m.master) ?? []
-    const navTimeline =
-      source.length === 0
-        ? []
-        : resampleTimeSeries({
-            sourceList: [
-              { time: startActivityTimeframe, nav: source[0].nav },
-              ...source,
-              { time: endTime, nav: source[source.length - 1].nav }
-            ],
-            ticks: BALANCE_TIMELINE_BUCKETS,
-            getTime: s => s.time,
-            mapSource: s => formatFixed(USD_DECIMALS, s.nav)
-          })
     // Derive win/loss consistency from the per-trade realised PnL series the indexer already provides.
     let winCount = 0
     let lossCount = 0
@@ -234,11 +277,19 @@ export async function fetchLeaderboardPage(params: {
       if (pnl > 0n) winCount++
       else if (pnl < 0n) lossCount++
     }
+    const fundRow = fundById.get(getAddress(m.fund))
     return {
       ...m,
-      name: nameByMaster.get(m.master) ?? null,
-      puppetList: puppetsByMaster.get(m.master) ?? [],
-      navTimeline,
+      master: (fundRow?.master ?? m.fund) as Address,
+      name: fundRow?.name ?? null,
+      shareToken: (fundRow?.shareToken ?? null) as Address | null,
+      puppetList: puppetsByFund.get(m.fund) ?? [],
+      pnlTimeline: buildPnlTimeline({
+        pnlList: m.pnlList,
+        pnlTimestampList: m.pnlTimestampList,
+        activityTimeframe: params.activityTimeframe,
+        now: endTime
+      }),
       winCount,
       lossCount
     }
@@ -286,36 +337,6 @@ export async function fetchGmxTraderLeaderboardPage(params: {
   if (metricList.length === 0) return []
 
   return metricList.map(m => {
-    // Build a VALID bucketed timeline before cumulating. The indexed per-period series (pnlList/
-    // pnlTimestampList on GmxTraderRouteMetric) can arrive out of block-time order, so we bucket each
-    // (timestamp, pnl) into a fixed time-slot, sum per slot, sort by time, then cumulate in TIME order.
-    // Accumulating in raw array order (as before) both mis-ordered the curve and produced wrong cum
-    // values — a later-time pnl folded in early — which is what tripped resampleTimeSeries' sorted-check.
-    const slotSize = Math.max(1, Math.floor(params.activityTimeframe / BALANCE_TIMELINE_BUCKETS))
-    const pnlBySlot = new Map<number, bigint>()
-    for (let i = 0; i < m.pnlTimestampList.length; i++) {
-      const slot = Math.floor(m.pnlTimestampList[i] / slotSize) * slotSize
-      pnlBySlot.set(slot, (pnlBySlot.get(slot) ?? 0n) + (m.pnlList[i] ?? 0n))
-    }
-    let cum = 0n
-    const points = [...pnlBySlot.keys()]
-      .sort((a, b) => a - b)
-      .map(slot => {
-        cum += pnlBySlot.get(slot) as bigint
-        return { time: slot, cum }
-      })
-    // Slots are pruned indexer-side against the LAST EVENT's time, not wall-clock now, so the oldest
-    // slot can predate startActivityTimeframe (now - interval). Clamp the 0-anchor to <= the first point.
-    const anchorTime = points.length > 0 ? Math.min(startActivityTimeframe, points[0].time) : startActivityTimeframe
-    const pnlTimeline =
-      points.length === 0
-        ? []
-        : resampleTimeSeries({
-            sourceList: [{ time: anchorTime, cum: 0n }, ...points, { time: now, cum: points[points.length - 1].cum }],
-            ticks: BALANCE_TIMELINE_BUCKETS,
-            getTime: s => s.time,
-            mapSource: s => formatFixed(USD_DECIMALS, s.cum)
-          })
     return {
       account: m.account,
       collateralToken: m.collateralToken,
@@ -324,7 +345,12 @@ export async function fetchGmxTraderLeaderboardPage(params: {
       realisedPnlUsd: m.pnl,
       winCount: m.winCount,
       lossCount: m.lossCount,
-      pnlTimeline
+      pnlTimeline: buildPnlTimeline({
+        pnlList: m.pnlList,
+        pnlTimestampList: m.pnlTimestampList,
+        activityTimeframe: params.activityTimeframe,
+        now
+      })
     }
   })
 }
@@ -351,26 +377,25 @@ export interface IBalanceTimelinePoint {
 }
 
 async function currentBalanceUsdByAccount(accounts: ISubaccountState[]): Promise<Map<string, bigint>> {
-  const baseTokenIdList = [...new Set(accounts.map(a => a.baseTokenId))]
-  const tokenRows = await select(sqlClient, 'RegisterModule__RegisterToken', {
-    where: { tokenId: { _in: baseTokenIdList }, chainId: { _eq: BigInt(HUB_CHAIN_ID) } },
-    fields: ['tokenId', 'token']
-  })
-  const tokenByBaseId = new Map(tokenRows.map(row => [row.tokenId as Hex, row.token]))
-  const tokenList = [...new Set([...tokenByBaseId.values()])]
+  const baseTokenIdList = [...new Set(accounts.flatMap(a => [...a.balances.keys()]))]
+  const tokenMap = await tokenByBaseId(baseTokenIdList)
+  const tokenList = [...new Set([...tokenMap.values()])]
   const priceRows =
     tokenList.length > 0
       ? await select(sqlClient, 'GmxOraclePrice', { where: { id: { _in: tokenList } }, fields: ['id', 'price'] })
       : []
-  const priceByToken = new Map(priceRows.map(row => [row.id, row.price]))
+  const priceByToken = new Map(priceRows.map(row => [getAddress(row.id), row.price]))
 
   const out = new Map<string, bigint>()
   for (const acc of accounts) {
-    const token = tokenByBaseId.get(acc.baseTokenId)
-    const price = token ? priceByToken.get(token) : undefined
-    if (price === undefined) continue
-    const cashBalance = acc.isMaster ? 0n : acc.signedBalance
-    out.set(acc.account, (cashBalance + acc.positionBalance) * price)
+    let usd = 0n
+    for (const [baseTokenId, balance] of acc.balances) {
+      const token = tokenMap.get(baseTokenId)
+      const price = token ? priceByToken.get(getAddress(token)) : undefined
+      if (price === undefined) continue
+      usd += balance.signedBalance * price
+    }
+    out.set(acc.account, usd)
   }
   return out
 }
@@ -385,14 +410,14 @@ export async function fetchPuppetBalanceTimeline(
 
   const accountList = accounts.map(a => a.account)
   const [windowRows, seedRowList] = await Promise.all([
-    select(sqlClient, 'PuppetBalanceCheckpoint', {
+    select(sqlClient, 'AccountBalanceCheckpoint', {
       where: { account: { _in: accountList }, blockTimestamp: { _gte: startTime } },
       orderBy: { blockTimestamp: 'asc' },
       fields: ['account', 'blockTimestamp', 'balanceUsd']
     }),
     Promise.all(
       accountList.map(account =>
-        selectOne(sqlClient, 'PuppetBalanceCheckpoint', {
+        selectOne(sqlClient, 'AccountBalanceCheckpoint', {
           where: { account: { _eq: account }, blockTimestamp: { _lt: startTime } },
           orderBy: { blockTimestamp: 'desc' },
           fields: ['account', 'balanceUsd']
@@ -412,9 +437,9 @@ export async function fetchPuppetBalanceTimeline(
   }
 
   // Accounts with no checkpoint at all (just-settled, or a checkpoint skipped when the
-  // oracle price was momentarily absent) still hold value in IAccountState. Seed them
-  // with their current USD value so the aggregate covers every account, not just the
-  // checkpointed ones.
+  // oracle price was momentarily absent) still hold value across their AccountBalance rows.
+  // Seed them with their current USD value so the aggregate covers every account, not just
+  // the checkpointed ones.
   const uncheckpointed = accounts.filter(a => !checkpointed.has(a.account))
   if (uncheckpointed.length > 0) {
     for (const [account, balanceUsd] of await currentBalanceUsdByAccount(uncheckpointed)) {
@@ -448,21 +473,21 @@ export async function fetchPuppetBalanceTimeline(
 }
 
 export async function fetchMasterPerformanceTimeline(
-  masterAccount: Address,
+  fund: Address,
   activityTimeframe: IntervalTime
 ): Promise<IBalanceTimelinePoint[]> {
   const endTime = getUnixTimestamp()
   const startTime = endTime - activityTimeframe
 
-  const account = getAddress(masterAccount)
+  const fundAddress = getAddress(fund)
   const [windowRows, seedRow] = await Promise.all([
-    select(sqlClient, 'MasterCheckpoint', {
-      where: { masterAccount: { _eq: account }, blockTimestamp: { _gte: startTime } },
+    select(sqlClient, 'FundCheckpoint', {
+      where: { fund: { _eq: fundAddress }, blockTimestamp: { _gte: startTime } },
       orderBy: { blockTimestamp: 'asc' },
       fields: ['blockTimestamp', 'navPerShare']
     }),
-    selectOne(sqlClient, 'MasterCheckpoint', {
-      where: { masterAccount: { _eq: account }, blockTimestamp: { _lt: startTime } },
+    selectOne(sqlClient, 'FundCheckpoint', {
+      where: { fund: { _eq: fundAddress }, blockTimestamp: { _lt: startTime } },
       orderBy: { blockTimestamp: 'desc' },
       fields: ['navPerShare']
     })

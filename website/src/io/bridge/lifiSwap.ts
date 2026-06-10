@@ -1,6 +1,6 @@
 import type { Address, Hex } from 'viem'
 
-const QUOTE_PATH = '/api/swapQuote/v1/quote'
+const QUOTE_PATH = '/api/swap/lifi/v1/quote'
 const FILL_WINDOW_SEC = 5 * 60
 const EXPIRE_WINDOW_SEC = 5 * 60
 const DEFAULT_SLIPPAGE = 0.005
@@ -8,6 +8,7 @@ const UINT256_MAX = 2n ** 256n - 1n
 
 interface ILifiSwapParams {
   chainId: number
+  toChainId?: number
   inputToken: Address
   outputToken: Address
   inputAmount: bigint
@@ -21,10 +22,10 @@ interface ILifiQuoteResponse {
   transactionRequest: { to: Address; data: Hex; value?: string }
 }
 
-async function fetchLifiQuote(params: ILifiSwapParams): Promise<ILifiQuoteResponse | null> {
+async function fetchLifiQuote(params: ILifiSwapParams): Promise<ILifiQuoteResponse> {
   const query = new URLSearchParams({
     fromChain: String(params.chainId),
-    toChain: String(params.chainId),
+    toChain: String(params.toChainId ?? params.chainId),
     fromToken: params.inputToken,
     toToken: params.outputToken,
     fromAmount: params.inputAmount.toString(),
@@ -32,21 +33,23 @@ async function fetchLifiQuote(params: ILifiSwapParams): Promise<ILifiQuoteRespon
     toAddress: params.toAddress,
     slippage: String(params.slippage ?? DEFAULT_SLIPPAGE)
   })
-  try {
-    const res = await fetch(`${window.location.origin}${QUOTE_PATH}?${query.toString()}`)
-    if (!res.ok) return null
-    return (await res.json()) as ILifiQuoteResponse
-  } catch {
-    return null
+  const res = await fetch(`${window.location.origin}${QUOTE_PATH}?${query.toString()}`, {
+    signal: AbortSignal.timeout(10_000)
+  }).catch(() => {
+    throw new Error('Swap quote unavailable for this route')
+  })
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { message?: string } | null
+    throw new Error(
+      typeof body?.message === 'string' ? `LI.FI: ${body.message}` : 'Swap quote unavailable for this route'
+    )
   }
+  return (await res.json()) as ILifiQuoteResponse
 }
 
 export async function fetchLifiSwapQuote(params: ILifiSwapParams) {
   const nowSec = Math.floor(Date.now() / 1000)
   const quote = await fetchLifiQuote(params)
-  if (quote === null) {
-    throw new Error('Same-chain swap quote unavailable for this route')
-  }
   const provider = quote.transactionRequest.to
   if (quote.estimate.approvalAddress.toLowerCase() !== provider.toLowerCase()) {
     throw new Error('LI.FI approval target differs from the swap router')

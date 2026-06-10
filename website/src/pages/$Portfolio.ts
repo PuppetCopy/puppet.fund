@@ -1,6 +1,9 @@
+import { HUB_CHAIN_ID } from '@puppet/contracts/const'
+import { predictPuppetAccount } from '@puppet/sdk/account'
 import type { IntervalTime } from '@puppet/sdk/const'
-import type { ISubaccountState, ITokenRegistryMap } from '@puppet/sdk/state'
-import { combine, empty, filter, type IStream, map, nowWith, op, switchLatest, switchPromises } from 'aelea/stream'
+import { getDuration, readablePercentage } from '@puppet/sdk/core'
+import { type ISubaccountState, stubSubaccountState } from '@puppet/sdk/state'
+import { combine, empty, type IStream, just, map, nowWith, op, start, switchLatest, switchPromises } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $element, $node, $text, attr, component, effectProp, type I$Node, style, stylePseudo } from 'aelea/ui'
 import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
@@ -8,8 +11,9 @@ import { colorShade, palette } from 'aelea/ui-components-theme'
 import { pushUrl } from 'aelea/ui-router'
 import { isAddressEqual } from 'viem'
 import type { Address } from 'viem/accounts'
-import { $arrowRight, $ButtonSecondary, $defaultButtonSecondary, $icon, $infoLabel, $Link, text } from '@/ui-components'
+import { $arrowRight, $icon, $infoLabel, $infoTooltip, $navLink, text } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
+import { $roboAvatar } from '../common/$roboAvatar.js'
 import { $heading3 } from '../common/$text.js'
 import { $card, $card2 } from '../common/elements/$common.js'
 import { $profileDisplay } from '../components/$AccountProfile.js'
@@ -21,14 +25,13 @@ import { $TokenBalanceEditor } from '../components/portfolio/$TokenBalanceEditor
 import type {
   IAllocateDraft,
   IClaimDraft,
-  ICreateMasterDraft,
   IDepositDraft,
   IFulfillDraft,
   ISellDraft,
   IWithdrawDraft
 } from '../components/portfolio/draft.js'
 import * as context from '../io/context.js'
-import { fetchPuppetBalanceTimeline } from '../io/indexer/query.js'
+import { fetchMasterPoolState, fetchPuppetBalanceTimeline, type ISubscribeRule } from '../io/indexer/query.js'
 import {
   type connectWallet,
   disconnect,
@@ -68,9 +71,10 @@ const $timelineCard = (
 interface I$Portfolio extends IPageFilterParams {
   draftDepositList: IStream<IDepositDraft[]>
   draftWithdrawList: IStream<IWithdrawDraft[]>
+  draftAllocateList: IStream<IAllocateDraft[]>
   walletQuery: IStream<Promise<IConnectedWallet | null>>
   subaccountList: IStream<Promise<ISubaccountState[]>>
-  activeMaster: IStream<Address | null>
+  userMatchingRuleQuery: IStream<Promise<ISubscribeRule[]>>
 }
 
 export const $Portfolio = ({
@@ -78,9 +82,10 @@ export const $Portfolio = ({
   collateralTokenList,
   walletQuery,
   subaccountList,
-  activeMaster,
+  userMatchingRuleQuery,
   draftDepositList,
-  draftWithdrawList
+  draftWithdrawList,
+  draftAllocateList
 }: I$Portfolio) =>
   component(
     (
@@ -88,7 +93,7 @@ export const $Portfolio = ({
       [selectCollateralTokenList, selectCollateralTokenListTether]: IBehavior<Address[]>,
       [selectIndexTokenList, _selectIndexTokenListTether]: IBehavior<Address[]>,
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
-      [changeMasterDraft, changeMasterDraftTether]: IBehavior<IAllocateDraft | ICreateMasterDraft>,
+      [changeMasterDraft, changeMasterDraftTether]: IBehavior<IAllocateDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
       [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IFulfillDraft>,
       // Wiring this through is what subscribes $WalletConnect's click → map(connectWallet)
@@ -111,47 +116,24 @@ export const $Portfolio = ({
         })
       )
 
-      const $accountRow = (acc: ISubaccountState, registry: ITokenRegistryMap, wallet: IConnectedWallet): I$Node => {
-        const account: IStream<ISubaccountState> = op(
-          subaccountListState,
-          map(list => list.find(b => isAddressEqual(b.account, acc.account)) ?? acc)
+      const $sectionLabel = (label: string): I$Node =>
+        $node(style({ color: palette.foreground, fontSize: text.sm, fontWeight: '500', letterSpacing: '0.5px' }))(
+          $text(label)
         )
-        const $typeChip = $node(
-          style({
-            fontSize: text.xs,
-            color: palette.foreground,
-            border: `1px solid ${colorShade(palette.foreground, 30)}`,
-            borderRadius: '100px',
-            padding: '2px 10px'
-          })
-        )($text(acc.isMaster ? 'Master' : 'Puppet'))
-        const $editor = acc.isMaster
-          ? $AllocateEditor({ account, walletAccount: wallet, tokenRegistry: registry, activeMaster })({
-              changeDraft: changeMasterDraftTether(),
-              changeRedeemDraft: changeRedeemDraftTether(),
-              changeFulfillDraft: changeFulfillDraftTether()
-            })
-          : $TokenBalanceEditor({
-              accountState: account,
-              tokenRegistry: registry,
-              walletAccount: wallet,
-              draft: op(
-                combine({ dep: draftDepositList, wd: draftWithdrawList }),
-                map(
-                  p => p.dep.find(d => d.account === acc.account) ?? p.wd.find(d => d.account === acc.account) ?? null
-                )
-              )
-            })({ changeDraft: changeDraftTether() })
-        const $profile = $profileDisplay({ address: acc.account, name: acc.name, profileSize: 36 })
-        return $row(spacing.big, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          acc.isMaster
-            ? $Link({ route: routeSchema.master.detail, params: { address: acc.account }, $content: $profile })({})
-            : $profile,
-          $editor,
-          $node(style({ flex: 1 }))(),
-          $typeChip
+
+      const $fundProfile = (fundAddress: Address): I$Node =>
+        switchLatest(
+          map(
+            fund =>
+              $profileDisplay({
+                address: fundAddress,
+                name: fund?.name,
+                profileSize: 36,
+                $avatar: $roboAvatar((fund?.shareToken ?? fundAddress) as Address, 36)
+              }),
+            op(just(fetchMasterPoolState(fundAddress)), switchPromises, start(undefined))
+          )
         )
-      }
 
       const $accountSeparator = () =>
         $node(style({ height: '1px', width: '100%', backgroundColor: colorShade(palette.foreground, 12) }))()
@@ -161,8 +143,8 @@ export const $Portfolio = ({
           $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm, color: palette.foreground }))(
             $element('a')(
               attr({ href: '/' }),
-              style({ color: palette.foreground, cursor: 'pointer' }),
-              stylePseudo(':hover', { color: colorShade(palette.primary, 50) }),
+              style({ color: colorShade(palette.message, 85), cursor: 'pointer' }),
+              stylePseudo(':hover', { color: palette.message }),
               effectProp(
                 'onclick',
                 nowWith(() => (ev: MouseEvent) => {
@@ -213,45 +195,160 @@ export const $Portfolio = ({
                       ),
                       $WalletConnect()({ connect: connectTether() })
                     )
-                  if (p.accounts.length === 0)
-                    return $column(
-                      spacing.big,
-                      style({ alignItems: 'center', textAlign: 'center', padding: '40px 16px' })
-                    )(
-                      $heading3($text('No accounts yet')),
-                      $infoLabel(style({ maxWidth: '460px' }))(
-                        $text(
-                          'A backer deposits into a puppet account to copy a trader, and a trader creates a master account to lead.'
-                        )
-                      ),
-                      $Link({
-                        route: routeSchema.hello,
-                        $content: $row(spacing.small, style({ alignItems: 'center', color: palette.message }))(
-                          $text('Create account'),
-                          $icon({ $content: $arrowRight, fill: palette.message, width: '10px' })
-                        )
-                      })({})
-                    )
                   const wallet = p.wallet
+                  const existingSigner = p.accounts.find(a => a.user && isAddressEqual(a.user, wallet.address))?.signer
+                  const signer = wallet.session?.signer ?? existingSigner ?? wallet.address
+                  const puppetAddress = predictPuppetAccount({ user: wallet.address, signer })
+                  const lateBindDerivation = wallet.session ? undefined : { user: wallet.address }
+                  const puppetAccount: IStream<ISubaccountState> = op(
+                    subaccountListState,
+                    map(
+                      list =>
+                        list.find(b => isAddressEqual(b.account, puppetAddress)) ??
+                        stubSubaccountState({ user: wallet.address, signer })
+                    )
+                  )
+                  const registeredIds = [...(p.registry.get(HUB_CHAIN_ID)?.keys() ?? [])]
+                  // The puppet account is often just a controller (masters allocate straight
+                  // from the wallet), so zero-balance rows are noise: list only held tokens
+                  // and hide the whole section when there are none.
+                  const puppetSnapshot = p.accounts.find(b => isAddressEqual(b.account, puppetAddress))
+                  const heldIds = registeredIds.filter(
+                    tid => (puppetSnapshot?.balances.get(tid)?.signedBalance ?? 0n) > 0n
+                  )
+
+                  const $balanceRows = heldIds.map(tokenId =>
+                    $TokenBalanceEditor({
+                      accountState: puppetAccount,
+                      baseTokenId: tokenId,
+                      tokenRegistry: p.registry,
+                      walletAccount: wallet,
+                      lateBindDerivation,
+                      draft: op(
+                        combine({ dep: draftDepositList, wd: draftWithdrawList }),
+                        map(
+                          d =>
+                            d.dep.find(x => x.account === puppetAddress && x.inputAmount.baseTokenId === tokenId) ??
+                            d.wd.find(x => x.account === puppetAddress && x.inputAmount.baseTokenId === tokenId) ??
+                            null
+                        )
+                      )
+                    })({ changeDraft: changeDraftTether() })
+                  )
+
+                  const funds = p.accounts.filter(a => a.isFund)
+                  const $fundRows = funds.map(acc => {
+                    const account: IStream<ISubaccountState> = op(
+                      subaccountListState,
+                      map(list => list.find(b => isAddressEqual(b.account, acc.account)) ?? acc)
+                    )
+                    return $node(style({ display: 'flex', flex: 1 }))(
+                      $AllocateEditor({
+                        account,
+                        walletAccount: wallet,
+                        tokenRegistry: p.registry,
+                        draft: map(list => list.find(d => d.account === acc.account) ?? null, draftAllocateList),
+                        $profile: $navLink({
+                          route: routeSchema.master.detail,
+                          params: { address: acc.account },
+                          $content: $fundProfile(acc.account)
+                        })
+                      })({
+                        changeDraft: changeMasterDraftTether(),
+                        changeRedeemDraft: changeRedeemDraftTether(),
+                        changeFulfillDraft: changeFulfillDraftTether()
+                      })
+                    )
+                  })
+
+                  const activeRules = p.rules.filter(rule => rule.allocationRate > 0n)
+                  const $subscriptionRows = activeRules.map(rule =>
+                    $row(spacing.big, style({ alignItems: 'center', flexWrap: 'wrap' }))(
+                      $navLink({
+                        route: routeSchema.master.detail,
+                        params: { address: rule.fund },
+                        $content: $fundProfile(rule.fund as Address)
+                      }),
+                      $node(style({ color: palette.foreground, fontSize: text.sm }))(
+                        $text(
+                          `${readablePercentage(rule.allocationRate)} per match, at most every ${getDuration(Number(rule.throttlePeriod))}`
+                        )
+                      )
+                    )
+                  )
+
+                  const $emptyHint = (label: string): I$Node =>
+                    $node(style({ color: palette.foreground, fontSize: text.sm }))($text(label))
+
                   return $column(spacing.big, style({ padding: '16px 0' }))(
-                    ...p.accounts.flatMap((acc, i) =>
-                      i === 0
-                        ? [$accountRow(acc, p.registry, wallet)]
-                        : [$accountSeparator(), $accountRow(acc, p.registry, wallet)]
+                    ...(heldIds.length === 0
+                      ? []
+                      : [
+                          $column(spacing.default)(
+                            $row(spacing.tiny, style({ alignItems: 'center' }))(
+                              $sectionLabel('Balances'),
+                              $infoTooltip(
+                                $node(
+                                  style({
+                                    display: 'block',
+                                    maxWidth: '280px',
+                                    whiteSpace: 'normal',
+                                    fontSize: text.sm
+                                  })
+                                )(
+                                  $text(
+                                    'Your overall balance in the app, held by your smart account. It is primarily used for funding: seeding your own fund and matching the traders you copy. Deposit from any token on any chain, withdraw anytime.'
+                                  )
+                                ),
+                                colorShade(palette.foreground, 60),
+                                '20px'
+                              )
+                            ),
+                            ...$balanceRows
+                          ),
+                          $accountSeparator()
+                        ]),
+                    $column(spacing.default)(
+                      $sectionLabel('Your funds'),
+                      ...($fundRows.length > 0
+                        ? $fundRows
+                        : [$emptyHint('No funds yet. Create one to get backed to trade.')]),
+                      $row(style({ placeContent: 'flex-end' }))(
+                        $element('a')(
+                          attr({ href: '/hello' }),
+                          style({
+                            color: colorShade(palette.message, 85),
+                            fontSize: text.sm,
+                            textDecoration: 'none',
+                            cursor: 'pointer'
+                          }),
+                          stylePseudo(':hover', { color: palette.message }),
+                          effectProp(
+                            'onclick',
+                            nowWith(() => (ev: MouseEvent) => {
+                              if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return
+                              ev.preventDefault()
+                              pushUrl('/hello')
+                            })
+                          )
+                        )($text('+ Create fund'))
+                      )
                     ),
                     $accountSeparator(),
-                    $ButtonSecondary({
-                      $container: $defaultButtonSecondary(
-                        effectProp(
-                          'onclick',
-                          nowWith(() => () => pushUrl('/hello'))
-                        )
-                      ),
-                      $content: $text('+ Create account')
-                    })({})
+                    $column(spacing.default)(
+                      $sectionLabel('Subscriptions'),
+                      ...($subscriptionRows.length > 0
+                        ? $subscriptionRows
+                        : [$emptyHint('Not copying any traders yet. Pick them on the leaderboard.')])
+                    )
                   )
                 },
-                combine({ accounts: subaccountListState, registry: tokenRegistryValue, wallet: walletState })
+                combine({
+                  accounts: subaccountListState,
+                  registry: tokenRegistryValue,
+                  wallet: walletState,
+                  rules: switchPromises(userMatchingRuleQuery)
+                })
               )
             )
           )
@@ -262,8 +359,7 @@ export const $Portfolio = ({
           selectIndexTokenList,
           changeDraft,
           changeRedeemDraft,
-          changeCreateMasterDraft: filter((d): d is ICreateMasterDraft => d.kind === 'createMaster', changeMasterDraft),
-          changeAllocateDraft: filter((d): d is IAllocateDraft => d.kind === 'allocate', changeMasterDraft),
+          changeAllocateDraft: changeMasterDraft,
           changeFulfillDraft
         }
       ]

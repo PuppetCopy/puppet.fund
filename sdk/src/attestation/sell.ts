@@ -1,7 +1,7 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type { IAccountLib__AccountInitParams, IRedeemModule__SellIntent } from '@puppet/contracts/types'
-import type { TypedDataDefinition } from 'viem'
+import type { Address, Hex, TypedDataDefinition } from 'viem'
 import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
 import * as IntentLib from './intentLib.js'
@@ -13,7 +13,9 @@ export interface ISellInput {
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
-  masterParams: IAccountLib__AccountInitParams
+  baseTokenId: Hex
+  name: Hex
+  master: Address
   sharesOut: bigint
 }
 
@@ -28,7 +30,7 @@ export function attestSellIntent(ctx: ISellAttestContext, input: ISellInput) {
   IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
-    baseTokenId: input.masterParams.baseTokenId,
+    baseTokenId: input.baseTokenId,
     lookupChain: HUB_CHAIN_ID,
     capAmount: 0n,
     acceptableRelayFee: input.acceptableRelayFee,
@@ -52,7 +54,9 @@ export function attestSellIntent(ctx: ISellAttestContext, input: ISellInput) {
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: BigInt(ctx.chainId),
-    masterParams: input.masterParams,
+    baseTokenId: input.baseTokenId,
+    name: input.name,
+    master: input.master,
     sharesOut: input.sharesOut
   }
 

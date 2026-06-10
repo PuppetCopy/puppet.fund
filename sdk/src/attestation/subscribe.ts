@@ -1,9 +1,13 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
-import type { IAccountLib__AccountInitParams, ISubscribeModule__SubscribeIntent } from '@puppet/contracts/types'
-import { type Address, type Hex, isAddressEqual, keccak256, type TypedDataDefinition } from 'viem'
+import type {
+  IAccountLib__AccountInitParams,
+  IRuleLib__Rule,
+  ISubscribeModule__SubscribeIntent
+} from '@puppet/contracts/types'
+import { type Address, type Hex, keccak256, type TypedDataDefinition } from 'viem'
 import type { LocalAccount } from 'viem/accounts'
-import { predictMasterAccount } from '../account/index.js'
+import { predictFundAccount, predictPuppetAccount } from '../account/index.js'
 import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
 import * as IntentLib from './intentLib.js'
@@ -14,7 +18,7 @@ export const MANDATE_TYPED_DATA = {
   types: {
     Mandate: [
       { name: 'puppet', type: 'address' },
-      { name: 'master', type: 'address' },
+      { name: 'fund', type: 'address' },
       { name: 'baseToken', type: 'address' },
       { name: 'bodyHash', type: 'bytes32' }
     ]
@@ -24,25 +28,26 @@ export const MANDATE_TYPED_DATA = {
 export async function signMandate(
   signer: LocalAccount,
   puppet: Address,
-  master: Address,
+  fund: Address,
   baseToken: Address,
   body: Hex
 ): Promise<Hex> {
   return signer.signTypedData({
     domain: HUB_DOMAIN,
     ...MANDATE_TYPED_DATA,
-    message: { puppet, master, baseToken, bodyHash: keccak256(body) }
+    message: { puppet, fund, baseToken, bodyHash: keccak256(body) }
   })
 }
 
 export interface ISubscribeRule {
-  masterParams: IAccountLib__AccountInitParams
+  master: Address
   body: Hex
   mandate: Hex
 }
 
 export interface ISubscribeInput {
   params: IAccountLib__AccountInitParams
+  baseTokenId: Hex
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
@@ -56,10 +61,10 @@ export interface ISubscribeAttestContext extends IDraftContext {
 }
 
 export function attestSubscribeIntent(ctx: ISubscribeAttestContext, input: ISubscribeInput) {
-  const baseToken = IntentLib.verifyCommonIntent(ctx, {
+  IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
-    baseTokenId: input.params.baseTokenId,
+    baseTokenId: input.baseTokenId,
     lookupChain: HUB_CHAIN_ID,
     capAmount: 0n,
     acceptableRelayFee: input.acceptableRelayFee,
@@ -69,27 +74,21 @@ export function attestSubscribeIntent(ctx: ISubscribeAttestContext, input: ISubs
   const n = input.rules.length
   if (n === 0) throw new CompactContractError('Subscribe__EmptyRules', [])
 
+  const ownFund = predictFundAccount(predictPuppetAccount(input.params))
+
   let prev: Address = '0x0000000000000000000000000000000000000000'
   for (let i = 0; i < n; i++) {
     const rule = input.rules[i]!
-    if (input.params.baseTokenId !== rule.masterParams.baseTokenId) {
-      throw new CompactContractError('Subscribe__BaseTokenMismatch', [
-        input.params.baseTokenId,
-        rule.masterParams.baseTokenId
-      ])
-    }
-    if (isAddressEqual(input.params.user, rule.masterParams.user)) {
+    const fund = predictFundAccount(rule.master)
+    if (fund === ownFund) {
       throw new CompactContractError('Subscribe__SelfSubscribe', [input.params.user])
     }
-    const master = predictMasterAccount(rule.masterParams)
-    if (BigInt(master) <= BigInt(prev)) {
-      throw new CompactContractError('Subscribe__MasterListNotSorted', [prev, master])
+    if (i > 0 && BigInt(fund) <= BigInt(prev)) {
+      throw new CompactContractError('Subscribe__FundListNotSorted', [prev, fund])
     }
-    prev = master
+    prev = fund
   }
 
-  // SDK-only preflight: subscribe deducts the relay fee from signedBalance at runtime (Account__OutflowExceedsSigned);
-  // no contract revert covers an under-funded fee balance, so surface it off-chain before signing.
   if (ctx.signedBalance < input.acceptableRelayFee) {
     throw new CompactError(
       'SUBSCRIBE_INSUFFICIENT_FEE_BALANCE',
@@ -104,15 +103,17 @@ export function attestSubscribeIntent(ctx: ISubscribeAttestContext, input: ISubs
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: BigInt(ctx.chainId),
-    baseToken,
-    rules: input.rules.map(r => ({ masterParams: r.masterParams, body: r.body, mandate: r.mandate }))
+    baseTokenId: input.baseTokenId,
+    rules: input.rules.map(
+      (r): IRuleLib__Rule => ({ fund: predictFundAccount(r.master), body: r.body, mandate: r.mandate })
+    )
   }
 
+  if (!HUB_DOMAIN) throw new CompactError('BAD_REQUEST', 'missing HUB domain')
   const typedData: TypedDataDefinition = {
     domain: HUB_DOMAIN,
     ...HUB_GATE_INTENTS.subscribe,
     message: intent as unknown as Record<string, unknown>
   }
-  if (!HUB_DOMAIN) throw new CompactError('BAD_REQUEST', 'missing HUB domain')
   return { intent, typedData, args: [intent] }
 }

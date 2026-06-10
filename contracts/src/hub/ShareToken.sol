@@ -18,48 +18,62 @@ contract ShareToken is ERC20 {
         _self = address(this);
     }
 
-    modifier onlyShareGate() {
-        _onlyShareGate();
+    modifier onlyShareModule() {
+        _onlyShareModule();
         _;
     }
 
-    function _onlyShareGate() internal view {
-        if (address(this) == _self || msg.sender != shareGate()) revert Error.ShareToken__NotShareGate();
+    function _onlyShareModule() internal view {
+        if (address(this) == _self || msg.sender != getShareModule()) revert Error.ShareToken__NotShareGate();
     }
 
-    function master() public view returns (address _m) {
+    function getFund() public view returns (address _fund) {
         bytes memory _b = LibClone.argsOnClone(address(this), 0, 20);
         assembly ("memory-safe") {
-            _m := shr(96, mload(add(_b, 0x20)))
+            _fund := shr(96, mload(add(_b, 0x20)))
         }
     }
 
-    function shareGate() public view returns (address _g) {
+    function getShareModule() public view returns (address _g) {
         bytes memory _b = LibClone.argsOnClone(address(this), 20, 40);
         assembly ("memory-safe") {
             _g := shr(96, mload(add(_b, 0x20)))
         }
     }
 
+    function getBaseTokenId() public view returns (bytes32 _id) {
+        bytes memory _b = LibClone.argsOnClone(address(this), 40, 72);
+        assembly ("memory-safe") {
+            _id := mload(add(_b, 0x20))
+        }
+    }
+
+    function getName() public view returns (bytes32 _name) {
+        bytes memory _b = LibClone.argsOnClone(address(this), 72, 104);
+        assembly ("memory-safe") {
+            _name := mload(add(_b, 0x20))
+        }
+    }
+
     function name() public view override returns (string memory) {
-        return string(LibClone.argsOnClone(address(this), 40, 72));
+        return string(abi.encodePacked(getName()));
     }
 
     function symbol() public view override returns (string memory) {
-        return string(LibClone.argsOnClone(address(this), 72, 76));
+        return string(abi.encodePacked(bytes4(getName())));
     }
 
     function mint(
         address _to,
         uint _amount
-    ) external onlyShareGate {
+    ) external onlyShareModule {
         _mint(_to, _amount);
     }
 
     function mintMany(
         address[] calldata _toList,
         uint[] calldata _amountList
-    ) external onlyShareGate {
+    ) external onlyShareModule {
         for (uint _i; _i < _toList.length; ++_i) {
             uint _amount = _amountList[_i];
             if (_amount == 0) continue;
@@ -70,15 +84,23 @@ contract ShareToken is ERC20 {
     function burn(
         address _from,
         uint _amount
-    ) external onlyShareGate {
+    ) external onlyShareModule {
         _burn(_from, _amount);
+    }
+
+    function transfer(
+        address _to,
+        uint _amount
+    ) public override onlyShareModule returns (bool) {
+        _transfer(msg.sender, _to, _amount);
+        return true;
     }
 
     function transferFrom(
         address _from,
         address _to,
         uint _amount
-    ) public override onlyShareGate returns (bool) {
+    ) public override onlyShareModule returns (bool) {
         _transfer(_from, _to, _amount);
         return true;
     }

@@ -104,6 +104,7 @@ export const DEFAULT_EVALUATION_CONFIG: IEvaluationConfig = {
 export interface IEvaluateAccountParams {
   master: Address
   baseToken: Address
+  baseTokenId: Hex
   health: IndexerHealth
   kind: INavKind
   platforms?: IPlatformEvaluator[]

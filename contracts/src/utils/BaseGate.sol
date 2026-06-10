@@ -6,7 +6,6 @@ import {Error} from "./Error.sol";
 import {IAuthority} from "./interfaces/IAuthority.sol";
 import {IArbSys} from "./interfaces/IArbSys.sol";
 import {AccountModule} from "../core/module/AccountModule.sol";
-import {BridgeModule} from "../core/module/BridgeModule.sol";
 import {RegisterModule} from "../core/module/RegisterModule.sol";
 
 abstract contract BaseGate is Permission {
@@ -21,7 +20,6 @@ abstract contract BaseGate is Permission {
     IArbSys internal constant arbSys = IArbSys(address(100));
 
     AccountModule internal immutable accountModule;
-    BridgeModule internal immutable bridgeModule;
     RegisterModule internal immutable registerModule;
 
     address internal immutable attestor;
@@ -32,16 +30,14 @@ abstract contract BaseGate is Permission {
 
     constructor(
         IAuthority _authority,
-        AccountModule _accountGate,
-        BridgeModule _bridge,
+        AccountModule _accountModule,
         RegisterModule _register,
         Config memory _config
     ) Permission(_authority) {
-        if (address(_accountGate) == address(0) || address(_bridge) == address(0) || address(_register) == address(0)) {
+        if (address(_accountModule) == address(0) || address(_register) == address(0)) {
             revert Error.Gate__InvalidModule();
         }
-        accountModule = _accountGate;
-        bridgeModule = _bridge;
+        accountModule = _accountModule;
         registerModule = _register;
         attestor = _config.attestor;
         feeReceiver = _config.feeReceiver;
@@ -58,5 +54,9 @@ abstract contract BaseGate is Permission {
             maxBlockDelay: maxBlockDelay,
             maxRelayFeeBps: maxRelayFeeBps
         });
+    }
+
+    function _blockNumber() internal view returns (uint) {
+        return address(arbSys).code.length > 0 ? arbSys.arbBlockNumber() : block.number;
     }
 }

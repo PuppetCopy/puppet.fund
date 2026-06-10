@@ -1,9 +1,6 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { readableTokenAmount } from '@puppet/sdk/core'
-import { getTokenDescription } from '@puppet/sdk/gmx'
-import { type ISubaccountState, type ITokenRegistryMap, tokenInfoFor } from '@puppet/sdk/state'
+import { readableUsd } from '@puppet/sdk/core'
+import type { ISubaccountState } from '@puppet/sdk/state'
 import {
-  combine,
   constant,
   empty,
   filter,
@@ -13,9 +10,7 @@ import {
   nowWith,
   o,
   op,
-  skipRepeats,
   start,
-  switchLatest,
   switchPromises,
   tap
 } from 'aelea/stream'
@@ -54,13 +49,12 @@ import {
   $alertIntermediateSpinnerContainer,
   $anchor,
   $ButtonSecondary,
-  $caretDown,
   $gitbook,
   $github,
   $icon,
   $intermediatePromise,
+  $loadingValue,
   $moreDots,
-  $puppeteer,
   $twitter,
   keyActivate,
   text
@@ -68,34 +62,18 @@ import {
 import { routeSchema } from '../app/routeSchema.js'
 import { $jazzicon } from '../common/$avatar.js'
 import { $puppetLogo } from '../common/$icons.js'
-import { $roboAvatar } from '../common/$roboAvatar.js'
 import { DOCS_URL, GITHUB_REPO_URL } from '../const/links.js'
-import * as context from '../io/context.js'
+import { $separator2 } from '../pages/common.js'
 import { type connectWallet, type IConnectedWallet, walletQuery } from '../wallet/index.js'
-import { $accountLabel, readableAccountName } from './$AccountProfile.js'
+import { $accountLabel } from './$AccountProfile.js'
 import { $ThemePicker } from './$ThemePicker.js'
 import { $WalletConnect } from './$WalletConnect.js'
 
 interface I$MainMenu {
   subaccountList: IStream<Promise<ISubaccountState[]>>
-  selectedSubaccount: IStream<ISubaccountState | null>
 }
 
-const $accountTypeIcon = (isMaster: boolean, size = 14) =>
-  $icon({
-    $content: isMaster ? $puppeteer : $puppetLogo,
-    width: `${size}px`,
-    fill: palette.foreground,
-    viewBox: '0 0 32 32'
-  })
-
-const accountUsdLabel = (registry: ITokenRegistryMap, acc: ISubaccountState): string => {
-  const desc = getTokenDescription(tokenInfoFor(registry, HUB_CHAIN_ID, acc.baseTokenId).token)
-  const hub = acc.chains.get(HUB_CHAIN_ID)
-  return `$${readableTokenAmount(desc.decimals, hub?.signedBalance ?? acc.signedBalance)}`
-}
-
-export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
+export const $MainMenu = ({ subaccountList }: I$MainMenu) =>
   component(
     (
       [clickPopoverClaim, clickPopoverClaimTether]: IBehavior<any, any>,
@@ -304,14 +282,6 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
                   })({})
                 }
 
-                const $caret = () =>
-                  $icon({
-                    $content: $caretDown,
-                    width: '12px',
-                    fill: palette.foreground,
-                    viewBox: '0 0 32 32',
-                    svgOps: style({ position: 'relative' })
-                  })
                 const $circle = style({
                   position: 'relative',
                   display: 'inline-flex',
@@ -323,83 +293,15 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
                   flexShrink: '0',
                   overflow: 'hidden'
                 })
-                const $caretCircle = () => $node($circle)($caret())
-                const $spinningCaret = () =>
-                  $node($circle)(
-                    $node(
-                      style({
-                        position: 'absolute',
-                        top: '-50%',
-                        left: '-50%',
-                        width: '200%',
-                        height: '200%',
-                        animation: 'rotate 3.5s linear infinite',
-                        background: `conic-gradient(from 0deg, ${palette.indeterminate}, ${colorShade(palette.foreground, 40)}, ${colorShade(palette.foreground, 40)}, ${palette.indeterminate})`
-                      })
-                    )(),
-                    $node(
-                      style({ position: 'absolute', inset: '1px', borderRadius: '50%', background: palette.horizon })
-                    )(),
-                    $caret()
-                  )
-                const $rightSlot = $node($circle)($jazzicon(connection.address))
 
-                const circleKey = op(
-                  combine({ sub: selectedSubaccount, list: subaccountListState }),
-                  map(p => (p.sub ? `sub:${p.sub.account}` : p.list.length === 0 ? 'spin' : 'caret')),
-                  skipRepeats
-                )
-                const $identityCircle = switchLatest(
-                  map(key => {
-                    if (key === 'spin') return $spinningCaret()
-                    if (key === 'caret') return $caretCircle()
-                    return $roboAvatar(key.slice(4) as Address, 45)
-                  }, circleKey)
-                )
-
-                const $identityBody = switchLatest(
-                  map(
-                    p =>
-                      p.sub
-                        ? $column(style({ minWidth: '0', gap: '2px' }))(
-                            $row(spacing.small, style({ alignItems: 'center' }))(
-                              $accountLabel({
-                                address: p.sub.account,
-                                ensName: readableAccountName(p.sub.name),
-                                primarySize: 0.95
-                              }),
-                              $accountTypeIcon(p.sub.isMaster, 14)
-                            ),
-                            $node(style({ fontSize: text.sm, color: palette.message, lineHeight: '1.1' }))(
-                              $text(accountUsdLabel(p.registry, p.sub))
-                            )
-                          )
-                        : $column(style({ fontSize: text.xs, lineHeight: '1.3', whiteSpace: 'nowrap' }))(
-                            $node($text('Click to')),
-                            $node(style({ fontWeight: 'bold' }))($text('Create subaccount'))
-                          ),
-                    combine({ sub: selectedSubaccount, registry: switchPromises(context.tokenRegistryQuery) })
-                  )
-                )
-
-                const $identitySlot = $row(spacing.small, style({ alignItems: 'center' }))(
-                  $identityCircle,
-                  $identityBody,
-                  $node(
-                    style({ alignSelf: 'stretch', width: '1px', backgroundColor: colorShade(palette.foreground, 40) })
-                  )(),
-                  $accountLabel({ address: connection.address, primarySize: 0.75 })
-                )
-
-                const accountHref: IStream<string> = op(
-                  selectedSubaccount,
-                  map(sub => (sub ? '/portfolio' : '/hello')),
-                  skipRepeats
+                const totalUsdText: IStream<string> = op(
+                  subaccountListState,
+                  map(list => `$${readableUsd(list.reduce((acc, a) => acc + a.balanceUsd, 0n))}`),
+                  start('-')
                 )
 
                 return $element('a')(
-                  attr({ 'aria-label': 'Account' }),
-                  attrBehavior(map(h => ({ href: h }), accountHref)),
+                  attr({ 'aria-label': 'Portfolio', href: '/portfolio' }),
                   style({
                     display: 'inline-flex',
                     alignItems: 'center',
@@ -416,14 +318,22 @@ export const $MainMenu = ({ subaccountList, selectedSubaccount }: I$MainMenu) =>
                     nowWith(() => (ev: MouseEvent) => {
                       if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return
                       ev.preventDefault()
-                      const dest = (ev.currentTarget as HTMLAnchorElement).getAttribute('href')
-                      if (dest) pushUrl(dest)
+                      pushUrl('/portfolio')
                     })
                   )
                 )(
-                  $row(spacing.small, style({ alignItems: 'center', alignSelf: 'stretch', pointerEvents: 'none' }))(
-                    $identitySlot,
-                    $rightSlot
+                  $row(
+                    spacing.small,
+                    style({ alignItems: 'center', alignSelf: 'stretch', pointerEvents: 'none', paddingRight: '16px' })
+                  )(
+                    $node($circle)($jazzicon(connection.address)),
+                    $column(spacing.tiny, style({ minWidth: '0' }))(
+                      $accountLabel({ address: connection.address, primarySize: 0.75 }),
+                      $separator2,
+                      $node(style({ fontSize: text.xs, fontWeight: '600', color: palette.message, lineHeight: '1.1' }))(
+                        $loadingValue(totalUsdText)
+                      )
+                    )
                   )
                 )
               }, walletQuery)

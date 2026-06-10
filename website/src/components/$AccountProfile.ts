@@ -1,4 +1,4 @@
-import { EMPTY_NAME } from '@puppet/sdk/account'
+import { BYTES32_ZERO } from '@puppet/sdk/const'
 import { empty, type IStream, map, switchLatest } from 'aelea/stream'
 import { $node, $text, type I$Node, type INodeCompose, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
@@ -6,11 +6,12 @@ import { colorShade, palette } from 'aelea/ui-components-theme'
 import { type Hex, hexToString } from 'viem'
 import type { Address } from 'viem/accounts'
 import { $infoLabel, text } from '@/ui-components'
+import { $jazzicon } from '../common/$avatar.js'
 import { $roboAvatar } from '../common/$roboAvatar.js'
 import { $card2 } from '../common/elements/$common.js'
 
 export const readableAccountName = (name?: Hex | null): string | undefined => {
-  if (!name || name === EMPTY_NAME) return undefined
+  if (!name || name === BYTES32_ZERO) return undefined
   const decoded = hexToString(name, { size: 32 }).trim()
   return decoded.length > 0 ? decoded : undefined
 }
@@ -22,6 +23,8 @@ export const $profileDisplay = ({
   ensName,
   showAddress = true,
   profileSize = 45,
+  isFund = true,
+  user,
   $avatar,
   $labelContainer
 }: {
@@ -31,14 +34,16 @@ export const $profileDisplay = ({
   ensName?: string | null
   showAddress?: boolean
   profileSize?: number
+  isFund?: boolean
+  user?: Address
   $avatar?: I$Node
   $labelContainer?: INodeCompose
 }) => {
   return $container(spacing.small, style({ alignItems: 'center', textDecoration: 'none' }))(
-    $avatar ?? $roboAvatar(address, profileSize),
+    $avatar ?? (isFund ? $roboAvatar(address, profileSize) : $jazzicon(user ?? address, profileSize)),
     showAddress
       ? $accountLabel({
-          address,
+          address: isFund ? address : (user ?? address),
           ensName: readableAccountName(name) ?? ensName,
           $container: $labelContainer
         })

@@ -3,7 +3,6 @@ pragma solidity ^0.8.35;
 
 import {LibClone} from "solady/utils/LibClone.sol";
 
-import {MasterAccount} from "../core/MasterAccount.sol";
 import {ShareToken} from "./ShareToken.sol";
 import {Error} from "../utils/Error.sol";
 import {Access} from "../utils/auth/Access.sol";
@@ -21,19 +20,34 @@ contract ShareModule is Access {
     }
 
     function predict(
-        address _master
-    ) external view returns (address) {
+        address _fund,
+        bytes32 _baseTokenId,
+        bytes32 _name
+    ) public view returns (address) {
         return LibClone.predictDeterministicAddress(
-            shareTokenImpl, _cloneArgs(_master), bytes32(uint(uint160(_master))), address(this)
+            shareTokenImpl, _cloneArgs(_fund, _baseTokenId, _name), bytes32(uint(uint160(_fund))), address(this)
         );
     }
 
+    function verifyShareToken(
+        address _fund,
+        bytes32 _baseTokenId,
+        bytes32 _name
+    ) external view returns (address shareToken_) {
+        shareToken_ = predict(_fund, _baseTokenId, _name);
+        if (shareToken_.code.length == 0) revert Error.Share__NotCreated();
+    }
+
     function createShareToken(
-        address _master,
-        uint _initialSupply
-    ) external auth returns (address shareToken_) {
-        shareToken_ = LibClone.cloneDeterministic(shareTokenImpl, _cloneArgs(_master), bytes32(uint(uint160(_master))));
-        _logEvent("CreateShareToken", abi.encode(_master, shareToken_, _initialSupply));
+        address _fund,
+        bytes32 _baseTokenId,
+        uint _initialSupply,
+        bytes32 _name
+    ) external auth {
+        address _shareToken = LibClone.cloneDeterministic(
+            shareTokenImpl, _cloneArgs(_fund, _baseTokenId, _name), bytes32(uint(uint160(_fund)))
+        );
+        _logEvent("CreateShareToken", abi.encode(_fund, _shareToken, _baseTokenId, _initialSupply, _name));
     }
 
     function mint(
@@ -70,9 +84,10 @@ contract ShareModule is Access {
     }
 
     function _cloneArgs(
-        address _master
+        address _fund,
+        bytes32 _baseTokenId,
+        bytes32 _name
     ) internal view returns (bytes memory) {
-        bytes32 _name = MasterAccount(payable(_master)).getName();
-        return abi.encodePacked(_master, address(this), _name, bytes4(_name));
+        return abi.encodePacked(_fund, address(this), _baseTokenId, _name);
     }
 }

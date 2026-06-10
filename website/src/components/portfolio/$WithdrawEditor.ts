@@ -1,8 +1,8 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import {
-  type IBridgeToWalletInput,
-  type IWithdrawInput,
+  type IWithdrawToBridgeInput,
+  type IWithdrawToWalletInput,
   resolveDispatchChainId,
   resolveDispatchNetwork
 } from '@puppet/sdk/attestation'
@@ -31,22 +31,23 @@ import {
   map,
   merge,
   op,
-  periodic,
   sample,
   sampleMap,
+  skipRepeats,
+  skipRepeatsWith,
   start,
   switchMap,
   switchPromises
 } from 'aelea/stream'
 import { type IBehavior, multicast, state } from 'aelea/stream-extended'
-import { $element, $node, $text, attr, component, type INode, nodeEvent, style, stylePseudo } from 'aelea/ui'
+import { $element, $node, $text, attr, component, type INode, nodeEvent, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
+import type { Hex } from 'viem'
 import {
   $ButtonSecondary,
   $DropSelect,
   $defaultDropdownContainer,
-  $defaultDropSelectAnchor,
   $defaultSliderContainer,
   $intermediateText,
   $labeledValue,
@@ -68,6 +69,7 @@ import { DEFAULT_DEADLINE_SEC, walletClientForChain } from './runner/_shared.js'
 
 export interface I$WithdrawEditor {
   accountState: ISubaccountState
+  baseTokenId: Hex
   tokenRegistry: ITokenRegistryMap
   walletAccount: IConnectedWallet
   existingDraft: IStream<IWithdrawDraft | null>
@@ -85,16 +87,15 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       [clickMax, clickMaxTether]: IBehavior<INode<HTMLButtonElement>, MouseEvent>,
       [enterPress, enterPressTether]: IBehavior<KeyboardEvent>
     ) => {
-      const { accountState, tokenRegistry, walletAccount, existingDraft } = config
-      const baseTokenId = accountState.baseTokenId
+      const { accountState, baseTokenId, tokenRegistry, walletAccount, existingDraft } = config
       const token = tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseTokenId).token
       const from = accountState.account
-      const to = accountState.user
+      const to = accountState.user ?? walletAccount.address
       const tokenDescription = getTokenDescription(token)
       const decimals = tokenDescription.decimals
       const relayFeeMapQuery: IStream<RelayFeeMap> = context.relayFeeMapForToken(baseTokenId)
 
-      const balance: IStream<bigint | null> = just(accountState.chains.get(HUB_CHAIN_ID)?.signedBalance ?? 0n)
+      const balance: IStream<bigint | null> = just(accountState.balances.get(baseTokenId)?.signedBalance ?? 0n)
 
       const destChainIds = CHAIN_LIST.map(c => c.id).filter(id => !!tokenRegistry.get(id as ChainId)?.get(baseTokenId))
       const isDestChainId = (id: number): boolean => (destChainIds as readonly number[]).includes(id)
@@ -121,12 +122,13 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       )
       const chainSelection = state(defaultChainId, merge(userChain, draftChain, initialChain))
 
-      const relayFee: IStream<bigint> = map(
-        p => {
-          const method: RelayMethod = p.chainId === HUB_CHAIN_ID ? 'walletWithdraw' : 'bridgeToWallet'
+      const relayFee: IStream<bigint> = op(
+        combine({ chainId: chainSelection, feeMap: relayFeeMapQuery }),
+        map(p => {
+          const method: RelayMethod = p.chainId === HUB_CHAIN_ID ? 'withdrawToWallet' : 'withdrawToBridge'
           return p.feeMap[method].relayFee
-        },
-        combine({ chainId: chainSelection, feeMap: relayFeeMapQuery })
+        }),
+        skipRepeats
       )
 
       const sliderFee: IStream<bigint> = start(0n, relayFee)
@@ -160,17 +162,17 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       type QuoteStatus =
         | { status: 'idle'; quote: AcrossBridgeQuote | null }
         | { status: 'error'; quote: null; message: string }
-      const quoteRefreshTick: IStream<number> = start(0, periodic(60_000))
+      // Quotes fire only on user-driven changes (destination chain, amount); the relay fee
+      // is SAMPLED at trigger time as a gas snapshot.
+      const quoteTrigger = op(
+        combine({ balance, chainId: chainSelection, draft: draftAmount, raw: amountValue }),
+        skipRepeatsWith(
+          (a, b) => a.chainId === b.chainId && a.draft === b.draft && a.raw === b.raw && a.balance === b.balance
+        )
+      )
       const quoteParams = debounce(
         200,
-        combine({
-          balance,
-          chainId: chainSelection,
-          fee: relayFee,
-          draft: draftAmount,
-          raw: amountValue,
-          _: quoteRefreshTick
-        })
+        sampleMap((fee, t) => ({ ...t, fee }), relayFee, quoteTrigger)
       )
       const acrossQuoteFetch: IStream<Promise<QuoteStatus>> = op(
         map(async (params): Promise<QuoteStatus> => {
@@ -200,35 +202,34 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       const acrossQuoteQuery: IStream<QuoteStatus> = multicast(switchPromises(acrossQuoteFetch))
 
       const accountParams: IAccountLib__AccountInitParams = {
-        user: accountState.user,
-        signer: accountState.signer,
-        name: accountState.name,
-        baseTokenId: accountState.baseTokenId
+        user: to,
+        signer: accountState.signer
       }
 
       // Leaf-local validation only: balance & Across quote bounds.
-      // Protocol-level checks (verifyWithdrawInput / verifyBridgeToWalletInput)
+      // Protocol-level checks (verifyWithdrawToWalletInput / verifyWithdrawToBridgeInput)
       // run in $TokenBalanceEditor against the live preview and arrive via parentAlert.
       const validation: IStream<Promise<string | null>> = sampleMap(
         async (sample, params): Promise<string | null> => {
-          if (params.amount === 0n) return null
           if (params.balance === null) return null
           const fee = sample.relayFee
+          if (params.chainId !== HUB_CHAIN_ID) {
+            if (params.q.status === 'error') return params.q.message
+            if (params.q.quote) {
+              if (params.q.quote.isAmountTooLow) {
+                return `Below bridge minimum ${readableTokenAmount(tokenDescription, params.q.quote.limits.minDeposit)}`
+              }
+              if (params.balance - fee > params.q.quote.limits.maxDeposit) {
+                return `Exceeds bridge max ${readableTokenAmount(tokenDescription, params.q.quote.limits.maxDeposit)}`
+              }
+            }
+          }
+          if (params.amount === 0n) return null
           if (params.balance <= fee) {
             return `Balance must exceed execution fee ${readableTokenAmountLabel(tokenDescription, fee)}`
           }
           if (params.amount + fee > params.balance) {
             return `Exceeds available ${readableTokenAmount(tokenDescription, params.balance - fee)}`
-          }
-          if (params.chainId !== HUB_CHAIN_ID) {
-            if (params.q.status === 'error') return params.q.message
-            if (!params.q.quote) return null
-            if (params.q.quote.isAmountTooLow) {
-              return `Below bridge minimum ${readableTokenAmount(tokenDescription, params.q.quote.limits.minDeposit)}`
-            }
-            if (params.balance - fee > params.q.quote.limits.maxDeposit) {
-              return `Exceeds bridge max ${readableTokenAmount(tokenDescription, params.q.quote.limits.maxDeposit)}`
-            }
           }
           return null
         },
@@ -364,7 +365,6 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
 
       const $picker = $DropSelect({
         $container: $defaultDropdownContainer(style({ alignItems: 'flex-end', flexShrink: '0' })),
-        $anchor: $defaultDropSelectAnchor(stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 40) })),
         value: chainSelection,
         optionList: destChainIds,
         $valueLabel: map((id: number) =>
@@ -376,22 +376,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
             )
           )
         ),
-        $$option: map((id: number) => $chainOption(id)),
-        $optionContainer: $node(
-          style({ cursor: 'pointer', padding: '4px 6px', borderRadius: '10px', display: 'block' }),
-          stylePseudo(':hover', { backgroundColor: palette.horizon })
-        ),
-        $dropListContainer: $column(
-          style({
-            background: palette.background,
-            border: `1px solid ${colorShade(palette.foreground, 60)}`,
-            borderRadius: '14px',
-            padding: '6px',
-            gap: '2px',
-            boxShadow: `0 8px 24px ${palette.shadow}`,
-            minWidth: '260px'
-          })
-        )
+        $$option: map((id: number) => $chainOption(id))
       })({ select: selectChainTether() })
 
       return [
@@ -452,6 +437,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
                     input: {
                       chainId: BigInt(HUB_CHAIN_ID),
                       params: accountParams,
+                      tokenId: baseTokenId,
                       blockNumber,
                       deadline,
                       nonce: randomNonce(),
@@ -464,8 +450,9 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
 
               if (isHome) {
                 const grossAmount = isSweep ? liveBalance : params.amount + params.fee
-                const input: IWithdrawInput = {
+                const input: IWithdrawToWalletInput = {
                   params: accountParams,
+                  tokenId: baseTokenId,
                   blockNumber,
                   deadline,
                   nonce,
@@ -487,14 +474,15 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
                     baseTokenId,
                     approx: false
                   },
-                  inputSteps: [...(deployStep ? [deployStep] : []), { kind: 'walletWithdraw', input }]
+                  inputSteps: [...(deployStep ? [deployStep] : []), { kind: 'withdrawToWallet', input }]
                 }
               }
 
               const grossAmount = isSweep ? liveBalance : params.amount + params.fee
               const quote = params.q.quote
-              const input: IBridgeToWalletInput = {
+              const input: IWithdrawToBridgeInput = {
                 params: accountParams,
+                tokenId: baseTokenId,
                 blockNumber,
                 deadline,
                 acceptableRelayFee: params.fee,
@@ -522,7 +510,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
                   baseTokenId,
                   approx: true
                 },
-                inputSteps: [...(deployStep ? [deployStep] : []), { kind: 'bridgeToWallet', input }]
+                inputSteps: [...(deployStep ? [deployStep] : []), { kind: 'withdrawToBridge', input }]
               }
             },
             combine({

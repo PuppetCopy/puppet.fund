@@ -50,6 +50,10 @@ contract RegisterModule is Access {
         if (_hubToken == address(_token) && block.chainid != hubChainId) {
             revert Error.Register__SelfHubTokenOnSpoke(block.chainid, address(_token));
         }
+        IERC20 _registered = tokenRegistryMap[_tokenId].token;
+        if (address(_registered) != address(0) && _registered != _token) {
+            revert Error.Register__TokenSwapForbidden(_tokenId, address(_registered), address(_token));
+        }
         tokenRegistryMap[_tokenId] = TokenInfo({token: _token, cap: _cap, hubToken: _hubToken});
         _logEvent("RegisterToken", abi.encode(block.chainid, _tokenId, _token, _cap, _hubToken));
     }

@@ -1,7 +1,12 @@
-import { predictMasterAccount, predictPuppetAccount } from '@puppet/sdk/account'
+import { predictFundAccount, predictPuppetAccount } from '@puppet/sdk/account'
 import type { IntervalTime } from '@puppet/sdk/const'
 import { ignoreAll } from '@puppet/sdk/core'
-import { getUserSubaccountList, type IAccountStateRow, type ISubaccountState } from '@puppet/sdk/state'
+import {
+  getUserSubaccountList,
+  type IAccountBalanceRow,
+  type IAccountRow,
+  type ISubaccountState
+} from '@puppet/sdk/state'
 import {
   combine,
   empty,
@@ -23,7 +28,7 @@ import { $node, $text, $wrapNativeElement, component, style } from 'aelea/ui'
 import { $column, $row, designSheet, isMobileScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { contains, match } from 'aelea/ui-router'
-import { getAddress } from 'viem'
+import { getAddress, type Hex } from 'viem'
 import type { Address } from 'viem/accounts'
 import { $alertPositiveContainer, $ButtonSecondary, $defaultMiniButtonSecondary, fadeIn } from '@/ui-components'
 import { uiStorage } from '@/ui-storage'
@@ -39,7 +44,6 @@ import type { ISubscribeRule } from '../components/portfolio/$MatchingRuleEditor
 import type {
   IAllocateDraft,
   IClaimDraft,
-  ICreateMasterDraft,
   IDepositDraft,
   IFulfillDraft,
   ISellDraft,
@@ -60,93 +64,129 @@ import { $Portfolio } from './$Portfolio.js'
 
 interface IApp {}
 
-const MASTER_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'fulfill'])
+const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'fulfill', 'createFundAccount'])
+
+const ZERO_TOKEN = '0x0000000000000000000000000000000000000000' as Address
 
 function accountForRequest(req: IAttestation['request']): Address {
-  const params = req.input.params
-  return MASTER_ROUTED.has(req.kind) ? predictMasterAccount(params) : predictPuppetAccount(params)
+  if (FUND_ROUTED.has(req.kind)) return predictFundAccount((req.input as { master: Address }).master)
+  return predictPuppetAccount((req.input as { params: { user: Address; signer: Address } }).params)
+}
+
+function tokenIdForRequest(req: IAttestation['request']): Hex {
+  const intent = req.intent as { tokenId?: Hex; baseTokenId?: Hex }
+  return intent.tokenId ?? intent.baseTokenId ?? ('0x' as Hex)
+}
+
+function stubBalanceRow(account: Address, chainId: bigint, tokenId: Hex, signedBalance: bigint): IAccountBalanceRow {
+  return {
+    id: `${chainId}-${account}-${tokenId}`,
+    account,
+    chainId,
+    tokenId,
+    token: ZERO_TOKEN,
+    signedBalance,
+    recordedBalance: signedBalance,
+    lastEventBlock: 0n,
+    lastEventAt: 0
+  }
 }
 
 // Fold an attest into the subaccount list using the intent + actualRelayFee.
-// createPuppet/createMaster insert a new standalone leaf from their own params;
-// other kinds adjust signedBalance on the dispatched account.
+// createPuppet/createFund insert a new standalone leaf from their own params;
+// other kinds adjust the per-token signedBalance on the dispatched account.
 function applySubaccountAttest(list: ISubaccountState[], settled: IAttestation): ISubaccountState[] {
   const { request, result } = settled
   const chainId = (request.intent as { chainId: bigint }).chainId
   const cid = Number(chainId)
   const fee = result.actualRelayFee
+  const nonce = (request.intent as { nonce: bigint }).nonce
+  const tokenId = tokenIdForRequest(request)
 
   if (request.kind === 'createPuppetAccount') {
     const params = request.input.params
     const account = predictPuppetAccount(params)
     if (list.some(s => s.account === account)) return list
     const initialDeposit = (request.input as { initialDepositAmount: bigint }).initialDepositAmount
-    const leaf: IAccountStateRow = {
+    const leaf: IAccountRow = {
       id: `${chainId}-${account}`,
       account,
       chainId,
+      isFund: false,
       user: getAddress(params.user),
       signer: getAddress(params.signer),
-      name: params.name,
-      baseTokenId: params.baseTokenId,
-      signedBalance: initialDeposit - fee,
-      recordedBalance: initialDeposit - fee,
-      positionBalance: 0n,
-      isMaster: false,
-      lastNonce: (request.intent as { nonce: bigint }).nonce,
+      balanceUsd: 0n,
+      lastNonce: nonce,
       lastEventBlock: 0n,
       lastEventAt: 0,
       lastTransactionHash: result.txHash
     }
-    return [...list, { ...leaf, chains: new Map([[cid, leaf]]) }]
+    const balances = new Map<Hex, IAccountBalanceRow>([
+      [tokenId, stubBalanceRow(account, chainId, tokenId, initialDeposit - fee)]
+    ])
+    return [...list, { ...leaf, chains: new Map([[cid, leaf]]), balances }]
   }
 
-  if (request.kind === 'seedMasterAccount') {
-    const params = request.input.params
-    const account = predictMasterAccount(params)
+  if (request.kind === 'createFundAccount') {
+    const master = (request.input as { master: Address }).master
+    const account = predictFundAccount(master)
     if (list.some(s => s.account === account)) return list
-    const masterAmount = (request.input as { masterAmount: bigint }).masterAmount
-    const leaf: IAccountStateRow = {
+    const sweepAmount = (request.input as { sweepAmount: bigint }).sweepAmount
+    const leaf: IAccountRow = {
       id: `${chainId}-${account}`,
       account,
       chainId,
-      user: getAddress(params.user),
-      signer: getAddress(params.signer),
-      name: params.name,
-      baseTokenId: params.baseTokenId,
-      signedBalance: masterAmount - fee,
-      recordedBalance: masterAmount - fee,
-      positionBalance: 0n,
-      isMaster: true,
-      lastNonce: (request.intent as { nonce: bigint }).nonce,
+      isFund: true,
+      user: list.find(s => s.account === getAddress(master))?.user ?? getAddress(master),
+      signer: getAddress(master),
+      balanceUsd: 0n,
+      lastNonce: nonce,
       lastEventBlock: 0n,
       lastEventAt: 0,
       lastTransactionHash: result.txHash
     }
-    return [...list, { ...leaf, chains: new Map([[cid, leaf]]) }]
+    const balances = new Map<Hex, IAccountBalanceRow>([
+      [tokenId, stubBalanceRow(account, chainId, tokenId, sweepAmount - fee)]
+    ])
+    return [...list, { ...leaf, chains: new Map([[cid, leaf]]), balances }]
   }
 
-  // Adjust signedBalance on the dispatched account.
+  // Adjust the per-token signedBalance on the dispatched account.
   const target = accountForRequest(request)
   const delta = computeSignedDelta(request, fee)
-  return list.map(sub => {
-    if (sub.account !== target) return sub
-    const existing = sub.chains.get(cid)
-    if (!existing) return sub
-    const next: IAccountStateRow = {
-      ...existing,
-      signedBalance: existing.signedBalance + delta,
-      lastNonce: (request.intent as { nonce: bigint }).nonce,
+
+  if (request.kind === 'allocate' && !list.some(s => s.account === target)) {
+    const master = getAddress((request.input as { master: Address }).master)
+    const leaf: IAccountRow = {
+      id: `${chainId}-${target}`,
+      account: target,
+      chainId,
+      isFund: true,
+      user: list.find(s => s.account === master)?.user ?? master,
+      signer: master,
+      balanceUsd: 0n,
+      lastNonce: nonce,
+      lastEventBlock: 0n,
+      lastEventAt: 0,
       lastTransactionHash: result.txHash
     }
-    const newChains = new Map(sub.chains)
-    newChains.set(cid, next)
+    const balances = new Map<Hex, IAccountBalanceRow>([[tokenId, stubBalanceRow(target, chainId, tokenId, delta)]])
+    return [...list, { ...leaf, chains: new Map([[cid, leaf]]), balances }]
+  }
+
+  return list.map(sub => {
+    if (sub.account !== target) return sub
+    const existing = sub.balances.get(tokenId)
+    const nextBalance: IAccountBalanceRow = existing
+      ? { ...existing, signedBalance: existing.signedBalance + delta }
+      : stubBalanceRow(sub.account, chainId, tokenId, delta)
+    const newBalances = new Map(sub.balances)
+    newBalances.set(tokenId, nextBalance)
     return {
       ...sub,
-      chains: newChains,
-      signedBalance: next.signedBalance,
-      lastNonce: next.lastNonce,
-      lastTransactionHash: next.lastTransactionHash
+      balances: newBalances,
+      lastNonce: nonce,
+      lastTransactionHash: result.txHash
     }
   })
 }
@@ -162,7 +202,6 @@ export const $Main = (_config: IApp = {}) =>
 
       [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>,
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
-      [changeCreateMasterDraft, changeCreateMasterDraftTether]: IBehavior<ICreateMasterDraft>,
       [changeAllocateDraft, changeAllocateDraftTether]: IBehavior<IAllocateDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
       [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IFulfillDraft>,
@@ -255,14 +294,6 @@ export const $Main = (_config: IApp = {}) =>
         state()
       )
 
-      const selectedSubaccount: IStream<ISubaccountState | null> = op(
-        combine({ active: activeMaster, list: switchPromises(subaccountList) }),
-        map(p =>
-          p.active ? (p.list.find(a => getAddress(a.account) === getAddress(p.active as Address)) ?? null) : null
-        ),
-        state()
-      )
-
       const $extensionSync = op(
         combine({ addr: activeMaster, wallet: switchPromises(walletQuery) }),
         map(p => {
@@ -287,7 +318,6 @@ export const $Main = (_config: IApp = {}) =>
       type DraftEvent =
         | { type: 'set-subscribes'; list: ISubscribeRule[] }
         | { type: 'upsert'; draft: IDepositDraft | IWithdrawDraft }
-        | { type: 'create-master'; draft: ICreateMasterDraft }
         | { type: 'allocate'; draft: IAllocateDraft }
         | { type: 'redeem'; draft: ISellDraft | IClaimDraft }
         | { type: 'fulfill'; draft: IFulfillDraft }
@@ -295,33 +325,21 @@ export const $Main = (_config: IApp = {}) =>
         | { type: 'clear' }
 
       // Execution-order priority. Deposits run first so they fund the puppet account before
-      // any createMaster step (which depends on puppet existing + having balance to cover fees).
+      // any fund step (which depends on puppet existing + having balance to cover fees).
       const DRAFT_SORT_KEY: Record<IDraft['kind'], number> = {
         deposit: 0,
         subscribe: 1,
-        createMaster: 2,
-        allocate: 3,
-        sell: 4,
-        fulfill: 5,
-        claim: 6,
-        withdraw: 7
+        allocate: 2,
+        sell: 3,
+        fulfill: 4,
+        claim: 5,
+        withdraw: 6
       }
-      const normalizeDraftList = (list: IDraft[]): IDraft[] => {
-        const sorted = [...list]
+      const normalizeDraftList = (list: IDraft[]): IDraft[] =>
+        [...list]
           .map((d, i) => ({ d, i }))
           .sort((a, b) => DRAFT_SORT_KEY[a.d.kind] - DRAFT_SORT_KEY[b.d.kind] || a.i - b.i)
           .map(p => p.d)
-        const baseTokensFundedByDeposit = new Set<string>(
-          sorted.filter((d): d is IDepositDraft => d.kind === 'deposit').map(d => d.inputAmount.baseTokenId)
-        )
-        return sorted.map(d => {
-          if (d.kind !== 'createMaster') return d
-          // A pending deposit for the same baseTokenId will deploy + fund the puppet before this
-          // master step runs, so the alert from the producer no longer applies.
-          if (baseTokensFundedByDeposit.has(d.baseTokenId)) return { ...d, alert: null }
-          return d
-        })
-      }
 
       const draftList: IStream<IDraft[]> = state(
         [],
@@ -330,9 +348,6 @@ export const $Main = (_config: IApp = {}) =>
             const next = ((): IDraft[] => {
               if (event.type === 'clear') return []
               if (event.type === 'release') return list.filter(d => d.id !== event.key)
-              if (event.type === 'create-master') {
-                return list.some(d => d.id === event.draft.id) ? list : [...list, event.draft]
-              }
               if (event.type === 'allocate') {
                 if (event.draft.masterAmount === 0n) {
                   return list.filter(d => d.id !== event.draft.id)
@@ -404,7 +419,6 @@ export const $Main = (_config: IApp = {}) =>
           merge(
             map((list): DraftEvent => ({ type: 'set-subscribes', list }), changeMatchRuleList),
             map((draft): DraftEvent => ({ type: 'upsert', draft }), changeDraft),
-            map((draft): DraftEvent => ({ type: 'create-master', draft }), changeCreateMasterDraft),
             map((draft): DraftEvent => ({ type: 'allocate', draft }), changeAllocateDraft),
             map((draft): DraftEvent => ({ type: 'redeem', draft }), changeRedeemDraft),
             map((draft): DraftEvent => ({ type: 'fulfill', draft }), changeFulfillDraft),
@@ -433,6 +447,10 @@ export const $Main = (_config: IApp = {}) =>
       )
       const draftWithdrawList: IStream<IWithdrawDraft[]> = map(
         list => list.filter((d): d is IWithdrawDraft => d.kind === 'withdraw'),
+        draftList
+      )
+      const draftAllocateList: IStream<IAllocateDraft[]> = map(
+        list => list.filter((d): d is IAllocateDraft => d.kind === 'allocate'),
         draftList
       )
 
@@ -479,7 +497,7 @@ export const $Main = (_config: IApp = {}) =>
             )
           }, pwaUpgradeNotification),
 
-          $MainMenu({ subaccountList, selectedSubaccount })({}),
+          $MainMenu({ subaccountList })({}),
 
           $PairBanner({ walletQuery, subaccountList })({}),
 
@@ -487,9 +505,14 @@ export const $Main = (_config: IApp = {}) =>
           contains(routeSchema.hello)(
             $midContainer(
               fadeIn(
-                $HelloPage({ walletQuery, subaccountList, draftDepositList, draftWithdrawList, activeMaster })({
+                $HelloPage({
+                  walletQuery,
+                  subaccountList,
+                  draftDepositList,
+                  draftWithdrawList,
+                  draftAllocateList
+                })({
                   changeDraft: changeDraftTether(),
-                  changeCreateMasterDraft: changeCreateMasterDraftTether(),
                   changeAllocateDraft: changeAllocateDraftTether(),
                   changeRedeemDraft: changeRedeemDraftTether(),
                   changeFulfillDraft: changeFulfillDraftTether()
@@ -537,9 +560,10 @@ export const $Main = (_config: IApp = {}) =>
                 $Portfolio({
                   draftDepositList,
                   draftWithdrawList,
+                  draftAllocateList,
+                  userMatchingRuleQuery,
                   walletQuery,
                   subaccountList,
-                  activeMaster,
                   activityTimeframe,
                   collateralTokenList,
                   indexTokenList
@@ -549,7 +573,6 @@ export const $Main = (_config: IApp = {}) =>
                   changeActivityTimeframe: changeActivityTimeframeTether(),
                   changeDraft: changeDraftTether(),
                   changeRedeemDraft: changeRedeemDraftTether(),
-                  changeCreateMasterDraft: changeCreateMasterDraftTether(),
                   changeAllocateDraft: changeAllocateDraftTether(),
                   changeFulfillDraft: changeFulfillDraftTether()
                 })

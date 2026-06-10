@@ -4,8 +4,13 @@
 // carries no bare workspace type specifiers. Entrypoints are the root `dist/index.d.ts`
 // plus each venue folder's `dist/<venue>/index.d.ts` — adding a venue folder under src/
 // needs no change here, matching the package's `./*` wildcard export.
-import { readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+
+if (existsSync('dist/src') && !existsSync('dist/index.d.ts')) {
+  cpSync('dist/src', 'dist', { recursive: true })
+  rmSync('dist/src', { recursive: true, force: true })
+}
 
 function entrypoints(): string[] {
   const entries = ['dist/index.d.ts']

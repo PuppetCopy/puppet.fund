@@ -1,6 +1,6 @@
 import type { Address } from 'viem'
 
-const SUGGESTED_FEES_PATH = '/api/bridgeQuote/suggested-fees'
+const SUGGESTED_FEES_PATH = '/api/swap/across/suggested-fees'
 const FILL_WINDOW_SEC = 30 * 60
 const EXPIRE_WINDOW_SEC = 60 * 60
 
@@ -32,14 +32,18 @@ export async function fetchAcrossBridgeQuote(params: IAcrossBridgeQuoteParams) {
     destinationChainId: String(params.destinationChainId),
     recipient: params.recipient
   })
-  let data: IAcrossSuggestedFees
-  try {
-    const res = await fetch(`${window.location.origin}${SUGGESTED_FEES_PATH}?${query.toString()}`)
-    if (!res.ok) throw new Error(`Across suggested-fees responded ${res.status}`)
-    data = (await res.json()) as IAcrossSuggestedFees
-  } catch {
+  const res = await fetch(`${window.location.origin}${SUGGESTED_FEES_PATH}?${query.toString()}`, {
+    signal: AbortSignal.timeout(10_000)
+  }).catch(() => {
     throw new Error('Across quote unavailable for this route')
+  })
+  if (!res.ok) {
+    const body = (await res.json().catch(() => null)) as { message?: string } | null
+    throw new Error(typeof body?.message === 'string' ? body.message : 'Across quote unavailable for this route')
   }
+  const data = (await res.json().catch(() => {
+    throw new Error('Across quote unavailable for this route')
+  })) as IAcrossSuggestedFees
   const outputAmount = BigInt(data.outputAmount)
   return {
     route: {

@@ -1,0 +1,28 @@
+{
+  "name": "@puppet.fund/templates",
+  "version": "0.1.0",
+  "license": "BUSL-1.1",
+  "description": "Scaffold an autonomous trading operator on Puppet",
+  "type": "module",
+  "bin": {
+    "create-operator": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "scaffolds"
+  ],
+  "scripts": {
+    "tsgo:check": "tsgo --noEmit"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "0.102.0",
+    "@puppet.fund/operator": "workspace:*",
+    "@types/bun": "catalog:",
+    "viem": "catalog:"
+  },
+  "keywords": [
+    "puppet",
+    "templates",
+    "scaffold"
+  ]
+}

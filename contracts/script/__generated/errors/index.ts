@@ -31,11 +31,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Account__InvalidGate",
-    inputs: []
-  },
-  {
-    type: "error",
     name: "Share__InvalidImpl",
     inputs: []
   },
@@ -63,6 +58,11 @@ export const puppetErrorAbi = [
     type: "error",
     name: "Account__Shortfall",
     inputs: [
+      {
+        name: "token",
+        internalType: "address",
+        type: "address"
+      },
       {
         name: "actual",
         internalType: "uint256",
@@ -98,22 +98,12 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "TransientRoute__Unauthorized",
+    name: "PassthroughRoute__Unauthorized",
     inputs: []
   },
   {
     type: "error",
     name: "WalletDeposit__ZeroAmount",
-    inputs: []
-  },
-  {
-    type: "error",
-    name: "WalletDeposit__UnregisteredToken",
-    inputs: []
-  },
-  {
-    type: "error",
-    name: "Attest__InvalidAttestor",
     inputs: []
   },
   {
@@ -203,6 +193,27 @@ export const puppetErrorAbi = [
       },
       {
         name: "token",
+        internalType: "address",
+        type: "address"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Register__TokenSwapForbidden",
+    inputs: [
+      {
+        name: "tokenId",
+        internalType: "bytes32",
+        type: "bytes32"
+      },
+      {
+        name: "registered",
+        internalType: "address",
+        type: "address"
+      },
+      {
+        name: "attempted",
         internalType: "address",
         type: "address"
       }
@@ -369,11 +380,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Intent__FeeReceiverZero",
-    inputs: []
-  },
-  {
-    type: "error",
     name: "Allocate__ZeroAmount",
     inputs: []
   },
@@ -385,22 +391,6 @@ export const puppetErrorAbi = [
   {
     type: "error",
     name: "Allocate__PreMintSupplyMismatch",
-    inputs: [
-      {
-        name: "current",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "expected",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Allocate__PostMintSupplyMismatch",
     inputs: [
       {
         name: "current",
@@ -453,28 +443,12 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Operate__ExitsPending",
-    inputs: [
-      {
-        name: "signedBalance",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "totalStake",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
     name: "Subscribe__EmptyRules",
     inputs: []
   },
   {
     type: "error",
-    name: "Subscribe__MasterListNotSorted",
+    name: "Subscribe__FundListNotSorted",
     inputs: [
       {
         name: "prev",
@@ -485,22 +459,6 @@ export const puppetErrorAbi = [
         name: "curr",
         internalType: "address",
         type: "address"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Subscribe__BaseTokenMismatch",
-    inputs: [
-      {
-        name: "puppetBaseTokenId",
-        internalType: "bytes32",
-        type: "bytes32"
-      },
-      {
-        name: "masterBaseTokenId",
-        internalType: "bytes32",
-        type: "bytes32"
       }
     ]
   },
@@ -543,6 +501,11 @@ export const puppetErrorAbi = [
   {
     type: "error",
     name: "Share__NoStakeToCredit",
+    inputs: []
+  },
+  {
+    type: "error",
+    name: "Share__NotCreated",
     inputs: []
   },
   {
@@ -606,27 +569,6 @@ export const puppetErrorAbi = [
     type: "error",
     name: "Deposit__NothingToRecord",
     inputs: []
-  },
-  {
-    type: "error",
-    name: "Deposit__BaseTokenMismatch",
-    inputs: [
-      {
-        name: "baseTokenId",
-        internalType: "bytes32",
-        type: "bytes32"
-      },
-      {
-        name: "expected",
-        internalType: "address",
-        type: "address"
-      },
-      {
-        name: "received",
-        internalType: "address",
-        type: "address"
-      }
-    ]
   },
   {
     type: "error",

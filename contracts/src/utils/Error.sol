@@ -10,22 +10,18 @@ library Error {
     error Account__UnauthorizedCaller();
     error Account__ForbiddenTarget(address target);
     error Account__NotDeployed(address predicted);
-    error Account__InvalidGate();
     error Share__InvalidImpl();
     error Account__InvalidUser();
     error Account__InvalidBaseTokenId();
     error Account__InvalidSignature();
     error Account__InvalidFlow();
-    error Account__Shortfall(uint actual, uint expected);
+    error Account__Shortfall(address token, uint actual, uint expected);
     error Account__OutflowExceedsSigned(uint amountOut, uint signedSum);
     error Account__UnauthorizedDeploy();
 
-    error TransientRoute__Unauthorized();
+    error PassthroughRoute__Unauthorized();
 
     error WalletDeposit__ZeroAmount();
-    error WalletDeposit__UnregisteredToken();
-
-    error Attest__InvalidAttestor();
 
     error Module__InvalidAuthority();
     error Module__CallerNotAuthority();
@@ -46,6 +42,7 @@ library Error {
     error Register__InvalidImpl();
     error Register__InvalidHubToken();
     error Register__SelfHubTokenOnSpoke(uint chainId, address token);
+    error Register__TokenSwapForbidden(bytes32 tokenId, address registered, address attempted);
     error Register__UnknownBaseTokenId(bytes32 baseTokenId);
     error Register__WntNotSet();
 
@@ -59,20 +56,15 @@ library Error {
     error Intent__AmountExceedsCap(uint amount, uint cap);
     error Intent__RelayFeeExceedsCap(uint actual, uint cap);
     error Intent__RelayFeeRatioExceeded(uint actual, uint amount, uint maxBps);
-    error Intent__FeeReceiverZero();
 
     error Allocate__ZeroAmount();
     error Allocate__ZeroAcceptableNav();
     error Allocate__PreMintSupplyMismatch(uint current, uint expected);
-    error Allocate__PostMintSupplyMismatch(uint current, uint expected);
     error Allocate__PuppetListNotSorted(address prev, address curr);
     error Allocate__ListLengthMismatch(uint puppetsLen, uint bodiesLen, uint sigsLen);
 
-    error Operate__ExitsPending(uint signedBalance, uint totalStake);
-
     error Subscribe__EmptyRules();
-    error Subscribe__MasterListNotSorted(address prev, address curr);
-    error Subscribe__BaseTokenMismatch(bytes32 puppetBaseTokenId, bytes32 masterBaseTokenId);
+    error Subscribe__FundListNotSorted(address prev, address curr);
     error Subscribe__SelfSubscribe(address user);
 
     error Share__ZeroShares();
@@ -81,6 +73,7 @@ library Error {
     error Share__InsufficientClaimable();
     error Share__RelayFeeTooHigh();
     error Share__NoStakeToCredit();
+    error Share__NotCreated();
 
     error Fulfill__ZeroAcceptableNav();
     error Fulfill__SupplyMismatch(uint current, uint expected);
@@ -92,7 +85,6 @@ library Error {
 
     error Deposit__NothingToWithdraw();
     error Deposit__NothingToRecord();
-    error Deposit__BaseTokenMismatch(bytes32 baseTokenId, address expected, address received);
     error Deposit__NothingToBridge();
     error Deposit__InsufficientBalance(uint balance, uint required);
     error Deposit__RelayFeeTooHigh();

@@ -429,22 +429,24 @@ interface I$MasterDisplay {
   address: Address
   ensName?: string | null
   ensNameStream?: IStream<string | null>
+  avatarSeed?: Address
   puppetList: Address[]
   labelSize?: number
   profileSize?: number
 }
 export const $MasterDisplay = (config: I$MasterDisplay) =>
   component(([click, clickTether]: IBehavior<any, Address>) => {
-    const { address, ensName, ensNameStream, puppetList, labelSize, profileSize = 50 } = config
+    const { address, ensName, ensNameStream, avatarSeed, puppetList, labelSize, profileSize = 50 } = config
 
     return [
       $Link({
         $content: $row(spacing.small, style({ alignItems: 'center', textDecoration: 'none' }))(
-          $roboAvatar(address, profileSize),
+          $roboAvatar(avatarSeed ?? address, profileSize),
           labelSize === undefined || labelSize > 0
             ? $column(style({ gap: '3px' }))(
                 $accountLabel({
                   address,
+                  ensName,
                   primarySize: labelSize
                 }),
                 puppetList.length > 0

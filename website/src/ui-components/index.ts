@@ -1,15 +1,10 @@
 export {
   $ButtonToggle,
   $Checkbox,
-  $Dropdown,
   $defaultButtonToggleBtn,
   $defaultButtonToggleContainer,
   $defaultCheckboxBox,
   $defaultCheckboxLabel,
-  $defaultDropdownAnchor,
-  $defaultDropdownContainer,
-  $defaultDropListContainer,
-  $defaultOptionContainer,
   $defaultSliderContainer,
   $defaultSliderThumb,
   $defaultTooltipContainer,
@@ -19,7 +14,6 @@ export {
   $Slider,
   $Tooltip,
   type I$ButtonToggle,
-  type I$Dropdown,
   type I$QuantumScroll,
   type I$Tooltip,
   type IPageRequest,
@@ -40,6 +34,13 @@ export * from './chart/$Baseline.js'
 export * from './chart/$CandleSticks.js'
 export * from './chart/$Chart.js'
 export * from './form/$Button.js'
+export {
+  $Dropdown,
+  $defaultDropdownContainer,
+  $defaultDropListContainer,
+  $defaultOptionContainer,
+  type I$Dropdown
+} from './form/$Dropdown.js'
 export * from './form/$DropMultiselect.js'
 export * from './form/$DropSelect.js'
 export * from './form/$TextField.js'

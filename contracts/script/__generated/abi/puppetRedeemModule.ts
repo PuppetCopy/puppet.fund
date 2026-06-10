@@ -65,16 +65,6 @@ export default [
                 "internalType": "address"
               },
               {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
                 "name": "signer",
                 "type": "address",
                 "internalType": "address"
@@ -107,31 +97,19 @@ export default [
             "internalType": "uint256"
           },
           {
-            "name": "masterParams",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
           },
           {
             "name": "amount",
@@ -139,11 +117,6 @@ export default [
             "internalType": "uint256"
           }
         ]
-      },
-      {
-        "name": "_masterAccount",
-        "type": "address",
-        "internalType": "address"
       },
       {
         "name": "_store",
@@ -156,14 +129,19 @@ export default [
         "internalType": "contract AccountModule"
       },
       {
+        "name": "_shareGate",
+        "type": "address",
+        "internalType": "contract ShareModule"
+      },
+      {
         "name": "_baseToken",
         "type": "address",
         "internalType": "contract IERC20"
       },
       {
-        "name": "_shareToken",
+        "name": "_fund",
         "type": "address",
-        "internalType": "contract ShareToken"
+        "internalType": "address"
       },
       {
         "name": "_digest",
@@ -220,31 +198,9 @@ export default [
         "internalType": "struct RedeemModule.FulfillIntent",
         "components": [
           {
-            "name": "params",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
           },
           {
             "name": "blockNumber",
@@ -272,6 +228,16 @@ export default [
             "internalType": "uint256"
           },
           {
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
             "name": "acceptableNetAssetValue",
             "type": "uint256",
             "internalType": "uint256"
@@ -287,11 +253,6 @@ export default [
             "internalType": "uint256"
           }
         ]
-      },
-      {
-        "name": "_masterAccount",
-        "type": "address",
-        "internalType": "address"
       },
       {
         "name": "_store",
@@ -314,9 +275,9 @@ export default [
         "internalType": "contract IERC20"
       },
       {
-        "name": "_shareToken",
+        "name": "_fund",
         "type": "address",
-        "internalType": "contract ShareToken"
+        "internalType": "address"
       },
       {
         "name": "_digest",
@@ -367,17 +328,12 @@ export default [
         "internalType": "contract RedeemStore"
       },
       {
-        "name": "_masterAccount",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "_baseToken",
-        "type": "address",
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "_puppetAccount",
+        "name": "_holder",
         "type": "address",
         "internalType": "address"
       }
@@ -401,24 +357,14 @@ export default [
         "internalType": "contract RedeemStore"
       },
       {
-        "name": "_masterAccount",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_baseToken",
-        "type": "address",
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "_puppetAccount",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
         "name": "_shareToken",
         "type": "address",
         "internalType": "contract ShareToken"
+      },
+      {
+        "name": "_holder",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [
@@ -448,16 +394,6 @@ export default [
                 "name": "user",
                 "type": "address",
                 "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
               },
               {
                 "name": "signer",
@@ -492,31 +428,19 @@ export default [
             "internalType": "uint256"
           },
           {
-            "name": "masterParams",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
           },
           {
             "name": "sharesOut",
@@ -526,9 +450,9 @@ export default [
         ]
       },
       {
-        "name": "_masterAccount",
+        "name": "_holder",
         "type": "address",
-        "internalType": "address"
+        "internalType": "contract IAccount"
       },
       {
         "name": "_store",
@@ -541,14 +465,19 @@ export default [
         "internalType": "contract AccountModule"
       },
       {
+        "name": "_shareGate",
+        "type": "address",
+        "internalType": "contract ShareModule"
+      },
+      {
         "name": "_baseToken",
         "type": "address",
         "internalType": "contract IERC20"
       },
       {
-        "name": "_shareToken",
+        "name": "_fund",
         "type": "address",
-        "internalType": "contract ShareToken"
+        "internalType": "address"
       },
       {
         "name": "_digest",

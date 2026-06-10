@@ -53,7 +53,7 @@ export function gmxOperator(core: IOperatorCore, opts: IGmxOptions = {}) {
   if (!isAddressEqual(core.token, CHAIN_TOKEN_MAP[HUB_CHAIN_ID].WETH as Address)) {
     throw new Error('gmxOperator needs a WETH-based core — create it with baseTokenId GMX_BASE_TOKEN_ID')
   }
-  const { operate, publicClient, token, master } = core
+  const { operate, publicClient, token, fund } = core
 
   const executionFeeBufferBps = opts.executionFeeBufferBps ?? 2_000n
   let gasLimitsConfig: IGasLimitsConfig | null = null
@@ -69,8 +69,14 @@ export function gmxOperator(core: IOperatorCore, opts: IGmxOptions = {}) {
 
   async function createOrder(p: IGmxOrder) {
     const executionFee = p.executionFee ?? (await quoteExecutionFee(p.orderType))
-    const { callList, amountIn, amountOut } = buildGmxOrderCalls(p, { master, baseToken: token, executionFee })
-    return operate(callList, { amountIn, amountOut })
+    const { callList, amountOut } = buildGmxOrderCalls(p, { master: fund, baseToken: token, executionFee })
+    if (amountOut > 0n) {
+      const balance = await core.getFundBalance()
+      if (balance < amountOut) {
+        throw new Error(`fund balance ${balance} below required ${amountOut} — allocate more on the site or size down`)
+      }
+    }
+    return operate(callList)
   }
 
   return {
@@ -80,7 +86,7 @@ export function gmxOperator(core: IOperatorCore, opts: IGmxOptions = {}) {
     getMarket(indexToken: Address): Address {
       return selectGmxMarket(token, indexToken)
     },
-    getPositions(account: Address = master) {
+    getPositions(account: Address = fund) {
       return publicClient.readContract({
         address: READER,
         abi: READER_ABI,
@@ -88,7 +94,7 @@ export function gmxOperator(core: IOperatorCore, opts: IGmxOptions = {}) {
         args: [DATA_STORE, account, 0n, 1000n]
       })
     },
-    getOrders(account: Address = master) {
+    getOrders(account: Address = fund) {
       return publicClient.readContract({
         address: READER,
         abi: READER_ABI,
@@ -99,7 +105,7 @@ export function gmxOperator(core: IOperatorCore, opts: IGmxOptions = {}) {
     createOrder,
     cancelOrder(key: Hex) {
       const callData = encodeFunctionData({ abi: ROUTER_ABI, functionName: 'cancelOrder', args: [key] })
-      return operate([call(ROUTER, callData, 1_000_000n)], { amountIn: 0n, amountOut: 0n })
+      return operate([call(ROUTER, callData, 1_000_000n)])
     },
     updateOrder(p: IUpdateOrder) {
       const callData = encodeFunctionData({
@@ -115,7 +121,7 @@ export function gmxOperator(core: IOperatorCore, opts: IGmxOptions = {}) {
           p.autoCancel ?? false
         ]
       })
-      return operate([call(ROUTER, callData, 1_000_000n)], { amountIn: 0n, amountOut: 0n })
+      return operate([call(ROUTER, callData, 1_000_000n)])
     }
   }
 }

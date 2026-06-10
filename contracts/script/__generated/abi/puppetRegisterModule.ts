@@ -280,6 +280,27 @@ export default [
   },
   {
     "type": "error",
+    "name": "Register__TokenSwapForbidden",
+    "inputs": [
+      {
+        "name": "tokenId",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "registered",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "attempted",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "Register__UnknownBaseTokenId",
     "inputs": [
       {

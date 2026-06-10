@@ -1,7 +1,7 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
-import type { IAccountLib__AccountInitParams, IAllocateModule__AllocateIntent } from '@puppet/contracts/types'
-import { type Address, concat, type Hex, keccak256, type TypedDataDefinition, toHex } from 'viem'
+import type { IAllocateModule__AllocateIntent } from '@puppet/contracts/types'
+import { type Address, encodePacked, type Hex, keccak256, type TypedDataDefinition } from 'viem'
 import { CompactContractError } from '../compact/error.js'
 import * as IntentLib from './intentLib.js'
 import { HUB_DOMAIN, type IDraftContext } from './shared.js'
@@ -13,7 +13,9 @@ export interface IAllocateRulePosition {
 }
 
 export interface IAllocateInput {
-  params: IAccountLib__AccountInitParams
+  master: Address
+  baseTokenId: Hex
+  name: Hex
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
@@ -33,10 +35,10 @@ export interface IAllocateAttestContext extends IDraftContext {
 }
 
 export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAllocateInput) {
-  const baseToken = IntentLib.verifyCommonIntent(ctx, {
+  IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
-    baseTokenId: input.params.baseTokenId,
+    baseTokenId: input.baseTokenId,
     lookupChain: HUB_CHAIN_ID,
     capAmount: input.masterAmount,
     acceptableRelayFee: input.acceptableRelayFee
@@ -88,13 +90,14 @@ export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAlloca
   }
 
   const intent: IAllocateModule__AllocateIntent = {
-    params: input.params,
+    master: input.master,
     blockNumber: input.blockNumber,
     deadline: input.deadline,
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: BigInt(ctx.chainId),
-    baseToken,
+    baseTokenId: input.baseTokenId,
+    name: input.name,
     acceptableNetAssetValue: input.acceptableNetAssetValue,
     totalShareSupply: input.totalShareSupply,
     masterAmount: input.masterAmount,
@@ -108,8 +111,8 @@ export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAlloca
     ...HUB_GATE_INTENTS.allocate,
     message: {
       ...rest,
-      puppetListHash: keccak256(concat(puppetList)),
-      matchedAmountListHash: keccak256(concat(matchedAmountList.map(x => toHex(x, { size: 32 }))))
+      puppetListHash: keccak256(encodePacked(['address[]'], [puppetList])),
+      matchedAmountListHash: keccak256(encodePacked(['uint256[]'], [matchedAmountList]))
     }
   }
   return { intent, typedData, args: [intent, bodyList, mandateList] }

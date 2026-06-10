@@ -225,20 +225,22 @@ function convertSolidityTypeToAbi(solType: string, structs: Map<string, StructDe
     return isArray ? `${SOLIDITY_TO_ABI_TYPE[baseType]}[]` : SOLIDITY_TO_ABI_TYPE[baseType]
   }
 
-  if (
-    baseType === 'IERC20' ||
-    (baseType.startsWith('I') && baseType.length > 1 && baseType[1] === baseType[1]!.toUpperCase())
-  ) {
-    return isArray ? 'address[]' : 'address'
-  }
-
-  // Handle qualified struct names like "Position.PositionInfo" -> "PositionInfo"
+  // Handle qualified struct names like "Position.PositionInfo" or "IAccount.SignTransfer" -> tuple.
+  // Resolved before the interface heuristic so a struct namespaced under an interface expands to its
+  // tuple instead of collapsing to address.
   const unqualifiedType = baseType.includes('.') ? baseType.split('.').pop()! : baseType
   const structDef = structs.get(unqualifiedType)
   if (structDef) {
     const tupleParts = structDef.fields.map(f => `${convertSolidityTypeToAbi(f.type, structs)} ${f.name}`)
     const tuple = `(${tupleParts.join(', ')})`
     return isArray ? `${tuple}[]` : tuple
+  }
+
+  if (
+    baseType === 'IERC20' ||
+    (baseType.startsWith('I') && baseType.length > 1 && baseType[1] === baseType[1]!.toUpperCase())
+  ) {
+    return isArray ? 'address[]' : 'address'
   }
 
   // Any PascalCase identifier that isn't a struct or known type is a contract reference (address)

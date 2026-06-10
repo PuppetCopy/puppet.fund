@@ -20,12 +20,12 @@
   evm_version = "cancun"
   solc_version = "0.8.35"
   via_ir = true
-  bytecode_hash = "ipfs"
-  cbor_metadata = true
+  bytecode_hash = "none"
+  cbor_metadata = false
   optimizer = true
   optimizer_runs = 200
   gas_reports = [
-    "PuppetGate",
+    "AccountGate",
     "MasterGate",
     "HubGate"
   ]

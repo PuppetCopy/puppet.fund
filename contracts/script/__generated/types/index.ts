@@ -2,25 +2,42 @@
 
 import type { Address, Hex } from 'viem'
 
-export interface IAccountLib__AccountInitParams {
-  user: Address
-  name: Hex
-  baseTokenId: Hex
-  signer: Address
-}
-
-export interface IAccountModule__CreateMasterAccountIntent {
+export interface IAccountGate__BridgeIntent {
   params: IAccountLib__AccountInitParams
+  tokenId: Hex
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
   chainId: bigint
-  initialDepositAmount: bigint
+  provider: Address
+  providerCallData: Hex
+  inputAmount: bigint
+  outputAmount: bigint
+  destinationChainId: bigint
+  expires: number
+  fillDeadline: number
+}
+
+export interface IAccountGate__RecognizeIntent {
+  params: IAccountLib__AccountInitParams
+  tokenId: Hex
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  amount: bigint
+}
+
+export interface IAccountLib__AccountInitParams {
+  user: Address
+  signer: Address
 }
 
 export interface IAccountModule__CreatePuppetAccountIntent {
   params: IAccountLib__AccountInitParams
+  tokenId: Hex
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
@@ -30,13 +47,14 @@ export interface IAccountModule__CreatePuppetAccountIntent {
 }
 
 export interface IAllocateModule__AllocateIntent {
-  params: IAccountLib__AccountInitParams
+  master: Address
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
   chainId: bigint
-  baseToken: Address
+  baseTokenId: Hex
+  name: Hex
   acceptableNetAssetValue: bigint
   totalShareSupply: bigint
   masterAmount: bigint
@@ -57,8 +75,9 @@ export interface IBaseGate__Config {
   maxRelayFeeBps: bigint
 }
 
-export interface IHubGate__BridgeToWalletIntent {
+export interface IHubGate__WithdrawToBridgeIntent {
   params: IAccountLib__AccountInitParams
+  tokenId: Hex
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
@@ -73,6 +92,17 @@ export interface IHubGate__BridgeToWalletIntent {
   providerCallData: Hex
   expires: number
   fillDeadline: number
+}
+
+export interface IHubGate__WithdrawToWalletIntent {
+  params: IAccountLib__AccountInitParams
+  tokenId: Hex
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  amount: bigint
 }
 
 export interface IIAccount__Call {
@@ -82,86 +112,33 @@ export interface IIAccount__Call {
   callData: Hex
 }
 
-export interface IMasterGate__BridgeIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  fromTransientRoute: boolean
-  inputToken: Address
-  outputToken: Address
-  inputAmount: bigint
-  outputAmount: bigint
-  destinationChainId: bigint
-  provider: Address
-  providerCallData: Hex
-  expires: number
-  fillDeadline: number
-}
-
-export interface IMasterGate__OperateIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  baseToken: Address
-  callList: IIAccount__Call[]
+export interface IIAccount__SignTransfer {
+  tokenId: Hex
+  token: Address
   amountIn: bigint
   amountOut: bigint
 }
 
-export interface IMasterGate__RecognizeIntent {
-  params: IAccountLib__AccountInitParams
+export interface IMasterGate__CreateFundAccountIntent {
+  master: Address
+  tokenId: Hex
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
   chainId: bigint
-  fromTransientRoute: boolean
-  amount: bigint
+  sweepAmount: bigint
 }
 
-export interface IPuppetGate__BridgeIntent {
-  params: IAccountLib__AccountInitParams
+export interface IMasterGate__OperateIntent {
+  master: Address
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
   chainId: bigint
-  fromTransientRoute: boolean
-  inputToken: Address
-  outputToken: Address
-  inputAmount: bigint
-  outputAmount: bigint
-  destinationChainId: bigint
-  provider: Address
-  providerCallData: Hex
-  expires: number
-  fillDeadline: number
-}
-
-export interface IPuppetGate__RecognizeIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  amount: bigint
-}
-
-export interface IPuppetGate__WithdrawIntent {
-  params: IAccountLib__AccountInitParams
-  blockNumber: bigint
-  deadline: bigint
-  acceptableRelayFee: bigint
-  nonce: bigint
-  chainId: bigint
-  amount: bigint
+  callList: IIAccount__Call[]
+  transferList: IIAccount__SignTransfer[]
 }
 
 export interface IRedeemModule__ClaimIntent {
@@ -171,17 +148,21 @@ export interface IRedeemModule__ClaimIntent {
   acceptableRelayFee: bigint
   nonce: bigint
   chainId: bigint
-  masterParams: IAccountLib__AccountInitParams
+  baseTokenId: Hex
+  name: Hex
+  master: Address
   amount: bigint
 }
 
 export interface IRedeemModule__FulfillIntent {
-  params: IAccountLib__AccountInitParams
+  master: Address
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
   chainId: bigint
+  baseTokenId: Hex
+  name: Hex
   acceptableNetAssetValue: bigint
   totalShareSupply: bigint
   acceptableShares: bigint
@@ -194,7 +175,9 @@ export interface IRedeemModule__SellIntent {
   acceptableRelayFee: bigint
   nonce: bigint
   chainId: bigint
-  masterParams: IAccountLib__AccountInitParams
+  baseTokenId: Hex
+  name: Hex
+  master: Address
   sharesOut: bigint
 }
 
@@ -216,7 +199,7 @@ export interface IRegisterModule__TokenInfo {
 }
 
 export interface IRuleLib__Rule {
-  masterParams: IAccountLib__AccountInitParams
+  fund: Address
   body: Hex
   mandate: Hex
 }
@@ -228,6 +211,6 @@ export interface ISubscribeModule__SubscribeIntent {
   acceptableRelayFee: bigint
   nonce: bigint
   chainId: bigint
-  baseToken: Address
+  baseTokenId: Hex
   rules: IRuleLib__Rule[]
 }

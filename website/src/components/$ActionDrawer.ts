@@ -1,9 +1,9 @@
 import { HUB_CHAIN_ID, TOKEN_ID } from '@puppet/contracts/const'
 import {
   predictDepositRoute,
-  predictMasterAccount,
+  predictFundAccount,
   predictPuppetAccount,
-  predictTransientRoute,
+  predictShareToken,
   symbolForBaseTokenId
 } from '@puppet/sdk/account'
 import { resolveDispatchChainId, resolveDispatchNetwork } from '@puppet/sdk/attestation'
@@ -42,32 +42,20 @@ import {
   just,
   map,
   merge,
-  nowWith,
   op,
   sample,
   sampleMap,
   skipRepeats,
   start,
+  switchLatest,
   switchMap,
   switchPromises,
   take
 } from 'aelea/stream'
 import { type IBehavior, multicast, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
-import {
-  $element,
-  $node,
-  $text,
-  attr,
-  component,
-  effectProp,
-  effectRun,
-  type I$Node,
-  type I$Slottable,
-  style
-} from 'aelea/ui'
+import { $node, $text, attr, component, effectRun, type I$Node, type I$Slottable, style } from 'aelea/ui'
 import { $Button, $column, $row, designSheet, isMobileScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { pushUrl } from 'aelea/ui-router'
 import { type Address, type Hex, isAddressEqual } from 'viem'
 import {
   $addressRef,
@@ -88,9 +76,9 @@ import {
   fadeIn,
   text
 } from '@/ui-components'
-import { routeSchema } from '../app/routeSchema.js'
 import { $jazzicon } from '../common/$avatar.js'
 import { $chainIcon, chainName } from '../common/$chain.js'
+import { $roboAvatar } from '../common/$roboAvatar.js'
 import { $heading3 } from '../common/$text.js'
 import { $card2 } from '../common/elements/$common.js'
 import * as context from '../io/context.js'
@@ -136,11 +124,10 @@ type PlannedStep = { kind: 'bind' } | { kind: 'draft'; draft: IDraft }
 const chainFor = (id: number) => (CHAIN_MAP as Record<number, typeof HUB_CHAIN>)[id] ?? HUB_CHAIN
 
 const DRAFT_VERB: Record<IDraft['kind'], string> = {
-  deposit: 'Fund',
+  deposit: 'Deposit',
   withdraw: 'Withdraw',
   subscribe: 'Subscribe',
   allocate: 'Allocate',
-  createMaster: 'Create master',
   sell: 'Sell',
   claim: 'Claim',
   fulfill: 'Fulfill'
@@ -425,7 +412,6 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
       type FeeBreakdown = {
         relay: Map<Hex, bigint>
         bridge: Map<Hex, bigint>
-        gasGwei: string
         descOf: (token: Hex) => ReturnType<typeof getTokenDescription>
       }
 
@@ -435,7 +421,7 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
 
         return op(
           combineMap(
-            (gas: bigint, registry: ITokenRegistryMap, ...feeMaps: RelayFeeMap[]): FeeBreakdown => {
+            (_gas: bigint, registry: ITokenRegistryMap, ...feeMaps: RelayFeeMap[]): FeeBreakdown => {
               const feeMapByToken = new Map<Hex, RelayFeeMap>()
               tokens.forEach((t, i) => {
                 feeMapByToken.set(t, feeMaps[i]!)
@@ -466,12 +452,7 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
                 }
               }
               const descOf = (token: Hex) => getTokenDescription(tokenInfoFor(registry, HUB_CHAIN_ID, token).token)
-              return {
-                relay,
-                bridge,
-                gasGwei: `${(Number(gas) / 1e9).toFixed(3)} gwei`,
-                descOf
-              }
+              return { relay, bridge, descOf }
             },
             context.gasPrice,
             tokenRegistryValue,
@@ -487,28 +468,24 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         switchMap(p => {
           const tokens = new Set<Hex>([...p.relay.keys(), ...p.bridge.keys()])
           if (tokens.size === 0) {
-            return $column(spacing.small, style({ minWidth: '200px', fontSize: text.sm }))(
-              $labeledValue('Relay fees', $text('-')),
-              $labeledValue('Gas price', p.gasGwei)
-            )
+            return $column(
+              spacing.small,
+              style({ minWidth: '200px', fontSize: text.sm })
+            )($labeledValue('Relay fees', $text('-')))
           }
-          return $column(spacing.small, style({ minWidth: '200px', fontSize: text.sm }))(
+          return $column(
+            spacing.small,
+            style({ minWidth: '200px', fontSize: text.sm })
+          )(
             ...[...tokens].flatMap(t => {
               const bridgeFee = p.bridge.get(t) ?? 0n
               const relayFee = p.relay.get(t) ?? 0n
               const desc = p.descOf(t)
               const rows: I$Node[] = []
-              if (bridgeFee > 0n)
-                rows.push($labeledValue(`Bridge fees (${desc.symbol})`, readableTokenAmountLabel(desc, bridgeFee)))
-              rows.push(
-                $labeledValue(
-                  `Relay fees (${desc.symbol})`,
-                  relayFee === 0n ? '-' : readableTokenAmountLabel(desc, relayFee)
-                )
-              )
+              if (bridgeFee > 0n) rows.push($labeledValue('Bridge fees', readableTokenAmountLabel(desc, bridgeFee)))
+              rows.push($labeledValue('Relay fees', relayFee === 0n ? '-' : readableTokenAmountLabel(desc, relayFee)))
               return rows
-            }),
-            $labeledValue('Gas price', p.gasGwei)
+            })
           )
         }, feeBreakdown)
 
@@ -617,7 +594,13 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
             $text(STEP_DESCRIPTION[kind]),
             recipient && recipientChain
               ? $row(spacing.tiny, style({ alignItems: 'center', color: palette.foreground, fontSize: text.xs }))(
-                  $text(kind === 'walletDeposit' || kind === 'walletDepositWnt' ? 'To' : 'From'),
+                  $text(
+                    kind === 'createPuppetAccount'
+                      ? 'Account'
+                      : kind === 'walletDeposit' || kind === 'walletDepositWnt'
+                        ? 'To'
+                        : 'From'
+                  ),
                   $anchor(attr({ href: getAccountExplorerUrl(recipient.address, recipientChain), target: '_blank' }))(
                     $text(readableAddress(recipient.address))
                   )
@@ -713,13 +696,20 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         return { symbol: symbolForBaseTokenId(baseTokenId) ?? desc.symbol, desc }
       }
 
-      // Resolve an account's profile (avatar + name) from the live subaccount list,
-      // falling back to a draft-supplied name for accounts not yet indexed (onboarding).
-      const $accountProfile = (address: Address, fallbackName?: Hex | null): I$Node =>
-        switchMap(accounts => {
-          const acc = accounts.find(a => isAddressEqual(a.account, address))
-          return $profileDisplay({ address, name: acc?.name ?? fallbackName, profileSize: 24 })
-        }, subaccountListValues)
+      const $accountProfile = (address: Address, fundName?: Hex, avatarSeed?: Address): I$Node =>
+        switchLatest(
+          map(list => {
+            const acc = list.find(a => isAddressEqual(a.account, address))
+            return acc && !acc.isFund
+              ? $profileDisplay({ address, isFund: false, user: acc.user, profileSize: 24 })
+              : $profileDisplay({
+                  address,
+                  name: fundName,
+                  profileSize: 24,
+                  $avatar: avatarSeed ? $roboAvatar(avatarSeed, 24) : undefined
+                })
+          }, subaccountListValues)
+        )
 
       const $depositDesc = (draft: IDepositDraft, registry: ITokenRegistryMap): I$Node => {
         const { symbol, desc } = renderToken(registry, draft.inputAmount.baseTokenId)
@@ -727,20 +717,12 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         const approx = draft.output.approx ? '≈ ' : ''
         const sweep = isSweep ? 'Sweep all · ' : ''
         const amountText = `${sweep}${approx}${readableTokenAmount(desc, draft.output.amount)} ${symbol}`
-        let onboardName: Hex | null = null
-        for (const s of draft.inputSteps) {
-          if (s.kind === 'createPuppetAccount') onboardName = s.input.params.name
-        }
-        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $text(amountText),
-          $metaText('to'),
-          $accountProfile(draft.output.receiver, onboardName)
-        )
+        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))($text(amountText))
       }
 
       const $withdrawDesc = (draft: IWithdrawDraft, registry: ITokenRegistryMap): I$Node => {
         const step = draft.inputSteps[0]!
-        const isBridge = step.kind === 'bridgeToWallet'
+        const isBridge = step.kind === 'withdrawToBridge'
         const isSweep = isBridge && step.input.inputAmount === 0n
         const { symbol, desc } = renderToken(registry, draft.inputAmount.baseTokenId)
         const approx = draft.output.approx ? '≈ ' : ''
@@ -787,7 +769,7 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
           $text(`${readableTokenAmount(desc, draft.masterAmount)} ${symbol}`),
           $metaText('to'),
-          $accountProfile(draft.master)
+          $accountProfile(draft.master, draft.name, predictShareToken(draft.master, draft.baseTokenId, draft.name))
         )
       }
 
@@ -824,39 +806,33 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
         if (draft.kind === 'sell') return $sellDesc(draft)
         if (draft.kind === 'claim') return $claimDesc(draft, registry)
         if (draft.kind === 'fulfill') return $fulfillDesc(draft, registry)
-        if (draft.kind === 'createMaster') {
-          const { symbol, desc } = renderToken(registry, draft.baseTokenId)
-          return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-            $text(`${readableTokenAmount(desc, draft.masterAmount)} ${symbol}`),
-            $metaText('to'),
-            $accountProfile(draft.master, draft.params.name)
-          )
-        }
         return $metaText((draft as { title?: string; kind: string }).title ?? (draft as { kind: string }).kind)
       }
 
       const $draftBadge = (draft: IDraft, query: Promise<unknown> | null, submitBlockByChain: Map<number, bigint>) => {
-        if (draft.kind === 'createMaster' || draft.kind === 'allocate') {
+        if (draft.kind === 'allocate') {
           const fundSteps = draft.inputSteps.map(step => {
             if (step.kind === 'transferToMaster' || step.kind === 'transferToMasterWnt') {
               return {
                 kind: step.kind,
                 nonce: null,
                 recipient: {
-                  address: predictDepositRoute(predictMasterAccount(step.input.params)),
+                  address: predictDepositRoute(step.input.params.signer),
                   chainId: step.input.chainId
                 }
               }
             }
-            const transientRoute = predictTransientRoute(predictMasterAccount(step.input.params))
+            const account =
+              step.kind === 'createFundAccount' ? predictFundAccount(step.input.master) : step.input.params.signer
             return {
               kind: step.kind,
               nonce: stepNonce(step),
-              recipient: { address: transientRoute, chainId: Number(step.input.chainId) }
+              recipient: { address: predictDepositRoute(account), chainId: Number(step.input.chainId) }
             }
           })
+          const trailingKind: StepKind = draft.kind === 'allocate' ? 'allocate' : 'createFundAccount'
           return $sequencedStepRow(
-            [...fundSteps, { kind: draft.kind, nonce: null, recipient: null }],
+            [...fundSteps, { kind: trailingKind, nonce: null, recipient: null }],
             query,
             submitBlockByChain,
             draft.alert !== null
@@ -871,6 +847,13 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
           )
         }
         const steps = draft.inputSteps.map(step => {
+          if (step.kind === 'createPuppetAccount') {
+            return {
+              kind: step.kind,
+              nonce: stepNonce(step),
+              recipient: { address: predictPuppetAccount(step.input.params), chainId: Number(step.input.chainId) }
+            }
+          }
           const depositRoute = predictDepositRoute(predictPuppetAccount(step.input.params))
           const hasChainId =
             step.kind === 'walletDeposit' ||
@@ -1057,38 +1040,6 @@ export const $ActionDrawer = ({ subaccountList, draftList, title = 'Pending Acti
                 if (p.indexerHealth.worstSeverity === 'stale') return $oneLiner('Data out of sync, cannot submit yet')
                 const offending = p.list.find(d => d.alert !== null)
                 if (!offending) return empty
-                if (offending.kind === 'createMaster') {
-                  const symbol = symbolForBaseTokenId(offending.baseTokenId) ?? 'base token'
-                  const portfolioHref = `/${routeSchema.portfolio.fragment}`
-                  const fullText = `Deposit ${symbol} to your Puppet Account to pay for execution fees`
-                  const $rich = $node(
-                    style({
-                      color: palette.message,
-                      fontSize: text.xs,
-                      whiteSpace: isMobileScreen ? 'normal' : 'nowrap'
-                    })
-                  )(
-                    $text(`Deposit ${symbol} to your `),
-                    $element('a')(
-                      attr({ href: portfolioHref }),
-                      style({
-                        color: palette.message,
-                        textDecoration: 'underline',
-                        cursor: 'pointer'
-                      }),
-                      effectProp(
-                        'onclick',
-                        nowWith(() => (ev: MouseEvent) => {
-                          if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return
-                          ev.preventDefault()
-                          pushUrl(portfolioHref)
-                        })
-                      )
-                    )($text('Puppet Account')),
-                    $text(' to pay for execution fees')
-                  )
-                  return isMobileScreen ? $rich : $oneLiner(fullText, $rich)
-                }
                 return $oneLiner(offending.alert!)
               },
               combine({

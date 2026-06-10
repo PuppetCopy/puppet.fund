@@ -753,6 +753,12 @@ export const ARBITRUM_TOKEN_LIST = [
     name: 'Sky'
   },
   {
+    symbol: 'SPCX',
+    decimals: 18,
+    address: '0x8CBd0d5d81e7957123E6D8fFaE657a40bDC5691b',
+    name: 'SpaceX'
+  },
+  {
     symbol: 'SPX6900',
     decimals: 8,
     address: '0xb736be525A65326513351058427d1f47B0CfB045',

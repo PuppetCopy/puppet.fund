@@ -55,7 +55,7 @@ export async function awaitAccountDeployed(
 ): Promise<void> {
   await pollUntil(
     () =>
-      selectOne(sql, 'AccountState', {
+      selectOne(sql, 'Account', {
         where: { account: { _eq: getAddress(account) }, chainId: { _eq: BigInt(chainId) } },
         fields: ['id']
       }),

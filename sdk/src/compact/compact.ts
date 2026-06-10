@@ -1,7 +1,7 @@
 import type { IStream } from 'aelea/stream'
 import { state } from 'aelea/stream-extended'
 import { type Address, getAddress, type Hex } from 'viem'
-import { predictMasterAccount, predictPuppetAccount } from '../account/index.js'
+import { predictFundAccount, predictPuppetAccount } from '../account/index.js'
 import type { IActionKind, IInputByKind, IIntentByKind } from '../attestation/index.js'
 import { createAdapter } from '../core/stream/stream.js'
 import { awaitAccountCall, awaitAccountDeployed } from '../state/dispatch.js'
@@ -35,17 +35,13 @@ export interface IDispatchedFrame {
   actualRelayFee: bigint
 }
 
-const MASTER_ROUTED_KINDS: ReadonlySet<IActionKind> = new Set([
-  'operate',
-  'allocate',
-  'fulfill',
-  'seedMasterAccount',
-  'createMasterAccount'
-])
+const FUND_ROUTED_KINDS: ReadonlySet<IActionKind> = new Set(['operate', 'allocate', 'fulfill', 'createFundAccount'])
 
 function accountForRequest(request: IRelayRequest): Address {
-  const isMaster = MASTER_ROUTED_KINDS.has(request.kind) || (request.input as { isMaster?: boolean }).isMaster === true
-  return isMaster ? predictMasterAccount(request.input.params) : predictPuppetAccount(request.input.params)
+  if (FUND_ROUTED_KINDS.has(request.kind)) {
+    return predictFundAccount((request.input as { master: Address }).master)
+  }
+  return predictPuppetAccount((request.input as { params: Parameters<typeof predictPuppetAccount>[0] }).params)
 }
 
 export type IMatchmakerStatus = 'open' | 'connecting' | 'closed'
@@ -199,7 +195,8 @@ export function createCompact(opts: ICompactOpts): ICompact {
           pending.delete(key)
           const idx = outbox.indexOf(request)
           if (idx !== -1) outbox.splice(idx, 1)
-          reject(new Error(`attest(${request.kind} nonce=${intent.nonce}) ack timed out after ${timeoutMs}ms`))
+          console.error(`attest(${request.kind} nonce=${intent.nonce}) ack timed out after ${timeoutMs}ms`)
+          reject(new Error(`The relay did not confirm the ${request.kind} action in time. Try again.`))
         }, timeoutMs)
         pending.set(key, { resolve, reject, timer, request })
         outbox.push(request)
@@ -207,11 +204,7 @@ export function createCompact(opts: ICompactOpts): ICompact {
       })
 
       const chainId = Number(intent.chainId)
-      if (
-        request.kind === 'createPuppetAccount' ||
-        request.kind === 'seedMasterAccount' ||
-        request.kind === 'createMasterAccount'
-      ) {
+      if (request.kind === 'createPuppetAccount' || request.kind === 'createFundAccount') {
         await awaitAccountDeployed(sql, account, chainId, settlementTimeoutMs)
       } else {
         await awaitAccountCall(sql, account, chainId, intent.nonce, settlementTimeoutMs)

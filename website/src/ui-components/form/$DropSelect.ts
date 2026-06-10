@@ -13,11 +13,13 @@ import {
   style,
   stylePseudo
 } from 'aelea/ui'
-import { $Dropdown, $defaultDropListContainer, $defaultOptionContainer, $row, spacing } from 'aelea/ui-components'
+import { $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { $icon, dropAnchorKeyNav, keyActivate, listboxKeyNav } from '../$common.js'
 import { $caretDown } from '../$icons.js'
 import { $infoLabel } from '../$info.js'
+import { $Dropdown } from './$Dropdown.js'
+
 export const $defaultDropSelectAnchor = $row(
   spacing.tiny,
   style({
@@ -32,12 +34,39 @@ export const $defaultDropSelectAnchor = $row(
     transition: 'border-color 120ms ease-out'
   }),
   // Hover brightens the border, matching the icon-circular controls / choice cards.
-  stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) })
+  stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) }),
+  // While the list is open the anchor joins the panel below it: flattened bottom corners
+  // and the same brightened border the panel uses, so the two read as one control.
+  stylePseudo('[aria-expanded="true"]', {
+    borderColor: colorShade(palette.foreground, 60),
+    borderBottomLeftRadius: '0',
+    borderBottomRightRadius: '0'
+  })
 )
 
 // Back-compat alias — `$container` was the historical name; `$anchor` describes
 // what it actually wraps (the clickable button visual, not the outer dropdown box).
 export const $defaultDropSelectContainer = $defaultDropSelectAnchor
+
+// Panel that joins the open anchor: flush under it (the dropdown positions it overlapping
+// the anchor's 1px bottom border), top corners squared, same border as the open anchor.
+export const $dropSelectJoinedListContainer = $node(
+  style({
+    display: 'flex',
+    flexDirection: 'column',
+    background: palette.background,
+    border: `1px solid ${colorShade(palette.foreground, 60)}`,
+    borderRadius: '0 0 14px 14px',
+    padding: '6px',
+    gap: '2px',
+    boxShadow: `0 8px 24px ${palette.shadow}`
+  })
+)
+
+export const $defaultDropSelectOptionContainer = $node(
+  style({ cursor: 'pointer', padding: '0 2px', borderRadius: '10px', display: 'block' }),
+  stylePseudo(':hover', { backgroundColor: palette.horizon })
+)
 
 export interface I$DropSelect<T> {
   value: IStream<T>
@@ -67,8 +96,8 @@ export const $DropSelect = <T>({
   label,
   $anchor = $defaultDropSelectAnchor,
   $container,
-  $dropListContainer = $defaultDropListContainer,
-  $optionContainer = $defaultOptionContainer,
+  $dropListContainer = $dropSelectJoinedListContainer,
+  $optionContainer = $defaultDropSelectOptionContainer,
   $$option = $stringRender<T>(),
   $valueLabel = $stringRender<T>(),
   closeOnSelect
@@ -79,7 +108,7 @@ export const $DropSelect = <T>({
     // ArrowDown/ArrowUp can move focus into the freshly-mounted list.
     let anchorEl: HTMLElement | null = null
     let listEl: HTMLElement | null = null
-    // Re-clicking the open trigger toggles the dropdown closed (aelea $Dropdown.isOpen reducer).
+    // Re-clicking the open trigger toggles the dropdown closed (isOpen reducer).
     const closeAndFocus = () => {
       anchorEl?.click()
       anchorEl?.focus()

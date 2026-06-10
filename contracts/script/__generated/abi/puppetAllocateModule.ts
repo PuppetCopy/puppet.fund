@@ -23,31 +23,9 @@ export default [
         "internalType": "struct AllocateModule.AllocateIntent",
         "components": [
           {
-            "name": "params",
-            "type": "tuple",
-            "internalType": "struct AccountLib.AccountInitParams",
-            "components": [
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "signer",
-                "type": "address",
-                "internalType": "address"
-              }
-            ]
+            "name": "master",
+            "type": "address",
+            "internalType": "address"
           },
           {
             "name": "blockNumber",
@@ -75,9 +53,14 @@ export default [
             "internalType": "uint256"
           },
           {
-            "name": "baseToken",
-            "type": "address",
-            "internalType": "contract IERC20"
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "name",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
             "name": "acceptableNetAssetValue",
@@ -132,6 +115,16 @@ export default [
         "internalType": "contract AllocateStore"
       },
       {
+        "name": "_redeemStore",
+        "type": "address",
+        "internalType": "contract RedeemStore"
+      },
+      {
+        "name": "_base",
+        "type": "address",
+        "internalType": "contract IERC20"
+      },
+      {
         "name": "_digest",
         "type": "bytes32",
         "internalType": "bytes32"
@@ -174,7 +167,7 @@ export default [
     ],
     "outputs": [
       {
-        "name": "masterAccountIn_",
+        "name": "fundAccountIn_",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -254,6 +247,17 @@ export default [
     "type": "error",
     "name": "Access__Unauthorized",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Account__NotDeployed",
+    "inputs": [
+      {
+        "name": "predicted",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

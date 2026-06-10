@@ -1,7 +1,7 @@
 import { PUPPET_CONTRACT_MAP } from '@puppet/contracts'
 import { HUB_CHAIN_ID, TOKEN_ID } from '@puppet/contracts/const'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
-import { predictDepositRoute, predictTransientRoute } from '@puppet/sdk/account'
+import { predictDepositRoute } from '@puppet/sdk/account'
 import {
   type IBridgeInput,
   type IDepositRoute,
@@ -10,7 +10,7 @@ import {
 } from '@puppet/sdk/attestation'
 import { formatThrownError } from '@puppet/sdk/compact'
 import { ADDRESS_ZERO, CHAIN_LIST, type ChainId } from '@puppet/sdk/const'
-import { getMappedValueFallback, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { getTokenDescription } from '@puppet/sdk/gmx'
 import {
   fetchDepositRouteBalance,
@@ -34,29 +34,19 @@ import {
   map,
   merge,
   op,
-  periodic,
   sample,
   sampleMap,
   skipRepeats,
+  skipRepeatsWith,
   start,
+  switchLatest,
   switchMap,
   switchPromises,
   take,
   until
 } from 'aelea/stream'
 import { type IBehavior, multicast, state } from 'aelea/stream-extended'
-import {
-  $element,
-  $node,
-  $text,
-  attr,
-  component,
-  type I$Node,
-  type INode,
-  nodeEvent,
-  style,
-  stylePseudo
-} from 'aelea/ui'
+import { $element, $node, $text, attr, component, type INode, nodeEvent, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { type Address, erc20Abi, formatUnits, type Hex } from 'viem'
@@ -65,7 +55,6 @@ import {
   $ButtonSecondary,
   $DropSelect,
   $defaultDropdownContainer,
-  $defaultDropSelectAnchor,
   $defaultSliderContainer,
   $icon,
   $intermediateText,
@@ -74,8 +63,6 @@ import {
   $noteTooltip,
   $Slider,
   $TokenAmountInput,
-  $tokenIconMap,
-  $unknown,
   $wallet,
   NOTE_TOOLTIP_HEIGHT,
   text
@@ -83,68 +70,19 @@ import {
 import { uiStorage } from '@/ui-storage'
 import { depositSourceKey, type IDepositSource } from '../../app/localStoreSchema.js'
 import { $tokenWithChainBadge, chainName } from '../../common/$chain.js'
-import { type AcrossBridgeQuote, fetchAcrossBridgeQuote } from '../../io/bridge/across.js'
-import { fetchLifiSwapQuote, type LifiSwapQuote } from '../../io/bridge/lifiSwap.js'
+import { fetchSwapQuote, type ISwapQuote } from '../../io/bridge/swapQuote.js'
 import { fetchTokenBalances } from '../../io/chain/balances.js'
 import * as context from '../../io/context.js'
-import { formatUsd, priceFor } from '../../io/gmx/priceFeed.js'
+import { formatUsd, latestPriceMap, priceFor } from '../../io/gmx/priceFeed.js'
 import { homePublicClient, type IConnectedWallet, wagmi } from '../../wallet/index.js'
 import { walletChainId as walletChainIdStream } from '../../wallet/state.js'
+import { $optionRow, $tokenIconBySymbol, decorateOptionList, type ITokenInputOption } from './$tokenOption.js'
 import type { IDepositDraft, IDepositStep } from './draft.js'
 import { DEFAULT_DEADLINE_SEC, walletClientForChain } from './runner/_shared.js'
 
-interface ITokenInputOption {
-  symbol: string
-  chainId: number
-  address: Address
-  balance: bigint | null
-  decimals: number
-  usdValue?: IStream<string>
-  disabled?: boolean
-}
-
-const $tokenIconBySymbol = (sym: string, size = '28px'): I$Node =>
-  $icon({
-    $content: getMappedValueFallback($tokenIconMap, sym, $unknown),
-    size,
-    fill: palette.message,
-    svgOps: style({ borderRadius: '50%' }),
-    viewBox: '0 0 32 32'
-  })
-
-const $optionRow = (opt: ITokenInputOption): I$Node => {
-  const balanceText = opt.balance && opt.balance > 0n ? readableTokenAmount(opt.decimals, opt.balance) : '-'
-  return $row(
-    spacing.default,
-    style({
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      flex: 1,
-      padding: '8px',
-      minWidth: '280px',
-      gap: '16px',
-      opacity: opt.disabled ? '0.4' : '1',
-      cursor: opt.disabled ? 'not-allowed' : 'pointer'
-    })
-  )(
-    $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
-      $tokenWithChainBadge($tokenIconBySymbol(opt.symbol, '40px'), opt.chainId, 40, 18),
-      $column(style({ gap: '1px', minWidth: '0' }))(
-        $node(style({ fontWeight: '600', fontSize: text.base, color: palette.message }))($text(opt.symbol)),
-        $node(style({ fontSize: text.xs, color: palette.foreground }))($text(chainName(opt.chainId)))
-      )
-    ),
-    $column(style({ alignItems: 'flex-end', gap: '1px' }))(
-      $node(style({ fontWeight: '600', fontSize: text.sm, color: palette.message }))(
-        opt.usdValue ? $loadingValue(opt.usdValue) : $text(balanceText)
-      ),
-      opt.usdValue ? $node(style({ color: palette.foreground, fontSize: text.xs }))($text(balanceText)) : $node()
-    )
-  )
-}
-
 export interface I$DepositEditor {
   accountState: ISubaccountState
+  baseTokenId: Hex
   tokenRegistry: ITokenRegistryMap
   walletAccount: IConnectedWallet
   lateBindDerivation?: Omit<IAccountLib__AccountInitParams, 'signer'>
@@ -153,6 +91,7 @@ export interface I$DepositEditor {
 
 export const $DepositEditor = ({
   accountState,
+  baseTokenId,
   tokenRegistry: _tokenRegistry,
   walletAccount,
   lateBindDerivation,
@@ -170,7 +109,6 @@ export const $DepositEditor = ({
       [enterPress, enterPressTether]: IBehavior<KeyboardEvent>
     ) => {
       const tokenRegistry = _tokenRegistry
-      const baseTokenId = accountState.baseTokenId
       const outputToken = tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseTokenId).token
       const recipient = accountState.account
       const outputTokenDesc = getTokenDescription(outputToken)
@@ -260,9 +198,16 @@ export const $DepositEditor = ({
       const isValidSource = (s: IDepositSource): boolean =>
         sources.some(src => src.chainId === s.chainId && src.address === s.address)
 
+      // The replayWrite stream must stay subscribed for the editor's whole life (via the
+      // savedSource merge below), otherwise its write half is disposed before the user
+      // ever selects and the choice never persists.
       const persistedSource: IStream<IDepositSource | null> = uiStorage.replayWrite(
         depositSourceKey(walletAccount.address),
         filter(isValidSource, selectSource)
+      )
+      const savedSource: IStream<IDepositSource> = filter(
+        (s): s is IDepositSource => s !== null && isValidSource(s),
+        persistedSource
       )
       // Mount-time chain, used only to pick the initial source default below.
       const mountWalletChainId = walletAccount.walletClient.chain?.id
@@ -273,8 +218,8 @@ export const $DepositEditor = ({
         : { chainId: sources[0].chainId, address: sources[0].address }
       const initialSource: IStream<IDepositSource> = op(
         combine({ saved: persistedSource, balances: balanceQuery }),
+        filter(p => p.saved === null || !isValidSource(p.saved)),
         map(p => {
-          if (p.saved !== null && isValidSource(p.saved)) return p.saved
           if (walletChainSource) return { chainId: walletChainSource.chainId, address: walletChainSource.address }
           if (p.balances === null) return fallbackSource
           const top = [...p.balances].sort((a, b) => (b.balance > a.balance ? 1 : b.balance < a.balance ? -1 : 0))[0]
@@ -291,7 +236,7 @@ export const $DepositEditor = ({
       )
       const sourceSelection: IStream<IDepositSource> = state(
         fallbackSource,
-        merge(selectSource, initialSource, draftSourceStream)
+        merge(selectSource, savedSource, initialSource, draftSourceStream)
       )
       const chainSelection: IStream<number> = op(
         sourceSelection,
@@ -397,6 +342,7 @@ export const $DepositEditor = ({
         symbol: source.symbol,
         chainId: source.chainId,
         address: source.address,
+        tokenId: source.routeTokenId,
         balance,
         decimals: source.decimals,
         usdValue: usdText(source, balance)
@@ -408,18 +354,20 @@ export const $DepositEditor = ({
 
       const optionList: IStream<readonly ITokenInputOption[]> = map(
         p =>
-          sources
-            .filter(source => !(source.chainId === p.sel.chainId && source.address === p.sel.address))
-            .map(source => {
+          decorateOptionList(
+            sources.map(source => {
               const balance =
                 p.list === null
                   ? null
                   : (p.list.find(b => b.chainId === source.chainId && b.tokenAddress === source.address)?.balance ?? 0n)
               const disabled = balance !== null && balance <= sourceRelayFee(source, p.fees)
               return { ...toOption(source, balance), disabled }
-            })
-            .sort((a, b) => Number(a.disabled) - Number(b.disabled)),
-        combine({ list: balanceQuery, sel: sourceSelection, fees: feeMapByTokenId })
+            }),
+            p.sel,
+            opt => p.prices[tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, opt.tokenId).token]?.price ?? null,
+            baseTokenId
+          ),
+        combine({ list: balanceQuery, sel: sourceSelection, fees: feeMapByTokenId, prices: latestPriceMap })
       )
 
       const sliderAmount: IStream<bigint> = sampleMap(
@@ -448,7 +396,7 @@ export const $DepositEditor = ({
       const focused: IStream<boolean> = state(false, merge(constant(true, focusEvt), constant(false, blurEvt)))
 
       type QuoteStatus =
-        | { status: 'idle'; quote: AcrossBridgeQuote | LifiSwapQuote | null }
+        | { status: 'idle'; quote: ISwapQuote | null }
         | { status: 'error'; quote: null; message: string }
 
       const bridgeAmountStream: IStream<bigint> = map(
@@ -460,24 +408,30 @@ export const $DepositEditor = ({
         combine({ value, surplus: depositSurplus, feeMap: relayFeeMapQuery, isSwap: isSwapStream })
       )
 
-      const bridgeQuoteInput: IStream<bigint> = map(
-        p => {
+      const bridgeQuoteInput: IStream<bigint> = op(
+        combine({ amount: bridgeAmountStream, feeMap: relayFeeMapQuery, inputFeeMap, isSwap: isSwapStream }),
+        map(p => {
           const fee = p.isSwap ? p.inputFeeMap.bridge.relayFee : p.feeMap.bridge.relayFee
           return p.amount > fee ? p.amount - fee : 0n
-        },
-        combine({ amount: bridgeAmountStream, feeMap: relayFeeMapQuery, inputFeeMap, isSwap: isSwapStream })
+        }),
+        skipRepeats
       )
 
-      const quoteRefreshTick: IStream<number> = start(0, periodic(60_000))
+      // Quotes fire only on user-driven changes (source, amount, sweep surplus); the
+      // fee-adjusted bridge input is SAMPLED at trigger time as a gas snapshot.
+      const quoteTrigger = op(
+        combine({ source: selectedSourceRef, value, surplus: depositSurplus }),
+        skipRepeatsWith(
+          (a, b) =>
+            a.source.chainId === b.source.chainId &&
+            a.source.address === b.source.address &&
+            a.value === b.value &&
+            a.surplus === b.surplus
+        )
+      )
       const quoteParams = debounce(
         200,
-        combine({
-          source: selectedSourceRef,
-          bridgeInput: bridgeQuoteInput,
-          inputPrice,
-          outputPrice: tokenPrice,
-          _: quoteRefreshTick
-        })
+        sampleMap((bridgeInput, t) => ({ source: t.source, bridgeInput }), bridgeQuoteInput, quoteTrigger)
       )
       const quoteFetch: IStream<Promise<QuoteStatus>> = op(
         map(async (params): Promise<QuoteStatus> => {
@@ -486,29 +440,17 @@ export const $DepositEditor = ({
           const bridgeInput = params.bridgeInput
           if (bridgeInput <= 0n) return { status: 'idle', quote: null }
           try {
-            if (source.chainId === HUB_CHAIN_ID) {
-              const quote = await fetchLifiSwapQuote({
-                chainId: HUB_CHAIN_ID,
-                inputToken: source.routeToken,
-                outputToken,
-                inputAmount: bridgeInput,
-                fromAddress: predictDepositRoute(recipient),
-                toAddress: predictTransientRoute(recipient)
-              })
-              return { status: 'idle', quote }
-            }
-            const depositRoute = predictDepositRoute(recipient)
-            const quote = await fetchAcrossBridgeQuote({
+            const quote = await fetchSwapQuote({
               originChainId: source.chainId,
               destinationChainId: HUB_CHAIN_ID,
               inputToken: source.routeToken,
               outputToken,
               inputAmount: bridgeInput,
-              recipient: depositRoute
+              route: predictDepositRoute(recipient)
             })
             return { status: 'idle', quote }
           } catch (err) {
-            console.error('[$DepositEditor.quoteFetch] fetchAcrossBridgeQuote failed', err)
+            console.error('[$DepositEditor.quoteFetch] fetchSwapQuote failed', err)
             return { status: 'error', quote: null, message: formatThrownError(err) }
           }
         }, quoteParams),
@@ -517,10 +459,8 @@ export const $DepositEditor = ({
       const quoteQuery: IStream<QuoteStatus> = multicast(switchPromises(quoteFetch))
 
       const accountParams: IAccountLib__AccountInitParams = {
-        user: accountState.user,
-        signer: accountState.signer,
-        name: accountState.name,
-        baseTokenId: accountState.baseTokenId
+        user: accountState.user ?? walletAccount.address,
+        signer: accountState.signer
       }
 
       // Leaf-local validation only: input-shape concerns the parent has no view into.
@@ -575,9 +515,8 @@ export const $DepositEditor = ({
             if (!s.quote || p.inPrice === null || p.outPrice === null) return '-'
             const fee =
               Number(formatUnits(total * p.inPrice, 30)) - Number(formatUnits(s.quote.outputAmount * p.outPrice, 30))
-            if (fee <= 0) return '$0.00'
-            if (fee < 0.01) return '< $0.01'
-            return `$${fee.toFixed(2)}`
+            const feeText = fee <= 0 ? '$0.00' : fee < 0.01 ? '< $0.01' : `$${fee.toFixed(2)}`
+            return `${feeText} via ${s.quote.provider}`
           }, quoteFetch)
         },
         combine({ value, surplus: depositSurplus, inPrice: inputPrice, outPrice: tokenPrice })
@@ -610,7 +549,15 @@ export const $DepositEditor = ({
           s.chainId === HUB_CHAIN_ID && !s.isSwap
             ? $column(spacing.small)($labeledValue('Relay fee', $relayFeeNode), $surplusInline)
             : $column(spacing.small)(
-                $labeledValue(s.chainId === HUB_CHAIN_ID ? 'Swap fee' : 'Bridge fee', $intermediateText(bridgeFeeText)),
+                $labeledValue(
+                  'Swap fee',
+                  switchLatest(
+                    map(
+                      p => (p.value + p.surplus === 0n ? $node($text('-')) : $intermediateText(bridgeFeeText)),
+                      combine({ value, surplus: depositSurplus })
+                    )
+                  )
+                ),
                 $labeledValue('Relay fee', $relayFeeNode),
                 $surplusInline
               ),
@@ -701,8 +648,7 @@ export const $DepositEditor = ({
       })({ change: sliderPercentTether() })
 
       const $picker = $DropSelect({
-        $container: $defaultDropdownContainer(style({ alignItems: 'flex-end', minWidth: '160px', flexShrink: '0' })),
-        $anchor: $defaultDropSelectAnchor(stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 40) })),
+        $container: $defaultDropdownContainer(style({ alignItems: 'flex-end', flexShrink: '0' })),
         value: selectedOption,
         optionList,
         $valueLabel: map((opt: ITokenInputOption) =>
@@ -725,22 +671,7 @@ export const $DepositEditor = ({
             )
           )
         ),
-        $$option: map((opt: ITokenInputOption) => $optionRow(opt)),
-        $optionContainer: $node(
-          style({ cursor: 'pointer', padding: '4px 6px', borderRadius: '10px', display: 'block' }),
-          stylePseudo(':hover', { backgroundColor: palette.horizon })
-        ),
-        $dropListContainer: $column(
-          style({
-            background: palette.background,
-            border: `1px solid ${colorShade(palette.foreground, 60)}`,
-            borderRadius: '14px',
-            padding: '6px',
-            gap: '2px',
-            boxShadow: `0 8px 24px ${palette.shadow}`,
-            minWidth: '260px'
-          })
-        )
+        $$option: map((opt: ITokenInputOption) => $optionRow(opt))
       })({ select: selectOptionTether() })
 
       const amountUsd: IStream<string> = map(
@@ -860,7 +791,7 @@ export const $DepositEditor = ({
                           input: {
                             chainId: originChainId,
                             params: accountParams,
-                            accountKind: 'puppet',
+                            tokenId: params.source.routeTokenId,
                             mode: 'native',
                             token: swapToken,
                             amount: inputAmount,
@@ -872,7 +803,7 @@ export const $DepositEditor = ({
                           input: {
                             chainId: originChainId,
                             params: accountParams,
-                            accountKind: 'puppet',
+                            tokenId: params.source.routeTokenId,
                             mode: 'erc20Gate',
                             token: swapToken,
                             amount: inputAmount,
@@ -885,14 +816,12 @@ export const $DepositEditor = ({
                   kind: 'bridge',
                   input: {
                     params: accountParams,
+                    tokenId: params.source.routeTokenId,
                     blockNumber: originBlockNumber,
                     deadline,
                     acceptableRelayFee: params.inputFeeMap.bridge.relayFee,
                     nonce: randomNonce(),
                     chainId: BigInt(originChainId),
-                    isMaster: false,
-                    fromTransientRoute: true,
-                    inputToken: swapToken,
                     inputAmount,
                     destinationChainId: BigInt(HUB_CHAIN_ID),
                     route: quote?.route ?? { kind: 'swap', provider: ADDRESS_ZERO, providerCallData: '0x' },
@@ -906,12 +835,12 @@ export const $DepositEditor = ({
                       kind: 'recognize',
                       input: {
                         params: accountParams,
+                        tokenId: baseTokenId,
                         blockNumber: homeBlockNumber,
                         deadline,
                         acceptableRelayFee: recognizeFee,
                         nonce: randomNonce(),
                         chainId: BigInt(HUB_CHAIN_ID),
-                        isMaster: false,
                         amount: swapOutputAmount
                       }
                     }
@@ -920,6 +849,7 @@ export const $DepositEditor = ({
                       input: {
                         chainId: BigInt(HUB_CHAIN_ID),
                         params: accountParams,
+                        tokenId: baseTokenId,
                         blockNumber: homeBlockNumber,
                         deadline,
                         nonce: randomNonce(),
@@ -936,6 +866,7 @@ export const $DepositEditor = ({
                       input: {
                         chainId: BigInt(originChainId),
                         params: accountParams,
+                        tokenId: params.source.routeTokenId,
                         blockNumber: originBlockNumber,
                         deadline,
                         nonce: randomNonce(),
@@ -984,7 +915,7 @@ export const $DepositEditor = ({
                         input: {
                           chainId: originChainId,
                           params: accountParams,
-                          accountKind: 'puppet',
+                          tokenId: params.source.routeTokenId,
                           mode: 'native',
                           token: inputToken,
                           amount: topUp,
@@ -996,7 +927,7 @@ export const $DepositEditor = ({
                         input: {
                           chainId: originChainId,
                           params: accountParams,
-                          accountKind: 'puppet',
+                          tokenId: params.source.routeTokenId,
                           mode: 'erc20Gate',
                           token: inputToken,
                           amount: topUp,
@@ -1012,12 +943,12 @@ export const $DepositEditor = ({
                     kind: 'recognize',
                     input: {
                       params: accountParams,
+                      tokenId: baseTokenId,
                       blockNumber: homeBlockNumber,
                       deadline,
                       acceptableRelayFee: recognizeFee,
                       nonce: randomNonce(),
                       chainId: BigInt(HUB_CHAIN_ID),
-                      isMaster: false,
                       amount: recognizeAmount
                     }
                   }
@@ -1026,6 +957,7 @@ export const $DepositEditor = ({
                     input: {
                       chainId: BigInt(HUB_CHAIN_ID),
                       params: accountParams,
+                      tokenId: baseTokenId,
                       blockNumber: homeBlockNumber,
                       deadline,
                       nonce: randomNonce(),
@@ -1065,13 +997,12 @@ export const $DepositEditor = ({
                 kind: 'bridge',
                 input: {
                   params: accountParams,
+                  tokenId: baseTokenId,
                   blockNumber: originBlockNumber,
                   deadline,
                   acceptableRelayFee: bridgeFee,
                   nonce: randomNonce(),
                   chainId: BigInt(originChainId),
-                  isMaster: false,
-                  fromTransientRoute: true,
                   inputAmount: params.bridgeAmount,
                   destinationChainId: BigInt(HUB_CHAIN_ID),
                   route: quote?.route ?? {
@@ -1091,12 +1022,12 @@ export const $DepositEditor = ({
                     kind: 'recognize',
                     input: {
                       params: accountParams,
+                      tokenId: baseTokenId,
                       blockNumber: homeBlockNumber,
                       deadline,
                       acceptableRelayFee: recognizeFee,
                       nonce: randomNonce(),
                       chainId: BigInt(HUB_CHAIN_ID),
-                      isMaster: false,
                       amount: bridgeOutputAmount
                     }
                   }
@@ -1105,6 +1036,7 @@ export const $DepositEditor = ({
                     input: {
                       chainId: BigInt(HUB_CHAIN_ID),
                       params: accountParams,
+                      tokenId: baseTokenId,
                       blockNumber: homeBlockNumber,
                       deadline,
                       nonce: randomNonce(),
@@ -1121,6 +1053,7 @@ export const $DepositEditor = ({
                     input: {
                       chainId: BigInt(originChainId),
                       params: accountParams,
+                      tokenId: baseTokenId,
                       blockNumber: originBlockNumber,
                       deadline,
                       nonce: randomNonce(),

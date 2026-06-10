@@ -1,6 +1,6 @@
 import { router__gasLimit } from '@puppet/contracts'
 import { CHAIN_TOKEN_MAP, HUB_CHAIN_ID, TOKEN_ID } from '@puppet/contracts/const'
-import { HUB_GATE_INTENTS, MASTER_GATE_INTENTS, PUPPET_GATE_INTENTS } from '@puppet/contracts/intents'
+import { ACCOUNT_GATE_INTENTS, HUB_GATE_INTENTS, MASTER_GATE_INTENTS } from '@puppet/contracts/intents'
 import { combine, type IStream, just, map, op } from 'aelea/stream'
 import { state } from 'aelea/stream-extended'
 import type { Address, Chain, Client, Hex, Transport } from 'viem'
@@ -15,7 +15,7 @@ import { periodicRun } from '../core/stream/recover.js'
 export type FeeClient = Client<Transport, Chain | undefined>
 
 const ROUTER_GAS = {
-  PuppetGate: router__gasLimit.PuppetGate,
+  AccountGate: router__gasLimit.AccountGate,
   MasterGate: router__gasLimit.MasterGate,
   HubGate: router__gasLimit.HubGate
 } as const
@@ -34,15 +34,10 @@ const PER_UNIT_GAS: Partial<Record<RelayMethod, bigint>> = {
   subscribe: 10_000n
 }
 
-// bridge/recognize exist on both PuppetGate and MasterGate; the caller passes the
-// account role to disambiguate. All other kinds live on exactly one gate.
-export function relayRouterForKind(kind: RelayMethod, isMaster = false): RelayRouter {
+export function relayRouterForKind(kind: RelayMethod): RelayRouter {
   if (kind in HUB_GATE_INTENTS) return 'HubGate'
-  const inPuppet = kind in PUPPET_GATE_INTENTS
-  const inMaster = kind in MASTER_GATE_INTENTS
-  if (inPuppet && inMaster) return isMaster ? 'MasterGate' : 'PuppetGate'
-  if (inMaster) return 'MasterGate'
-  if (inPuppet) return 'PuppetGate'
+  if (kind in MASTER_GATE_INTENTS) return 'MasterGate'
+  if (kind in ACCOUNT_GATE_INTENTS) return 'AccountGate'
   throw new Error(`unknown relay kind ${kind}`)
 }
 
@@ -97,7 +92,7 @@ export async function getAcceptableRelayFee(
 
 export function getRelayFeeQuoteSource(tokenPerEth: bigint, gasPrice: bigint): RelayFeeMap {
   const map = {} as RelayFeeMap
-  for (const router of ['PuppetGate', 'MasterGate', 'HubGate'] as const) {
+  for (const router of ['AccountGate', 'MasterGate', 'HubGate'] as const) {
     for (const [method, gas] of Object.entries(ROUTER_GAS[router])) {
       map[method as RelayMethod] = { relayFee: withMargin((gas * gasPrice * tokenPerEth) / WEI_PER_ETH) }
     }

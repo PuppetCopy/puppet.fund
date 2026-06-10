@@ -42,7 +42,7 @@ export const $PairBanner = ({ walletQuery, subaccountList }: IPairBanner) =>
           if (!wallet?.session) {
             return $hint('Connect your wallet and sign a session to pair your agent.')
           }
-          if (!p.masters.some(a => a.isMaster)) {
+          if (!p.funds.some(a => a.isFund)) {
             return $hint('Create and fund a trading account first, then reopen your agent’s pair link.')
           }
           const session = wallet.session
@@ -64,8 +64,7 @@ export const $PairBanner = ({ walletQuery, subaccountList }: IPairBanner) =>
                     signerKey: session.privateKey,
                     endpoints: {
                       matchmakerUrl,
-                      indexerUrl: indexerEndpoint,
-                      rpcUrl: `${location.origin}/api/rpc?network=arbitrum`
+                      indexerUrl: indexerEndpoint
                     }
                   })
                     .then(sealed =>
@@ -90,7 +89,7 @@ export const $PairBanner = ({ walletQuery, subaccountList }: IPairBanner) =>
         },
         combine({
           wallet: op(walletQuery, switchPromises, state()),
-          masters: op(subaccountList, switchPromises, state())
+          funds: op(subaccountList, switchPromises, state())
         })
       )
     )

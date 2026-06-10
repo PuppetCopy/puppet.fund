@@ -1,18 +1,19 @@
 import { HUB_CHAIN_ID, TOKEN_ID } from '@puppet/contracts/const'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
-import { EMPTY_NAME, predictPuppetAccount } from '@puppet/sdk/account'
+import { predictFundAccount, predictPuppetAccount, predictShareToken } from '@puppet/sdk/account'
 import { getTokenDescription } from '@puppet/sdk/gmx'
-import { type ISubaccountState, stubMasterState, stubSubaccountState } from '@puppet/sdk/state'
+import { type ISubaccountState, stubSubaccountState } from '@puppet/sdk/state'
 import { roboAvatarName } from '@puppet/sdk/ui-components'
 import {
   combine,
   constant,
   empty,
-  filter,
   type IStream,
+  just,
   map,
   nowWith,
   op,
+  skip,
   switchLatest,
   switchPromises
 } from 'aelea/stream'
@@ -51,7 +52,6 @@ import { $TokenBalanceEditor } from '../components/portfolio/$TokenBalanceEditor
 import type {
   IAllocateDraft,
   IClaimDraft,
-  ICreateMasterDraft,
   IDepositDraft,
   IFulfillDraft,
   ISellDraft,
@@ -85,7 +85,7 @@ export interface I$HelloPage {
   subaccountList: IStream<Promise<ISubaccountState[]>>
   draftDepositList: IStream<IDepositDraft[]>
   draftWithdrawList: IStream<IWithdrawDraft[]>
-  activeMaster: IStream<Address | null>
+  draftAllocateList: IStream<IAllocateDraft[]>
 }
 
 const $accountStatusBadge = (predicted: IStream<Address>, accountList: IStream<ISubaccountState[]>): I$Node =>
@@ -125,12 +125,12 @@ export const $HelloPage = ({
   subaccountList,
   draftDepositList,
   draftWithdrawList,
-  activeMaster
+  draftAllocateList
 }: I$HelloPage) =>
   component(
     (
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
-      [changeMasterDraft, changeMasterDraftTether]: IBehavior<IAllocateDraft | ICreateMasterDraft>,
+      [changeMasterDraft, changeMasterDraftTether]: IBehavior<IAllocateDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
       [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IFulfillDraft>,
       [selectBaseToken, selectBaseTokenTether]: IBehavior<Hex>,
@@ -143,8 +143,6 @@ export const $HelloPage = ({
       const subaccountListState: IStream<ISubaccountState[]> = op(subaccountList, switchPromises, state())
       const tokenRegistryValue = switchPromises(context.tokenRegistryQuery)
       const baseTokenId: IStream<Hex> = state(TOKEN_ID.USDC, selectBaseToken)
-      const nameInput: IStream<string> = state('', changeName)
-      const settledName: IStream<string> = state('', nameInput)
       const trackState: IStream<ITrack | null> = state(null, selectTrack)
       const modeState: IStream<IMasterMode> = state('human', selectMode)
 
@@ -155,35 +153,23 @@ export const $HelloPage = ({
             const wallet = p.wallet
             // If the AccountState query already returned accounts for this wallet, reuse their signer so
             // we target the real account and skip the session prompt; only ask to sign when there are none.
-            const existingSigner = p.accounts.find(a => isAddressEqual(a.user, wallet.address))?.signer
+            const existingSigner = p.accounts.find(a => a.user && isAddressEqual(a.user, wallet.address))?.signer
             const signer = wallet.session?.signer ?? existingSigner ?? wallet.address
             const needsSession = !wallet.session && !existingSigner
             const homeTokens = p.registry.get(HUB_CHAIN_ID)
+            const registeredIds = [...(homeTokens?.keys() ?? [])]
+            if (registeredIds.length === 0) return $callout('No tokens are registered yet. Check back shortly.')
+            const effectiveBid = homeTokens?.has(p.baseTokenId) ? p.baseTokenId : registeredIds[0]!
             const $tokenSelector = $ButtonToggle({
-              value: baseTokenId,
-              optionList: [...(homeTokens?.keys() ?? [])],
+              value: just(effectiveBid),
+              optionList: registeredIds,
               $$option: map((id: Hex) => {
                 const info = homeTokens?.get(id)
                 return $node(info ? $tokenLabelFromSummary(getTokenDescription(info.token)) : $text(id))
               })
             })({ select: selectBaseTokenTether() })
 
-            const predicted = op(
-              settledName,
-              map(rawName => {
-                const name = rawName.trim() ? toHex(rawName.trim(), { size: 32 }) : EMPTY_NAME
-                return predictPuppetAccount({ user: wallet.address, name, baseTokenId: p.baseTokenId, signer })
-              })
-            )
-
-            const $nameField = $FieldLabeled({
-              label: null,
-              placeholder: map(roboAvatarName, predicted),
-              maxLength: 32,
-              value: nameInput
-            })({
-              change: changeNameTether()
-            })
+            const account = predictPuppetAccount({ user: wallet.address, signer })
 
             const $signSession = $defaultButtonPrimary(
               style({ flexShrink: '0', alignSelf: 'center' }),
@@ -197,52 +183,48 @@ export const $HelloPage = ({
               )
             )($text('Sign session'))
 
-            const $accountSection = switchLatest(
-              map(rawName => {
-                const name = rawName.trim() ? toHex(rawName.trim(), { size: 32 }) : EMPTY_NAME
-                const derivation = { user: wallet.address, name, baseTokenId: p.baseTokenId }
-                const lateBindDerivation = wallet.session ? undefined : derivation
-                const acc = predictPuppetAccount({ ...derivation, signer })
-                const baseAccount: IStream<ISubaccountState> = op(
-                  subaccountListState,
-                  map(list => list.find(b => b.account === acc) ?? stubSubaccountState({ ...derivation, signer }))
-                )
-                const editorDraft = op(
-                  combine({ account: baseAccount, dep: draftDepositList, wd: draftWithdrawList }),
-                  map(d => {
-                    const addr = d.account.account
-                    return d.dep.find(x => x.account === addr) ?? d.wd.find(x => x.account === addr) ?? null
-                  })
-                )
-                return $TokenBalanceEditor({
-                  accountState: baseAccount,
-                  tokenRegistry: p.registry,
-                  walletAccount: wallet,
-                  lateBindDerivation,
-                  draft: editorDraft
-                })({ changeDraft: changeDraftTether() })
-              }, settledName)
+            const lateBindDerivation = wallet.session ? undefined : { user: wallet.address }
+            const baseAccount: IStream<ISubaccountState> = op(
+              subaccountListState,
+              map(
+                list => list.find(b => b.account === account) ?? stubSubaccountState({ user: wallet.address, signer })
+              )
             )
+            const editorDraft = op(
+              combine({ account: baseAccount, dep: draftDepositList, wd: draftWithdrawList }),
+              map(d => {
+                const addr = d.account.account
+                return d.dep.find(x => x.account === addr) ?? d.wd.find(x => x.account === addr) ?? null
+              })
+            )
+            const $accountSection = $TokenBalanceEditor({
+              accountState: baseAccount,
+              baseTokenId: effectiveBid,
+              tokenRegistry: p.registry,
+              walletAccount: wallet,
+              lateBindDerivation,
+              draft: editorDraft
+            })({ changeDraft: changeDraftTether() })
 
             return $column(spacing.default)(
               $column(spacing.tiny)(
                 $tokenSelector,
                 $node(style({ color: palette.foreground, fontSize: text.xs, lineHeight: '1.5' }))(
                   $text(
-                    'Base token: the currency your account holds and settles in. Matching and funding only happen within the same base token, so pick the one your traders use.'
+                    'Base token: the currency your balance settles in. Matching and funding only happen within the same base token, so pick the one your traders use.'
                   )
                 )
               ),
-              $stubAccountDisplay({
-                $title: $nameField,
-                address: predicted,
-                $detail: needsSession
-                  ? $node(style({ fontSize: text.base, color: palette.indeterminate }))(
-                      $text('Sign to maintain a session')
+              ...(needsSession
+                ? [
+                    $row(spacing.default, style({ alignItems: 'center' }))(
+                      $node(style({ fontSize: text.base, color: palette.indeterminate, flex: '1' }))(
+                        $text('Sign once to maintain a session on this device')
+                      ),
+                      $signSession
                     )
-                  : undefined,
-                $action: needsSession ? $signSession : $accountStatusBadge(predicted, subaccountListState)
-              }),
+                  ]
+                : []),
               $accountSection
             )
           },
@@ -257,40 +239,46 @@ export const $HelloPage = ({
             const wallet = p.wallet
             // If the AccountState query already returned accounts for this wallet, reuse their signer so
             // we target the real account and skip the session prompt; only ask to sign when there are none.
-            const existingSigner = p.accounts.find(a => isAddressEqual(a.user, wallet.address))?.signer
+            const existingSigner = p.accounts.find(a => a.user && isAddressEqual(a.user, wallet.address))?.signer
             const signer = wallet.session?.signer ?? existingSigner ?? wallet.address
             const needsSession = !wallet.session && !existingSigner
             const homeTokens = p.registry.get(HUB_CHAIN_ID)
+            const registeredIds = [...(homeTokens?.keys() ?? [])]
+            if (registeredIds.length === 0) return $callout('No tokens are registered yet. Check back shortly.')
+            const effectiveBid = homeTokens?.has(p.baseTokenId) ? p.baseTokenId : registeredIds[0]!
             const $tokenSelector = $ButtonToggle({
-              value: baseTokenId,
-              optionList: [...(homeTokens?.keys() ?? [])],
+              value: just(effectiveBid),
+              optionList: registeredIds,
               $$option: map((id: Hex) => {
                 const info = homeTokens?.get(id)
                 return $node(info ? $tokenLabelFromSummary(getTokenDescription(info.token)) : $text(id))
               })
             })({ select: selectBaseTokenTether() })
 
-            const masterStub = (rawName: string): ISubaccountState => {
-              const name = rawName.trim() ? toHex(rawName.trim(), { size: 32 }) : EMPTY_NAME
-              const params: IAccountLib__AccountInitParams = {
-                user: wallet.address,
-                name,
-                baseTokenId: p.baseTokenId,
-                signer
-              }
-              return stubMasterState(params)
+            const fundParams: IAccountLib__AccountInitParams = { user: wallet.address, signer }
+            const fundMaster = predictPuppetAccount(fundParams)
+            const fundStub: ISubaccountState = {
+              ...stubSubaccountState(fundParams),
+              account: predictFundAccount(fundMaster),
+              signer: fundMaster,
+              isFund: true
             }
-
-            const predicted = op(
-              settledName,
-              map(rawName => masterStub(rawName).account)
+            const predicted: IStream<Address> = just(fundStub.account)
+            const defaultName = roboAvatarName(fundStub.account)
+            const fundName: IStream<string> = state(defaultName, changeName)
+            // The ShareToken address derives from the fund name, so the identity preview
+            // (avatar + address) updates live as the user types.
+            const shareToken: IStream<Address> = map(
+              name =>
+                predictShareToken(fundStub.account, effectiveBid, toHex(name.trim() || defaultName, { size: 32 })),
+              fundName
             )
 
             const $nameField = $FieldLabeled({
               label: null,
-              placeholder: map(roboAvatarName, predicted),
+              placeholder: defaultName,
               maxLength: 32,
-              value: nameInput
+              value: skip(1, fundName)
             })({
               change: changeNameTether()
             })
@@ -307,25 +295,22 @@ export const $HelloPage = ({
               )
             )($text('Sign session'))
 
-            const $accountSection = switchLatest(
-              map(rawName => {
-                const stub = masterStub(rawName)
-                const account: IStream<ISubaccountState> = op(
-                  subaccountListState,
-                  map(list => list.find(b => isAddressEqual(b.account, stub.account)) ?? stub)
-                )
-                return $AllocateEditor({
-                  account,
-                  walletAccount: wallet,
-                  tokenRegistry: p.registry,
-                  activeMaster
-                })({
-                  changeDraft: changeMasterDraftTether(),
-                  changeRedeemDraft: changeRedeemDraftTether(),
-                  changeFulfillDraft: changeFulfillDraftTether()
-                })
-              }, settledName)
+            const account: IStream<ISubaccountState> = op(
+              subaccountListState,
+              map(list => list.find(b => isAddressEqual(b.account, fundStub.account)) ?? fundStub)
             )
+            const $accountSection = $AllocateEditor({
+              account,
+              walletAccount: wallet,
+              tokenRegistry: p.registry,
+              initialBaseTokenId: just(effectiveBid),
+              fundName,
+              draft: map(list => list.find(d => d.account === fundStub.account) ?? null, draftAllocateList)
+            })({
+              changeDraft: changeMasterDraftTether(),
+              changeRedeemDraft: changeRedeemDraftTether(),
+              changeFulfillDraft: changeFulfillDraftTether()
+            })
 
             return $column(spacing.default)(
               $column(spacing.tiny)(
@@ -338,12 +323,14 @@ export const $HelloPage = ({
               ),
               $stubAccountDisplay({
                 $title: $nameField,
-                address: predicted,
+                address: shareToken,
                 $detail: needsSession
                   ? $node(style({ fontSize: text.base, color: palette.indeterminate }))(
                       $text('Sign to maintain a session')
                     )
-                  : undefined,
+                  : $node(style({ fontSize: text.xs, color: palette.foreground }))(
+                      $text('Name your fund. This is the name backers see on the leaderboard and your profile.')
+                    ),
                 $action: needsSession ? $signSession : $accountStatusBadge(predicted, subaccountListState)
               }),
               $accountSection
@@ -429,16 +416,16 @@ export const $HelloPage = ({
           'puppet',
           $puppetLogo,
           'Puppet fund',
-          'Back a trader',
-          'Puppets (Investors) pick and choose top traders to fund by their rules',
+          'Earn from top traders',
+          'Fund once, copy many. Your money follows the traders you pick, under rules you sign.',
           palette.primary
         ),
         $choiceCard(
           'master',
           $puppeteer,
           'Master Wallet',
-          'Become a trader',
-          'Traders seamlessly earn more doing what they do best',
+          'Get backed to trade',
+          'Seamlessly trade as you do and earn more. Backer capital follows your moves and pays performance fees.',
           palette.positive
         )
       )
@@ -454,7 +441,7 @@ export const $HelloPage = ({
             return $card(spacing.default)($subhead('Fund your account'), $fundStep($fundEditor))
           }
           if (track === 'master') {
-            return $card(spacing.default)($subhead('Create your trading account'), $createMasterStep)
+            return $card(spacing.default)($subhead('Create your fund'), $createMasterStep)
           }
           return empty
         }, trackState)
@@ -504,8 +491,7 @@ export const $HelloPage = ({
         ),
         {
           changeDraft,
-          changeCreateMasterDraft: filter((d): d is ICreateMasterDraft => d.kind === 'createMaster', changeMasterDraft),
-          changeAllocateDraft: filter((d): d is IAllocateDraft => d.kind === 'allocate', changeMasterDraft),
+          changeAllocateDraft: changeMasterDraft,
           changeRedeemDraft,
           changeFulfillDraft
         }
@@ -515,13 +501,11 @@ export const $HelloPage = ({
 
 const $hero = (): I$Node =>
   $column(spacing.default, style({ paddingBottom: '12px' }))(
-    $heading1($text('Hello.')),
+    $heading1($text('Seamless copytrading.')),
     $node(style({ fontSize: text.lg, lineHeight: '1.5' }))(
-      $element('span')(style({ color: palette.foreground }))(
-        $text('Puppet connects backers and traders under signed rules. ')
-      ),
+      $element('span')(style({ color: palette.foreground }))($text('Back top traders, or get backed to trade. ')),
       $element('span')(style({ color: palette.message }))(
-        $text('You hold custody. Your subaccount is a smart wallet controlled by you.')
+        $text('You hold custody, and every action runs under rules you sign.')
       )
     )
   )
@@ -623,6 +607,7 @@ const $step = (n: number, label: string, $extra?: I$Node): I$Node =>
 
 const $spinUpStep = (templateState: IStream<ITemplate>, $picker: I$Node): I$Node =>
   $column(spacing.default)(
+    $body('The GMX templates trade a WETH fund: create your fund above with WETH as the base token before pairing.'),
     $step(
       1,
       'Pick a template and scaffold it on your machine:',

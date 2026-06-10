@@ -1,26 +1,22 @@
 // This file is auto-generated from forge test --gas-report. Do not edit manually.
 
 export const router__gasLimit = {
-  PuppetGate: {
-    bridge: 413609n,
-    createPuppetAccount: 267217n,
-    recognize: 204738n,
-    walletWithdraw: 187195n,
-    walletWithdrawWnt: 200409n
+  AccountGate: {
+    bridge: 390061n,
+    createPuppetAccount: 262355n,
+    recognize: 218167n
   },
   MasterGate: {
-    bridge: 391762n,
-    createMasterAccount: 313141n,
-    operate: 122773n,
-    recognize: 179202n
+    createFundAccount: 296818n,
+    operate: 154631n
   },
   HubGate: {
-    allocate: 396691n,
-    bridgeToWallet: 392916n,
-    claim: 251326n,
-    fulfill: 253339n,
-    seedMasterAccount: 547972n,
-    sell: 253620n,
-    subscribe: 218300n
+    allocate: 610940n,
+    claim: 233094n,
+    fulfill: 256122n,
+    sell: 263765n,
+    subscribe: 204397n,
+    withdrawToBridge: 365074n,
+    withdrawToWallet: 183482n
   }
 } as const

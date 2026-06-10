@@ -33,10 +33,10 @@ export async function evaluateAccountNav(sql: IIndexerClient, params: IEvaluateA
     )
   ])
 
-  const chains = composeCashLeg(subaccount, params.health)
+  const chains = composeCashLeg(subaccount, params.health, params.baseTokenId)
   const breakdown = composeBreakdown(chains, valuations)
   const { navMark, navFloor, navSigned } = computeNavValues(breakdown, params.kind, config)
-  const gate = checkNavGate(breakdown, navSigned, config, { clientNav: params.clientNav })
+  const gate = checkNavGate(breakdown, navSigned, config, { clientNav: params.clientNav, kind: params.kind })
 
   return { navMark, navFloor, navSigned, kind: params.kind, breakdown, gate }
 }

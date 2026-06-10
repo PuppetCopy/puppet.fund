@@ -39,6 +39,24 @@ export interface I$RedeemEditor {
   tokenRegistry: ITokenRegistryMap
 }
 
+const EMPTY_POSITION: IPuppetRedeemPosition = {
+  sharesHeld: 0n,
+  stake: 0n,
+  cursor: 0n,
+  accrued: 0n,
+  accruedPerStake: 0n,
+  totalStake: 0n
+}
+
+const positionStreamFor = (puppet: Address, masterAccount: Address): IStream<IPuppetRedeemPosition> =>
+  op(
+    merge(
+      fromPromise(getPuppetRedeemPosition(sqlClient, puppet, masterAccount)),
+      livePuppetRedeemPosition(sqlClient, puppet, masterAccount)
+    ),
+    state(EMPTY_POSITION)
+  )
+
 export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, tokenRegistry }: I$RedeemEditor) =>
   component(
     (
@@ -48,19 +66,12 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
       [enterShares, enterSharesTether]: IBehavior<KeyboardEvent>,
       [sliderPercent, sliderPercentTether]: IBehavior<number>,
       [clickMax, clickMaxTether]: IBehavior<INode<HTMLButtonElement>, MouseEvent>,
-      [clickSell, clickSellTether]: IBehavior<PointerEvent>,
-      [clickClaim, clickClaimTether]: IBehavior<PointerEvent>
+      [clickSell, clickSellTether]: IBehavior<PointerEvent>
     ) => {
       const baseTokenInfo = tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseTokenId)
       const desc = getTokenDescription(baseTokenInfo.token)
 
-      const positionStream: IStream<IPuppetRedeemPosition> = op(
-        merge(
-          fromPromise(getPuppetRedeemPosition(sqlClient, puppet, masterAccount)),
-          livePuppetRedeemPosition(sqlClient, puppet, masterAccount)
-        ),
-        state({ sharesHeld: 0n, stake: 0n, cursor: 0n, accrued: 0n, accruedPerStake: 0n, totalStake: 0n })
-      )
+      const positionStream = positionStreamFor(puppet, masterAccount)
       const sharesHeldStream: IStream<bigint> = map(p => p.sharesHeld, positionStream)
 
       const sliderShares: IStream<bigint> = sampleMap(
@@ -76,7 +87,7 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
 
       const focused: IStream<boolean> = state(false, merge(constant(true, focusShares), constant(false, blurShares)))
 
-      const sellDraft: IStream<ISellDraft> = sampleMap(
+      const changeDraft: IStream<ISellDraft> = sampleMap(
         (params): ISellDraft => ({
           kind: 'sell',
           id: `sell:${masterAccount}`,
@@ -93,27 +104,7 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
         merge(clickSell, enterShares)
       )
 
-      const claimDraft: IStream<IClaimDraft> = sampleMap(
-        (position): IClaimDraft => ({
-          kind: 'claim',
-          id: `claim:${masterAccount}`,
-          account: puppet,
-          title: 'Claim',
-          alert: null,
-          master: masterAccount,
-          masterAccount,
-          baseToken,
-          baseTokenId,
-          amount: computeClaimable(position)
-        }),
-        positionStream,
-        clickClaim
-      )
-
-      const changeDraft: IStream<ISellDraft | IClaimDraft> = merge(sellDraft, claimDraft)
-
       const $editor = switchMap(position => {
-        const claimable = computeClaimable(position)
         const queued = position.stake
         const held = position.sharesHeld
 
@@ -166,48 +157,6 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
           $node(style({ color: palette.foreground, fontSize: text.xs }))($text(readableTokenAmount(desc, held)))
         )
 
-        const $statRow = (label: string, value: string, hint?: string) =>
-          $row(spacing.small, style({ alignItems: 'baseline', justifyContent: 'space-between' }))(
-            $node(style({ color: palette.foreground, fontSize: text.xs }))($text(label)),
-            $row(spacing.small, style({ alignItems: 'baseline' }))(
-              hint
-                ? $node(style({ color: palette.foreground, fontSize: text.xs, fontStyle: 'italic' }))($text(hint))
-                : empty,
-              $node(style({ color: palette.message, fontWeight: '600' }))($text(value))
-            )
-          )
-
-        const $claimSection = $column(
-          spacing.default,
-          style({
-            margin: '0 -28px',
-            padding: '16px 28px',
-            borderTop: `1px solid ${colorShade(palette.foreground, 12)}`,
-            background: colorShade(palette.foreground, 8)
-          })
-        )(
-          $row(spacing.small, style({ alignItems: 'center', justifyContent: 'space-between' }))(
-            $node(style({ color: palette.foreground, fontSize: text.sm, fontWeight: '500' }))($text('Claim accrued')),
-            $node(style({ color: palette.message, fontWeight: '600' }))(
-              $text(`${readableTokenAmount(desc, claimable)} ${desc.symbol}`)
-            )
-          ),
-          queued > 0n
-            ? $node(style({ color: palette.foreground, fontSize: text.xs }))(
-                $text(`${readableTokenAmount(desc, queued)} shares queued, waiting on master fulfillment.`)
-              )
-            : $node(style({ color: palette.foreground, fontSize: text.xs }))(
-                $text('Nothing queued. Sell shares first, then claim once the master fulfills.')
-              ),
-          $row(spacing.small)(
-            $node(style({ flex: 1 }))(),
-            $ButtonSecondary({
-              disabled: map(() => claimable === 0n, sharesValue),
-              $content: $text(`Claim ${readableTokenAmount(desc, claimable)} ${desc.symbol}`)
-            })({ click: clickClaimTether() })
-          )
-        )
-
         return $column(spacing.default, style({ minWidth: '380px' }))(
           $row(
             style({
@@ -248,24 +197,81 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
               )
             })({ change: sliderPercentTether() })
           ),
-          $row(
-            spacing.small,
-            style({ alignItems: 'center' })
-          )(
-            $statRow(
-              'Queued',
-              `${readableTokenAmount(desc, queued)} shares`,
-              queued > 0n ? 'awaiting fulfillment' : undefined
+          $row(spacing.small, style({ alignItems: 'baseline', justifyContent: 'space-between' }))(
+            $node(style({ color: palette.foreground, fontSize: text.xs }))($text('Queued')),
+            $row(spacing.small, style({ alignItems: 'baseline' }))(
+              queued > 0n
+                ? $node(style({ color: palette.foreground, fontSize: text.xs, fontStyle: 'italic' }))(
+                    $text('awaiting fulfillment')
+                  )
+                : empty,
+              $node(style({ color: palette.message, fontWeight: '600' }))(
+                $text(`${readableTokenAmount(desc, queued)} shares`)
+              )
             )
           ),
           $row(spacing.small, style({ alignItems: 'center' }))(
             $node(style({ flex: 1 }))(),
             $ButtonSecondary({ disabled: sellDisabled, $content: $text('Sell') })({ click: clickSellTether() })
-          ),
-          $claimSection
+          )
         )
       }, positionStream)
 
       return [$editor, { changeDraft }]
     }
   )
+
+export const $ClaimEditor = ({ puppet, masterAccount, baseToken, baseTokenId, tokenRegistry }: I$RedeemEditor) =>
+  component(([clickClaim, clickClaimTether]: IBehavior<PointerEvent>) => {
+    const baseTokenInfo = tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseTokenId)
+    const desc = getTokenDescription(baseTokenInfo.token)
+
+    const positionStream = positionStreamFor(puppet, masterAccount)
+
+    const changeDraft: IStream<IClaimDraft> = sampleMap(
+      (position): IClaimDraft => ({
+        kind: 'claim',
+        id: `claim:${masterAccount}`,
+        account: puppet,
+        title: 'Claim',
+        alert: null,
+        master: masterAccount,
+        masterAccount,
+        baseToken,
+        baseTokenId,
+        amount: computeClaimable(position)
+      }),
+      positionStream,
+      clickClaim
+    )
+
+    const $editor = switchMap(position => {
+      const claimable = computeClaimable(position)
+      const queued = position.stake
+
+      return $column(spacing.default, style({ minWidth: '380px' }))(
+        $row(spacing.small, style({ alignItems: 'center', justifyContent: 'space-between' }))(
+          $node(style({ color: palette.foreground, fontSize: text.sm, fontWeight: '500' }))($text('Claim accrued')),
+          $node(style({ color: palette.message, fontWeight: '600' }))(
+            $text(`${readableTokenAmount(desc, claimable)} ${desc.symbol}`)
+          )
+        ),
+        queued > 0n
+          ? $node(style({ color: palette.foreground, fontSize: text.xs }))(
+              $text(`${readableTokenAmount(desc, queued)} shares queued, waiting on master fulfillment.`)
+            )
+          : $node(style({ color: palette.foreground, fontSize: text.xs }))(
+              $text('Nothing queued. Sell shares first, then claim once the master fulfills.')
+            ),
+        $row(spacing.small)(
+          $node(style({ flex: 1 }))(),
+          $ButtonSecondary({
+            disabled: map(() => claimable === 0n, positionStream),
+            $content: $text(`Claim ${readableTokenAmount(desc, claimable)} ${desc.symbol}`)
+          })({ click: clickClaimTether() })
+        )
+      )
+    }, positionStream)
+
+    return [$editor, { changeDraft }]
+  })

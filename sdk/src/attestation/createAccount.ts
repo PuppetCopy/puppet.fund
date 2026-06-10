@@ -1,16 +1,16 @@
-import { PUPPET_GATE_INTENTS } from '@puppet/contracts/intents'
+import { ACCOUNT_GATE_INTENTS } from '@puppet/contracts/intents'
 import type { IAccountLib__AccountInitParams, IAccountModule__CreatePuppetAccountIntent } from '@puppet/contracts/types'
 import type { Hex, TypedDataDefinition } from 'viem'
 import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
 import * as IntentLib from './intentLib.js'
-import { PUPPET_GATE_DOMAIN_MAP, type IDraftContext } from './shared.js'
+import { ACCOUNT_GATE_DOMAIN_MAP, type IDraftContext } from './shared.js'
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
-const ZERO_BYTES32 = '0x0000000000000000000000000000000000000000000000000000000000000000'
 
 export interface ICreatePuppetAccountInput {
   params: IAccountLib__AccountInitParams
+  tokenId: Hex
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
@@ -23,7 +23,7 @@ export interface ICreatePuppetAccountInput {
 
 export interface ICreatePuppetAccountAttestContext extends IDraftContext {
   currentBlock: bigint
-  transientRouteBalance: bigint
+  depositRouteBalance: bigint
 }
 
 export function attestCreatePuppetAccountIntent(
@@ -34,26 +34,24 @@ export function attestCreatePuppetAccountIntent(
     blockNumber: input.blockNumber,
     deadline: input.deadline,
     intentChainId: input.chainId,
-    baseTokenId: input.params.baseTokenId,
+    baseTokenId: input.tokenId,
     lookupChain: ctx.chainId,
-    capAmount: 0n,
+    capAmount: input.initialDepositAmount,
     acceptableRelayFee: input.acceptableRelayFee,
     relayFeeDenominator: input.initialDepositAmount
   })
   if (input.params.user === ZERO_ADDRESS) throw new CompactContractError('Account__InvalidUser', [])
-  if (input.params.baseTokenId === ZERO_BYTES32) throw new CompactContractError('Account__InvalidBaseTokenId', [])
 
-  // SDK-only preflight: the initial deposit moves from the (counterfactually funded) TransientRoute at runtime;
-  // an under-funded TransientRoute surfaces on-chain as an ERC20 transfer bubble-up, not a contract revert.
-  if (input.initialDepositAmount > 0n && ctx.transientRouteBalance < input.initialDepositAmount) {
+  if (input.initialDepositAmount > 0n && ctx.depositRouteBalance < input.initialDepositAmount) {
     throw new CompactError(
-      'TRANSIENT_ROUTE_UNDERFUNDED',
-      `transient route balance ${ctx.transientRouteBalance} below initial deposit ${input.initialDepositAmount}`
+      'DEPOSIT_ROUTE_UNDERFUNDED',
+      `deposit route balance ${ctx.depositRouteBalance} below initial deposit ${input.initialDepositAmount}`
     )
   }
 
   const intent: IAccountModule__CreatePuppetAccountIntent = {
     params: input.params,
+    tokenId: input.tokenId,
     blockNumber: input.blockNumber,
     deadline: input.deadline,
     acceptableRelayFee: input.acceptableRelayFee,
@@ -62,11 +60,11 @@ export function attestCreatePuppetAccountIntent(
     initialDepositAmount: input.initialDepositAmount
   }
 
-  const domain = PUPPET_GATE_DOMAIN_MAP[ctx.chainId]
+  const domain = ACCOUNT_GATE_DOMAIN_MAP[ctx.chainId]
   if (!domain) throw new CompactError('BAD_REQUEST', `unsupported chain ${ctx.chainId}`)
   const typedData: TypedDataDefinition = {
     domain,
-    ...PUPPET_GATE_INTENTS.createPuppetAccount,
+    ...ACCOUNT_GATE_INTENTS.createPuppetAccount,
     message: intent as unknown as Record<string, unknown>
   }
   return { intent, typedData, args: [intent, input.userDeploySig, input.userSignerProof] }

@@ -2,17 +2,16 @@ import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import type {
   IAllocateInput,
   IBridgeInput,
-  IBridgeToWalletInput,
   IClaimInput,
-  ICreateMasterAccountInput,
-  ICreateMasterInput,
+  ICreateFundAccountInput,
   ICreatePuppetAccountInput,
   IDepositRoute,
   IFulfillInput,
   IRecognizeBalanceInput,
   ISellInput,
   ISubscribeInput,
-  IWithdrawInput
+  IWithdrawToBridgeInput,
+  IWithdrawToWalletInput
 } from '@puppet/sdk/attestation'
 import type { Address, Hex } from 'viem'
 import type { ISubscribeRule } from './$MatchingRuleEditor.js'
@@ -23,13 +22,12 @@ export type StepInput =
   | { kind: 'transferToMaster'; input: IDepositRoute }
   | { kind: 'transferToMasterWnt'; input: IDepositRoute }
   | { kind: 'bridge'; input: IBridgeInput }
-  | { kind: 'bridgeToWallet'; input: IBridgeToWalletInput }
+  | { kind: 'withdrawToBridge'; input: IWithdrawToBridgeInput }
   | { kind: 'recognize'; input: IRecognizeBalanceInput }
-  | { kind: 'walletWithdraw'; input: IWithdrawInput }
+  | { kind: 'withdrawToWallet'; input: IWithdrawToWalletInput }
   | { kind: 'subscribe'; input: ISubscribeInput }
   | { kind: 'createPuppetAccount'; input: ICreatePuppetAccountInput }
-  | { kind: 'createMasterAccount'; input: ICreateMasterAccountInput }
-  | { kind: 'createMaster'; input: ICreateMasterInput }
+  | { kind: 'createFundAccount'; input: ICreateFundAccountInput }
   | { kind: 'allocate'; input: IAllocateInput }
   | { kind: 'sell'; input: ISellInput }
   | { kind: 'claim'; input: IClaimInput }
@@ -43,13 +41,12 @@ export const STEP_LABEL: Record<StepKind, string> = {
   transferToMaster: 'Fund',
   transferToMasterWnt: 'Fund',
   bridge: 'Bridge',
-  bridgeToWallet: 'Bridge',
+  withdrawToBridge: 'Bridge',
   recognize: 'Credit',
-  walletWithdraw: 'Withdraw',
+  withdrawToWallet: 'Withdraw',
   subscribe: 'Subscribe',
   createPuppetAccount: 'Create Puppet Account',
-  createMasterAccount: 'Create master account',
-  createMaster: 'Create master account',
+  createFundAccount: 'Create fund account',
   allocate: 'Allocate',
   sell: 'Sell',
   claim: 'Claim',
@@ -64,15 +61,14 @@ export const STEP_DESCRIPTION: Record<StepKind, string> = {
   transferToMasterWnt: 'Sends native ETH from your wallet to seed your master account.',
   bridge:
     'Moves funds to your account on Arbitrum, usually within seconds. Your funds stay in transit and settle on-chain even if you wait. If it fails, they reappear in the deposit editor to recover.',
-  bridgeToWallet:
+  withdrawToBridge:
     'Moves funds from your account to your wallet on another chain, usually within seconds. Your funds stay in transit and settle on-chain even if you wait.',
   recognize: 'Confirms the tokens you just sent so they show up in your balance.',
-  walletWithdraw: 'Moves funds from your account to your wallet.',
+  withdrawToWallet: 'Moves funds from your account to your wallet.',
   subscribe: 'Lets a trader pull funds from your account under the rules you set.',
   createPuppetAccount: 'Creates your account on-chain.',
-  createMasterAccount: 'Creates your master account on this chain.',
-  createMaster: 'Creates your master account and seeds its initial allocation on-chain.',
-  allocate: 'A trader pulls funds matched from subscribers into their pool.',
+  createFundAccount: 'Creates your fund account and sweeps its deposit route on this chain.',
+  allocate: 'A trader pulls funds matched from subscribers into their fund.',
   sell: 'Queue your shares for redemption. The trader buys them back at the next fulfillment.',
   claim: 'Withdraw the base currency you accrued from a prior buyback.',
   fulfill: 'Pay base from the master pool to retire queued shares at the current NAV.'
@@ -124,8 +120,8 @@ export interface IDepositDraft extends IAmountDraftBase {
 
 export type IWithdrawStep =
   | ICreatePuppetStep
-  | { kind: 'walletWithdraw'; input: IWithdrawInput }
-  | { kind: 'bridgeToWallet'; input: IBridgeToWalletInput }
+  | { kind: 'withdrawToWallet'; input: IWithdrawToWalletInput }
+  | { kind: 'withdrawToBridge'; input: IWithdrawToBridgeInput }
 
 export interface IWithdrawDraft extends IAmountDraftBase {
   kind: 'withdraw'
@@ -139,25 +135,15 @@ export interface ISubscribeDraft extends IDraftBase, ISubscribeRule {
 export type IMasterFundStep =
   | { kind: 'transferToMaster'; input: IDepositRoute }
   | { kind: 'transferToMasterWnt'; input: IDepositRoute }
-  | { kind: 'createMasterAccount'; input: ICreateMasterAccountInput }
+  | { kind: 'createFundAccount'; input: ICreateFundAccountInput }
   | { kind: 'bridge'; input: IBridgeInput }
-
-export interface ICreateMasterDraft extends IDraftBase {
-  kind: 'createMaster'
-  params: IAccountLib__AccountInitParams
-  master: Address
-  baseToken: Address
-  baseTokenId: Hex
-  masterAmount: bigint
-  sourceChainId: number
-  inputSteps: IMasterFundStep[]
-}
 
 export interface IAllocateDraft extends IDraftBase {
   kind: 'allocate'
   master: Address
   baseToken: Address
   baseTokenId: Hex
+  name: Hex
   masterAmount: bigint
   sourceChainId: number
   inputSteps: IMasterFundStep[]
@@ -195,7 +181,6 @@ export type IDraft =
   | IDepositDraft
   | IWithdrawDraft
   | ISubscribeDraft
-  | ICreateMasterDraft
   | IAllocateDraft
   | ISellDraft
   | IClaimDraft

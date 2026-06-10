@@ -11,17 +11,23 @@ interface IAccount is IERC1271 {
         uint gasLimit;
         bytes callData;
     }
-    function getUser() external view returns (address);
-    function getSigner() external view returns (address);
+
+    struct SignTransfer {
+        bytes32 tokenId;
+        IERC20 token;
+        uint amountIn;
+        uint amountOut;
+    }
+
     function getAttest() external view returns (address);
-    function signedBalance() external view returns (uint);
+    function signedBalanceOf(
+        bytes32 tokenId
+    ) external view returns (uint);
     function execute(
         Call[] calldata callList,
-        IERC20 baseToken,
-        uint amountIn,
-        uint amountOut,
-        uint relayFee,
-        address feeReceiver,
-        uint transferGasLimit
-    ) external payable returns (uint signedPostBalance, uint postBalance, bytes[] memory returnData);
+        SignTransfer[] calldata transferList
+    )
+        external
+        payable
+        returns (uint[] memory signedPostBalanceList, uint[] memory postBalanceList, bytes[] memory returnDataList);
 }

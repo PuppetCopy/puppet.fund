@@ -2,17 +2,7 @@ import { PUPPET_CONTRACT_MAP } from '@puppet/contracts'
 import { PROTOCOL_CONFIG, TOKEN_ID } from '@puppet/contracts/const'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import type { Address, Hex } from 'viem'
-import {
-  encodeAbiParameters,
-  encodePacked,
-  getCreate2Address,
-  hashMessage,
-  keccak256,
-  pad,
-  stringToHex,
-  toBytes
-} from 'viem'
-export const EMPTY_NAME = stringToHex('', { size: 32 })
+import { encodeAbiParameters, encodePacked, getCreate2Address, hashMessage, keccak256, pad, toBytes } from 'viem'
 
 function cloneInitCodeHashWithArgs(impl: Address, args: Hex): Hex {
   const argBytes = (args.length - 2) / 2
@@ -29,8 +19,8 @@ function cloneInitCodeHashWithArgs(impl: Address, args: Hex): Hex {
 
 function packAccountArgs(params: IAccountLib__AccountInitParams): Hex {
   return encodePacked(
-    ['address', 'address', 'address', 'bytes32', 'bytes32'],
-    [PUPPET_CONTRACT_MAP.Attest.address, params.signer, params.user, params.name, params.baseTokenId]
+    ['address', 'address', 'address'],
+    [PUPPET_CONTRACT_MAP.Attest.address, params.signer, params.user]
   )
 }
 
@@ -43,30 +33,37 @@ export function predictPuppetAccount(params: IAccountLib__AccountInitParams): Ad
   })
 }
 
-export function predictTransientRoute(account: Address): Address {
+export function predictRoute(account: Address): Address {
   const args = encodePacked(['address'], [account])
   return getCreate2Address({
     from: PUPPET_CONTRACT_MAP.AccountModule.address,
     salt: pad(account, { size: 32 }),
-    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.TransientRoute.address, args)
+    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.PassthroughRoute.address, args)
   })
 }
 
 export function predictDepositRoute(account: Address): Address {
-  const args = encodePacked(['address'], [account])
-  return getCreate2Address({
-    from: PUPPET_CONTRACT_MAP.AccountModule.address,
-    salt: keccak256(encodePacked(['string', 'address'], ['DEPOSIT_ROUTE', account])),
-    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.TransientRoute.address, args)
-  })
+  return predictRoute(account)
 }
 
-export function predictMasterAccount(params: IAccountLib__AccountInitParams): Address {
-  const args = packAccountArgs(params)
+export function predictFundAccount(signer: Address): Address {
+  const args = encodePacked(['address', 'address'], [PUPPET_CONTRACT_MAP.Attest.address, signer])
   return getCreate2Address({
     from: PUPPET_CONTRACT_MAP.AccountModule.address,
     salt: keccak256(args),
-    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.MasterAccount.address, args)
+    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.FundAccount.address, args)
+  })
+}
+
+export function predictShareToken(fund: Address, baseTokenId: Hex, name: Hex): Address {
+  const args = encodePacked(
+    ['address', 'address', 'bytes32', 'bytes32'],
+    [fund, PUPPET_CONTRACT_MAP.ShareModule.address, baseTokenId, name]
+  )
+  return getCreate2Address({
+    from: PUPPET_CONTRACT_MAP.ShareModule.address,
+    salt: pad(fund, { size: 32 }),
+    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.ShareToken.address, args)
   })
 }
 
@@ -78,12 +75,6 @@ export function deriveSessionKey(signature: Hex): Hex {
   return keccak256(toBytes(signature))
 }
 
-// Digest the session key signs to prove ECDSA-derivation from the bind sig.
-// Mirrors `AccountLib.signerProofDigest(_user)` in Solidity:
-//   keccak256(abi.encode(_user))
-// Bound to user (so a proof can't be reused across users); no chainId so a
-// single proof is universal across deployments. Contract recovers the signer
-// from `signerProof` against this digest and checks `recovered == params.signer`.
 export function signerProofDigest(user: Address): Hex {
   return keccak256(encodeAbiParameters([{ type: 'address' }], [user]))
 }

@@ -55,7 +55,7 @@ export default [
         "internalType": "address[]"
       },
       {
-        "name": "_master",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
       }
@@ -91,7 +91,7 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "master",
+        "name": "fund",
         "type": "address",
         "internalType": "address"
       }
@@ -115,7 +115,7 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "master",
+        "name": "fund",
         "type": "address",
         "internalType": "address"
       }
@@ -125,25 +125,6 @@ export default [
         "name": "bodyHash",
         "type": "bytes32",
         "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "seeded",
-    "inputs": [
-      {
-        "name": "master",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "bool",
-        "internalType": "bool"
       }
     ],
     "stateMutability": "view"
@@ -181,7 +162,7 @@ export default [
         "internalType": "uint256[]"
       },
       {
-        "name": "_master",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
       },
@@ -204,7 +185,7 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_master",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
       },
@@ -212,19 +193,6 @@ export default [
         "name": "_bodyHash",
         "type": "bytes32",
         "internalType": "bytes32"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setSeeded",
-    "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
       }
     ],
     "outputs": [],

@@ -1,8 +1,7 @@
-import { EMPTY_NAME } from '@puppet/sdk/account'
+import { predictFundAccount, predictPuppetAccount } from '@puppet/sdk/account'
 import {
   computeAllocation,
   type IAllocateInput,
-  type ICreateMasterInput,
   resolveDispatchChainId,
   resolveDispatchNetwork
 } from '@puppet/sdk/attestation'
@@ -15,10 +14,10 @@ import {
   indexerBlock,
   randomNonce
 } from '@puppet/sdk/state'
-import type { Address } from 'viem'
+import { type Address, type Hex, isAddressEqual } from 'viem'
 import { fetchMasterPoolState, fetchMasterSubscribers } from '../../../io/indexer/query.js'
 import { homePublicClient } from '../../../wallet/index.js'
-import type { IAllocateDraft, ICreateMasterDraft } from '../draft.js'
+import type { IAllocateDraft } from '../draft.js'
 import { DEFAULT_DEADLINE_SEC, type ExecContext } from './_shared.js'
 
 export interface IGatheredAllocation {
@@ -31,19 +30,28 @@ export interface IGatheredAllocation {
 export async function gatherMatched(
   sql: Parameters<typeof evaluateAccountNav>[0],
   indexerHealth: IndexerHealth,
-  master: Address,
+  fund: Address,
   baseToken: Address,
+  baseTokenId: Hex,
   masterAmount: bigint,
   subaccount?: ISubaccountState
 ): Promise<IGatheredAllocation> {
-  const [puppets, pool] = await Promise.all([fetchMasterSubscribers(master), fetchMasterPoolState(master)])
+  const [puppets, pool] = await Promise.all([fetchMasterSubscribers(fund), fetchMasterPoolState(fund)])
 
   const totalShareSupply = pool?.totalShareSupply ?? 0n
   const queuedShares = pool?.queuedShares ?? 0n
   const acceptableNetAssetValue =
     totalShareSupply > 0n
-      ? (await evaluateAccountNav(sql, { master, baseToken, health: indexerHealth, kind: 'allocate', subaccount }))
-          .navSigned
+      ? (
+          await evaluateAccountNav(sql, {
+            master: fund,
+            baseToken,
+            baseTokenId,
+            health: indexerHealth,
+            kind: 'allocate',
+            subaccount
+          })
+        ).navSigned
       : masterAmount > 0n
         ? masterAmount
         : 1n
@@ -60,49 +68,21 @@ export async function gatherMatched(
   return { acceptableNetAssetValue, totalShareSupply, matched, totalPuppets: puppets.length }
 }
 
-export async function buildCreateMasterInput(draft: ICreateMasterDraft, ctx: ExecContext): Promise<ICreateMasterInput> {
-  const gathered = await gatherMatched(ctx.sql, ctx.indexerHealth, draft.master, draft.baseToken, draft.masterAmount)
-  const blockNumber = indexerBlock(ctx.indexerHealth, resolveDispatchNetwork(resolveDispatchChainId(undefined)))
-  const acceptableRelayFee = await getAcceptableRelayFee(
-    ctx.gasPrice,
-    'HubGate',
-    'seedMasterAccount',
-    draft.baseToken,
-    homePublicClient
-  )
-
-  return {
-    params: draft.params,
-    blockNumber,
-    deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
-    acceptableRelayFee,
-    nonce: randomNonce(),
-    acceptableNetAssetValue: gathered.acceptableNetAssetValue,
-    masterAmount: draft.masterAmount,
-    puppetList: gathered.matched.puppetList,
-    matchedAmountList: gathered.matched.matchedAmountList,
-    userDeploySig: '0x',
-    userSignerProof: '0x'
-  }
-}
-
 export async function buildAllocateInput(draft: IAllocateDraft, ctx: ExecContext): Promise<IAllocateInput> {
-  const master = await getSubaccountState(ctx.sql, draft.master)
-  if (!master) throw new Error(`master ${draft.master} not in indexer`)
-  const params = {
-    user: master.user,
-    name: EMPTY_NAME,
-    baseTokenId: master.baseTokenId,
-    signer: master.signer
+  const fund = await getSubaccountState(ctx.sql, draft.master)
+  const master = fund?.signer ?? predictPuppetAccount({ user: ctx.wallet.address, signer: ctx.session.signer })
+  if (!fund && !isAddressEqual(predictFundAccount(master), draft.master)) {
+    throw new Error(`fund ${draft.master} not in indexer and not derivable from the active session`)
   }
 
   const gathered = await gatherMatched(
     ctx.sql,
     ctx.indexerHealth,
-    master.account,
+    draft.master,
     draft.baseToken,
+    draft.baseTokenId,
     draft.masterAmount,
-    master
+    fund
   )
   const blockNumber = indexerBlock(ctx.indexerHealth, resolveDispatchNetwork(resolveDispatchChainId(undefined)))
   const acceptableRelayFee = await getAcceptableRelayFee(
@@ -114,7 +94,9 @@ export async function buildAllocateInput(draft: IAllocateDraft, ctx: ExecContext
   )
 
   return {
-    params,
+    master,
+    baseTokenId: draft.baseTokenId,
+    name: draft.name,
     blockNumber,
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,

@@ -5,37 +5,54 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {BaseGate} from "./utils/BaseGate.sol";
+import {CallLib} from "./utils/CallLib.sol";
 import {Error} from "./utils/Error.sol";
 import {IntentLib} from "./utils/IntentLib.sol";
 import {AccountLib} from "./core/AccountLib.sol";
-import {RuleLib} from "./hub/RuleLib.sol";
+import {RuleLib} from "./utils/RuleLib.sol";
 import {IAuthority} from "./utils/interfaces/IAuthority.sol";
 
 import {AccountModule} from "./core/module/AccountModule.sol";
 import {PuppetAccount} from "./core/PuppetAccount.sol";
-import {MasterAccount} from "./core/MasterAccount.sol";
+import {FundAccount} from "./core/FundAccount.sol";
 import {IAccount} from "./core/interface/IAccount.sol";
 import {ShareModule} from "./hub/ShareModule.sol";
 import {ShareToken} from "./hub/ShareToken.sol";
-import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "./hub/module/AllocateModule.sol";
-import {AllocateStore} from "./hub/AllocateStore.sol";
-import {SubscribeModule, SUBSCRIBE_INTENT_TYPEHASH} from "./hub/module/SubscribeModule.sol";
+import {AllocateModule, ALLOCATE_INTENT_TYPEHASH} from "./hub/AllocateModule.sol";
+import {AllocateStore} from "./hub/store/AllocateStore.sol";
+import {SubscribeModule, SUBSCRIBE_INTENT_TYPEHASH} from "./hub/SubscribeModule.sol";
 import {
     RedeemModule,
     SELL_INTENT_TYPEHASH,
     CLAIM_INTENT_TYPEHASH,
     FULFILL_INTENT_TYPEHASH
-} from "./hub/module/RedeemModule.sol";
-import {RedeemStore} from "./hub/RedeemStore.sol";
+} from "./hub/RedeemModule.sol";
+import {RedeemStore} from "./hub/store/RedeemStore.sol";
 import {RegisterModule} from "./core/module/RegisterModule.sol";
 
-bytes32 constant BRIDGE_TO_WALLET_INTENT_TYPEHASH = keccak256(
-    "BridgeToWalletIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,address inputToken,address outputToken,uint256 inputAmount,uint256 outputAmount,uint256 destinationChainId,address provider,bytes providerCallData,uint32 expires,uint32 fillDeadline)AccountInitParams(address user,bytes32 name,bytes32 baseTokenId,address signer)"
+bytes32 constant WITHDRAW_TO_WALLET_INTENT_TYPEHASH = keccak256(
+    "WithdrawToWalletIntent(AccountInitParams params,bytes32 tokenId,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,uint256 amount)AccountInitParams(address user,address signer)"
+);
+
+bytes32 constant WITHDRAW_TO_BRIDGE_INTENT_TYPEHASH = keccak256(
+    "WithdrawToBridgeIntent(AccountInitParams params,bytes32 tokenId,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,address inputToken,address outputToken,uint256 inputAmount,uint256 outputAmount,uint256 destinationChainId,address provider,bytes providerCallData,uint32 expires,uint32 fillDeadline)AccountInitParams(address user,address signer)"
 );
 
 contract HubGate is BaseGate, EIP712 {
-    struct BridgeToWalletIntent {
+    struct WithdrawToWalletIntent {
         AccountLib.AccountInitParams params;
+        bytes32 tokenId;
+        uint blockNumber;
+        uint deadline;
+        uint acceptableRelayFee;
+        uint nonce;
+        uint chainId;
+        uint amount;
+    }
+
+    struct WithdrawToBridgeIntent {
+        AccountLib.AccountInitParams params;
+        bytes32 tokenId;
         uint blockNumber;
         uint deadline;
         uint acceptableRelayFee;
@@ -85,9 +102,11 @@ contract HubGate is BaseGate, EIP712 {
     }
 
     function predictShareToken(
-        address _masterAccount
+        address _fundAccount,
+        bytes32 _baseTokenId,
+        bytes32 _name
     ) public view returns (ShareToken) {
-        return ShareToken(shareModule.predict(_masterAccount));
+        return ShareToken(shareModule.predict(_fundAccount, _baseTokenId, _name));
     }
 
     function subscribe(
@@ -97,9 +116,9 @@ contract HubGate is BaseGate, EIP712 {
         uint _actualRelayFee
     ) external {
         IntentLib.verifyChainId(_intent.chainId);
-        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, arbSys.arbBlockNumber(), maxBlockDelay);
+        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, _blockNumber(), maxBlockDelay);
         IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
-        IntentLib.verifyTokenAndCap(registerModule, _intent.params.baseTokenId, address(_intent.baseToken), 0);
+        IERC20 _base = IntentLib.verifyTokenAndCap(registerModule, _intent.baseTokenId, address(0), 0);
 
         bytes32 _digest = _hashTypedDataV4(
             keccak256(
@@ -111,19 +130,23 @@ contract HubGate is BaseGate, EIP712 {
                     _intent.acceptableRelayFee,
                     _intent.nonce,
                     _intent.chainId,
-                    _intent.baseToken,
+                    _intent.baseTokenId,
                     RuleLib.hashRules(_intent.rules)
                 )
             )
         );
 
         IntentLib.verifyRelayFeeRatio(
-            _actualRelayFee, accountModule.verifyPuppetAccount(_intent.params).signedBalance(), maxRelayFeeBps
+            _actualRelayFee,
+            accountModule.verifyPuppetAccount(_intent.params).signedBalanceOf(_intent.baseTokenId),
+            maxRelayFeeBps
         );
         subscribeModule.subscribe(
             _intent,
             accountModule,
             allocateStore,
+            _base,
+            _intent.baseTokenId,
             _digest,
             _domainSeparatorV4(),
             _userSignature,
@@ -144,22 +167,23 @@ contract HubGate is BaseGate, EIP712 {
         uint _actualRelayFee
     ) external {
         IntentLib.verifyChainId(_intent.chainId);
-        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, arbSys.arbBlockNumber(), maxBlockDelay);
+        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, _blockNumber(), maxBlockDelay);
         IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
-        IntentLib.verifyTokenAndCap(
-            registerModule, _intent.params.baseTokenId, address(_intent.baseToken), _intent.masterAmount
-        );
+        IERC20 _base =
+            IntentLib.verifyTokenAndCap(registerModule, _intent.baseTokenId, address(0), _intent.masterAmount);
+
         bytes32 _digest = _hashTypedDataV4(
             keccak256(
                 abi.encode(
                     ALLOCATE_INTENT_TYPEHASH,
-                    AccountLib.hashAccount(_intent.params),
+                    _intent.master,
                     _intent.blockNumber,
                     _intent.deadline,
                     _intent.acceptableRelayFee,
                     _intent.nonce,
                     _intent.chainId,
-                    _intent.baseToken,
+                    _intent.baseTokenId,
+                    _intent.name,
                     _intent.acceptableNetAssetValue,
                     _intent.totalShareSupply,
                     _intent.masterAmount,
@@ -168,13 +192,15 @@ contract HubGate is BaseGate, EIP712 {
                 )
             )
         );
-        uint _masterAccountIn = allocateModule.allocate(
+        uint _fundAccountIn = allocateModule.allocate(
             _intent,
             _bodyList,
             _mandateList,
             accountModule,
             shareModule,
             allocateStore,
+            redeemStore,
+            _base,
             _digest,
             _domainSeparatorV4(),
             _userSignature,
@@ -184,23 +210,7 @@ contract HubGate is BaseGate, EIP712 {
             feeReceiver,
             _actualRelayFee
         );
-        IntentLib.verifyRelayFeeRatio(_actualRelayFee, _masterAccountIn, maxRelayFeeBps);
-    }
-
-    function seedMasterAccount(
-        AllocateModule.AllocateIntent calldata _intent,
-        bytes[] calldata _bodyList,
-        bytes[] calldata _mandateList,
-        bytes calldata _userDeploySig,
-        bytes calldata _signerProof,
-        bytes calldata _userSignature,
-        bytes calldata _attestorSignature,
-        uint _actualRelayFee
-    ) external {
-        (MasterAccount _masterAccount,,) =
-            accountModule.createMasterAccount(_intent.params, _userDeploySig, _signerProof);
-        shareModule.createShareToken(address(_masterAccount), _intent.masterAmount);
-        this.allocate(_intent, _bodyList, _mandateList, _userSignature, _attestorSignature, _actualRelayFee);
+        IntentLib.verifyRelayFeeRatio(_actualRelayFee, _fundAccountIn, maxRelayFeeBps);
     }
 
     function sell(
@@ -210,9 +220,10 @@ contract HubGate is BaseGate, EIP712 {
         uint _actualRelayFee
     ) external {
         IntentLib.verifyChainId(_intent.chainId);
-        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, arbSys.arbBlockNumber(), maxBlockDelay);
+        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, _blockNumber(), maxBlockDelay);
         IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
-        address _masterAccount = address(accountModule.verifyMasterAccount(_intent.masterParams));
+        FundAccount _fund = accountModule.verifyFundAccount(_intent.master);
+        address _fundAccount = address(_fund);
 
         bytes32 _digest = _hashTypedDataV4(
             keccak256(
@@ -224,27 +235,34 @@ contract HubGate is BaseGate, EIP712 {
                     _intent.acceptableRelayFee,
                     _intent.nonce,
                     _intent.chainId,
-                    AccountLib.hashAccount(_intent.masterParams),
+                    _intent.baseTokenId,
+                    _intent.name,
+                    _intent.master,
                     _intent.sharesOut
                 )
             )
         );
 
-        ShareToken _shareToken = predictShareToken(_masterAccount);
-        IERC20 _baseToken = IntentLib.verifyTokenAndCap(registerModule, _intent.masterParams.baseTokenId, address(0), 0);
-        uint _holderSignedBalance = AccountLib.hashAccount(_intent.params)
-            == AccountLib.hashAccount(_intent.masterParams)
-            ? IAccount(_masterAccount).signedBalance()
-            : accountModule.verifyPuppetAccount(_intent.params).signedBalance();
-        IntentLib.verifyRelayFeeRatio(_actualRelayFee, _holderSignedBalance, maxRelayFeeBps);
+        bytes32 _baseTokenId = _intent.baseTokenId;
+        IERC20 _baseToken = IntentLib.verifyTokenAndCap(registerModule, _baseTokenId, address(0), 0);
+
+        PuppetAccount _holder = accountModule.verifyPuppetAccount(_intent.params);
+
+        IntentLib.verifyRelayFeeRatio(
+            _actualRelayFee,
+            _holder.signedBalanceOf(_baseTokenId)
+                + redeemModule.getClaimable(redeemStore, _fundAccount, address(_holder)),
+            maxRelayFeeBps
+        );
 
         redeemModule.sell(
             _intent,
-            _masterAccount,
+            IAccount(address(_holder)),
             redeemStore,
             accountModule,
+            shareModule,
             _baseToken,
-            _shareToken,
+            _fundAccount,
             _digest,
             _userSignature,
             _attestorSignature,
@@ -262,9 +280,10 @@ contract HubGate is BaseGate, EIP712 {
         uint _actualRelayFee
     ) external returns (uint) {
         IntentLib.verifyChainId(_intent.chainId);
-        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, arbSys.arbBlockNumber(), maxBlockDelay);
+        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, _blockNumber(), maxBlockDelay);
         IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
-        address _masterAccount = address(accountModule.verifyMasterAccount(_intent.masterParams));
+        FundAccount _fund = accountModule.verifyFundAccount(_intent.master);
+        address _fundAccount = address(_fund);
 
         bytes32 _digest = _hashTypedDataV4(
             keccak256(
@@ -276,23 +295,24 @@ contract HubGate is BaseGate, EIP712 {
                     _intent.acceptableRelayFee,
                     _intent.nonce,
                     _intent.chainId,
-                    AccountLib.hashAccount(_intent.masterParams),
+                    _intent.baseTokenId,
+                    _intent.name,
+                    _intent.master,
                     _intent.amount
                 )
             )
         );
 
-        ShareToken _shareToken = predictShareToken(_masterAccount);
-        IERC20 _baseToken = IntentLib.verifyTokenAndCap(registerModule, _intent.masterParams.baseTokenId, address(0), 0);
+        IERC20 _baseToken = IntentLib.verifyTokenAndCap(registerModule, _intent.baseTokenId, address(0), 0);
         IntentLib.verifyRelayFeeRatio(_actualRelayFee, _intent.amount, maxRelayFeeBps);
 
         return redeemModule.claim(
             _intent,
-            _masterAccount,
             redeemStore,
             accountModule,
+            shareModule,
             _baseToken,
-            _shareToken,
+            _fundAccount,
             _digest,
             _userSignature,
             _attestorSignature,
@@ -310,22 +330,24 @@ contract HubGate is BaseGate, EIP712 {
         uint _actualRelayFee
     ) external {
         IntentLib.verifyChainId(_intent.chainId);
-        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, arbSys.arbBlockNumber(), maxBlockDelay);
+        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, _blockNumber(), maxBlockDelay);
         IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
-        address _masterAccount = address(accountModule.verifyMasterAccount(_intent.params));
-        IERC20 _baseToken = IntentLib.verifyTokenAndCap(registerModule, _intent.params.baseTokenId, address(0), 0);
-        ShareToken _shareToken = predictShareToken(_masterAccount);
+        FundAccount _fund = accountModule.verifyFundAccount(_intent.master);
+        address _fundAccount = address(_fund);
+        IERC20 _baseToken = IntentLib.verifyTokenAndCap(registerModule, _intent.baseTokenId, address(0), 0);
 
         bytes32 _digest = _hashTypedDataV4(
             keccak256(
                 abi.encode(
                     FULFILL_INTENT_TYPEHASH,
-                    AccountLib.hashAccount(_intent.params),
+                    _intent.master,
                     _intent.blockNumber,
                     _intent.deadline,
                     _intent.acceptableRelayFee,
                     _intent.nonce,
                     _intent.chainId,
+                    _intent.baseTokenId,
+                    _intent.name,
                     _intent.acceptableNetAssetValue,
                     _intent.totalShareSupply,
                     _intent.acceptableShares
@@ -333,15 +355,14 @@ contract HubGate is BaseGate, EIP712 {
             )
         );
 
-        IntentLib.verifyRelayFeeRatio(_actualRelayFee, IAccount(_masterAccount).signedBalance(), maxRelayFeeBps);
+        IntentLib.verifyRelayFeeRatio(_actualRelayFee, _intent.acceptableNetAssetValue, maxRelayFeeBps);
         redeemModule.fulfill(
             _intent,
-            _masterAccount,
             redeemStore,
             accountModule,
             shareModule,
             _baseToken,
-            _shareToken,
+            _fundAccount,
             _digest,
             _userSignature,
             _attestorSignature,
@@ -352,8 +373,62 @@ contract HubGate is BaseGate, EIP712 {
         );
     }
 
-    function bridgeToWallet(
-        BridgeToWalletIntent calldata _intent,
+    function withdrawToWallet(
+        WithdrawToWalletIntent calldata _intent,
+        bytes calldata _userSignature,
+        bytes calldata _attestorSignature,
+        uint _actualRelayFee
+    ) external {
+        if (_intent.amount == 0) revert Error.Deposit__NothingToWithdraw();
+        IntentLib.verifyChainId(_intent.chainId);
+        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, _blockNumber(), maxBlockDelay);
+        IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
+        IERC20 _token = IntentLib.verifyTokenAndCap(registerModule, _intent.tokenId, address(0), _intent.amount);
+        PuppetAccount _account = accountModule.verifyPuppetAccount(_intent.params);
+
+        uint _signed = _account.signedBalanceOf(_intent.tokenId);
+        if (_signed < _intent.amount) revert Error.Deposit__InsufficientBalance(_signed, _intent.amount);
+        if (_actualRelayFee >= _intent.amount) revert Error.Deposit__RelayFeeTooHigh();
+        uint _receiverAmount = _intent.amount - _actualRelayFee;
+
+        bytes32 _digest = _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    WITHDRAW_TO_WALLET_INTENT_TYPEHASH,
+                    AccountLib.hashAccount(_intent.params),
+                    _intent.tokenId,
+                    _intent.blockNumber,
+                    _intent.deadline,
+                    _intent.acceptableRelayFee,
+                    _intent.nonce,
+                    _intent.chainId,
+                    _intent.amount
+                )
+            )
+        );
+
+        accountModule.dispatch(
+            IAccount(address(_account)),
+            CallLib.withFee(
+                CallLib.transferCall(_token, _intent.params.user, _receiverAmount, transferGasLimit),
+                _token,
+                feeReceiver,
+                _actualRelayFee,
+                transferGasLimit
+            ),
+            CallLib.signTransfer(_intent.tokenId, _token, 0, _intent.amount),
+            _digest,
+            _userSignature,
+            _attestorSignature,
+            attestor,
+            _intent.nonce
+        );
+
+        _logEvent("WithdrawToWallet", abi.encode(_intent, address(_account)));
+    }
+
+    function withdrawToBridge(
+        WithdrawToBridgeIntent calldata _intent,
         bytes calldata _userSignature,
         bytes calldata _attestorSignature,
         uint _actualRelayFee
@@ -363,39 +438,44 @@ contract HubGate is BaseGate, EIP712 {
             revert Error.Deposit__SameChainBridge(_intent.destinationChainId);
         }
         IntentLib.verifyChainId(_intent.chainId);
-        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, arbSys.arbBlockNumber(), maxBlockDelay);
+        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, _blockNumber(), maxBlockDelay);
         IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
-        IntentLib.verifyTokenAndCap(
-            registerModule, _intent.params.baseTokenId, address(_intent.inputToken), _intent.inputAmount
+        IERC20 _token = IntentLib.verifyTokenAndCap(
+            registerModule, _intent.tokenId, address(_intent.inputToken), _intent.inputAmount
         );
 
         PuppetAccount _puppetAccount = accountModule.verifyPuppetAccount(_intent.params);
         address _recipient = _puppetAccount.getUser();
+        address _route = accountModule.predictRoute(address(_puppetAccount));
 
-        uint _signed = _puppetAccount.signedBalance();
-        if (_signed < _intent.inputAmount) revert Error.Deposit__InsufficientBalance(_signed, _intent.inputAmount);
+        uint _routeBalance = _token.balanceOf(_route);
+        if (_routeBalance < _intent.inputAmount) {
+            revert Error.Deposit__InsufficientBalance(_routeBalance, _intent.inputAmount);
+        }
 
         IntentLib.verifyRelayFeeRatio(_actualRelayFee, _intent.inputAmount, maxRelayFeeBps);
-        if (_actualRelayFee >= _intent.inputAmount) {
-            revert Error.Deposit__InsufficientBalance(_intent.inputAmount, _actualRelayFee);
-        }
+        if (_actualRelayFee >= _intent.inputAmount) revert Error.Deposit__RelayFeeTooHigh();
         if (_intent.outputAmount == 0) revert Error.Deposit__ZeroBridgeOutput();
-        uint _settlerInputAmount = _intent.inputAmount - _actualRelayFee;
+        uint _settler = _intent.inputAmount - _actualRelayFee;
 
-        IAccount.Call[] memory _calls = new IAccount.Call[](3);
-        _calls[0] = _approveCall(_intent.inputToken, _intent.provider, _settlerInputAmount);
-        _calls[1] =
-            IAccount.Call({target: _intent.provider, value: 0, gasLimit: 0, callData: _intent.providerCallData});
-        _calls[2] = _approveCall(_intent.inputToken, _intent.provider, 0);
+        IAccount.Call[] memory _legs = new IAccount.Call[](_actualRelayFee > 0 ? 4 : 3);
+        _legs[0] = CallLib.approveCall(_token, _intent.provider, _settler, transferGasLimit);
+        _legs[1] = IAccount.Call({target: _intent.provider, value: 0, gasLimit: 0, callData: _intent.providerCallData});
+        _legs[2] = CallLib.approveCall(_token, _intent.provider, 0, transferGasLimit);
+        if (_actualRelayFee > 0) {
+            _legs[3] = CallLib.transferCall(_token, feeReceiver, _actualRelayFee, transferGasLimit);
+        }
 
         accountModule.dispatch(
-            _puppetAccount,
-            _calls,
+            IAccount(address(_puppetAccount)),
+            CallLib.wrap(CallLib.routeExecute(_route, _legs)),
+            CallLib.noTransfers(),
             _hashTypedDataV4(
                 keccak256(
                     abi.encode(
-                        BRIDGE_TO_WALLET_INTENT_TYPEHASH,
+                        WITHDRAW_TO_BRIDGE_INTENT_TYPEHASH,
                         AccountLib.hashAccount(_intent.params),
+                        _intent.tokenId,
                         _intent.blockNumber,
                         _intent.deadline,
                         _intent.acceptableRelayFee,
@@ -416,15 +496,9 @@ contract HubGate is BaseGate, EIP712 {
             _userSignature,
             _attestorSignature,
             attestor,
-            _intent.nonce,
-            _intent.inputToken,
-            0,
-            _settlerInputAmount,
-            _actualRelayFee,
-            feeReceiver,
-            transferGasLimit
+            _intent.nonce
         );
 
-        _logEvent("BridgeToWallet", abi.encode(_intent, _puppetAccount, _recipient));
+        _logEvent("WithdrawToBridge", abi.encode(_intent, _puppetAccount, _recipient));
     }
 }

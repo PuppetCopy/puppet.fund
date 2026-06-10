@@ -83,16 +83,6 @@ export default [
                 "internalType": "address"
               },
               {
-                "name": "name",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
-                "name": "baseTokenId",
-                "type": "bytes32",
-                "internalType": "bytes32"
-              },
-              {
                 "name": "signer",
                 "type": "address",
                 "internalType": "address"
@@ -125,9 +115,9 @@ export default [
             "internalType": "uint256"
           },
           {
-            "name": "baseToken",
-            "type": "address",
-            "internalType": "contract IERC20"
+            "name": "baseTokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
           },
           {
             "name": "rules",
@@ -135,31 +125,9 @@ export default [
             "internalType": "struct RuleLib.Rule[]",
             "components": [
               {
-                "name": "masterParams",
-                "type": "tuple",
-                "internalType": "struct AccountLib.AccountInitParams",
-                "components": [
-                  {
-                    "name": "user",
-                    "type": "address",
-                    "internalType": "address"
-                  },
-                  {
-                    "name": "name",
-                    "type": "bytes32",
-                    "internalType": "bytes32"
-                  },
-                  {
-                    "name": "baseTokenId",
-                    "type": "bytes32",
-                    "internalType": "bytes32"
-                  },
-                  {
-                    "name": "signer",
-                    "type": "address",
-                    "internalType": "address"
-                  }
-                ]
+                "name": "fund",
+                "type": "address",
+                "internalType": "address"
               },
               {
                 "name": "body",
@@ -184,6 +152,16 @@ export default [
         "name": "_store",
         "type": "address",
         "internalType": "contract AllocateStore"
+      },
+      {
+        "name": "_base",
+        "type": "address",
+        "internalType": "contract IERC20"
+      },
+      {
+        "name": "_baseTokenId",
+        "type": "bytes32",
+        "internalType": "bytes32"
       },
       {
         "name": "_digest",
@@ -275,28 +253,12 @@ export default [
   },
   {
     "type": "error",
-    "name": "Subscribe__BaseTokenMismatch",
-    "inputs": [
-      {
-        "name": "puppetBaseTokenId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "masterBaseTokenId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ]
-  },
-  {
-    "type": "error",
     "name": "Subscribe__EmptyRules",
     "inputs": []
   },
   {
     "type": "error",
-    "name": "Subscribe__MasterListNotSorted",
+    "name": "Subscribe__FundListNotSorted",
     "inputs": [
       {
         "name": "prev",

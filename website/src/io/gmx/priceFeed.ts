@@ -5,7 +5,7 @@ interface IGmxOraclePrice {
 }
 
 import { getMappedValueFallback, periodicRun } from '@puppet/sdk/core'
-import { type IStream, map, op } from 'aelea/stream'
+import { type IStream, map, op, skipRepeats } from 'aelea/stream'
 import { state } from 'aelea/stream-extended'
 import { type Address, formatUnits } from 'viem'
 
@@ -89,6 +89,7 @@ export function priceFor(address: Address): IStream<bigint | null> {
   const stream = op(
     latestPriceMap,
     map(pm => getMappedValueFallback(pm, address, null)?.price ?? null),
+    skipRepeats,
     state(null)
   )
   priceForCache.set(address, stream)

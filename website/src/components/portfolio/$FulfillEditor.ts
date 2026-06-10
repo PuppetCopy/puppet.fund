@@ -2,11 +2,11 @@ import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { readableTokenAmount } from '@puppet/sdk/core'
 import { getTokenDescription } from '@puppet/sdk/gmx'
 import {
-  getMasterPoolState,
-  type IMasterPoolState,
+  getFundPoolState,
+  type IFundPoolState,
   type ISubaccountState,
   type ITokenRegistryMap,
-  liveMasterPoolState,
+  liveFundPoolState,
   tokenInfoFor
 } from '@puppet/sdk/state'
 import {
@@ -59,13 +59,13 @@ export const $FulfillEditor = ({
     ) => {
       const desc = getTokenDescription(tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseTokenId).token)
 
-      const poolStream: IStream<IMasterPoolState> = op(
-        merge(fromPromise(getMasterPoolState(sqlClient, masterAccount)), liveMasterPoolState(sqlClient, masterAccount)),
+      const poolStream: IStream<IFundPoolState> = op(
+        merge(fromPromise(getFundPoolState(sqlClient, masterAccount)), liveFundPoolState(sqlClient, masterAccount)),
         state({ totalShareSupply: 0n, queuedShares: 0n })
       )
       const navStream: IStream<bigint> = op(
         account,
-        map(acc => acc.chains.get(HUB_CHAIN_ID)?.signedBalance ?? 0n),
+        map(acc => acc.balances.get(baseTokenId)?.signedBalance ?? 0n),
         state(0n)
       )
       // The contract caps acceptableShares at queuedShares - 1 (Fulfill__NothingToRetire guard).

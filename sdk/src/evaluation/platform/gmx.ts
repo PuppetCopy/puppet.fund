@@ -56,6 +56,7 @@ export function valueGmxPositions(
     }
   }
   const basePrice = baseEntry.price
+  const baseAgeSec = Math.max(0, nowSec - baseEntry.updateTimestamp)
 
   const positions: INavPosition[] = rows.map(row => {
     const indexToken = resolveIndexToken(row.market)
@@ -73,7 +74,7 @@ export function valueGmxPositions(
       collateralBase,
       pnlBase,
       netBase: max(0n, collateralBase + pnlBase),
-      priceAgeSec: canRevalue ? Math.max(0, nowSec - indexEntry.updateTimestamp) : undefined,
+      priceAgeSec: canRevalue ? Math.max(baseAgeSec, nowSec - indexEntry.updateTimestamp) : undefined,
       facets: {
         side: row.isLong ? 'long' : 'short',
         sizeUsd: row.sizeInUsd,

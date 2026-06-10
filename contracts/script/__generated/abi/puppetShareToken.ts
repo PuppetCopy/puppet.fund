@@ -120,11 +120,50 @@ export default [
   },
   {
     "type": "function",
-    "name": "master",
+    "name": "getBaseTokenId",
     "inputs": [],
     "outputs": [
       {
-        "name": "_m",
+        "name": "_id",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getFund",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "_fund",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getName",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "_name",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getShareModule",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "_g",
         "type": "address",
         "internalType": "address"
       }
@@ -244,19 +283,6 @@ export default [
   },
   {
     "type": "function",
-    "name": "shareGate",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "_g",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "symbol",
     "inputs": [],
     "outputs": [
@@ -286,12 +312,12 @@ export default [
     "name": "transfer",
     "inputs": [
       {
-        "name": "to",
+        "name": "_to",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "amount",
+        "name": "_amount",
         "type": "uint256",
         "internalType": "uint256"
       }

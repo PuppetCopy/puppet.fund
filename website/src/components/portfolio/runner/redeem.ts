@@ -1,5 +1,4 @@
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
-import { EMPTY_NAME } from '@puppet/sdk/account'
 import {
   type IClaimInput,
   type IFulfillInput,
@@ -9,35 +8,41 @@ import {
 } from '@puppet/sdk/attestation'
 import { evaluateAccountNav } from '@puppet/sdk/evaluation'
 import {
+  fetchRouteBalance,
   getAcceptableRelayFee,
-  getMasterPoolState,
+  getFundPoolState,
   getSubaccountState,
   type ISubaccountState,
   indexerBlock,
   randomNonce
 } from '@puppet/sdk/state'
+import type { Address, Hex } from 'viem'
+import { fetchMasterPoolState } from '../../../io/indexer/query.js'
 import { homePublicClient } from '../../../wallet/index.js'
 import type { IClaimDraft, IFulfillDraft, ISellDraft } from '../draft.js'
 import { DEFAULT_DEADLINE_SEC, type ExecContext } from './_shared.js'
 
-async function resolveMasterParams(
+async function resolveFund(
   draft: ISellDraft | IClaimDraft | IFulfillDraft,
   ctx: ExecContext
-): Promise<{ params: IAccountLib__AccountInitParams; subaccount: ISubaccountState }> {
-  const subaccount = await getSubaccountState(ctx.sql, draft.masterAccount)
-  if (!subaccount) throw new Error(`master ${draft.masterAccount} not in indexer`)
-  return {
-    params: { user: subaccount.user, name: EMPTY_NAME, baseTokenId: subaccount.baseTokenId, signer: subaccount.signer },
-    subaccount
-  }
+): Promise<ISubaccountState> {
+  const fund = await getSubaccountState(ctx.sql, draft.masterAccount)
+  if (!fund) throw new Error(`fund ${draft.masterAccount} not in indexer`)
+  return fund
+}
+
+// The redeem intents carry the fund's NAME because the ShareToken address derives from
+// it; the digest only verifies against the name the fund was created with.
+async function fundName(master: Address): Promise<Hex> {
+  const fund = await fetchMasterPoolState(master)
+  if (!fund) throw new Error(`fund ${master} pool state not in indexer`)
+  return fund.name as Hex
 }
 
 export async function buildSellInput(draft: ISellDraft, ctx: ExecContext): Promise<ISellInput> {
-  const { params: masterParams } = await resolveMasterParams(draft, ctx)
+  const fund = await resolveFund(draft, ctx)
   const params: IAccountLib__AccountInitParams = {
     user: ctx.wallet.address,
-    name: EMPTY_NAME,
-    baseTokenId: masterParams.baseTokenId,
     signer: ctx.session.signer
   }
   const acceptableRelayFee = await getAcceptableRelayFee(
@@ -53,42 +58,50 @@ export async function buildSellInput(draft: ISellDraft, ctx: ExecContext): Promi
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,
     nonce: randomNonce(),
-    masterParams,
+    baseTokenId: draft.baseTokenId,
+    master: fund.signer,
+    name: await fundName(draft.masterAccount),
     sharesOut: draft.sharesOut
   }
 }
 
 export async function buildFulfillInput(draft: IFulfillDraft, ctx: ExecContext): Promise<IFulfillInput> {
-  const { params, subaccount } = await resolveMasterParams(draft, ctx)
-  const [pool, acceptableRelayFee, fulfillEval] = await Promise.all([
-    getMasterPoolState(ctx.sql, draft.masterAccount),
+  const fund = await resolveFund(draft, ctx)
+  const [pool, acceptableRelayFee, fulfillEval, liveBalance] = await Promise.all([
+    getFundPoolState(ctx.sql, draft.masterAccount),
     getAcceptableRelayFee(ctx.gasPrice, 'HubGate', 'fulfill', draft.baseToken, homePublicClient),
     evaluateAccountNav(ctx.sql, {
       master: draft.masterAccount,
       baseToken: draft.baseToken,
+      baseTokenId: draft.baseTokenId,
       health: ctx.indexerHealth,
       kind: 'fulfill',
-      subaccount
-    })
+      subaccount: fund
+    }),
+    fetchRouteBalance(homePublicClient, draft.baseToken, draft.masterAccount)
   ])
+  // The fund pays sharesRetired * nav / supply (payout + relay fee) out of its live token balance, so an
+  // indexer-overstated signed balance (fee debits are invisible to events) reverts the dispatch on-chain.
+  // Clamp the attested NAV to what the fund can actually pay.
+  const acceptableNetAssetValue = fulfillEval.navSigned < liveBalance ? fulfillEval.navSigned : liveBalance
   return {
-    params,
+    master: fund.signer,
+    baseTokenId: draft.baseTokenId,
     blockNumber: indexerBlock(ctx.indexerHealth, resolveDispatchNetwork(resolveDispatchChainId(undefined))),
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,
     nonce: randomNonce(),
-    acceptableNetAssetValue: fulfillEval.navSigned,
+    acceptableNetAssetValue,
+    name: await fundName(draft.masterAccount),
     totalShareSupply: pool.totalShareSupply,
     acceptableShares: draft.acceptableShares
   }
 }
 
 export async function buildClaimInput(draft: IClaimDraft, ctx: ExecContext): Promise<IClaimInput> {
-  const { params: masterParams } = await resolveMasterParams(draft, ctx)
+  const fund = await resolveFund(draft, ctx)
   const params: IAccountLib__AccountInitParams = {
     user: ctx.wallet.address,
-    name: EMPTY_NAME,
-    baseTokenId: masterParams.baseTokenId,
     signer: ctx.session.signer
   }
   const acceptableRelayFee = await getAcceptableRelayFee(
@@ -104,7 +117,9 @@ export async function buildClaimInput(draft: IClaimDraft, ctx: ExecContext): Pro
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,
     nonce: randomNonce(),
-    masterParams,
+    baseTokenId: draft.baseTokenId,
+    master: fund.signer,
+    name: await fundName(draft.masterAccount),
     amount: draft.amount
   }
 }

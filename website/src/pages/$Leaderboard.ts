@@ -3,12 +3,10 @@ import { IntervalTime, PLATFORM_STAT_INTERVAL, USD_DECIMALS } from '@puppet/sdk/
 import {
   formatFixed,
   getMappedValue,
-  getUnixTimestamp,
   readableFactorPercentage,
   readablePnl,
   readableTokenAmount,
-  readableUsd,
-  resampleTimeSeries
+  readableUsd
 } from '@puppet/sdk/core'
 import { getTokenDescription } from '@puppet/sdk/gmx'
 import { tokenInfoFor } from '@puppet/sdk/state'
@@ -359,7 +357,14 @@ export const $Leaderboard = (config: I$Leaderboard) =>
           clickFilters
         ),
         dismiss: empty,
-        $target: $row(spacing.small, style({ alignItems: 'stretch' }))(
+        $target: $row(
+          style({
+            alignItems: 'stretch',
+            borderRadius: '100px',
+            border: `1px solid ${colorShade(palette.foreground, 40)}`,
+            overflow: 'hidden'
+          })
+        )(
           $ButtonSecondary({
             $container: $node(
               style({
@@ -368,11 +373,9 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                 gap: '8px',
                 padding: '8px 14px',
                 cursor: 'pointer',
-                borderRadius: '100px',
-                border: `1px solid ${colorShade(palette.foreground, 40)}`,
-                transition: 'border-color 120ms ease-out'
+                transition: 'background-color 120ms ease-out'
               }),
-              stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) })
+              stylePseudo(':hover', { backgroundColor: colorShade(palette.foreground, 15) })
             ),
             $content: $row(spacing.small, style({ alignItems: 'center', whiteSpace: 'nowrap' }))(
               switchLatest(
@@ -411,26 +414,27 @@ export const $Leaderboard = (config: I$Leaderboard) =>
             map(
               p =>
                 p.view === 'shadow' || p.collateral.length > 0 || p.acct
-                  ? $ButtonSecondary({
-                      $container: $node(
-                        style({
-                          display: 'flex',
-                          alignItems: 'center',
-                          padding: '0 12px',
-                          cursor: 'pointer',
-                          borderRadius: '100px',
-                          border: `1px solid ${colorShade(palette.foreground, 40)}`,
-                          transition: 'border-color 120ms ease-out'
-                        }),
-                        stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) })
-                      ),
-                      $content: $icon({
-                        $content: $xCross,
-                        width: '11px',
-                        viewBox: '0 0 32 32',
-                        fill: palette.foreground
-                      })
-                    })({ click: clearAllFiltersTether() })
+                  ? $row(style({ alignItems: 'stretch' }))(
+                      $node(style({ width: '1px', backgroundColor: colorShade(palette.foreground, 40) }))(),
+                      $ButtonSecondary({
+                        $container: $node(
+                          style({
+                            display: 'flex',
+                            alignItems: 'center',
+                            padding: '0 12px',
+                            cursor: 'pointer',
+                            transition: 'background-color 120ms ease-out'
+                          }),
+                          stylePseudo(':hover', { backgroundColor: colorShade(palette.foreground, 15) })
+                        ),
+                        $content: $icon({
+                          $content: $xCross,
+                          width: '11px',
+                          viewBox: '0 0 32 32',
+                          fill: palette.foreground
+                        })
+                      })({ click: clearAllFiltersTether() })
+                    )
                   : empty,
               combine({ view: leaderboardView, collateral: collateralTokenList, acct: account })
             )
@@ -759,19 +763,31 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                       columns: [
                         {
                           $head: $text('Master'),
-                          gridTemplate: isDesktopScreen ? '149px' : '136px',
+                          gridTemplate: isDesktopScreen ? '280px' : '200px',
                           $bodyCallback: map(pos => {
                             const $master = $MasterDisplay({
-                              address: pos.master,
+                              address: pos.fund as Address,
                               ensName: readableAccountName(pos.name),
+                              avatarSeed: pos.shareToken ?? undefined,
                               puppetList: pos.puppetList,
                               profileSize: isDesktopScreen ? 50 : 32
                             })({})
+                            const token = tokenInfoFor(params.registry, HUB_CHAIN_ID, pos.baseTokenId).token
+                            const $copy = $FundEditor({
+                              master: pos.master,
+                              collateralToken: token,
+                              userMatchingRuleQuery,
+                              draftMatchingRuleList
+                            })({ changeMatchRuleList: changeMatchRuleListTether() })
+                            const $identity = $row(spacing.default, style({ alignItems: 'center', minWidth: '0' }))(
+                              $master,
+                              $copy
+                            )
                             // On mobile there is no dedicated Consistency column, so fold win-rate in as a secondary line.
                             // TODO(indexer): swap/augment with drawdown + Sharpe once MasterLatestMetric exposes them.
                             return isDesktopScreen
-                              ? $master
-                              : $column(spacing.tiny)($master, $winRateDisplay(pos.winCount, pos.lossCount))
+                              ? $identity
+                              : $column(spacing.tiny)($identity, $winRateDisplay(pos.winCount, pos.lossCount))
                           })
                         },
                         {
@@ -782,71 +798,48 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                             return $route(getTokenDescription(token), isDesktopScreen)
                           })
                         },
-                        ...((isDesktopScreen
-                          ? [
-                              {
-                                $head: $text('AUM'),
-                                sortBy: 'allocated',
-                                gridTemplate: '120px',
-                                $bodyCallback: map((pos: I$LeaderboardCellData) => {
-                                  const token = tokenInfoFor(params.registry, HUB_CHAIN_ID, pos.baseTokenId).token
-                                  const desc = getTokenDescription(token)
-                                  return $row(style({}))($text(readableTokenAmount(desc, pos.allocated)))
-                                })
-                              },
-                              {
-                                // Consistency/downside column so funders judge risk instead of chasing the top return line.
-                                // TODO(indexer): needs maxDrawdown (bps) + sharpeRatio on MasterLatestMetric to render
-                                // $drawdownDisplay/$sharpeDisplay; until then we surface win-rate derived from pnlList.
-                                $head: $text('Consistency'),
-                                gridTemplate: '90px',
-                                $bodyCallback: map((pos: I$LeaderboardCellData) =>
-                                  $row(style({ placeContent: 'flex-start' }))(
-                                    $winRateDisplay(pos.winCount, pos.lossCount)
-                                  )
-                                )
-                              }
-                            ]
-                          : []) as TableColumn<I$LeaderboardCellData>[]),
                         {
+                          // AUM + the active metric overlaid on the activity chart in one column: numbers are
+                          // left-aligned (the chart reads left→right, so the latest values on the right stay
+                          // unobscured) over a palette.background→transparent gradient. Mirrors the shadow view.
                           $head: $row(
                             spacing.small,
                             style({ flex: 1, placeContent: 'space-between', alignItems: 'center' })
                           )(
-                            $text(params.performanceMetric === 'navPerShare' ? 'Performance' : 'Realised PnL'),
-                            $node(style({ textAlign: 'right', alignSelf: 'center' }))(
-                              $text(`${getMappedValue(activityOptionLabelMap, params.activityTimeframe)} Activity`)
+                            $text(params.performanceMetric === 'navPerShare' ? 'ROI % / AUM' : 'PnL $ / AUM'),
+                            $node(style({ textAlign: 'right', alignSelf: 'center', color: palette.foreground }))(
+                              $text(`Last ${getMappedValue(activityOptionLabelMap, params.activityTimeframe)} activity`)
                             )
                           ),
                           sortBy: params.performanceMetric,
-                          gridTemplate: isDesktopScreen ? 'minmax(0, 1fr)' : undefined,
+                          gridTemplate: isDesktopScreen ? 'minmax(0, 1fr)' : '220px',
                           $bodyCallback: map(pos => {
                             const isNav = params.performanceMetric === 'navPerShare'
-                            const endTime = getUnixTimestamp()
-                            const startTime = endTime - params.activityTimeframe
-                            const timeline = isNav
-                              ? pos.navTimeline
-                              : resampleTimeSeries({
-                                  sourceList: [
-                                    { value: 0n, time: startTime },
-                                    ...pos.pnlList
-                                      .map((pnl: bigint, index: number) => ({
-                                        value: pnl,
-                                        time: pos.pnlTimestampList[index]
-                                      }))
-                                      .filter((item: { value: bigint; time: number }) => item.time > startTime),
-                                    { value: pos.pnlList[pos.pnlList.length - 1] ?? 0n, time: endTime }
-                                  ],
-                                  getTime: item => item.time,
-                                  mapSource: next => formatFixed(USD_DECIMALS, next.value)
-                                })
-
                             const navReturn = (Number(formatFixed(USD_DECIMALS, pos.navPerShare)) - 1) * 100
-                            const $value = isNav
-                              ? $node(style({ color: navReturn >= 0 ? palette.positive : palette.negative }))(
-                                  $text(`${navReturn >= 0 ? '+' : ''}${navReturn.toFixed(2)}%`)
-                                )
+                            const token = tokenInfoFor(params.registry, HUB_CHAIN_ID, pos.baseTokenId).token
+                            const desc = getTokenDescription(token)
+                            const $primary = isNav
+                              ? $node(
+                                  style({
+                                    fontWeight: 'bold',
+                                    color: navReturn >= 0 ? palette.positive : palette.negative
+                                  })
+                                )($text(`${navReturn >= 0 ? '+' : ''}${navReturn.toFixed(2)}%`))
                               : $pnlDisplay(pos.realisedPnl)
+                            const $value = $column(
+                              spacing.tiny,
+                              style({ alignItems: 'flex-start', placeContent: 'center', whiteSpace: 'nowrap' })
+                            )(
+                              $primary,
+                              $separator2,
+                              $node(style({ color: palette.message, fontSize: '0.85em' }))(
+                                $text(readableTokenAmount(desc, pos.allocated))
+                              )
+                            )
+
+                            if (pos.pnlTimeline.length === 0) {
+                              return $row(style({ alignItems: 'center', placeContent: 'flex-start', flex: 1 }))($value)
+                            }
 
                             return $row(style({ position: 'relative', height: '100%', flex: 1, overflow: 'hidden' }))(
                               style({
@@ -869,9 +862,9 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                                     },
                                     timeScale: { visible: false }
                                   },
-                                  data: timeline as any as BaselineData<ISeriesTime>[],
+                                  data: pos.pnlTimeline as any as BaselineData<ISeriesTime>[],
                                   baselineOptions: {
-                                    baseValue: { price: isNav ? 1 : 0, type: 'price' },
+                                    baseValue: { price: 0, type: 'price' },
                                     lineWidth: 1,
                                     lineType: LineType.Curved
                                   }
@@ -880,26 +873,15 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                               $row(
                                 style({
                                   position: 'absolute',
-                                  background: `linear-gradient(to right, ${palette.background} 0%, ${palette.background} 23%, transparent 100%)`,
+                                  background: `linear-gradient(to right, ${palette.background} 0%, ${palette.background} 32%, transparent 100%)`,
                                   inset: 0,
                                   zIndex: 1,
-                                  alignItems: 'center'
+                                  alignItems: 'center',
+                                  paddingLeft: '4px',
+                                  pointerEvents: 'none'
                                 })
                               )($value)
                             )
-                          })
-                        },
-                        {
-                          $head: $text('Copy'),
-                          gridTemplate: isDesktopScreen ? '140px' : '120px',
-                          $bodyCallback: map((pos: I$LeaderboardCellData) => {
-                            const token = tokenInfoFor(params.registry, HUB_CHAIN_ID, pos.baseTokenId).token
-                            return $FundEditor({
-                              master: pos.master,
-                              collateralToken: token,
-                              userMatchingRuleQuery,
-                              draftMatchingRuleList
-                            })({ changeMatchRuleList: changeMatchRuleListTether() })
                           })
                         }
                       ] as TableColumn<I$LeaderboardCellData>[]

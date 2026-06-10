@@ -3,11 +3,11 @@ import { style } from 'aelea/ui'
 import { $separator } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import type { Address, Hex } from 'viem'
-import type { IGmxPositionDecrease, IGmxPositionIncrease, IMasterLatestMetric } from '../io/indexer/query.js'
+import type { IFundLatestMetric, IGmxPositionDecrease, IGmxPositionIncrease } from '../io/indexer/query.js'
 import type { IPosition } from './types'
 
 export const $separator2 = style(
-  { backgroundColor: colorShade(palette.foreground, 20), alignSelf: 'stretch', display: 'block' },
+  { backgroundColor: colorShade(palette.foreground, 40), alignSelf: 'stretch', display: 'block' },
   $separator
 )
 
@@ -111,14 +111,14 @@ export function aggregatePositionList(list: (IGmxPositionIncrease | IGmxPosition
   })
 }
 
-export function accountSettledPositionListSummary(account: Address, metricList: IMasterLatestMetric[]) {
+export function accountSettledPositionListSummary(account: Address, metricList: IFundLatestMetric[]) {
   const seed = {
     account,
     realisedPnl: 0n,
     allocatedVolume: 0n,
     lossCount: 0,
     winCount: 0,
-    pnlTimeline: [] as { time: number; value: bigint; master: Hex }[],
+    pnlTimeline: [] as { time: number; value: bigint; fund: Address }[],
     matchedPuppetList: [] as Address[]
   }
 
@@ -129,7 +129,7 @@ export function accountSettledPositionListSummary(account: Address, metricList: 
     next.pnlList.forEach((pnl: bigint, idx: number) => {
       seed.lossCount += pnl < 0n ? 1 : 0
       seed.winCount += pnl > 0n ? 1 : 0
-      seed.pnlTimeline.push({ time: next.pnlTimestampList[idx], value: pnl, master: next.master })
+      seed.pnlTimeline.push({ time: next.pnlTimestampList[idx], value: pnl, fund: next.fund })
     })
 
     return seed

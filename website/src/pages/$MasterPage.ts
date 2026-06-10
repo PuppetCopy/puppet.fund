@@ -10,7 +10,6 @@ import {
   readableUsd
 } from '@puppet/sdk/core'
 import { getTokenDescription } from '@puppet/sdk/gmx'
-import { getSubaccountState } from '@puppet/sdk/state'
 import {
   combine,
   constant,
@@ -57,12 +56,12 @@ import type { ISubscribeRule } from '../components/portfolio/$MatchingRuleEditor
 import { entryColumn, pnlColumn, puppetsColumn, sizeColumn, timeColumn } from '../components/table/$TableColumn.js'
 import * as context from '../io/context.js'
 import {
+  fetchMasterPoolState,
   fetchMasterRouteMetricList,
   fetchMasterSubscribers,
   fetchPositionDecreaseList,
   fetchPositionIncreaseList
 } from '../io/indexer/query.js'
-import { sqlClient } from '../io/indexer/sql.js'
 import { accountSettledPositionListSummary, aggregatePositionList } from './common'
 import type { IPageFilterParams } from './types.js'
 
@@ -95,13 +94,13 @@ export const $MasterPage = ({
       const sortBy = state(defaultSortBy, merge(sortByChange, constant(defaultSortBy, retryPositions)))
 
       const urlFragments = document.location.pathname.split('/')
-      const account = urlFragments[urlFragments.length - 1].toLowerCase() as Address
+      const fund = urlFragments[urlFragments.length - 1].toLowerCase() as Address
 
       const routeMetricListQuery = op(
         combine({ activityTimeframe, collateralTokenList, indexTokenList }),
         map(async params =>
           fetchMasterRouteMetricList({
-            master: account,
+            fund,
             activityTimeframe: params.activityTimeframe,
             collateralTokenList: params.collateralTokenList
           })
@@ -111,12 +110,12 @@ export const $MasterPage = ({
 
       const metricsQuery = op(
         routeMetricListQuery,
-        map(async metricList => accountSettledPositionListSummary(account, await metricList)),
+        map(async metricList => accountSettledPositionListSummary(fund, await metricList)),
         multicast
       )
 
-      const subscribersQuery = just(fetchMasterSubscribers(account))
-      const masterStateQuery = just(getSubaccountState(sqlClient, account))
+      const subscribersQuery = just(fetchMasterSubscribers(fund))
+      const fundStateQuery = just(fetchMasterPoolState(fund))
 
       const tokenRegistryValue = switchPromises(context.tokenRegistryQuery)
 
@@ -138,8 +137,8 @@ export const $MasterPage = ({
         const since = getUnixTimestamp() - params.activityTimeframe
         const pageQuery = Promise.all([
           params.routeMetricListQuery,
-          fetchPositionIncreaseList({ account, collateralTokenList: params.collateralTokenList, since }),
-          fetchPositionDecreaseList({ account, collateralTokenList: params.collateralTokenList, since })
+          fetchPositionIncreaseList({ account: fund, collateralTokenList: params.collateralTokenList, since }),
+          fetchPositionDecreaseList({ account: fund, collateralTokenList: params.collateralTokenList, since })
         ])
         return pageQuery.then(([routeMetricList, increaseList, decreaseList]) => {
           const openPositionList = aggregatePositionList([...increaseList, ...decreaseList])
@@ -248,15 +247,15 @@ export const $MasterPage = ({
 
       const $identityHeader = (accountName?: string) =>
         $column(spacing.tiny)(
-          $heading3($accountLabel({ address: account, ensName: accountName })),
+          $heading3($accountLabel({ address: fund, ensName: accountName })),
           // Show the truncated 0x address as a secondary, verifiable identifier when a name is set,
           // alongside the 'View on explorer' link.
           $row(spacing.small, style({ alignItems: 'center' }))(
             accountName
-              ? $node(style({ color: palette.foreground, fontSize: text.sm }))($text(readableAddress(account)))
+              ? $node(style({ color: palette.foreground, fontSize: text.sm }))($text(readableAddress(fund)))
               : empty,
             $anchor(
-              attr({ href: getEtherscanMultichainUrl(account), target: '_blank' }),
+              attr({ href: getEtherscanMultichainUrl(fund), target: '_blank' }),
               style({ color: palette.foreground, fontSize: text.sm })
             )($text('View on explorer'), $icon({ $content: $external, width: '11px' }))
           )
@@ -264,12 +263,12 @@ export const $MasterPage = ({
 
       const $profileOverview = $column(spacing.default)(
         $row(spacing.default, style({ alignItems: 'center' }))(
-          $roboAvatar(account, 56),
+          $roboAvatar(fund, 56),
           $intermediatePromise({
             $loader: $identityHeader(),
             $display: map(
-              async masterStateFuture => $identityHeader(readableAccountName((await masterStateFuture)?.name)),
-              masterStateQuery
+              async fundStateFuture => $identityHeader(readableAccountName((await fundStateFuture)?.name)),
+              fundStateQuery
             )
           })
         ),
@@ -278,22 +277,22 @@ export const $MasterPage = ({
         $intermediatePromise({
           $display: map(
             async p => {
-              const masterState = await p.master
-              if (!masterState) return $infoLabel($text('Master account not found'))
-              const info = p.registry.get(HUB_CHAIN_ID)?.get(masterState.baseTokenId)
+              const fundState = await p.fund
+              if (!fundState) return $infoLabel($text('Fund not found'))
+              const info = p.registry.get(HUB_CHAIN_ID)?.get(fundState.baseTokenId)
               if (!info) return $infoLabel($text('Unsupported collateral'))
               return $FundEditor({
                 collateralToken: info.token,
                 userMatchingRuleQuery,
                 draftMatchingRuleList,
-                master: account,
+                master: fund,
                 prominent: true,
                 $container: $defaultFundEditorContainer(style({ marginLeft: '-12px' }))
               })({
                 changeMatchRuleList: changeMatchRuleListTether()
               })
             },
-            combine({ master: masterStateQuery, registry: tokenRegistryValue })
+            combine({ fund: fundStateQuery, registry: tokenRegistryValue })
           )
         })
       )
@@ -461,8 +460,8 @@ export const $MasterPage = ({
           )(
             $element('a')(
               attr({ href: '/' }),
-              style({ color: palette.foreground, cursor: 'pointer' }),
-              stylePseudo(':hover', { color: colorShade(palette.primary, 50) }),
+              style({ color: colorShade(palette.message, 85), cursor: 'pointer' }),
+              stylePseudo(':hover', { color: palette.message }),
               effectProp(
                 'onclick',
                 nowWith(() => (ev: MouseEvent) => {
@@ -474,13 +473,13 @@ export const $MasterPage = ({
             )($text('Leaderboard')),
             $icon({ $content: $arrowRight, fill: palette.foreground, width: '8px' }),
             $intermediatePromise({
-              $loader: $node(style({ color: palette.message }))($text(readableAddress(account))),
+              $loader: $node(style({ color: palette.message }))($text(readableAddress(fund))),
               $display: map(
-                async masterStateFuture =>
+                async fundStateFuture =>
                   $node(style({ color: palette.message }))(
-                    $text(readableAccountName((await masterStateFuture)?.name) ?? readableAddress(account))
+                    $text(readableAccountName((await fundStateFuture)?.name) ?? readableAddress(fund))
                   ),
-                masterStateQuery
+                fundStateQuery
               )
             })
           ),

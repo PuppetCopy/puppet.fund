@@ -21,12 +21,12 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_transientRouteImpl",
+        "name": "_fundAccountImpl",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "_masterAccountImpl",
+        "name": "_passthroughRouteImpl",
         "type": "address",
         "internalType": "address"
       }
@@ -85,59 +85,22 @@ export default [
   },
   {
     "type": "function",
-    "name": "createMasterAccount",
+    "name": "createFundAccount",
     "inputs": [
       {
-        "name": "_params",
-        "type": "tuple",
-        "internalType": "struct AccountLib.AccountInitParams",
-        "components": [
-          {
-            "name": "user",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "name",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "baseTokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "signer",
-            "type": "address",
-            "internalType": "address"
-          }
-        ]
-      },
-      {
-        "name": "_userDeploySig",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_signerProof",
-        "type": "bytes",
-        "internalType": "bytes"
+        "name": "_signer",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [
       {
         "name": "account_",
         "type": "address",
-        "internalType": "contract MasterAccount"
+        "internalType": "contract FundAccount"
       },
       {
-        "name": "transientRoute_",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "depositRoute_",
+        "name": "route_",
         "type": "address",
         "internalType": "address"
       }
@@ -157,16 +120,6 @@ export default [
             "name": "user",
             "type": "address",
             "internalType": "address"
-          },
-          {
-            "name": "name",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "baseTokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
           },
           {
             "name": "signer",
@@ -193,7 +146,7 @@ export default [
         "internalType": "contract PuppetAccount"
       },
       {
-        "name": "transientRoute_",
+        "name": "route_",
         "type": "address",
         "internalType": "address"
       }
@@ -237,6 +190,33 @@ export default [
         ]
       },
       {
+        "name": "_transferList",
+        "type": "tuple[]",
+        "internalType": "struct IAccount.SignTransfer[]",
+        "components": [
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "contract IERC20"
+          },
+          {
+            "name": "amountIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "amountOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
         "name": "_digest",
         "type": "bytes32",
         "internalType": "bytes32"
@@ -260,51 +240,21 @@ export default [
         "name": "_nonce",
         "type": "uint256",
         "internalType": "uint256"
-      },
-      {
-        "name": "_baseToken",
-        "type": "address",
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "_amountIn",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_amountOut",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_relayFee",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_feeReceiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_transferGasLimit",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "outputs": [
       {
-        "name": "signedPostBalance_",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "signedPostBalanceList_",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
       },
       {
-        "name": "postBalance_",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "postBalanceList_",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
       },
       {
-        "name": "results_",
+        "name": "resultList_",
         "type": "bytes[]",
         "internalType": "bytes[]"
       }
@@ -358,39 +308,64 @@ export default [
         ]
       },
       {
-        "name": "_baseToken",
-        "type": "address",
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "_amountOut",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_transferGasLimit",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "_transferList",
+        "type": "tuple[]",
+        "internalType": "struct IAccount.SignTransfer[]",
+        "components": [
+          {
+            "name": "tokenId",
+            "type": "bytes32",
+            "internalType": "bytes32"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "contract IERC20"
+          },
+          {
+            "name": "amountIn",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "amountOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "outputs": [
       {
-        "name": "signedPostBalance_",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "signedPostBalanceList_",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
       },
       {
-        "name": "postBalance_",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "postBalanceList_",
+        "type": "uint256[]",
+        "internalType": "uint256[]"
       },
       {
-        "name": "results_",
+        "name": "resultList_",
         "type": "bytes[]",
         "internalType": "bytes[]"
       }
     ],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "fundAccountImpl",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -418,7 +393,7 @@ export default [
   },
   {
     "type": "function",
-    "name": "masterAccountImpl",
+    "name": "passthroughRouteImpl",
     "inputs": [],
     "outputs": [
       {
@@ -431,53 +406,12 @@ export default [
   },
   {
     "type": "function",
-    "name": "predictDepositRoute",
+    "name": "predictFundAccount",
     "inputs": [
       {
-        "name": "_account",
+        "name": "_signer",
         "type": "address",
         "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "predictMasterAccount",
-    "inputs": [
-      {
-        "name": "_params",
-        "type": "tuple",
-        "internalType": "struct AccountLib.AccountInitParams",
-        "components": [
-          {
-            "name": "user",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "name",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "baseTokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "signer",
-            "type": "address",
-            "internalType": "address"
-          }
-        ]
       }
     ],
     "outputs": [
@@ -504,16 +438,6 @@ export default [
             "internalType": "address"
           },
           {
-            "name": "name",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "baseTokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
             "name": "signer",
             "type": "address",
             "internalType": "address"
@@ -532,7 +456,7 @@ export default [
   },
   {
     "type": "function",
-    "name": "predictTransientRoute",
+    "name": "predictRoute",
     "inputs": [
       {
         "name": "_account",
@@ -606,54 +530,19 @@ export default [
   },
   {
     "type": "function",
-    "name": "transientRouteImpl",
-    "inputs": [],
-    "outputs": [
+    "name": "verifyFundAccount",
+    "inputs": [
       {
-        "name": "",
+        "name": "_signer",
         "type": "address",
         "internalType": "address"
       }
     ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "verifyMasterAccount",
-    "inputs": [
-      {
-        "name": "_params",
-        "type": "tuple",
-        "internalType": "struct AccountLib.AccountInitParams",
-        "components": [
-          {
-            "name": "user",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "name",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "baseTokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "signer",
-            "type": "address",
-            "internalType": "address"
-          }
-        ]
-      }
-    ],
     "outputs": [
       {
         "name": "",
         "type": "address",
-        "internalType": "contract MasterAccount"
+        "internalType": "contract FundAccount"
       }
     ],
     "stateMutability": "view"
@@ -673,16 +562,6 @@ export default [
             "internalType": "address"
           },
           {
-            "name": "name",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "baseTokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
             "name": "signer",
             "type": "address",
             "internalType": "address"
@@ -698,11 +577,6 @@ export default [
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "error",
-    "name": "Account__InvalidBaseTokenId",
-    "inputs": []
   },
   {
     "type": "error",
