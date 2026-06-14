@@ -1,18 +1,17 @@
 import {
   dustToZeroUsd,
   getMappedValueFallback,
-  type IMarketDescription,
   type ITokenDescription,
   readableDate,
   readableLeverage,
   readablePnl,
   readableUsd
 } from '@puppet/sdk/core'
-import { getLiquidationPrice, getPositionPnlUsd, getTokenDescription, liquidationWeight } from '@puppet/sdk/gmx'
+import { getPositionPnlUsd, getTokenDescription } from '@puppet/sdk/gmx'
 import { empty, type IStream, map, skipRepeats, toStream } from 'aelea/stream'
 import type { IBehavior, IComposeBehavior } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, type INode, nodeEvent, style, styleInline } from 'aelea/ui'
-import { $column, $row, $separator, isDesktopScreen, layoutSheet, spacing } from 'aelea/ui-components'
+import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import type { Address } from 'viem/accounts'
 import {
@@ -213,59 +212,6 @@ export const $winRateDisplay = (wins: number, losses: number) => {
   return $column(spacing.tiny)(
     $node(style({ color, fontWeight: 'bold' }))($text(`${rate.toFixed(0)}%`)),
     $node(style({ fontSize: text.xs, color: palette.foreground }))($text(`${wins}W / ${losses}L`))
-  )
-}
-
-// Default minCollateralFactor (1% = 1e28 with 30 decimals)
-const DEFAULT_MIN_COLLATERAL_FACTOR = 10n ** 28n
-
-export function $liquidationSeparator(
-  isLong: boolean,
-  sizeUsd: bigint,
-  sizeInTokens: bigint,
-  collateralAmount: bigint,
-  markPrice: IStream<bigint>
-) {
-  const liqWeight = map(price => {
-    const collateralUsd = price * collateralAmount
-    const liquidationPrice = getLiquidationPrice(
-      isLong,
-      sizeUsd,
-      sizeInTokens,
-      collateralUsd,
-      0n,
-      DEFAULT_MIN_COLLATERAL_FACTOR
-    )
-
-    return liquidationWeight(isLong, liquidationPrice, price)
-  }, markPrice)
-
-  return styleInline(
-    map(weight => {
-      return {
-        width: '100%',
-        background: `linear-gradient(90deg, ${palette.negative} ${`${weight * 100}%`}, ${palette.foreground} 0)`
-      }
-    }, liqWeight)
-  )($separator)
-}
-
-export const $marketLabel = (market: IMarketDescription, showLabel = true) => {
-  const indexTokenDescription = getTokenDescription(market.indexToken)
-  const longTokenDescription = getTokenDescription(market.longToken)
-  const shortTokenDescription = getTokenDescription(market.shortToken)
-  const $iconG = $tokenIconMap[indexTokenDescription.symbol]
-
-  return $row(spacing.default, style({ cursor: 'pointer', alignItems: 'center' }))(
-    $icon({ $content: $iconG, width: '34px', viewBox: '0 0 32 32' }),
-    showLabel
-      ? $column(layoutSheet.flex)(
-          $node(style({ fontWeight: 'bold' }))($text(indexTokenDescription.symbol)),
-          $node(style({ fontSize: text.base, color: palette.foreground }))(
-            $text(`${longTokenDescription.symbol}/${shortTokenDescription.symbol}`)
-          )
-        )
-      : empty
   )
 }
 

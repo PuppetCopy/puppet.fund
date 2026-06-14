@@ -13,7 +13,6 @@ export const localStoreSchema = uiStorage.createStoreDefinition(DB_NAME, 1, {
     wallet: null as null | string,
     activityTimeframe: IntervalTime.WEEK,
     collateralTokenList: [] as string[],
-    indexTokenList: [] as string[],
     firstVisitSeen: false
   },
   ruleEditor: {

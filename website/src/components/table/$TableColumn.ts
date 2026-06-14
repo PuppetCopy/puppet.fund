@@ -89,7 +89,6 @@ export const pnlColumn = (_puppet?: Address): TableColumn<IPosition> => ({
             $pnlDisplay(pnl)
           ),
           $separator2,
-          // $liquidationSeparator(pos.isLong, pos.lastUpdate.sizeInUsd, pos.lastUpdate.sizeInTokens, pos.lastUpdate.collateralAmount, latestPrice),
           $node(style({ fontSize: text.sm }))(
             $text(
               map(value => {

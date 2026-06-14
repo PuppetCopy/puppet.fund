@@ -115,7 +115,6 @@ export const $Leaderboard = (config: I$Leaderboard) =>
 
       [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<IntervalTime>,
       [selectCollateralTokenList, selectCollateralTokenListTether]: IBehavior<Address[]>,
-      [selectIndexTokenList, selectIndexTokenListTether]: IBehavior<Address[]>,
 
       [filterAccount, filterAccountTether]: IBehavior<string | undefined>,
       [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>,
@@ -934,7 +933,6 @@ export const $Leaderboard = (config: I$Leaderboard) =>
             constant([] as Address[], clearCollateralFilter),
             constant([] as Address[], clearAllFilters)
           ),
-          selectIndexTokenList,
           changeMatchRuleList
         }
       ]

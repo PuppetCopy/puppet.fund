@@ -120,7 +120,6 @@ export const $Main = (_config: IApp = {}) =>
 
       [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<IntervalTime>,
       [selectCollateralTokenList, selectCollateralTokenListTether]: IBehavior<Address[]>,
-      [selectIndexTokenList, selectIndexTokenListTether]: IBehavior<Address[]>,
 
       [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>,
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
@@ -140,7 +139,6 @@ export const $Main = (_config: IApp = {}) =>
         localStoreSchema.global.collateralTokenList,
         selectCollateralTokenList
       )
-      const indexTokenList = uiStorage.replayWrite(localStoreSchema.global.indexTokenList, selectIndexTokenList)
 
       const loadWalletState = async (wallet: IConnectedWallet | null): Promise<ISubaccountState | null> => {
         if (!wallet) return null
@@ -438,12 +436,10 @@ export const $Main = (_config: IApp = {}) =>
                   draftMatchingRuleList,
                   activityTimeframe,
                   collateralTokenList,
-                  indexTokenList,
                   userMatchingRuleQuery
                 })({
                   changeActivityTimeframe: changeActivityTimeframeTether(),
                   selectCollateralTokenList: selectCollateralTokenListTether(),
-                  selectIndexTokenList: selectIndexTokenListTether(),
                   changeMatchRuleList: changeMatchRuleListTether()
                 })
               )
@@ -458,11 +454,9 @@ export const $Main = (_config: IApp = {}) =>
                       userMatchingRuleQuery,
                       activityTimeframe,
                       collateralTokenList,
-                      indexTokenList,
                       draftMatchingRuleList
                     })({
                       selectCollateralTokenList: selectCollateralTokenListTether(),
-                      selectIndexTokenList: selectIndexTokenListTether(),
                       changeActivityTimeframe: changeActivityTimeframeTether(),
                       changeMatchRuleList: changeMatchRuleListTether()
                     })
@@ -489,11 +483,9 @@ export const $Main = (_config: IApp = {}) =>
                   walletQuery,
                   walletState,
                   activityTimeframe,
-                  collateralTokenList,
-                  indexTokenList
+                  collateralTokenList
                 })({
                   selectCollateralTokenList: selectCollateralTokenListTether(),
-                  selectIndexTokenList: selectIndexTokenListTether(),
                   changeActivityTimeframe: changeActivityTimeframeTether(),
                   changeDraft: changeDraftTether(),
                   changeRedeemDraft: changeRedeemDraftTether(),

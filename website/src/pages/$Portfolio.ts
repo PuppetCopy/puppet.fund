@@ -131,7 +131,6 @@ export const $Portfolio = ({
     (
       [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<any, IntervalTime>,
       [selectCollateralTokenList, selectCollateralTokenListTether]: IBehavior<Address[]>,
-      [selectIndexTokenList, _selectIndexTokenListTether]: IBehavior<Address[]>,
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
       [changeMasterDraft, changeMasterDraftTether]: IBehavior<IAllocateDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
@@ -614,7 +613,6 @@ export const $Portfolio = ({
         {
           changeActivityTimeframe,
           selectCollateralTokenList,
-          selectIndexTokenList,
           changeDraft,
           changeRedeemDraft,
           changeAllocateDraft: changeMasterDraft,

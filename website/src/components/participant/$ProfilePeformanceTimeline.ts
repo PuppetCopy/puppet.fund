@@ -209,7 +209,6 @@ interface I$MasterRouteTimeline extends IPageFilterParams {
 export const $MasterRouteTimeline = ({
   activityTimeframe,
   collateralTokenList,
-  indexTokenList,
   metricsQuery,
   chartHeight,
   $lead,
@@ -219,7 +218,6 @@ export const $MasterRouteTimeline = ({
   component(
     (
       [selectCollateralTokenList, _selectCollateralTokenListTether]: IBehavior<Address[]>,
-      [selectIndexTokenList, _selectIndexTokenListTether]: IBehavior<Address[]>,
       [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<any, IntervalTime>
     ) => {
       const timelineQuery = map(
@@ -273,7 +271,7 @@ export const $MasterRouteTimeline = ({
           changeActivityTimeframe: changeActivityTimeframeTether()
         }),
 
-        { selectCollateralTokenList, selectIndexTokenList, changeActivityTimeframe }
+        { selectCollateralTokenList, changeActivityTimeframe }
       ]
     }
   )

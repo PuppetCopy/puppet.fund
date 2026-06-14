@@ -8,7 +8,6 @@ export type { IMasterMetricSummary } from './common.js'
 export interface IPageFilterParams {
   activityTimeframe: IStream<IntervalTime>
   collateralTokenList: IStream<Address[]>
-  indexTokenList: IStream<Address[]>
 }
 
 export type IPosition = {

@@ -21,7 +21,6 @@ export {
 } from 'aelea/ui-components'
 export { type TextStep, text } from 'aelea/ui-components-theme'
 export * from './$alert.js'
-export * from './$avatar.js'
 export * from './balanceVisibility.js'
 export * from './$common.js'
 export * from './$hintAdjustment.js'

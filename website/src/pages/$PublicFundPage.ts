@@ -123,7 +123,6 @@ const operateVenue = (
 export const $PublicFundPage = ({
   activityTimeframe,
   collateralTokenList,
-  indexTokenList,
   userMatchingRuleQuery,
   draftMatchingRuleList
 }: I$PublicFundPage) =>
@@ -131,14 +130,13 @@ export const $PublicFundPage = ({
     (
       [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<any, IntervalTime>,
       [selectCollateralTokenList, selectCollateralTokenListTether]: IBehavior<Address[]>,
-      [selectIndexTokenList, selectIndexTokenListTether]: IBehavior<Address[]>,
       [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>
     ) => {
       const urlFragments = document.location.pathname.split('/')
       const fund = urlFragments[urlFragments.length - 1].toLowerCase() as Address
 
       const routeMetricListQuery = op(
-        combine({ activityTimeframe, collateralTokenList, indexTokenList }),
+        combine({ activityTimeframe, collateralTokenList }),
         map(async params =>
           fetchMasterRouteMetricList({
             fund,
@@ -649,7 +647,6 @@ export const $PublicFundPage = ({
           $MasterRouteTimeline({
             activityTimeframe,
             collateralTokenList,
-            indexTokenList,
             metricsQuery,
             livePnlUsd,
             aumUsd: aumUsdQuery,
@@ -657,7 +654,6 @@ export const $PublicFundPage = ({
             $lead: $row(style({ flex: 1, pointerEvents: 'all' }))($metricsLead)
           })({
             selectCollateralTokenList: selectCollateralTokenListTether(),
-            selectIndexTokenList: selectIndexTokenListTether(),
             changeActivityTimeframe: changeActivityTimeframeTether()
           }),
           isDesktopScreen
@@ -829,7 +825,7 @@ export const $PublicFundPage = ({
             $column(spacing.default, style({ flex: 1, minWidth: 0 }))($openPositions, $activity)
           )
         ),
-        { changeActivityTimeframe, selectCollateralTokenList, selectIndexTokenList, changeMatchRuleList }
+        { changeActivityTimeframe, selectCollateralTokenList, changeMatchRuleList }
       ]
     }
   )

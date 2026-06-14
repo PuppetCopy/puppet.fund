@@ -1,6 +1,5 @@
 import { CHAIN_NETWORK_MAP, HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { type ChainId, VIEM_CHAINS } from '@puppet/sdk/const'
-import { walletConnect } from '@wagmi/connectors'
 import {
   type Config,
   type Connector,
@@ -22,24 +21,13 @@ import { fromCallback } from 'aelea/stream-extended'
 import { type Chain, fallback, http, type PublicClient } from 'viem'
 
 export const WALLETCONNECT_PROJECT_ID = '37a9b5a1299a3d3d2ddecf4f022030f5'
-// Injected at build time by vite's `define` from `SITE_CONFIG`.
-declare const __WC_METADATA__: {
-  name: string
-  description: string
-  url: string
-  icons: string[]
-}
 
-// Caddy + vite rewrite `/api/rpc?network={slug}` to a keyed provider; mainnet's
-// slug is `ethereum`, others match the chain alias from foundry.toml.
 const proxyTransport = (slug: string, chain: Chain) =>
   fallback([http(`/api/rpc?network=${slug}`, { batch: true }), http(chain.rpcUrls.default.http[0], { batch: true })])
 
 export const wagmi: Config = createConfig({
   chains: VIEM_CHAINS,
-  // EIP-6963 (mipd) auto-discovers each installed wallet as its own connector
-  // via wagmi's default `multiInjectedProviderDiscovery`. No manual `injected()`.
-  connectors: [walletConnect({ projectId: WALLETCONNECT_PROJECT_ID, metadata: __WC_METADATA__ })],
+  connectors: [],
   storage: createStorage({ storage: localStorage }),
   syncConnectedChain: true,
   transports: Object.fromEntries(

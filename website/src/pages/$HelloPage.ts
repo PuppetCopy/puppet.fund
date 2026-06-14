@@ -47,6 +47,7 @@ import {
   $FieldLabeled,
   $icon,
   $labelDisplay,
+  $navLink,
   $popoverCaret,
   $puppeteer,
   $smartContract,
@@ -263,20 +264,24 @@ export const $HelloPage = ({
                     spacing.small,
                     style({ alignItems: 'flex-start', minWidth: '0' })
                   )(
-                    switchLatest(
-                      map(
-                        name =>
-                          $fundProfile(
-                            {
-                              master: fundMaster,
-                              baseTokenId: effectiveBid,
-                              name: accountNameToHex(name.trim() || defaultName)
-                            },
-                            48
-                          ),
-                        fundName
+                    $navLink({
+                      route: routeSchema.fund.detail,
+                      params: { address: predictFundAccount(fundMaster) },
+                      $content: switchLatest(
+                        map(
+                          name =>
+                            $fundProfile(
+                              {
+                                master: fundMaster,
+                                baseTokenId: effectiveBid,
+                                name: accountNameToHex(name.trim() || defaultName)
+                              },
+                              48
+                            ),
+                          fundName
+                        )
                       )
-                    )
+                    })
                   ),
                   $row(spacing.small, style({ alignItems: 'center', justifyContent: 'flex-end', flex: '1' }))(
                     $column(spacing.small, style({ alignItems: 'flex-end' }))($depositButton, $withdrawButton),
