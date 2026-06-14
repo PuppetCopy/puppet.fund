@@ -1,0 +1,6 @@
+# Never ship real env files — only the .env.example templates. npm does not ignore .env
+# by default, and `files` is an include-list, so a stray secret-bearing .env would otherwise
+# be packed straight into the published tarball.
+.env
+.env.*
+!.env.example

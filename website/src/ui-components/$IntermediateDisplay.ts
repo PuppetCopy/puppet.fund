@@ -1,24 +1,11 @@
-import {
-  constant,
-  empty,
-  type Fn,
-  fromPromise,
-  type IOps,
-  type IStream,
-  just,
-  map,
-  start,
-  switchLatest,
-  switchMap
-} from 'aelea/stream'
-import { multicast, PromiseStatus, promiseState } from 'aelea/stream-extended'
+import { type Fn, fromPromise, type IStream, map, start, switchLatest, switchMap } from 'aelea/stream'
+import { PromiseStatus, promiseState } from 'aelea/stream-extended'
 import { $node, $text, type I$Node, type I$Slottable, style } from 'aelea/ui'
-import { $column, $row, spacing } from 'aelea/ui-components'
+import { $column, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import type { Chain, TransactionReceipt } from 'viem'
 import { text } from '@/ui-components'
-import { $alert, $alertTooltip } from './$alert.js'
-import { $icon, $txHashRef } from './$common.js'
+import { $alertTooltip } from './$alert.js'
+import { $icon } from './$common.js'
 import { $alertIcon } from './$icons.js'
 
 export const $loadingDash: I$Node = $node(
@@ -151,53 +138,3 @@ export const $intermediatePromise = <T>({
 
     return state.value
   }, promiseState($display))
-
-type IIntermediateTx<TSuccess extends TransactionReceipt> = {
-  $$success?: IOps<TSuccess, I$Node>
-  chain: Chain
-  query: IStream<Promise<TSuccess>>
-  clean?: IStream<any>
-  showTooltip?: boolean
-}
-
-export const $IntermediateTx = <TSuccess extends TransactionReceipt>({
-  query,
-  chain,
-  clean = empty,
-  $$success = constant($node(style({ color: palette.positive }))($text('Transaction confirmed'))),
-  showTooltip = false
-}: IIntermediateTx<TSuccess>) => {
-  const multicastQuery = multicast(query)
-
-  return $intermediatePromise<TSuccess>({
-    clean,
-    $display: map(async query => {
-      const res = await query
-
-      return $row(spacing.small, style({ color: palette.positive }))(
-        switchLatest($$success(just(res))),
-        $txHashRef(res.transactionHash, chain)
-      )
-    }, multicastQuery),
-    $loader: switchLatest(
-      map(c => {
-        return $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm }))(
-          $spinner,
-          $text(
-            start(
-              'Wallet Request...',
-              map(() => 'Awaiting confirmation...', fromPromise(c))
-            )
-          ),
-          $node(style({ flex: 1 }))(),
-          switchLatest(map(txHash => $txHashRef(txHash.transactionHash, chain), fromPromise(c)))
-        )
-      }, multicastQuery)
-    ),
-    $$fail: res => {
-      const error = String(res)
-
-      return showTooltip ? $alertTooltip($node($text(error))) : $alert($node($text(error)))
-    }
-  })
-}

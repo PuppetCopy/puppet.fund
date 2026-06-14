@@ -1,22 +1,37 @@
-import { generatePairingKeypair, type ISealedPayload, openPairingPayload } from '@puppet/sdk/account'
+import {
+  generatePairingKeypair,
+  type IPairedSession,
+  type ISealedPayload,
+  openPairingPayload,
+  predictPuppetAccount
+} from '@puppet/sdk/account'
+import { DEFAULT_MATCHMAKER_URL } from '@puppet/sdk/const'
+import type { ITokenInfo } from '@puppet/sdk/state'
 import type { Address, Hex } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
 
-export interface IPairedEndpoints {
-  matchmakerUrl?: string
-  indexerUrl?: string
-}
+const PAIR_CALLBACK_PORT = 42071
 
-export interface IPairedSession {
+export function buildSession(input: {
   signerKey: Hex
   user: Address
-  endpoints: IPairedEndpoints
+  baseTokenId: Hex
+  name: Hex
+  matchmakerUrl?: string
+  tokenRegistry?: ITokenInfo[]
+}): IPairedSession {
+  const params = { user: input.user, signer: privateKeyToAccount(input.signerKey).address }
+  return {
+    signerKey: input.signerKey,
+    params,
+    share: { master: predictPuppetAccount(params), baseTokenId: input.baseTokenId, name: input.name },
+    matchmakerUrl: input.matchmakerUrl ?? DEFAULT_MATCHMAKER_URL,
+    tokenRegistry: input.tokenRegistry
+  }
 }
 
-export async function pairOverBrowser(
-  siteUrl: string | URL = 'https://puppet.fund',
-  port = 42071
-): Promise<IPairedSession> {
-  const origin = new URL(siteUrl).origin
+export async function pairOverBrowser(pairUrl: string | URL = 'https://puppet.fund'): Promise<IPairedSession> {
+  const origin = new URL(pairUrl).origin
   const token = crypto.randomUUID()
   const { publicKey, privateKey } = await generatePairingKeypair()
   const cors = {
@@ -28,7 +43,7 @@ export async function pairOverBrowser(
   return new Promise(resolve => {
     const server = Bun.serve({
       hostname: '127.0.0.1',
-      port,
+      port: PAIR_CALLBACK_PORT,
       async fetch(req) {
         if (req.method === 'OPTIONS') return new Response(null, { headers: cors })
         const url = new URL(req.url)
@@ -36,20 +51,15 @@ export async function pairOverBrowser(
           return new Response('forbidden', { status: 403, headers: cors })
         }
         const sealed = (await req.json()) as ISealedPayload
-        const { user, signerKey, endpoints } = await openPairingPayload<{
-          user: Address
-          signerKey: Hex
-          endpoints?: IPairedEndpoints
-        }>(privateKey, sealed)
-        const result: IPairedSession = { signerKey, user, endpoints: endpoints ?? {} }
+        const session = await openPairingPayload<IPairedSession>(privateKey, sealed)
         queueMicrotask(() => {
           server.stop(true)
-          resolve(result)
+          resolve(session)
         })
         return new Response('ok', { headers: cors })
       }
     })
     console.log('[operator] pair this operator with your browser (key stays in memory, never written):')
-    console.log(`  ${siteUrl}/hello?pair=${port}&token=${token}&epk=${publicKey}`)
+    console.log(`  ${origin}/hello?pair=${PAIR_CALLBACK_PORT}&token=${token}&epk=${publicKey}`)
   })
 }

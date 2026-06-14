@@ -9,11 +9,11 @@ export const CONTRACT_EVENT_MAP = {
     },
     DeployFundAccount: {
       hash: '0x58d9c1e134c3725e0aafe460d7e043deaeee5c5393e8507bef8289ffc86225ff',
-      args: [{type:"address",name:"signer"},{type:"address",name:"account"},{type:"address",name:"route"}]
+      args: [{type:"address",name:"user"},{type:"address",name:"signer"},{type:"address",name:"account"},{type:"address",name:"route"}]
     },
     DeployPuppetAccount: {
       hash: '0x7eb7e993a5f78384ea2bc550a06f6bbd0c81bf1dd87e41d93f83db79a5b213a6',
-      args: [{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"address",name:"account"},{type:"address",name:"route"}]
+      args: [{type:"address",name:"user"},{type:"address",name:"signer"},{type:"address",name:"account"},{type:"address",name:"route"}]
     },
     MandateCall: {
       hash: '0x6fed18cec7ec1f04eec6b2a4a063be23a15114300daa6c8379022f08e40f4fb7',
@@ -33,7 +33,7 @@ export const CONTRACT_EVENT_MAP = {
   Allocate: {
     Allocate: {
       hash: '0x2d453a8b2eb4888bfee5a5b17781ba95747a5f795cd81b44fe943773178f8d8e',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple",name:"share",components:[{type:"address",name:"master"},{type:"bytes32",name:"baseTokenId"},{type:"bytes32",name:"name"}]},{type:"uint256",name:"acceptableNetAssetValue"},{type:"uint256",name:"totalShareSupply"},{type:"uint256",name:"masterAmount"},{type:"address[]",name:"puppetList"},{type:"uint256[]",name:"matchedAmountList"}]},{type:"address",name:"fundAccount"},{type:"uint256",name:"ownerNewShares"},{type:"uint256[]",name:"puppetSharesMintedList"},{type:"uint256",name:"totalMatched"},{type:"uint256",name:"param"}]
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple",name:"share",components:[{type:"address",name:"master"},{type:"bytes32",name:"baseTokenId"},{type:"bytes32",name:"name"}]},{type:"uint256",name:"acceptableNetAssetValue"},{type:"uint256",name:"totalShareSupply"},{type:"uint256",name:"masterAmount"},{type:"address[]",name:"puppetList"},{type:"uint256[]",name:"matchedAmountList"}]},{type:"address",name:"fundAccount"},{type:"uint256",name:"ownerNewShares"},{type:"uint256[]",name:"puppetSharesMintedList"},{type:"uint256",name:"totalMatched"},{type:"uint256",name:"preMintSupply"},{type:"uint256",name:"totalPuppetMinted"},{type:"uint256",name:"actualRelayFee"}]
     }
   },
   Deposit: {
@@ -63,7 +63,7 @@ export const CONTRACT_EVENT_MAP = {
   HubGate: {
     WithdrawToBridge: {
       hash: '0xdfd02049af371073122fab090ec83dc756ec2df286c997ab945fa39e3cd93dd5',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"bytes32",name:"tokenId"},{type:"address",name:"inputToken"},{type:"address",name:"outputToken"},{type:"uint256",name:"inputAmount"},{type:"uint256",name:"outputAmount"},{type:"uint256",name:"destinationChainId"},{type:"address",name:"provider"},{type:"bytes",name:"providerCallData"},{type:"uint32",name:"expires"},{type:"uint32",name:"fillDeadline"}]},{type:"address",name:"puppetAccount"},{type:"address",name:"recipient"}]
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"bytes32",name:"tokenId"},{type:"address",name:"inputToken"},{type:"address",name:"outputToken"},{type:"uint256",name:"inputAmount"},{type:"uint256",name:"outputAmount"},{type:"uint256",name:"destinationChainId"},{type:"address",name:"provider"},{type:"bytes",name:"providerCallData"},{type:"uint32",name:"expires"},{type:"uint32",name:"fillDeadline"}]},{type:"address",name:"puppetAccount"}]
     },
     WithdrawToWallet: {
       hash: '0x68ed3d1b5e751db0939430d855be419fa5d97c12247d546cb2ed796e1e7ab93b',
@@ -73,27 +73,35 @@ export const CONTRACT_EVENT_MAP = {
   Issue: {
     CreateShareToken: {
       hash: '0xa2950e4c1878e266c825ab552e11d8d4233bf677b6e5bbd63c70ee00cadb7752',
-      args: [{type:"address",name:"fund"},{type:"address",name:"shareToken"},{type:"bytes32",name:"baseTokenId"},{type:"bytes32",name:"name"}]
+      args: [{type:"address",name:"fund"},{type:"address",name:"shareToken"},{type:"address",name:"master"},{type:"bytes32",name:"baseTokenId"},{type:"bytes32",name:"name"}]
     }
   },
   MasterGate: {
+    CreateFundAccount: {
+      hash: '0x701479158a8a3c3a421420629a60c3f8dab9f22b62856107b1d4e3fbc85efd08',
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"bytes32",name:"tokenId"},{type:"uint256",name:"sweepAmount"}]},{type:"address",name:"account"},{type:"address",name:"route"},{type:"uint256",name:"actualRelayFee"}]
+    },
     Operate: {
       hash: '0x81fb87d9a5f286238a2fad3da31bb37826bc310f3dae1f4c04560a6367abd806',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple[]",name:"callList",components:[{type:"address",name:"target"},{type:"uint256",name:"value"},{type:"uint256",name:"gasLimit"},{type:"bytes",name:"callData"}]},{type:"tuple[]",name:"transferList",components:[{type:"bytes32",name:"tokenId"},{type:"address",name:"token"},{type:"uint256",name:"amountIn"},{type:"uint256",name:"amountOut"}]}]},{type:"address",name:"account"},{type:"address",name:"sender"},{type:"bytes[]",name:"result"}]
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple[]",name:"callList",components:[{type:"address",name:"target"},{type:"uint256",name:"value"},{type:"uint256",name:"gasLimit"},{type:"bytes",name:"callData"}]},{type:"tuple[]",name:"transferList",components:[{type:"bytes32",name:"tokenId"},{type:"address",name:"token"},{type:"uint256",name:"amountIn"},{type:"uint256",name:"amountOut"}]}]},{type:"address",name:"account"},{type:"bytes[]",name:"result"}]
     }
   },
   Redeem: {
     Claim: {
       hash: '0x5c2db6855baf6c374b9d0065771a33d4c31a8627d7b9d40f3fc6aa5dbd7b8a48',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple",name:"share",components:[{type:"address",name:"master"},{type:"bytes32",name:"baseTokenId"},{type:"bytes32",name:"name"}]},{type:"uint256",name:"amount"}]},{type:"address",name:"holder"},{type:"address",name:"fund"},{type:"uint256",name:"effective"},{type:"uint256",name:"stake"},{type:"uint256",name:"accruedAfter"},{type:"uint256",name:"accruedPerStake"},{type:"uint256",name:"totalStake"},{type:"uint256",name:"totalShares"}]
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple",name:"share",components:[{type:"address",name:"master"},{type:"bytes32",name:"baseTokenId"},{type:"bytes32",name:"name"}]},{type:"uint256",name:"amount"}]},{type:"address",name:"holder"},{type:"address",name:"fund"},{type:"uint256",name:"epoch"},{type:"uint256",name:"stake"},{type:"uint256",name:"accruedAfter"},{type:"uint256",name:"accruedPerStake"},{type:"uint256",name:"totalStake"},{type:"uint256",name:"totalShares"},{type:"uint256",name:"surrendered"}]
+    },
+    Liquidate: {
+      hash: '0xcf20efd552d992294b62e23bcfa29f7703b7b899c22eb04973d36655afd06ddf',
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple",name:"share",components:[{type:"address",name:"master"},{type:"bytes32",name:"baseTokenId"},{type:"bytes32",name:"name"}]},{type:"uint256",name:"acceptableNetAssetValue"}]},{type:"address",name:"fund"},{type:"uint256",name:"epoch"},{type:"uint256",name:"supply"},{type:"uint256",name:"closeRate"},{type:"uint256",name:"accruedPerStake"},{type:"uint256",name:"poolShares"},{type:"uint256",name:"surrendered"},{type:"uint256",name:"claimed"},{type:"uint256",name:"actualRelayFee"}]
     },
     Redeem: {
       hash: '0x27a2d0b55cceff62c8b578ccb1a7267b3274549524eddb8aa137cd4f48b45f50',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple",name:"share",components:[{type:"address",name:"master"},{type:"bytes32",name:"baseTokenId"},{type:"bytes32",name:"name"}]},{type:"uint256",name:"sharesOut"},{type:"uint256",name:"acceptableNetAssetValue"},{type:"uint256",name:"totalShareSupply"},{type:"uint256",name:"acceptableShares"}]},{type:"address",name:"fund"},{type:"address",name:"baseToken"},{type:"uint256",name:"sharesRetired"},{type:"uint256",name:"drainedBase"},{type:"uint256",name:"accruedPerStake"},{type:"uint256",name:"totalStake"},{type:"uint256",name:"poolShares"},{type:"uint256",name:"param"},{type:"uint256",name:"claimed"}]
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple",name:"share",components:[{type:"address",name:"master"},{type:"bytes32",name:"baseTokenId"},{type:"bytes32",name:"name"}]},{type:"uint256",name:"sharesOut"},{type:"uint256",name:"assetsOut"},{type:"uint256",name:"acceptableNetAssetValue"}]},{type:"address",name:"fund"},{type:"uint256",name:"epoch"},{type:"uint256",name:"supply"},{type:"uint256",name:"sharesRetired"},{type:"uint256",name:"accruedPerStake"},{type:"uint256",name:"totalStake"},{type:"uint256",name:"poolShares"},{type:"uint256",name:"stake"},{type:"uint256",name:"claimed"},{type:"uint256",name:"actualRelayFee"}]
     },
     Sell: {
       hash: '0x2960d925d7f3fc57a6fc5d05aac27fd1ae17fcf2a31a901375f427c5224e3219',
-      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple",name:"share",components:[{type:"address",name:"master"},{type:"bytes32",name:"baseTokenId"},{type:"bytes32",name:"name"}]},{type:"uint256",name:"sharesOut"}]},{type:"address",name:"holder"},{type:"address",name:"fund"},{type:"uint256",name:"stake"},{type:"uint256",name:"claimed"},{type:"uint256",name:"cursor"},{type:"uint256",name:"totalStake"},{type:"uint256",name:"param"}]
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple",name:"share",components:[{type:"address",name:"master"},{type:"bytes32",name:"baseTokenId"},{type:"bytes32",name:"name"}]},{type:"uint256",name:"sharesOut"}]},{type:"address",name:"holder"},{type:"address",name:"fund"},{type:"uint256",name:"epoch"},{type:"uint256",name:"stake"},{type:"uint256",name:"claimed"},{type:"uint256",name:"cursor"},{type:"uint256",name:"totalStake"},{type:"uint256",name:"totalShares"}]
     }
   },
   RegisterToken: {
@@ -109,7 +117,7 @@ export const CONTRACT_EVENT_MAP = {
   Subscribe: {
     Subscribe: {
       hash: '0x48d404d629614f23fea65a9948e14b556ebee2cdcec7eb97cad37db32d0f210e',
-      args: [{type:"address",name:"puppetAccount"},{type:"address",name:"fund"},{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"bytes",name:"body"},{type:"bytes",name:"mandate"}]
+      args: [{type:"address",name:"puppetAccount"},{type:"address",name:"fund"},{type:"bytes32",name:"baseTokenId"},{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"bytes",name:"body"},{type:"bytes",name:"mandate"}]
     }
   }
 } as const

@@ -90,7 +90,7 @@ export default [
   },
   {
     "type": "function",
-    "name": "getAttest",
+    "name": "getAttestContract",
     "inputs": [],
     "outputs": [
       {

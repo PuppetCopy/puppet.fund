@@ -1,15 +1,25 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
-import { readableTokenAmount } from '@puppet/sdk/core'
+import { readableTokenAmountLabel } from '@puppet/sdk/core'
 import { getTokenDescription } from '@puppet/sdk/gmx'
 import { type ISubaccountState, type ITokenRegistryMap, tokenInfoFor } from '@puppet/sdk/state'
-import { combine, constant, type IStream, just, map, op, switchLatest } from 'aelea/stream'
+import { combine, constant, type IStream, just, map, op, skipRepeatsWith, switchLatest } from 'aelea/stream'
 import { type IBehavior, multicast } from 'aelea/stream-extended'
 import { $node, $text, component, style } from 'aelea/ui'
 import { $Popover, $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import type { Hex } from 'viem'
-import { $amountDisplay, $ButtonSecondary, $defaultMiniButtonSecondary } from '@/ui-components'
+import {
+  $amountDisplay,
+  $ButtonPrimary,
+  $ButtonSecondary,
+  $defaultMiniButtonPrimary,
+  $defaultMiniButtonSecondary,
+  $icon,
+  $info,
+  $popoverCaret,
+  text
+} from '@/ui-components'
 import { $route } from '../../common/$common.js'
 import { formatUsd, priceFor } from '../../io/gmx/priceFeed.js'
 import type { IConnectedWallet } from '../../wallet/index.js'
@@ -26,6 +36,7 @@ export interface I$TokenBalanceEditor {
   walletAccount: IConnectedWallet
   lateBindDerivation?: Omit<IAccountLib__AccountInitParams, 'signer'>
   draft: IStream<IEditorDraft | null>
+  inlineNote?: string
 }
 
 export const $TokenBalanceEditor = ({
@@ -34,7 +45,8 @@ export const $TokenBalanceEditor = ({
   tokenRegistry,
   walletAccount,
   lateBindDerivation,
-  draft
+  draft,
+  inlineNote
 }: I$TokenBalanceEditor) =>
   component(
     (
@@ -43,6 +55,11 @@ export const $TokenBalanceEditor = ({
     ) => {
       const $body = op(
         accountState,
+        skipRepeatsWith(
+          (a, b) =>
+            a.account === b.account &&
+            (a.balances.get(baseTokenId)?.signedBalance ?? 0n) === (b.balances.get(baseTokenId)?.signedBalance ?? 0n)
+        ),
         map(metric => {
           const token = tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseTokenId).token
           const tokenDescription = getTokenDescription(token)
@@ -66,14 +83,14 @@ export const $TokenBalanceEditor = ({
                 ? null
                 : {
                     usd: formatUsd(balance + p.amount, p.price),
-                    amount: readableTokenAmount(tokenDescription, balance + p.amount)
+                    amount: readableTokenAmountLabel(tokenDescription, balance + p.amount)
                   },
             combine({ amount: pendingAmount, price: priceFor(token) })
           )
 
           const $balanceDisplay = $amountDisplay({
             usd: usdValue,
-            amount: readableTokenAmount(tokenDescription, balance),
+            amount: readableTokenAmountLabel(tokenDescription, balance),
             change: adjustmentChange,
             color: adjustmentColor,
             align: 'flex-end'
@@ -108,17 +125,31 @@ export const $TokenBalanceEditor = ({
             )(
               $route(tokenDescription, true),
               $row(spacing.small, style({ alignItems: 'center' }))(
-                $ButtonSecondary({
-                  $container: $defaultMiniButtonSecondary,
-                  $content: $text('Deposit')
+                $ButtonPrimary({
+                  $container: $defaultMiniButtonPrimary,
+                  $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Deposit'), $popoverCaret())
                 })({ click: popEditorTether(constant('deposit')) }),
                 $ButtonSecondary({
                   $container: $defaultMiniButtonSecondary,
-                  $content: $text('Withdraw'),
+                  $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Withdraw'), $popoverCaret()),
                   disabled: just(withdrawDisabled)
                 })({ click: popEditorTether(constant('withdraw')) })
               ),
-              $node(style({ flex: 1 }))(),
+              balance === 0n && inlineNote
+                ? $row(spacing.small, style({ alignItems: 'center', flex: 1, minWidth: '0' }))(
+                    $icon({ $content: $info, width: '12px', fill: palette.indeterminate }),
+                    $node(
+                      style({
+                        color: palette.foreground,
+                        fontSize: text.xs,
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        minWidth: '0'
+                      })
+                    )($text(inlineNote))
+                  )
+                : $node(style({ flex: 1 }))(),
               $balanceDisplay
             ),
             $open: map(action => (action === 'deposit' ? $depositEditor : $withdrawEditor), popEditor),

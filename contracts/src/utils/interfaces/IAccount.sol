@@ -19,7 +19,7 @@ interface IAccount is IERC1271 {
         uint amountOut;
     }
 
-    function getAttest() external view returns (address);
+    function getAttestContract() external view returns (address);
     function signedBalanceOf(
         bytes32 tokenId
     ) external view returns (uint);

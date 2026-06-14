@@ -1,5 +1,5 @@
 import { CHAIN_NETWORK_MAP } from '@puppet/contracts/const'
-import { type IStream, map } from 'aelea/stream'
+import { type IStream, just, map, skipRepeats, switchLatest } from 'aelea/stream'
 import type { ChainId } from '../const/index.js'
 import { periodicRun } from '../core/stream/recover.js'
 import { type IIndexerClient, query } from './shared.js'
@@ -8,7 +8,6 @@ interface IChainMetadataRow {
   chain_id: number
   latest_processed_block: number
   block_height: number
-  timestamp_caught_up_to_head_or_endblock: string | null
 }
 
 export type LagSeverity = 'healthy' | 'lagging' | 'stale' | 'unreachable'
@@ -23,8 +22,17 @@ export const DEFAULT_LAG_THRESHOLDS: IndexerLagThresholds = {
   laggingMaxAgeSec: 300
 }
 
+const CHAIN_BLOCK_TIME_SEC: Record<number, number> = {
+  42161: 0.25,
+  8453: 2
+}
+const DEFAULT_BLOCK_TIME_SEC = 2
+
 export interface IndexerChainHealth {
   block: { number: bigint; timestamp: number }
+  // Blocks the indexed head trails the chain head. This IS the gap an intent anchored to the
+  // indexed head must clear against the contract's maxBlockDelay window before it mines.
+  behind: number
   ageSec: number
   severity: LagSeverity
 }
@@ -46,7 +54,7 @@ export function indexerBlock(health: IndexerHealth, network: string): bigint {
 export async function getChainMetadata(sql: IIndexerClient): Promise<IChainMetadataRow[]> {
   const data = await query<{ chain_metadata: IChainMetadataRow[] }>(
     sql,
-    'query ChainMetadata { chain_metadata { chain_id latest_processed_block block_height timestamp_caught_up_to_head_or_endblock } }'
+    'query ChainMetadata { chain_metadata { chain_id latest_processed_block block_height } }'
   )
   return data.chain_metadata
 }
@@ -58,50 +66,59 @@ export async function getIndexerBlock(sql: IIndexerClient, network: string): Pro
   return BigInt(row.latest_processed_block)
 }
 
-export function createIndexerHealthSource(sql: IIndexerClient, intervalMs: number): IStream<IndexerHealth> {
-  return periodicRun({
-    interval: intervalMs,
-    actionOp: map(async () => {
-      const fetchedAtSec = Math.floor(Date.now() / 1000)
-      const rows = await getChainMetadata(sql).catch(() => null)
-      if (!rows || rows.length === 0) {
-        return {
-          reachable: false,
-          chains: {},
-          worstAgeSec: Number.POSITIVE_INFINITY,
-          worstSeverity: 'unreachable' as LagSeverity,
-          fetchedAtSec
-        }
-      }
-      const chains: IndexerHealth['chains'] = {}
-      let worstAgeSec = 0
-      let worstSeverity: LagSeverity = 'healthy'
-      for (const row of rows) {
-        const network = CHAIN_NETWORK_MAP[row.chain_id as ChainId]
-        if (!network) continue
-        const headSec = row.timestamp_caught_up_to_head_or_endblock
-          ? Math.floor(new Date(row.timestamp_caught_up_to_head_or_endblock).getTime() / 1000)
-          : fetchedAtSec
-        const behind = row.block_height - row.latest_processed_block
-        const freshSec = behind > 0 ? headSec : fetchedAtSec
-        const ageSec = behind > 0 ? fetchedAtSec - headSec : 0
-        const severity: LagSeverity =
-          ageSec <= DEFAULT_LAG_THRESHOLDS.healthyMaxAgeSec
-            ? 'healthy'
-            : ageSec <= DEFAULT_LAG_THRESHOLDS.laggingMaxAgeSec
-              ? 'lagging'
-              : 'stale'
-        chains[network] = {
-          block: { number: BigInt(row.latest_processed_block), timestamp: freshSec },
-          ageSec,
-          severity
-        }
-        if (ageSec > worstAgeSec) worstAgeSec = ageSec
-        if (SEVERITY_RANK[severity] > SEVERITY_RANK[worstSeverity]) worstSeverity = severity
-      }
-      return { reachable: true, chains, worstAgeSec, worstSeverity, fetchedAtSec }
-    })
-  })
+// One-shot indexer health snapshot. Native callers (e.g. the matchmaker relay) poll this
+// directly; createIndexerHealthSource wraps it for stream consumers.
+export async function fetchIndexerHealth(sql: IIndexerClient): Promise<IndexerHealth> {
+  const fetchedAtSec = Math.floor(Date.now() / 1000)
+  const rows = await getChainMetadata(sql).catch(() => null)
+  if (!rows || rows.length === 0) {
+    return {
+      reachable: false,
+      chains: {},
+      worstAgeSec: Number.POSITIVE_INFINITY,
+      worstSeverity: 'unreachable',
+      fetchedAtSec
+    }
+  }
+  const chains: IndexerHealth['chains'] = {}
+  let worstAgeSec = 0
+  let worstSeverity: LagSeverity = 'healthy'
+  for (const row of rows) {
+    const network = CHAIN_NETWORK_MAP[row.chain_id as ChainId]
+    if (!network) continue
+    const behind = Math.max(0, row.block_height - row.latest_processed_block)
+    const blockTimeSec = CHAIN_BLOCK_TIME_SEC[row.chain_id] ?? DEFAULT_BLOCK_TIME_SEC
+    const ageSec = Math.round(behind * blockTimeSec)
+    const freshSec = fetchedAtSec - ageSec
+    const severity: LagSeverity =
+      ageSec <= DEFAULT_LAG_THRESHOLDS.healthyMaxAgeSec
+        ? 'healthy'
+        : ageSec <= DEFAULT_LAG_THRESHOLDS.laggingMaxAgeSec
+          ? 'lagging'
+          : 'stale'
+    chains[network] = {
+      block: { number: BigInt(row.latest_processed_block), timestamp: freshSec },
+      behind,
+      ageSec,
+      severity
+    }
+    if (ageSec > worstAgeSec) worstAgeSec = ageSec
+    if (SEVERITY_RANK[severity] > SEVERITY_RANK[worstSeverity]) worstSeverity = severity
+  }
+  return { reachable: true, chains, worstAgeSec, worstSeverity, fetchedAtSec }
+}
+
+// The interval may be a stream so callers can tune polling to urgency: idle browsing
+// needs only a slow heartbeat, while pending submissions need fresh block numbers.
+// An urgency bump restarts the poller, which also fetches immediately.
+export function createIndexerHealthSource(
+  sql: IIndexerClient,
+  interval: number | IStream<number>
+): IStream<IndexerHealth> {
+  const intervalStream = typeof interval === 'number' ? just(interval) : interval
+  const sourceFor = (intervalMs: number): IStream<IndexerHealth> =>
+    periodicRun({ interval: intervalMs, actionOp: map(() => fetchIndexerHealth(sql)) })
+  return switchLatest(map(sourceFor, skipRepeats(intervalStream)))
 }
 
 const SEVERITY_RANK: Record<LagSeverity, number> = { healthy: 0, lagging: 1, stale: 2, unreachable: 3 }

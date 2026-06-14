@@ -1,7 +1,6 @@
 import { CHAIN_NETWORK_MAP } from '@puppet/contracts/const'
 import { ADDRESS_ZERO, CHAIN_MAP } from '@puppet/sdk/const'
-import { type Address, createPublicClient, erc20Abi, http, isAddressEqual } from 'viem'
-import { homePublicClient } from '../../wallet/index.js'
+import { type Address, createPublicClient, erc20Abi, http, isAddressEqual, type PublicClient } from 'viem'
 
 export interface ChainTokenBalance {
   chainId: number
@@ -9,25 +8,22 @@ export interface ChainTokenBalance {
   balance: bigint
 }
 
-export async function getTokenBalance(tokenAddress: Address, owner: Address): Promise<bigint> {
-  if (tokenAddress === ADDRESS_ZERO) return homePublicClient.getBalance({ address: owner })
-  return homePublicClient.readContract({
-    address: tokenAddress,
-    abi: erc20Abi,
-    functionName: 'balanceOf',
-    args: [owner]
-  })
-}
+const EIP7811_TIMEOUT_MS = 3000
 
-function clientFor(chainId: number) {
+const clientCache = new Map<number, PublicClient>()
+function clientFor(chainId: number): PublicClient {
+  const cached = clientCache.get(chainId)
+  if (cached) return cached
   const chain = CHAIN_MAP[chainId as keyof typeof CHAIN_MAP]
   if (!chain) throw new Error(`Unsupported source chain: ${chainId}`)
   const network = CHAIN_NETWORK_MAP[chainId as keyof typeof CHAIN_NETWORK_MAP]
   const proxyUrl = network ? `/api/rpc?network=${network}` : null
-  return createPublicClient({
+  const client = createPublicClient({
     chain,
-    transport: http(proxyUrl ?? chain.rpcUrls.default.http[0])
-  })
+    transport: http(proxyUrl ?? chain.rpcUrls.default.http[0], { batch: true })
+  }) as PublicClient
+  clientCache.set(chainId, client)
+  return client
 }
 
 type Eip7811Assets = Record<string, Array<{ address: Address; balance: `0x${string}`; type: 'ERC20' | 'NATIVE' }>>
@@ -56,7 +52,7 @@ async function tryEip7811(
       for (const asset of assets) {
         const match = tokenByChain.find(t => t.chainId === chainId && isAddressEqual(t.tokenAddress, asset.address))
         if (!match) continue
-        result.push({ chainId, tokenAddress: asset.address, balance: BigInt(asset.balance) })
+        result.push({ chainId, tokenAddress: match.tokenAddress, balance: BigInt(asset.balance) })
       }
     }
     return result
@@ -97,8 +93,16 @@ export async function fetchTokenBalances(
   provider?: { request: RpcRequestFn }
 ): Promise<ChainTokenBalance[]> {
   if (provider?.request) {
-    const via7811 = await tryEip7811(provider.request, owner, tokenByChain)
-    if (via7811) return via7811
+    const via = await Promise.race([
+      tryEip7811(provider.request, owner, tokenByChain),
+      new Promise<ChainTokenBalance[] | null>(resolve => setTimeout(() => resolve(null), EIP7811_TIMEOUT_MS))
+    ])
+    if (via) {
+      const key = (chainId: number, token: Address): string => `${chainId}:${token.toLowerCase()}`
+      const covered = new Set(via.map(b => key(b.chainId, b.tokenAddress)))
+      const missing = tokenByChain.filter(t => !covered.has(key(t.chainId, t.tokenAddress)))
+      return missing.length === 0 ? via : [...via, ...(await fetchViaRpc(owner, missing))]
+    }
   }
   return fetchViaRpc(owner, tokenByChain)
 }

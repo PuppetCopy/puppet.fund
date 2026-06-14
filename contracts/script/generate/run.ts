@@ -393,6 +393,8 @@ ${[...new Map(contracts.filter(c => c.abi).map(c => [c.name, c] as const)).value
   }
   const basisPoints = readPrecision('basisPoints')
   const floatPrecisionExp = Number(readPrecision('floatPrecisionExp'))
+  const sharePrecisionExp = Number(readPrecision('sharePrecisionExp'))
+  const shareTokenDecimals = Number(readPrecision('shareTokenDecimals'))
   const maxQuoteAgeSec = readPrecision('maxQuoteAgeSec')
 
   // [gmx] block — the referral code is a human-readable string in the toml; emit
@@ -415,6 +417,21 @@ ${[...new Map(contracts.filter(c => c.abi).map(c => [c.name, c] as const)).value
   }
   if (!floatPrecisionMatch || Number(floatPrecisionMatch[1]) !== floatPrecisionExp) {
     throw new Error(`Solidity FLOAT_PRECISION exponent != const.toml floatPrecisionExp (${floatPrecisionExp})`)
+  }
+  const allocateSrc = await Bun.file('./src/hub/Allocate.sol').text()
+  const sharePrecisionMatch = allocateSrc.match(/SHARE_PRECISION\s*=\s*1e(\d+)/)
+  if (!sharePrecisionMatch || Number(sharePrecisionMatch[1]) !== sharePrecisionExp) {
+    throw new Error(`Solidity SHARE_PRECISION exponent != const.toml sharePrecisionExp (${sharePrecisionExp})`)
+  }
+  // ShareToken inherits solady ERC20's default decimals() = 18; an override would
+  // silently change every share display, so its absence (or a matching value) is asserted.
+  const shareTokenSrc = await Bun.file('./src/hub/ShareToken.sol').text()
+  const decimalsOverride = shareTokenSrc.match(/function decimals\(\) [^}]*return (\d+)/)
+  const effectiveDecimals = decimalsOverride ? Number(decimalsOverride[1]) : 18
+  if (effectiveDecimals !== shareTokenDecimals) {
+    throw new Error(
+      `ShareToken decimals (${effectiveDecimals}) != const.toml shareTokenDecimals (${shareTokenDecimals})`
+    )
   }
   if (!deployAuthMatch || deployAuthMatch[1] !== signerDerivationMessage) {
     throw new Error(
@@ -445,6 +462,8 @@ ${protocolConfigBody}
 
 export const BASIS_POINTS = ${basisPoints}n
 export const FLOAT_PRECISION = 10n ** ${floatPrecisionExp}n
+export const SHARE_PRECISION = 10n ** ${sharePrecisionExp}n
+export const SHARE_DECIMALS = ${shareTokenDecimals}
 export const MAX_QUOTE_AGE_SEC = ${maxQuoteAgeSec}n
 
 export const GMX_REFERRAL_CODE = '${gmxReferralCodeHex}' as const

@@ -3,6 +3,7 @@ pragma solidity ^0.8.35;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Script} from "forge-std/src/Script.sol";
+import {VmSafe} from "forge-std/src/Vm.sol";
 import {stdToml} from "forge-std/src/StdToml.sol";
 
 interface ImmutableCreate2Factory {
@@ -10,11 +11,6 @@ interface ImmutableCreate2Factory {
         bytes32 salt,
         bytes calldata initializationCode
     ) external payable returns (address deploymentAddress);
-
-    function findCreate2Address(
-        bytes32 salt,
-        bytes calldata initializationCode
-    ) external view returns (address deploymentAddress);
 }
 
 abstract contract BaseScript is Script {
@@ -23,7 +19,26 @@ abstract contract BaseScript is Script {
     ImmutableCreate2Factory constant FACTORY = ImmutableCreate2Factory(0x0000000000FFe8B47B3e2130213B802212439497);
 
     string constant DEPLOYMENTS_PATH = "./deployments.toml";
+    string constant DEPLOYMENTS_SCRATCH_PATH = "./deployments.local.toml";
     string constant CONST_PATH = "./const.toml";
+
+    bool private _scratchReady;
+    mapping(bytes32 name => address) internal _plannedAddr;
+
+    // Dry-runs execute vm.writeToml like real runs do, so without isolation every
+    // simulation poisons deployments.toml with phantom addresses that only a
+    // following broadcast would correct. Route all toml IO through a scratch copy
+    // unless this process is actually broadcasting.
+    function _deploymentsPath() internal returns (string memory) {
+        if (vm.isContext(VmSafe.ForgeContext.ScriptBroadcast) || vm.isContext(VmSafe.ForgeContext.ScriptResume)) {
+            return DEPLOYMENTS_PATH;
+        }
+        if (!_scratchReady) {
+            vm.copyFile(DEPLOYMENTS_PATH, DEPLOYMENTS_SCRATCH_PATH);
+            _scratchReady = true;
+        }
+        return DEPLOYMENTS_SCRATCH_PATH;
+    }
 
     uint internal immutable DEPLOYER_PRIVATE_KEY = vm.envUint("DEPLOYER_PRIVATE_KEY");
     address internal immutable DEPLOYER_ADDRESS = vm.addr(DEPLOYER_PRIVATE_KEY);
@@ -31,7 +46,6 @@ abstract contract BaseScript is Script {
     address internal immutable RELAYER_ADDRESS = vm.envAddress("RELAYER_ADDRESS");
     address internal immutable GOVERNOR_ADDRESS = vm.envAddress("GOVERNOR_ADDRESS");
 
-    string internal _deployments = vm.readFile(DEPLOYMENTS_PATH);
     string internal _const = vm.readFile(CONST_PATH);
 
     function _getChainToken(
@@ -43,16 +57,8 @@ abstract contract BaseScript is Script {
         return IERC20(addr);
     }
 
-    function _getOifInputSettler() internal view returns (address) {
-        address addr = _const.readAddress(".oif.inputSettler");
-        require(addr != address(0), "OIF inputSettler not configured");
-        return addr;
-    }
-
-    function _getOifOutputSettler() internal view returns (bytes32) {
-        address addr = _const.readAddress(".oif.outputSettler");
-        require(addr != address(0), "OIF outputSettler not configured");
-        return bytes32(uint(uint160(addr)));
+    function _getVersion() internal view returns (uint) {
+        return _const.readUint(".protocol.version");
     }
 
     function _getHubChainId() internal view returns (uint) {
@@ -73,42 +79,28 @@ abstract contract BaseScript is Script {
 
     function _getCoreAddress(
         string memory name
-    ) internal view returns (address addr) {
-        addr = _deployments.readAddress(string.concat(".core.", name, ".address"));
+    ) internal returns (address addr) {
+        addr = vm.readFile(_deploymentsPath()).readAddress(string.concat(".core.", name, ".address"));
         require(addr != address(0), string.concat("Core address not found: ", name));
         require(addr.code.length > 0, string.concat("Core contract not deployed: ", name));
         require(_isCoreDeployedOnCurrentChain(name), string.concat("Core contract not deployed on this chain: ", name));
     }
 
-    function _getChainAddress(
-        string memory name
-    ) internal view returns (address addr) {
-        addr = _deployments.readAddress(string.concat(".chain.", _chainKey(), ".", name));
-        require(addr != address(0), string.concat("Chain address not found: ", name));
-        require(addr.code.length > 0, string.concat("Chain contract not deployed: ", name));
-    }
-
     function _setCoreAddress(
         string memory name,
         address addr,
-        bool enforceDrift
+        bool deployedNow
     ) internal {
-        string memory addrKey = string.concat(".core.", name, ".address");
-        string memory fresh = vm.readFile(DEPLOYMENTS_PATH);
-        if (enforceDrift && vm.keyExistsToml(fresh, addrKey)) {
-            address prior = fresh.readAddress(addrKey);
-            if (prior != address(0) && prior != addr && !vm.envOr("ALLOW_CORE_DRIFT", false)) {
-                revert(string.concat("Core address drift: ", name, " deployed at different address on another chain"));
-            }
-        }
-        vm.writeToml(vm.toString(addr), DEPLOYMENTS_PATH, addrKey);
-        _recordCoreChain(name);
+        vm.writeToml(vm.toString(addr), _deploymentsPath(), string.concat(".core.", name, ".address"));
+        _recordCoreChain(name, deployedNow);
     }
 
     function _specAddr(
         string memory name
-    ) internal view returns (address) {
-        string memory fresh = vm.readFile(DEPLOYMENTS_PATH);
+    ) internal returns (address) {
+        address planned = _plannedAddr[keccak256(bytes(name))];
+        if (planned != address(0)) return planned;
+        string memory fresh = vm.readFile(_deploymentsPath());
         string memory coreKey = string.concat(".core.", name, ".address");
         if (vm.keyExistsToml(fresh, coreKey)) {
             address a = fresh.readAddress(coreKey);
@@ -119,37 +111,11 @@ abstract contract BaseScript is Script {
         revert(string.concat("Spec address not found: ", name));
     }
 
-    function _create(
-        bytes memory initCode
-    ) internal returns (address addr) {
-        assembly ("memory-safe") {
-            addr := create(0, add(initCode, 0x20), mload(initCode))
-        }
-        require(addr != address(0), "CREATE failed");
-    }
-
-    function _setCoreBytes32(
-        string memory name,
-        string memory field,
-        bytes32 value
-    ) internal {
-        string memory key = string.concat(".core.", name, ".", field);
-        string memory fresh = vm.readFile(DEPLOYMENTS_PATH);
-        if (vm.keyExistsToml(fresh, key)) {
-            bytes32 prior = fresh.readBytes32(key);
-            require(
-                prior == value,
-                string.concat("Core ", field, " drift: ", name, " differs from previously recorded value")
-            );
-        }
-        vm.writeToml(vm.toString(value), DEPLOYMENTS_PATH, key);
-    }
-
     function _setChainAddress(
         string memory name,
         address addr
     ) internal {
-        vm.writeToml(vm.toString(addr), DEPLOYMENTS_PATH, string.concat(".chain.", _chainKey(), ".", name));
+        vm.writeToml(vm.toString(addr), _deploymentsPath(), string.concat(".chain.", _chainKey(), ".", name));
     }
 
     function _l2BlockNumber() internal returns (uint) {
@@ -167,12 +133,14 @@ abstract contract BaseScript is Script {
     }
 
     function _recordCoreChain(
-        string memory name
+        string memory name,
+        bool deployedNow
     ) internal {
         string memory chainBlockMapKey = string.concat(".core.", name, ".chainBlockMap");
         string memory chainIdStr = vm.toString(block.chainid);
+        string memory fresh = vm.readFile(_deploymentsPath());
+        if (!deployedNow && vm.keyExistsToml(fresh, string.concat(chainBlockMapKey, ".", chainIdStr))) return;
         uint blockNum = _l2BlockNumber();
-        string memory fresh = vm.readFile(DEPLOYMENTS_PATH);
 
         string memory json = "{";
         bool first = true;
@@ -188,14 +156,14 @@ abstract contract BaseScript is Script {
         }
         if (!first) json = string.concat(json, ",");
         json = string.concat(json, '"', chainIdStr, '":', vm.toString(blockNum), "}");
-        vm.writeToml(json, DEPLOYMENTS_PATH, chainBlockMapKey);
+        vm.writeToml(json, _deploymentsPath(), chainBlockMapKey);
     }
 
     function _isCoreDeployedOnCurrentChain(
         string memory name
-    ) internal view returns (bool) {
+    ) internal returns (bool) {
         string memory key = string.concat(".core.", name, ".chainBlockMap.", vm.toString(block.chainid));
-        return vm.keyExistsToml(_deployments, key);
+        return vm.keyExistsToml(vm.readFile(_deploymentsPath()), key);
     }
 
     function _chainKey() internal view returns (string memory) {

@@ -6,24 +6,13 @@
   "scripts": {
     "dev": "wxt",
     "dev:firefox": "wxt -b firefox",
-    "build": "wxt build && bun run build:client",
-    "clean": "rm -rf .wxt dist",
+    "build": "wxt build",
+    "clean": "rm -rf .wxt .output",
     "build:firefox": "wxt build -b firefox",
-    "build:client": "tsgo -b tsconfig-client.json",
-    "tsgo:check": "tsgo --noEmit && tsgo --noEmit -p tsconfig-client.json",
+    "tsgo:check": "tsgo --noEmit",
     "zip": "wxt zip",
     "zip:firefox": "wxt zip -b firefox",
     "postinstall": "wxt prepare"
-  },
-  "files": [
-    "dist"
-  ],
-  "exports": {
-    "./client": {
-      "types": "./dist/types/index.d.ts",
-      "import": "./dist/esm/index.js"
-    },
-    "./package.json": "./package.json"
   },
   "dependencies": {
     "@puppet/contracts": "workspace:*",

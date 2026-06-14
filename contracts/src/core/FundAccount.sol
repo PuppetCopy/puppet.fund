@@ -3,9 +3,9 @@ pragma solidity ^0.8.35;
 
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 
-import {AccountBase} from "./AccountBase.sol";
+import {BaseAccount} from "./BaseAccount.sol";
 
-contract FundAccount is AccountBase {
+contract FundAccount is BaseAccount {
     function isValidSignature(
         bytes32 _digest,
         bytes calldata _signature

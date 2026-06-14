@@ -40,7 +40,6 @@ contract Subscribe is Access {
         Account _accountGate,
         AllocateStore _store,
         IERC20 _base,
-        bytes32 _baseTokenId,
         bytes32 _digest,
         bytes32 _routerDomainSeparator,
         bytes calldata _userSignature,
@@ -58,7 +57,7 @@ contract Subscribe is Access {
         _accountGate.dispatch(
             IAccount(address(_puppetAccount)),
             CallLib.feeOnly(_base, _feeReceiver, _actualRelayFee, _transferGasLimit),
-            CallLib.signTransfer(_baseTokenId, _base, 0, _actualRelayFee),
+            CallLib.signTransfer(_intent.baseTokenId, _base, 0, _actualRelayFee),
             _digest,
             _userSignature,
             _attestorSignature,
@@ -88,7 +87,10 @@ contract Subscribe is Access {
                 _store.setMandate(address(_puppetAccount), _fund, _bodyHash);
             }
 
-            _logEvent("Subscribe", abi.encode(_puppetAccount, _fund, _intent.params, _rl.body, _rl.mandate));
+            _logEvent(
+                "Subscribe",
+                abi.encode(_puppetAccount, _fund, _intent.baseTokenId, _intent.params, _rl.body, _rl.mandate)
+            );
         }
     }
 }

@@ -11,30 +11,12 @@ export default [
         "internalType": "contract IAuthority"
       },
       {
-        "name": "_accountModule",
-        "type": "address",
-        "internalType": "contract Account"
-      },
-      {
         "name": "_shareTokenImpl",
         "type": "address",
         "internalType": "address"
       }
     ],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "accountModule",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract Account"
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -95,6 +77,11 @@ export default [
     "type": "function",
     "name": "createShareToken",
     "inputs": [
+      {
+        "name": "_fund",
+        "type": "address",
+        "internalType": "address"
+      },
       {
         "name": "_shareParams",
         "type": "tuple",
@@ -172,41 +159,10 @@ export default [
     "name": "predict",
     "inputs": [
       {
-        "name": "_shareParams",
-        "type": "tuple",
-        "internalType": "struct ShareLib.ShareInitParams",
-        "components": [
-          {
-            "name": "master",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "baseTokenId",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          },
-          {
-            "name": "name",
-            "type": "bytes32",
-            "internalType": "bytes32"
-          }
-        ]
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
+        "name": "_fund",
         "type": "address",
         "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "predictFund",
-    "inputs": [
+      },
       {
         "name": "_shareParams",
         "type": "tuple",
@@ -321,6 +277,11 @@ export default [
     "type": "function",
     "name": "verifyShareToken",
     "inputs": [
+      {
+        "name": "_fund",
+        "type": "address",
+        "internalType": "address"
+      },
       {
         "name": "_shareParams",
         "type": "tuple",

@@ -18,6 +18,7 @@ interface ILifiSwapParams {
 }
 
 interface ILifiQuoteResponse {
+  toolDetails?: { name?: string }
   estimate: { toAmount: string; toAmountMin: string; approvalAddress: Address }
   transactionRequest: { to: Address; data: Hex; value?: string }
 }
@@ -33,11 +34,15 @@ async function fetchLifiQuote(params: ILifiSwapParams): Promise<ILifiQuoteRespon
     toAddress: params.toAddress,
     slippage: String(params.slippage ?? DEFAULT_SLIPPAGE)
   })
-  const res = await fetch(`${window.location.origin}${QUOTE_PATH}?${query.toString()}`, {
-    signal: AbortSignal.timeout(10_000)
-  }).catch(() => {
-    throw new Error('Swap quote unavailable for this route')
-  })
+  const attempt = () =>
+    fetch(`${window.location.origin}${QUOTE_PATH}?${query.toString()}`, { signal: AbortSignal.timeout(10_000) })
+  // One retry absorbs transient rejections (timeout, connection blip); a rejection here
+  // is a transport failure, not a route verdict, and the message says so.
+  const res = await attempt()
+    .catch(attempt)
+    .catch(() => {
+      throw new Error('Swap quote request failed, check your connection and retry')
+    })
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { message?: string } | null
     throw new Error(
@@ -57,6 +62,8 @@ export async function fetchLifiSwapQuote(params: ILifiSwapParams) {
   const outputAmount = BigInt(quote.estimate.toAmountMin)
   return {
     route: { kind: 'swap' as const, provider, providerCallData: quote.transactionRequest.data },
+    txValue: BigInt(quote.transactionRequest.value ?? 0),
+    tool: quote.toolDetails?.name ?? 'LI.FI',
     outputAmount,
     fillDeadline: nowSec + FILL_WINDOW_SEC,
     expires: nowSec + EXPIRE_WINDOW_SEC,

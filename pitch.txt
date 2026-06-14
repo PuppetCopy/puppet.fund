@@ -1,7 +1,0 @@
-Puppet - Seamless copytrading
-
-A trader (human/machine) operates a smart wallet across chains and DeFi venues: an automated agent over the API, or a human, normally through the Puppet Wallet extension, which connects to any dapp. They trade their own money, exactly as they do today, and every action the wallet takes is gated through a co-signed, Intent-based attestation. On the same trades they earn performance fees and fame, because the capital of those who follow them trades alongside their own.
-
-Puppets (investors) fund once and copy many. A single deposit can back every trader they choose, each under rules they sign: how much can be allocated, how fast, and how often. Capital is only pulled when a trader actually trades, so one balance follows many traders at once. The same attestation enforces these rules, so a trader can only ever act within what each backer signed for.
-
-Funds stay in smart wallets their owners control, never the protocol, and wallet actions are permissionlessly co-signed. Each backer's exposure is bounded by their signature, not by trust. Backers hold transferable shares of a trader's pool and can redeem them at the pool's attested value.

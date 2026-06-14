@@ -1,11 +1,7 @@
-import type { IStream } from 'aelea/stream'
-import { state } from 'aelea/stream-extended'
-import { type Address, getAddress, type Hex } from 'viem'
+import { type Address, getAddress, type Hex, isAddress } from 'viem'
 import { predictFundAccount, predictPuppetAccount } from '../account/index.js'
 import type { IActionKind, IInputByKind, IIntentByKind } from '../attestation/index.js'
-import { createAdapter } from '../core/stream/stream.js'
-import { awaitAccountCall, awaitAccountDeployed } from '../state/dispatch.js'
-import type { IIndexerClient as IndexerClient } from '../state/shared.js'
+import { CompactError } from './error.js'
 import { decode, encode } from './frame.js'
 
 export const DISPATCH_TIMEOUT_MS = 5_000
@@ -22,11 +18,6 @@ export type IRelayRequest<K extends IActionKind = IActionKind> = K extends IActi
     }
   : never
 
-export interface IAttestResult {
-  txHash: Hex
-  actualRelayFee: bigint
-}
-
 export interface IDispatchedFrame {
   chainId: bigint
   account: Address
@@ -35,7 +26,21 @@ export interface IDispatchedFrame {
   actualRelayFee: bigint
 }
 
-const FUND_ROUTED_KINDS: ReadonlySet<IActionKind> = new Set(['operate', 'allocate', 'redeem', 'createFundAccount'])
+// Broadcast by the matchmaker (on connect + heartbeat), never per-request: the relay's
+// own indexed head per network. This is THE anchor for intent blockNumbers — an intent
+// anchored to the live RPC head is ahead of the relay's view and silently rejected.
+export interface IHeadFrame {
+  kind: 'head'
+  blocks: Record<string, bigint>
+}
+
+const FUND_ROUTED_KINDS: ReadonlySet<IActionKind> = new Set([
+  'operate',
+  'allocate',
+  'redeem',
+  'liquidate',
+  'createFundAccount'
+])
 
 function accountForRequest(request: IRelayRequest): Address {
   const params = (request.input as { params: Parameters<typeof predictPuppetAccount>[0] }).params
@@ -47,23 +52,28 @@ export type IMatchmakerStatus = 'open' | 'connecting' | 'closed'
 
 export interface ICompactOpts {
   matchmakerUrl: string
-  sql: IndexerClient
   defaultTimeoutMs?: number
-  settlementTimeoutMs?: number
 }
 
+// A pure relay client: attest() resolves at the relay's dispatch ACK. Settlement is the
+// caller's concern — the ack carries (account, chainId, nonce), exactly the key
+// awaitAccountCall / awaitAccountDeployed (@puppet/sdk/state) take.
 export interface ICompact {
-  attest(request: IRelayRequest, timeoutMs?: number): Promise<IAttestResult>
-  status: IStream<IMatchmakerStatus>
+  attest(request: IRelayRequest, timeoutMs?: number): Promise<IDispatchedFrame>
+  // Invokes cb immediately with the current status, then on every transition; returns
+  // an unsubscribe. Stream consumers wrap it (aelea: fromCallback(cb => onStatus(cb))).
+  onStatus(cb: (status: IMatchmakerStatus) => void): () => void
   // Synchronous connection check for callers that want to gate a trade without
-  // consuming the `status` stream (e.g. an operator tick loop). True only while the
+  // subscribing to status transitions (e.g. an operator tick loop). True only while the
   // socket is OPEN; false during connecting/backoff/closed.
   isOpen(): boolean
+  head(network: string): bigint | undefined
+  awaitHead(network: string, timeoutMs?: number): Promise<bigint>
   close(): void
 }
 
 type Pending = {
-  resolve: (result: IAttestResult) => void
+  resolve: (result: IDispatchedFrame) => void
   reject: (err: Error) => void
   timer: ReturnType<typeof setTimeout>
   request: IRelayRequest
@@ -73,18 +83,20 @@ const keyOf = (account: Address, chainId: bigint, nonce: bigint): string =>
   `${getAddress(account).toLowerCase()}:${chainId}:${nonce}`
 
 export function createCompact(opts: ICompactOpts): ICompact {
-  const {
-    matchmakerUrl,
-    sql,
-    defaultTimeoutMs = DISPATCH_TIMEOUT_MS,
-    settlementTimeoutMs = SETTLEMENT_TIMEOUT_MS
-  } = opts
+  const { matchmakerUrl, defaultTimeoutMs = DISPATCH_TIMEOUT_MS } = opts
 
-  const [pushStatus, statusStream] = createAdapter<IMatchmakerStatus>()
-  const status: IStream<IMatchmakerStatus> = state('closed', statusStream)
+  let currentStatus: IMatchmakerStatus = 'closed'
+  const statusListeners = new Set<(status: IMatchmakerStatus) => void>()
+  const pushStatus = (next: IMatchmakerStatus): void => {
+    if (next === currentStatus) return
+    currentStatus = next
+    for (const cb of statusListeners) cb(next)
+  }
 
   const pending = new Map<string, Pending>()
   const outbox: IRelayRequest[] = []
+  let heads: Record<string, bigint> = {}
+  const headWaiters = new Set<() => void>()
 
   let ws: WebSocket | null = null
   let disposed = false
@@ -102,7 +114,7 @@ export function createCompact(opts: ICompactOpts): ICompact {
     pending.clear()
     outbox.length = 0
   }
-  const resolvePending = (key: string, result: IAttestResult): void => {
+  const resolvePending = (key: string, result: IDispatchedFrame): void => {
     const slot = pending.get(key)
     if (!slot) return
     clearTimeout(slot.timer)
@@ -164,28 +176,67 @@ export function createCompact(opts: ICompactOpts): ICompact {
 
     socket.addEventListener('message', e => {
       const raw = typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data as ArrayBuffer)
-      const frame = decode(raw) as IDispatchedFrame | null
+      const frame = decode(raw) as IDispatchedFrame | IHeadFrame | null
       if (!frame || typeof frame !== 'object') return
-      resolvePending(keyOf(frame.account, frame.chainId, frame.nonce), {
-        txHash: frame.txHash,
-        actualRelayFee: frame.actualRelayFee
-      })
+      if ('kind' in frame && frame.kind === 'head') {
+        heads = { ...heads, ...frame.blocks }
+        const waiters = Array.from(headWaiters)
+        headWaiters.clear()
+        for (const wake of waiters) wake()
+        return
+      }
+      if (!('txHash' in frame) || !isAddress(frame.account, { strict: false })) return
+      const key = keyOf(frame.account, frame.chainId, frame.nonce)
+      resolvePending(key, frame)
     })
   }
 
   connect()
 
   return {
-    status,
+    onStatus(cb: (status: IMatchmakerStatus) => void): () => void {
+      statusListeners.add(cb)
+      cb(currentStatus)
+      return () => {
+        statusListeners.delete(cb)
+      }
+    },
     isOpen(): boolean {
       return ws?.readyState === WebSocket.OPEN
     },
-    async attest(request: IRelayRequest, timeoutMs = defaultTimeoutMs): Promise<IAttestResult> {
+    head(network: string): bigint | undefined {
+      return heads[network]
+    },
+    awaitHead(network: string, timeoutMs = DISPATCH_TIMEOUT_MS): Promise<bigint> {
+      const known = heads[network]
+      if (known !== undefined) return Promise.resolve(known)
+      return new Promise<bigint>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          headWaiters.delete(wake)
+          reject(
+            new Error(
+              `relay announced no indexed head for ${network} within ${timeoutMs}ms; not connected, or the relay predates head broadcasting`
+            )
+          )
+        }, timeoutMs)
+        const wake = (): void => {
+          const block = heads[network]
+          if (block === undefined) {
+            headWaiters.add(wake)
+            return
+          }
+          clearTimeout(timer)
+          resolve(block)
+        }
+        headWaiters.add(wake)
+      })
+    },
+    attest(request: IRelayRequest, timeoutMs = defaultTimeoutMs): Promise<IDispatchedFrame> {
       const account = accountForRequest(request)
       const intent = request.intent as IIntentByKind[IActionKind] & { chainId: bigint; nonce: bigint }
       const key = keyOf(account, intent.chainId, intent.nonce)
 
-      const ack = await new Promise<IAttestResult>((resolve, reject) => {
+      return new Promise<IDispatchedFrame>((resolve, reject) => {
         if (disposed) {
           reject(new Error('compact closed'))
           return
@@ -194,21 +245,18 @@ export function createCompact(opts: ICompactOpts): ICompact {
           pending.delete(key)
           const idx = outbox.indexOf(request)
           if (idx !== -1) outbox.splice(idx, 1)
-          console.error(`attest(${request.kind} nonce=${intent.nonce}) ack timed out after ${timeoutMs}ms`)
-          reject(new Error(`The relay did not confirm the ${request.kind} action in time. Try again.`))
+          reject(
+            new CompactError(
+              'DISPATCH_TIMEOUT',
+              `${request.kind} was not acknowledged in ${timeoutMs}ms: no agreement on the intent, or a busy relay. It can still dispatch until its deadline passes; wait it out, then retry on fresh state.`,
+              'server'
+            )
+          )
         }, timeoutMs)
         pending.set(key, { resolve, reject, timer, request })
         outbox.push(request)
         drain()
       })
-
-      const chainId = Number(intent.chainId)
-      if (request.kind === 'createPuppetAccount' || request.kind === 'createFundAccount') {
-        await awaitAccountDeployed(sql, account, chainId, settlementTimeoutMs)
-      } else {
-        await awaitAccountCall(sql, account, chainId, intent.nonce, settlementTimeoutMs)
-      }
-      return ack
     },
 
     close(): void {

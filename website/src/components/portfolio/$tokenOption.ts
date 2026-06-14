@@ -1,4 +1,4 @@
-import { getMappedValueFallback, readableTokenAmount } from '@puppet/sdk/core'
+import { getMappedValueFallback, readableTokenAmountLabel } from '@puppet/sdk/core'
 import type { IStream } from 'aelea/stream'
 import { $node, $text, type I$Node, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
@@ -31,7 +31,8 @@ export const $tokenIconBySymbol = (sym: string, size = '28px'): I$Node =>
 
 export const $optionRow = (opt: ITokenInputOption): I$Node => {
   const hasBalance = opt.balance !== null && opt.balance > 0n
-  const balanceText = opt.balance === null ? '-' : readableTokenAmount(opt.decimals, opt.balance)
+  const balanceText =
+    opt.balance === null ? '-' : readableTokenAmountLabel({ decimals: opt.decimals, symbol: opt.symbol }, opt.balance)
   const $content = $row(
     spacing.default,
     style({

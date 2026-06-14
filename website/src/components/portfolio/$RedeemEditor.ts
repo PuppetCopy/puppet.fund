@@ -1,11 +1,15 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { readableTokenAmount } from '@puppet/sdk/core'
+import { applyFactor, readableTokenAmount } from '@puppet/sdk/core'
 import { getTokenDescription } from '@puppet/sdk/gmx'
 import {
   computeClaimable,
+  computeQueuedShares,
+  getFundPoolState,
   getPuppetRedeemPosition,
+  type IFundPoolState,
   type IPuppetRedeemPosition,
   type ITokenRegistryMap,
+  liveFundPoolState,
   livePuppetRedeemPosition,
   tokenInfoFor
 } from '@puppet/sdk/state'
@@ -45,7 +49,8 @@ const EMPTY_POSITION: IPuppetRedeemPosition = {
   cursor: 0n,
   accrued: 0n,
   accruedPerStake: 0n,
-  totalStake: 0n
+  totalStake: 0n,
+  queuedShares: 0n
 }
 
 const positionStreamFor = (puppet: Address, masterAccount: Address): IStream<IPuppetRedeemPosition> =>
@@ -55,6 +60,12 @@ const positionStreamFor = (puppet: Address, masterAccount: Address): IStream<IPu
       livePuppetRedeemPosition(sqlClient, puppet, masterAccount)
     ),
     state(EMPTY_POSITION)
+  )
+
+const poolStreamFor = (masterAccount: Address): IStream<IFundPoolState> =>
+  op(
+    merge(fromPromise(getFundPoolState(sqlClient, masterAccount)), liveFundPoolState(sqlClient, masterAccount)),
+    state()
   )
 
 export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, tokenRegistry }: I$RedeemEditor) =>
@@ -105,7 +116,7 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
       )
 
       const $editor = switchMap(position => {
-        const queued = position.stake
+        const queued = computeQueuedShares(position)
         const held = position.sharesHeld
 
         const valueToShow: IStream<string> = map(
@@ -204,7 +215,7 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
             $row(spacing.small, style({ alignItems: 'baseline' }))(
               queued > 0n
                 ? $node(style({ color: palette.foreground, fontSize: text.xs, fontStyle: 'italic' }))(
-                    $text('awaiting fulfillment')
+                    $text("awaiting the master's redeem")
                   )
                 : empty,
               $node(style({ color: palette.message, fontWeight: '600' }))(
@@ -212,6 +223,13 @@ export const $RedeemEditor = ({ puppet, masterAccount, baseToken, baseTokenId, t
               )
             )
           ),
+          computeClaimable(position) > 0n
+            ? $node(style({ color: palette.foreground, fontSize: text.xs }))(
+                $text(
+                  `Selling also pays your ${readableTokenAmount(desc, computeClaimable(position))} ${desc.symbol} claimable to balance, and the relay fee can come out of it.`
+                )
+              )
+            : empty,
           $row(spacing.small, style({ alignItems: 'center' }))(
             $node(style({ flex: 1 }))(),
             $ButtonSecondary({ disabled: sellDisabled, $content: $text('Sell') })({ click: clickSellTether() })
@@ -229,9 +247,16 @@ export const $ClaimEditor = ({ puppet, masterAccount, baseToken, baseTokenId, to
     const desc = getTokenDescription(baseTokenInfo.token)
 
     const positionStream = positionStreamFor(puppet, masterAccount)
+    const poolStream = poolStreamFor(masterAccount)
+    const settleState = combine({ position: positionStream, pool: poolStream })
+
+    // On a closed fund the claim also surrenders the holder's full wallet share balance
+    // at the closing rate, so the claimable total covers queue accrual plus surrender.
+    const totalClaimable = (p: { position: IPuppetRedeemPosition; pool: IFundPoolState }): bigint =>
+      computeClaimable(p.position) + applyFactor(p.pool.closeRate, p.position.sharesHeld)
 
     const changeDraft: IStream<IClaimDraft> = sampleMap(
-      (position): IClaimDraft => ({
+      (p): IClaimDraft => ({
         kind: 'claim',
         id: `claim:${masterAccount}`,
         account: puppet,
@@ -241,30 +266,43 @@ export const $ClaimEditor = ({ puppet, masterAccount, baseToken, baseTokenId, to
         masterAccount,
         baseToken,
         baseTokenId,
-        amount: computeClaimable(position)
+        amount: totalClaimable(p)
       }),
-      positionStream,
+      settleState,
       clickClaim
     )
 
-    const $editor = switchMap(position => {
-      const claimable = computeClaimable(position)
-      const queued = position.stake
+    const $editor = switchMap(p => {
+      const closed = p.pool.closeRate !== 0n
+      const queueSide = computeClaimable(p.position)
+      const surrenderSide = closed ? applyFactor(p.pool.closeRate, p.position.sharesHeld) : 0n
+      const claimable = queueSide + surrenderSide
+      const queued = computeQueuedShares(p.position)
 
       return $column(spacing.default, style({ minWidth: '380px' }))(
         $row(spacing.small, style({ alignItems: 'center', justifyContent: 'space-between' }))(
-          $node(style({ color: palette.foreground, fontSize: text.sm, fontWeight: '500' }))($text('Claim accrued')),
+          $node(style({ color: palette.foreground, fontSize: text.sm, fontWeight: '500' }))(
+            $text(closed ? 'Fund closed' : 'Claim accrued')
+          ),
           $node(style({ color: palette.message, fontWeight: '600' }))(
             $text(`${readableTokenAmount(desc, claimable)} ${desc.symbol}`)
           )
         ),
-        queued > 0n
-          ? $node(style({ color: palette.foreground, fontSize: text.xs }))(
-              $text(`${readableTokenAmount(SHARE_DECIMALS, queued)} shares queued, waiting on master fulfillment.`)
+        closed
+          ? $node(style({ color: palette.foreground, fontSize: text.xs, lineHeight: '1.5' }))(
+              $text(
+                `Closed at ${readableTokenAmount(desc, applyFactor(p.pool.closeRate, 10n ** BigInt(SHARE_DECIMALS)))} ${desc.symbol} per share. Queue payout ${readableTokenAmount(desc, queueSide)} + your ${readableTokenAmount(SHARE_DECIMALS, p.position.sharesHeld)} shares ${readableTokenAmount(desc, surrenderSide)} = ${readableTokenAmount(desc, claimable)} ${desc.symbol} total. Claiming converts all your shares; anything you don't take now stays claimable anytime.`
+              )
             )
-          : $node(style({ color: palette.foreground, fontSize: text.xs }))(
-              $text('Nothing queued. Sell shares first, then claim once the master fulfills.')
-            ),
+          : queued > 0n
+            ? $node(style({ color: palette.foreground, fontSize: text.xs }))(
+                $text(
+                  `${readableTokenAmount(SHARE_DECIMALS, queued)} shares queued, payment arrives when the manager next processes redemptions.`
+                )
+              )
+            : $node(style({ color: palette.foreground, fontSize: text.xs }))(
+                $text('Nothing queued. Sell shares first, then claim once the manager processes the queue.')
+              ),
         $row(spacing.small)(
           $node(style({ flex: 1 }))(),
           $ButtonSecondary({
@@ -273,7 +311,7 @@ export const $ClaimEditor = ({ puppet, masterAccount, baseToken, baseTokenId, to
           })({ click: clickClaimTether() })
         )
       )
-    }, positionStream)
+    }, settleState)
 
     return [$editor, { changeDraft }]
   })

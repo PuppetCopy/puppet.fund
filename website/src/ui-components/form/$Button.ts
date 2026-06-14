@@ -68,6 +68,15 @@ export const $defaultMiniButtonSecondary = $defaultButtonSecondary(
   })
 )
 
+export const $defaultMiniButtonPrimary = $defaultButtonPrimary(
+  style({
+    alignSelf: 'center',
+    height: '28px',
+    padding: '0 10px',
+    fontSize: text.xs
+  })
+)
+
 export const $ButtonPrimary = (config: I$Button) => $keyboardOperableButton($Button, $defaultButtonPrimary, config)
 
 export const $ButtonSecondary = (config: I$Button) => $keyboardOperableButton($Button, $defaultButtonSecondary, config)

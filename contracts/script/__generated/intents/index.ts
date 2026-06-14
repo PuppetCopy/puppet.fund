@@ -8,17 +8,17 @@ export type IntentTypedData = Pick<TypedDataDefinition, 'primaryType' | 'types'>
 export type IntentActionMap = Readonly<Record<string, IntentTypedData>>
 
 export const ACCOUNT_GATE_DOMAIN_MAP: Record<number, TypedDataDomain> = {
-  8453: { name: 'AccountGate', version: '1', chainId: 8453, verifyingContract: '0x188C164eFb1248f6e77317FEc9f39A0D5E62Ca7C' },
-  42161: { name: 'AccountGate', version: '1', chainId: 42161, verifyingContract: '0x188C164eFb1248f6e77317FEc9f39A0D5E62Ca7C' }
+  8453: { name: 'AccountGate', version: '1', chainId: 8453, verifyingContract: '0x3a6526C26804D7Ad0F116330899FA808fa8dd94E' },
+  42161: { name: 'AccountGate', version: '1', chainId: 42161, verifyingContract: '0x3a6526C26804D7Ad0F116330899FA808fa8dd94E' }
 }
 
 export const MASTER_GATE_DOMAIN_MAP: Record<number, TypedDataDomain> = {
-  8453: { name: 'MasterGate', version: '1', chainId: 8453, verifyingContract: '0xd332b13C8C8B7B8E5B00de6Eb5EA91404Ed0fB43' },
-  42161: { name: 'MasterGate', version: '1', chainId: 42161, verifyingContract: '0xd332b13C8C8B7B8E5B00de6Eb5EA91404Ed0fB43' }
+  8453: { name: 'MasterGate', version: '1', chainId: 8453, verifyingContract: '0x6a63F80E57f175f10013B918b7aA83a195C4d3a7' },
+  42161: { name: 'MasterGate', version: '1', chainId: 42161, verifyingContract: '0x6a63F80E57f175f10013B918b7aA83a195C4d3a7' }
 }
 
 export const HUB_GATE_DOMAIN_MAP: Record<number, TypedDataDomain> = {
-  42161: { name: 'HubGate', version: '1', chainId: 42161, verifyingContract: '0x7242D4538332ECF36b0Aa69a4f91F1370fbBC0B6' }
+  42161: { name: 'HubGate', version: '1', chainId: 42161, verifyingContract: '0x2b2389D14504c8C97273Ec4b3D1afC3c9d1563fa' }
 }
 
 export const ACCOUNT_GATE_INTENTS = {
@@ -181,6 +181,30 @@ export const HUB_GATE_INTENTS = {
       ]
     }
   },
+  liquidate: {
+    primaryType: 'LiquidateIntent',
+    types: {
+      LiquidateIntent: [
+      { name: 'params', type: 'AccountInitParams' },
+      { name: 'blockNumber', type: 'uint256' },
+      { name: 'deadline', type: 'uint256' },
+      { name: 'acceptableRelayFee', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' },
+      { name: 'chainId', type: 'uint256' },
+      { name: 'share', type: 'ShareInitParams' },
+      { name: 'acceptableNetAssetValue', type: 'uint256' }
+      ],
+      AccountInitParams: [
+      { name: 'user', type: 'address' },
+      { name: 'signer', type: 'address' }
+      ],
+      ShareInitParams: [
+      { name: 'master', type: 'address' },
+      { name: 'baseTokenId', type: 'bytes32' },
+      { name: 'name', type: 'bytes32' }
+      ]
+    }
+  },
   redeem: {
     primaryType: 'RedeemIntent',
     types: {
@@ -193,9 +217,8 @@ export const HUB_GATE_INTENTS = {
       { name: 'chainId', type: 'uint256' },
       { name: 'share', type: 'ShareInitParams' },
       { name: 'sharesOut', type: 'uint256' },
-      { name: 'acceptableNetAssetValue', type: 'uint256' },
-      { name: 'totalShareSupply', type: 'uint256' },
-      { name: 'acceptableShares', type: 'uint256' }
+      { name: 'assetsOut', type: 'uint256' },
+      { name: 'acceptableNetAssetValue', type: 'uint256' }
       ],
       AccountInitParams: [
       { name: 'user', type: 'address' },

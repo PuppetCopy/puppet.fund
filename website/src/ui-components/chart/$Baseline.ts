@@ -2,6 +2,7 @@ import { readableUnitAmount } from '@puppet/sdk/core'
 import type { IStream } from 'aelea/stream'
 import { palette } from 'aelea/ui-components-theme'
 import {
+  type AutoscaleInfo,
   type BarPrice,
   BaselineSeries,
   type BaselineSeriesPartialOptions,
@@ -12,6 +13,20 @@ import {
   LineType
 } from 'lightweight-charts'
 import { $Chart, defaultChartConfig, type IMarker, type ISeriesType } from './$Chart.js'
+
+export const floorAutoscaleByAum =
+  (aum: number, fraction = 0.05) =>
+  (orig: () => AutoscaleInfo | null): AutoscaleInfo | null => {
+    const base = orig()
+    const floor = aum * fraction
+    if (!(floor > 0)) return base
+    return {
+      priceRange: {
+        minValue: Math.min(base?.priceRange?.minValue ?? 0, -floor),
+        maxValue: Math.max(base?.priceRange?.maxValue ?? 0, floor)
+      }
+    }
+  }
 
 // lightweight-charts paints to a canvas that can't resolve CSS custom properties,
 // so a raw `var(--x)` palette token renders as a dull fallback. Resolve to a concrete

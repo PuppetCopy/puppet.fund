@@ -6,9 +6,9 @@ import {LibClone} from "solady/utils/LibClone.sol";
 import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
 
 import {Error} from "../utils/Error.sol";
-import {AccountBase} from "./AccountBase.sol";
+import {BaseAccount} from "./BaseAccount.sol";
 
-contract PuppetAccount is AccountBase {
+contract PuppetAccount is BaseAccount {
     function getUser() public view returns (address _user) {
         bytes memory _b = LibClone.argsOnClone(address(this), 40, 60);
         assembly ("memory-safe") {

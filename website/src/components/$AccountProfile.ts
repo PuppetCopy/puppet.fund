@@ -1,19 +1,35 @@
+import type { IShareLib__ShareInitParams } from '@puppet/contracts/types'
+import { predictFundAccount, predictShareToken, symbolForBaseTokenId } from '@puppet/sdk/account'
 import { BYTES32_ZERO } from '@puppet/sdk/const'
-import { empty, type IStream, map, switchLatest } from 'aelea/stream'
+import { roboAvatarName } from '@puppet/sdk/ui-components'
+import { empty } from 'aelea/stream'
 import { $node, $text, type I$Node, type INodeCompose, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
-import { type Hex, hexToString } from 'viem'
+import { palette } from 'aelea/ui-components-theme'
+import { type Hex, hexToString, toHex } from 'viem'
 import type { Address } from 'viem/accounts'
-import { $infoLabel, text } from '@/ui-components'
+import { text } from '@/ui-components'
 import { $jazzicon } from '../common/$avatar.js'
 import { $roboAvatar } from '../common/$roboAvatar.js'
-import { $card2 } from '../common/elements/$common.js'
+import { $tokenIconBySymbol } from './portfolio/$tokenOption.js'
 
 export const readableAccountName = (name?: Hex | null): string | undefined => {
   if (!name || name === BYTES32_ZERO) return undefined
   const decoded = hexToString(name, { size: 32 }).trim()
   return decoded.length > 0 ? decoded : undefined
+}
+
+export const accountNameToHex = (name: string): Hex => {
+  const encoder = new TextEncoder()
+  let byteCount = 0
+  let truncated = ''
+  for (const codePoint of name) {
+    const size = encoder.encode(codePoint).length
+    if (byteCount + size > 32) break
+    byteCount += size
+    truncated += codePoint
+  }
+  return toHex(truncated, { size: 32 })
 }
 
 export const $profileDisplay = ({
@@ -51,62 +67,37 @@ export const $profileDisplay = ({
   )
 }
 
-export const $stubAccountDisplay = ({
-  address,
-  $title = $infoLabel($text('Your account')),
-  $detail,
-  $action,
-  profileSize = 48
-}: {
-  address: IStream<Address>
-  $title?: I$Node
-  $detail?: I$Node
-  $action?: I$Node
-  profileSize?: number
-}) => {
-  return $card2(
-    style({
-      width: '100%',
-      borderRadius: '30px',
-      padding: '20px 24px',
-      border: `1px solid ${colorShade(palette.foreground, 25)}`
-    })
-  )(
-    $row(spacing.big, style({ alignItems: 'center' }))(
+// THE fund identity display: rounded robo avatar seeded by the predicted ShareToken,
+// the base-token icon floated into its corner, and the fund name as the label. A fund's
+// identity IS its ShareToken (master + base token + name), so this takes the init params.
+export const $fundProfile = (share: IShareLib__ShareInitParams, size = 36): I$Node => {
+  const shareToken = predictShareToken(share.master, share.baseTokenId, share.name)
+  const symbol = symbolForBaseTokenId(share.baseTokenId)
+  return $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
+    $node(
+      style({
+        width: `${size}px`,
+        height: `${size}px`,
+        borderRadius: '50%',
+        overflow: 'hidden',
+        flexShrink: '0'
+      })
+    )($roboAvatar(shareToken, size)),
+    $column(style({ minWidth: '0', gap: '2px' }))(
       $node(
         style({
-          width: `${profileSize}px`,
-          height: `${profileSize}px`,
-          borderRadius: '50%',
+          fontWeight: '600',
+          fontSize: text.lg,
+          color: palette.message,
           overflow: 'hidden',
-          flexShrink: '0',
-          border: `1px dashed ${colorShade(palette.foreground, 40)}`,
-          opacity: '0.7'
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap'
         })
-      )(switchLatest(map($roboAvatar, address))),
-      $column(spacing.small, style({ minWidth: '0', flex: '1' }))(
-        $title,
-        $detail ??
-          $node(
-            style({
-              fontFamily: 'monospace',
-              fontSize: text.base,
-              color: palette.message,
-              overflowWrap: 'anywhere'
-            })
-          )(switchLatest(map(a => $node($text(a)), address)))
-      ),
-      $action ??
-        $node(
-          style({
-            flexShrink: '0',
-            fontSize: text.xs,
-            color: palette.foreground,
-            border: `1px solid ${colorShade(palette.foreground, 30)}`,
-            borderRadius: '100px',
-            padding: '4px 10px'
-          })
-        )($text('Not created yet'))
+      )($text(readableAccountName(share.name) ?? roboAvatarName(shareToken))),
+      $row(style({ alignItems: 'center', gap: '4px' }))(
+        symbol ? $tokenIconBySymbol(symbol, '16px') : empty,
+        $accountLabel({ address: predictFundAccount(share.master), primarySize: 1 })
+      )
     )
   )
 }
@@ -126,8 +117,16 @@ export const $accountLabel = ({
 }) => {
   // If ENS name exists, display it; otherwise fall back to shortened address
   if (ensName) {
-    return $container(style({ alignItems: 'baseline', flexDirection: 'row' }))(
-      $node(style({ fontSize: `${primarySize}rem` }))($text(ensName))
+    return $container(style({ alignItems: 'baseline', flexDirection: 'row', minWidth: '0' }))(
+      $node(
+        style({
+          fontSize: `${primarySize}rem`,
+          minWidth: '0',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap'
+        })
+      )($text(ensName))
     )
   }
 

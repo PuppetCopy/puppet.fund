@@ -5,9 +5,9 @@ export default defineConfig({
   dev: {
     reloadCommand: 'Alt+R'
   },
-  manifest: {
-    name: 'Puppet Wallet',
-    description: 'Smart wallet for copy-trading on any dApp',
+  manifest: ({ mode }) => ({
+    name: 'Puppet Connect',
+    description: 'Fund top traders and share their gains, or run your own fund and trade as you do today. You keep your keys and set the rules.',
     icons: {
       16: '/icon-16.png',
       48: '/icon-48.png',
@@ -19,11 +19,17 @@ export default defineConfig({
         48: '/icon-48.png',
         128: '/icon-128.png'
       },
-      default_title: 'Puppet Wallet'
+      default_title: 'Puppet Connect'
     },
     permissions: ['storage', 'tabs'],
+    content_security_policy: {
+      extension_pages: "script-src 'self'; object-src 'self'"
+    },
     externally_connectable: {
-      matches: ['http://localhost:*/*', 'https://puppet.fund/*', 'https://*.puppet.fund/*']
+      matches:
+        mode === 'production'
+          ? ['https://puppet.fund/*', 'https://*.puppet.fund/*']
+          : ['http://localhost:*/*', 'https://puppet.fund/*', 'https://*.puppet.fund/*']
     },
     web_accessible_resources: [
       {
@@ -31,7 +37,7 @@ export default defineConfig({
         matches: ['<all_urls>']
       }
     ]
-  },
+  }),
   vite: ({ mode }) => ({
     define: {
       'import.meta.env.VITE_PUPPET_URL': JSON.stringify(
@@ -39,7 +45,7 @@ export default defineConfig({
       ),
       'import.meta.env.VITE_MATCHMAKER_WS_URL': JSON.stringify(
         process.env.VITE_MATCHMAKER_WS_URL ??
-          (mode === 'production' ? 'wss://puppet.fund/api/matchmaker' : 'ws://localhost:8080')
+          (mode === 'production' ? 'wss://puppet.fund/api/matchmaker' : 'ws://localhost:4000/ws')
       )
     }
   })

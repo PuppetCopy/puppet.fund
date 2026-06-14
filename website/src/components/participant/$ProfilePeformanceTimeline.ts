@@ -1,5 +1,6 @@
 import { type IntervalTime, USD_DECIMALS } from '@puppet/sdk/const'
 import {
+  dustToZeroUsd,
   formatFixed,
   getUnixTimestamp,
   parseReadableNumber,
@@ -7,14 +8,22 @@ import {
   readableUnitAmount,
   resampleTimeSeries
 } from '@puppet/sdk/core'
-import { combine, empty, type IStream, map, skipRepeatsWith, start, switchLatest, switchMap } from 'aelea/stream'
+import { combine, empty, type IStream, just, map, skipRepeatsWith, start, switchLatest, switchMap } from 'aelea/stream'
 import { type IBehavior, multicast } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, motion, style } from 'aelea/ui'
 import { $column, $defaultNumberTickerSlot, $NumberTicker, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { type BaselineData, LineType, type MouseEventParams } from 'lightweight-charts'
 import type { Address } from 'viem/accounts'
-import { $Baseline, $infoLabel, $infoTooltip, $intermediatePromise, type ISeriesTime, text } from '@/ui-components'
+import {
+  $Baseline,
+  $infoLabel,
+  $infoTooltip,
+  $intermediatePromise,
+  floorAutoscaleByAum,
+  type ISeriesTime,
+  text
+} from '@/ui-components'
 import type { IMasterMetricSummary, IPageFilterParams } from '../../pages/types.js'
 import { $LastAtivity } from '../$LastActivity.js'
 
@@ -31,6 +40,7 @@ interface I$UsdTimeline {
   chartHeight?: string
   $lead?: I$Node
   $empty?: I$Node
+  aumUsd?: IStream<Promise<number>>
 }
 
 export const $usdTimeline = ({
@@ -39,6 +49,7 @@ export const $usdTimeline = ({
   tooltip,
   activityTimeframe,
   chartHeight = '200px',
+  aumUsd,
   $lead = $node(style({ flex: 1 }))(),
   $empty = $row(
     spacing.tiny,
@@ -65,6 +76,11 @@ export const $usdTimeline = ({
             })
           )(
             $lead,
+            $row(style({ flex: 1, justifyContent: 'center' }))(
+              $LastAtivity({ activityTimeframe })({
+                changeActivityTimeframe: changeActivityTimeframeTether()
+              })
+            ),
             switchLatest(
               switchMap(async query => {
                 const timeline = await query
@@ -93,38 +109,46 @@ export const $usdTimeline = ({
                   )
                 )
 
-                return $column(style({ flex: 1, alignItems: 'center' }))(
-                  $NumberTicker({
-                    $slot: $defaultNumberTickerSlot(style({ fontSize: text.xxl, fontWeight: '900' })),
-                    value: map(
-                      hoverValue => parseReadableNumber(readableUnitAmount(hoverValue)),
-                      motion({ damping: 26, precision: 15, stiffness: 210 }, hoverValue)
-                    ),
-                    incrementColor: palette.positive,
-                    decrementColor: palette.negative
-                  }),
+                return $column(style({ flex: 1, alignItems: 'flex-end' }))(
+                  $row(style({ alignItems: 'flex-end' }))(
+                    $node(
+                      style({
+                        fontSize: text.base,
+                        fontWeight: '900',
+                        color: palette.foreground,
+                        lineHeight: '1.6',
+                        marginRight: '2px'
+                      })
+                    )($text('$')),
+                    $NumberTicker({
+                      $slot: $defaultNumberTickerSlot(style({ fontSize: text.xxl, fontWeight: '900' })),
+                      value: map(
+                        hoverValue => parseReadableNumber(readableUnitAmount(hoverValue)),
+                        motion({ damping: 26, precision: 15, stiffness: 210 }, hoverValue)
+                      ),
+                      incrementColor: palette.positive,
+                      decrementColor: palette.negative
+                    })
+                  ),
                   switchLatest(
                     map(
                       date =>
                         date === null
-                          ? $row(style({ alignItems: 'center' }))($infoLabel($text(label)), $infoTooltip(tooltip))
-                          : $infoLabel($text(date)),
+                          ? $row(style({ alignItems: 'center', fontSize: text.xs }))(
+                              $infoLabel($text(label)),
+                              $infoTooltip(tooltip, palette.foreground, '16px')
+                            )
+                          : $infoLabel(style({ fontSize: text.xs }))($text(date)),
                       hoverDate
                     )
                   )
                 )
               }, timelineQuery)
-            ),
-            $row(style({ flex: 1 }))(
-              $node(style({ flex: 1 }))(),
-              $LastAtivity({ activityTimeframe })({
-                changeActivityTimeframe: changeActivityTimeframeTether()
-              })
             )
           ),
           $intermediatePromise({
-            $display: map(async query => {
-              const timeline = await query
+            $display: map(async p => {
+              const timeline = await p.query
 
               if (timeline.length === 0) {
                 return $empty
@@ -135,14 +159,14 @@ export const $usdTimeline = ({
                   rightPriceScale: {
                     visible: false,
                     scaleMargins: {
-                      top: 0.35
+                      top: 0.41
                     }
                   },
                   leftPriceScale: {
                     autoScale: true,
                     ticksVisible: true,
                     scaleMargins: {
-                      top: 0.55,
+                      top: 0.61,
                       bottom: 0.1
                     }
                   },
@@ -158,13 +182,14 @@ export const $usdTimeline = ({
                   baseValue: {
                     price: 0,
                     type: 'price'
-                  }
+                  },
+                  autoscaleInfoProvider: floorAutoscaleByAum(await p.aum)
                 },
                 data: timeline as any as BaselineData<ISeriesTime>[]
               })({
                 crosshairMove: crosshairMoveTether()
               })
-            }, timelineQuery)
+            }, combine({ query: timelineQuery, aum: aumUsd ?? just(Promise.resolve(0)) }))
           })
         ),
 
@@ -177,6 +202,8 @@ interface I$MasterRouteTimeline extends IPageFilterParams {
   metricsQuery: IStream<Promise<IMasterMetricSummary>>
   chartHeight?: string
   $lead?: I$Node
+  livePnlUsd?: IStream<number>
+  aumUsd?: IStream<Promise<number>>
 }
 
 export const $MasterRouteTimeline = ({
@@ -185,7 +212,9 @@ export const $MasterRouteTimeline = ({
   indexTokenList,
   metricsQuery,
   chartHeight,
-  $lead
+  $lead,
+  livePnlUsd,
+  aumUsd
 }: I$MasterRouteTimeline) =>
   component(
     (
@@ -193,34 +222,43 @@ export const $MasterRouteTimeline = ({
       [selectIndexTokenList, _selectIndexTokenListTether]: IBehavior<Address[]>,
       [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<any, IntervalTime>
     ) => {
-      const timelineQuery = map(async params => {
-        const pos = await params.metricsQuery
+      const timelineQuery = map(
+        async params => {
+          const pos = await params.metricsQuery
 
-        if (pos.pnlTimeline.length === 0) {
-          return []
-        }
-
-        const endTime = getUnixTimestamp()
-        const startTime = endTime - params.activityTimeframe
-        const sourceList = [
-          { value: 0n, time: startTime, fund: pos.pnlTimeline[0].fund },
-          ...pos.pnlTimeline.filter(item => item.time > startTime),
-          { value: 0n, time: endTime, fund: '0x000000000000000000000000000000000000dEaD' as Address }
-        ]
-
-        const sumMap = new Map<Address, bigint>()
-
-        return resampleTimeSeries({
-          sourceList,
-          ticks: 280,
-          getTime: item => item.time,
-          mapSource: next => {
-            sumMap.set(next.fund, next.value)
-            const sum = [...sumMap.values()].reduce((acc, curr) => acc + curr, 0n)
-            return formatFixed(USD_DECIMALS, sum)
+          if (pos.pnlTimeline.length === 0) {
+            return []
           }
-        })
-      }, combine({ metricsQuery, activityTimeframe }))
+
+          const endTime = getUnixTimestamp()
+          const startTime = endTime - params.activityTimeframe
+          const sourceList = [
+            { value: 0n, time: startTime, fund: pos.pnlTimeline[0].fund },
+            ...pos.pnlTimeline.filter(item => item.time > startTime),
+            { value: 0n, time: endTime, fund: '0x000000000000000000000000000000000000dEaD' as Address }
+          ]
+
+          const sumMap = new Map<Address, bigint>()
+
+          const series = resampleTimeSeries({
+            sourceList,
+            ticks: 280,
+            getTime: item => item.time,
+            mapSource: next => {
+              sumMap.set(next.fund, dustToZeroUsd(next.value))
+              const sum = [...sumMap.values()].reduce((acc, curr) => acc + curr, 0n)
+              return formatFixed(USD_DECIMALS, sum)
+            }
+          })
+
+          if (params.live !== 0 && series.length > 0) {
+            const last = series[series.length - 1]
+            series[series.length - 1] = { ...last, value: (last.value ?? 0) + params.live }
+          }
+          return series
+        },
+        combine({ metricsQuery, activityTimeframe, live: livePnlUsd ?? just(0) })
+      )
 
       return [
         $usdTimeline({
@@ -229,6 +267,7 @@ export const $MasterRouteTimeline = ({
           tooltip: 'The total combined settled and open trades',
           activityTimeframe,
           chartHeight,
+          ...(aumUsd ? { aumUsd } : {}),
           ...($lead ? { $lead } : {})
         })({
           changeActivityTimeframe: changeActivityTimeframeTether()

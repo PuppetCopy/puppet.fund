@@ -13,6 +13,9 @@ export const readableTinyNumber: Intl.NumberFormatOptions = { maximumSignificant
 // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/NumberFormat/NumberFormat#options
 export const readableNumber = curry2((formatOptions: Intl.NumberFormatOptions, ammount: number | bigint) => {
   const absAmount = Math.abs(Number(ammount))
+  if (absAmount > 0 && absAmount < 1e-8) {
+    return Intl.NumberFormat('en-US', { ...readableAccountingNumber, ...formatOptions }).format(0)
+  }
   const digitOptions =
     absAmount >= 100 ? readableLargeNumber : absAmount >= 0.01 ? readableAccountingNumber : readableTinyNumber
 
@@ -27,6 +30,10 @@ export const readableFactorPercentage = (amount: bigint) =>
   `${readableUnitAmount(formatFixed(USD_DECIMALS, amount) * 100)}%`
 export const readableLeverage = (a: bigint, b: bigint) =>
   `${b ? readableUnitAmount(formatFixed(4, (a * BASIS_POINTS) / b)) : 0n}x`
+// Sub-cent USD magnitudes (30-dec scale) are dust: zero them BEFORE display so the
+// rendered value and its sign-derived color agree instead of showing a red "0.00".
+const USD_DUST = 10n ** 28n
+export const dustToZeroUsd = (amount: bigint): bigint => (amount < USD_DUST && amount > -USD_DUST ? 0n : amount)
 export const readableUsd = (ammount: bigint) => readableUSD(formatFixed(USD_DECIMALS, ammount))
 export const readableTokenUsd = (
   token: ITokenDescription | Address,

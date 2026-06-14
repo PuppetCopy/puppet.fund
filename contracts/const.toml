@@ -1,4 +1,5 @@
 [protocol]
+version = 4
 hubChainId = 42161
 maxBlockDelay = 240
 maxRelayFeeBps = 1000
@@ -8,6 +9,8 @@ signerDerivationMessage = "Puppet: Authorize session key"
 [precision]
 basisPoints = 10000
 floatPrecisionExp = 30
+sharePrecisionExp = 12
+shareTokenDecimals = 18
 maxQuoteAgeSec = 600
 
 [gmx]
@@ -19,9 +22,11 @@ outputSettler = "0x0000000000eC36B683C2E6AC89e9A75989C22a2e"
 oracle = "0x0000003E06000007A224AeE90052fA6bb46d43C9"
 
 [arbitrum.token]
+ETH = "0x0000000000000000000000000000000000000000"
 USDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
 WETH = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
 
 [base.token]
+ETH = "0x0000000000000000000000000000000000000000"
 USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
 WETH = "0x4200000000000000000000000000000000000006"

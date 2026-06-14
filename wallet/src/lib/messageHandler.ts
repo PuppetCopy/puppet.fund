@@ -1,44 +1,78 @@
-import { WALLET_MESSAGE } from '@puppet/sdk/wallet'
-import { getAddress, type Hex, isHex } from 'viem'
-import { broadcastAccountsChanged } from './broadcast.js'
-import { notifyActiveSet, type StoredState } from './state.js'
+import {
+  type IConnectionsResponse,
+  type IHandoffSessionRequest,
+  type IHandoffSessionResponse,
+  type IRejectConnectRequest,
+  WALLET_MESSAGE,
+  WALLET_PROTOCOL_VERSION
+} from '@puppet/sdk/wallet'
+import type { Address } from 'viem'
+import { getAddress, isHex } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
+import { notifyOriginAccounts } from './broadcast.js'
+import { deriveSession, getState, type IWalletState, rejectApprovals, releaseApprovals, setState } from './state.js'
 
-export interface MessageHandlerDeps {
-  state: StoredState
+// The fund is exposed only while at least one dApp origin holds a grant.
+function exposedFund(state: IWalletState): Address | null {
+  return state.authorizedOrigins.length > 0 ? (deriveSession(state)?.fund ?? null) : null
 }
 
 export async function handleWebsiteMessage(
   message: { type: string; payload?: unknown },
-  deps: MessageHandlerDeps
+  siteOrigin: string
 ): Promise<unknown> {
-  const { state } = deps
+  const state = await getState()
 
   switch (message.type) {
-    case WALLET_MESSAGE.GET_ACTIVE_WALLET:
-      return state.activeSubaccount
+    case WALLET_MESSAGE.GET_CONNECTIONS: {
+      const response: IConnectionsResponse = {
+        version: WALLET_PROTOCOL_VERSION,
+        fund: exposedFund(state),
+        origins: state.authorizedOrigins
+      }
+      return response
+    }
 
-    case WALLET_MESSAGE.SET_ACTIVE_WALLET: {
-      const payload = message.payload as { subaccountAddress: string | null; signerKey: string | null }
-      const next = payload.subaccountAddress ? getAddress(payload.subaccountAddress) : null
-      if (payload.signerKey !== null && (!isHex(payload.signerKey) || payload.signerKey.length !== 66)) {
+    case WALLET_MESSAGE.HANDOFF_SESSION: {
+      const payload = message.payload as IHandoffSessionRequest
+      if (!isHex(payload.signerKey) || payload.signerKey.length !== 66) {
         throw new Error('signerKey must be a 32-byte hex string')
       }
-      const nextKey = (payload.signerKey as Hex | null) ?? null
-      if (next === state.activeSubaccount && nextKey === state.signerKey) {
-        return { activeSubaccount: state.activeSubaccount }
+      const user = getAddress(payload.user)
+      const signer = privateKeyToAccount(payload.signerKey).address
+      // A different user/signer revokes every prior grant; otherwise keep them and ADD the
+      // newly approved origin (the fund can be connected to several dApps at once).
+      const sameAccount = user === state.user && signer === state.signer
+      const kept = sameAccount ? state.authorizedOrigins : []
+      const authorizedOrigins =
+        payload.approveOrigin && !kept.includes(payload.approveOrigin) ? [...kept, payload.approveOrigin] : kept
+
+      const next = await setState({ user, signer, signerKey: payload.signerKey, authorizedOrigins })
+      const session = deriveSession(next)
+
+      // Resolve the pending connection synchronously, then broadcast WITHOUT awaiting so the
+      // site's request returns immediately (tab broadcasts must not delay the response).
+      if (payload.approveOrigin && session) {
+        releaseApprovals(payload.approveOrigin, session.fund)
+        void notifyOriginAccounts(payload.approveOrigin, [session.fund])
+        void notifyOriginAccounts(siteOrigin, [session.fund])
       }
-      state.activeSubaccount = next
-      state.signerKey = nextKey
-      if (next) notifyActiveSet(next)
-      await broadcastAccountsChanged(next)
-      return { activeSubaccount: state.activeSubaccount }
+      const response: IHandoffSessionResponse = { fund: exposedFund(next) }
+      return response
+    }
+
+    case WALLET_MESSAGE.REJECT_CONNECT: {
+      const { origin } = (message.payload ?? {}) as IRejectConnectRequest
+      if (origin) rejectApprovals(origin)
+      return null
     }
 
     case WALLET_MESSAGE.CLEAR_ALL: {
-      const prevAddress = state.activeSubaccount
-      state.activeSubaccount = null
-      state.signerKey = null
-      if (prevAddress !== null) await broadcastAccountsChanged(null)
+      const revoked = state.authorizedOrigins
+      const wasExposed = exposedFund(state) !== null
+      await setState({ user: null, signer: null, signerKey: null, authorizedOrigins: [] })
+      for (const origin of revoked) await notifyOriginAccounts(origin, [])
+      if (wasExposed) await notifyOriginAccounts(siteOrigin, [])
       return null
     }
 

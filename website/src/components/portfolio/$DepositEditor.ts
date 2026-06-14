@@ -9,8 +9,8 @@ import {
   resolveDispatchNetwork
 } from '@puppet/sdk/attestation'
 import { formatThrownError } from '@puppet/sdk/compact'
-import { ADDRESS_ZERO, CHAIN_LIST, type ChainId } from '@puppet/sdk/const'
-import { readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { ADDRESS_ZERO, CHAIN_LIST, CHAIN_MAP, type ChainId, HUB_CHAIN } from '@puppet/sdk/const'
+import { getAccountExplorerUrl, readableAddress, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { getTokenDescription } from '@puppet/sdk/gmx'
 import {
   fetchDepositRouteBalance,
@@ -52,6 +52,7 @@ import { colorShade, palette } from 'aelea/ui-components-theme'
 import { type Address, erc20Abi, formatUnits, type Hex } from 'viem'
 import { readContract } from 'viem/actions'
 import {
+  $anchor,
   $ButtonSecondary,
   $DropSelect,
   $defaultDropdownContainer,
@@ -69,7 +70,7 @@ import {
 } from '@/ui-components'
 import { uiStorage } from '@/ui-storage'
 import { depositSourceKey, type IDepositSource } from '../../app/localStoreSchema.js'
-import { $tokenWithChainBadge, chainName } from '../../common/$chain.js'
+import { $chainIcon, $tokenWithChainBadge, chainName } from '../../common/$chain.js'
 import { fetchSwapQuote, type ISwapQuote } from '../../io/bridge/swapQuote.js'
 import { fetchTokenBalances } from '../../io/chain/balances.js'
 import * as context from '../../io/context.js'
@@ -137,7 +138,7 @@ export const $DepositEditor = ({
           isNative: boolean
         ) => {
           const isSwap = routeTokenId !== baseTokenId
-          if (isSwap && (chain.id === HUB_CHAIN_ID || !context.relayFeeMapByToken.has(routeTokenId))) return
+          if (isSwap && !context.relayFeeMapByToken.has(routeTokenId)) return
           entries.push({
             chainId: chain.id,
             address,
@@ -150,6 +151,7 @@ export const $DepositEditor = ({
           })
         }
         for (const [tid, info] of chainMap) {
+          if (info.token === ADDRESS_ZERO) continue
           const desc = getTokenDescription(info.hubToken)
           pushSource(info.token, desc.symbol, tid, info.token, desc.decimals, false)
         }
@@ -527,20 +529,35 @@ export const $DepositEditor = ({
         combine({ fee: relayFee, price: inputPrice })
       )
 
+      const surplusRoute = predictDepositRoute(recipient)
       const $surplusInline = switchMap(
         p =>
           p.surplus > 0n
             ? $labeledValue(
                 'Sweep',
                 $node(style({ color: palette.positive }))($text(`+${formatUsd(p.surplus, p.price)}`)),
-                $node(style({ maxWidth: '220px', fontSize: text.sm, whiteSpace: 'normal' }))(
-                  $text(
-                    'An earlier deposit was sent but never finished. This step picks those funds up and credits them to your balance along with the new amount.'
+                $column(spacing.small, style({ maxWidth: '260px', fontSize: text.sm, whiteSpace: 'normal' }))(
+                  $node(
+                    $text(
+                      'An earlier deposit was sent but never finished. This step picks those funds up and credits them to your balance along with the new amount.'
+                    )
+                  ),
+                  $row(spacing.small, style({ alignItems: 'center' }))(
+                    $chainIcon(p.sel.chainId, 14),
+                    $anchor(
+                      attr({
+                        href: getAccountExplorerUrl(
+                          surplusRoute,
+                          CHAIN_MAP[p.sel.chainId as keyof typeof CHAIN_MAP] ?? HUB_CHAIN
+                        ),
+                        target: '_blank'
+                      })
+                    )($text(readableAddress(surplusRoute)))
                   )
                 )
               )
             : empty,
-        combine({ surplus: depositSurplus, price: tokenPrice })
+        combine({ surplus: depositSurplus, price: tokenPrice, sel: selectedSourceRef })
       )
 
       const $relayFeeNode = $text(start('-', relayFeeText))
@@ -979,7 +996,7 @@ export const $DepositEditor = ({
                   output: {
                     receiver: recipient,
                     chainId: HUB_CHAIN_ID,
-                    amount: recognizeAmount,
+                    amount: recognizeAmount - homeRecognizeFee,
                     baseTokenId,
                     approx: false
                   },

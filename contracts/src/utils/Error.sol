@@ -64,19 +64,24 @@ library Error {
 
     error Share__ZeroShares();
     error Share__ZeroStakeAdded();
+    error Share__MasterCannotSell();
     error Share__Empty();
     error Share__InsufficientClaimable();
     error Share__RelayFeeTooHigh();
     error Share__NoStakeToCredit();
+    error Share__CreditTooSmall();
+    error Share__PoolDegraded();
+    error Share__FundClosed();
     error Share__NotCreated();
     error Share__MasterMismatch(address derived, address declared);
 
     error Redeem__ZeroAcceptableNav();
-    error Redeem__SupplyMismatch(uint current, uint expected);
     error Redeem__NothingToRetire();
     error Redeem__RelayFeeTooHigh();
+    error Redeem__MasterFractionDecreased();
+    error Redeem__DrainExceedsQueue();
 
-    error ShareToken__NotShareGate();
+    error ShareToken__NotIssuer();
     error ShareToken__NotHubChain(uint expected, uint current);
 
     error Deposit__NothingToWithdraw();

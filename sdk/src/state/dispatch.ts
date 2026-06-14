@@ -47,15 +47,19 @@ export async function awaitAccountCall(
   )
 }
 
+// Event-sourced: deployment presence IS the raw deploy event row.
 export async function awaitAccountDeployed(
   sql: IIndexerClient,
+  kind: 'createPuppetAccount' | 'createFundAccount',
   account: Address,
   chainId: number,
   timeoutMs: number
 ): Promise<void> {
+  const entity =
+    kind === 'createFundAccount' ? ('Account__DeployFundAccount' as const) : ('Account__DeployPuppetAccount' as const)
   await pollUntil(
     () =>
-      selectOne(sql, 'Account', {
+      selectOne(sql, entity, {
         where: { account: { _eq: getAddress(account) }, chainId: { _eq: BigInt(chainId) } },
         fields: ['id']
       }),

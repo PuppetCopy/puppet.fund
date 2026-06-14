@@ -16,11 +16,12 @@ import {
   take
 } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
-import { $node, $text, component, type I$Node, type I$Slottable, style } from 'aelea/ui'
+import { $node, $text, component, type I$Node, type I$Slottable, style, styleBehavior } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { $Tooltip, text } from '@/ui-components'
 import * as context from '../io/context.js'
+import { puppetConnectedOrigins, puppetExtensionInstalled, puppetExtensionOutdated } from '../wallet/index.js'
 
 type ServiceHealth = 'ok' | 'degraded' | 'down'
 
@@ -75,10 +76,32 @@ const isIndexerHealthy = (health: IndexerHealth | null): boolean => {
 }
 
 const $matchmakerServiceLine = (status: IMatchmakerStatus) => {
-  if (status === 'open') return $serviceLine('Matchmaker', $text('Connected · ready to relay'), 'ok')
-  if (status === 'connecting')
-    return $serviceLine('Matchmaker', $text('Reconnecting… · submissions paused'), 'degraded')
-  return $serviceLine('Matchmaker', $text('Disconnected · submissions paused'), 'down')
+  if (status === 'open') return $serviceLine('Attestor', $text('Connected · ready to relay'), 'ok')
+  return $serviceLine('Attestor', $text('Disconnected · submissions paused'), 'down')
+}
+
+function originHost(origin: string): string {
+  try {
+    return new URL(origin).host
+  } catch {
+    return origin
+  }
+}
+
+// The browser extension is OPTIONAL — it lets dApps use your fund as a wallet. Its status
+// is informational only; it never drives the overall connectivity indicator.
+const $extensionServiceLine = (installed: boolean, outdated: boolean, origins: string[]) => {
+  if (outdated)
+    return $serviceLine('Puppet Wallet', $text('Update needed · the installed extension is out of date'), 'degraded')
+  if (origins.length > 0) {
+    const $desc = $column(style({ gap: '2px' }))(
+      $text(origins.length === 1 ? 'Connected to' : `Connected to ${origins.length} sites`),
+      ...origins.map(o => $node(style({ color: palette.message }))($text(originHost(o))))
+    )
+    return $serviceLine('Puppet Wallet', $desc, 'ok')
+  }
+  if (installed) return $serviceLine('Puppet Wallet', $text('Installed · no dApp connected'), 'degraded')
+  return $serviceLine('Puppet Wallet', $text('Extension not installed · optional'), 'down')
 }
 
 interface I$ServicesConnectivity {
@@ -93,22 +116,36 @@ export const $ServicesConnectivity = ({ matchmaker }: I$ServicesConnectivity) =>
     const indexer: IStream<IndexerHealth> = state()(merge(oneShot, onHover))
 
     const $tooltip: I$Node = op(
-      combine({ indexer, matchmaker }),
+      combine({
+        indexer,
+        matchmaker
+        // Browser extension status sunset for now; revive with the $extensionServiceLine below.
+        // extensionInstalled: puppetExtensionInstalled,
+        // extensionOutdated: puppetExtensionOutdated,
+        // origins: puppetConnectedOrigins
+      }),
       map(p =>
         $column(spacing.default, style({ minWidth: '280px', maxWidth: '320px' }))(
-          $node(style({ fontSize: text.sm, lineHeight: '1.4' }))(
-            $text('Backend services powering queries and submissions.')
+          $column(spacing.tiny)(
+            $node(style({ fontSize: text.base, fontWeight: 'bold', color: palette.message }))($text('Connections')),
+            $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.4' }))(
+              $text('Your live status of the protocol operations.')
+            )
           ),
           $column(spacing.default, style({ paddingTop: '8px', borderTop: `1px solid ${palette.horizon}` }))(
             $indexerServiceLine(p.indexer),
             $matchmakerServiceLine(p.matchmaker)
+            // $extensionServiceLine(p.extensionInstalled, p.extensionOutdated, p.origins)
           )
         )
       ),
       start(
         $column(spacing.default, style({ minWidth: '280px', maxWidth: '320px' }))(
-          $node(style({ fontSize: text.sm, lineHeight: '1.4' }))(
-            $text('Backend services powering queries and submissions.')
+          $column(spacing.tiny)(
+            $node(style({ fontSize: text.base, fontWeight: 'bold', color: palette.message }))($text('Connections')),
+            $node(style({ fontSize: text.sm, color: palette.foreground, lineHeight: '1.4' }))(
+              $text('Your live status of the protocol operations.')
+            )
           ),
           $node(style({ color: palette.foreground, fontSize: text.sm }))($text('Connecting…'))
         )
@@ -120,9 +157,6 @@ export const $ServicesConnectivity = ({ matchmaker }: I$ServicesConnectivity) =>
       palette.foreground,
       map(p => {
         if (isIndexerHealthy(p.indexer) && p.matchmaker === 'open') return palette.positive
-        // A transient matchmaker reconnect (with the indexer still healthy) is degraded,
-        // not down — show amber instead of red so it doesn't read as a permanent outage.
-        if (isIndexerHealthy(p.indexer) && p.matchmaker === 'connecting') return palette.indeterminate
         return palette.negative
       }, combine({ indexer, matchmaker }))
     )
@@ -134,36 +168,39 @@ export const $ServicesConnectivity = ({ matchmaker }: I$ServicesConnectivity) =>
     return [
       $Tooltip({
         $content: $tooltip,
-        $anchor: switchMap(
-          params =>
-            $row(
-              style({
-                width: '8px',
-                height: '8px',
-                borderRadius: '50%',
-                padding: '6px',
-                backgroundColor: colorShade(params.color, 50)
-              })
-            )(
-              $node(
-                style({
-                  position: 'absolute',
-                  top: 'calc(50% - 20px)',
-                  left: 'calc(50% - 20px)',
-                  width: '40px',
-                  height: '40px',
-                  borderRadius: '50%',
-                  border: '1px solid rgba(74, 180, 240, 0.12)',
-                  opacity: 0,
-                  backgroundColor: colorShade(params.color, 50),
-                  animationName: 'signal',
-                  animationDuration: '2s',
-                  animationTimingFunction: 'cubic-bezier(0.25, 0.46, 0.45, 0.94)',
-                  animationIterationCount: params.pulsing ? 'infinite' : '1'
-                })
-              )()
-            ),
-          combine({ color, pulsing })
+        $anchor: $row(
+          style({
+            position: 'relative',
+            width: '32px',
+            height: '32px',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flexShrink: '0'
+          })
+        )(
+          $node(
+            style({
+              position: 'absolute',
+              inset: '0',
+              borderRadius: '50%',
+              animationDuration: '1.6s',
+              animationTimingFunction: 'ease-out',
+              animationIterationCount: 'infinite'
+            }),
+            styleBehavior(
+              map(
+                p => ({
+                  backgroundColor: `color-mix(in srgb, ${p.color} ${p.pulsing ? 35 : 10}%, transparent)`,
+                  animationName: p.pulsing ? 'signal' : 'none'
+                }),
+                combine({ color, pulsing })
+              )
+            )
+          )(),
+          $node(
+            style({ position: 'relative', width: '10px', height: '10px', borderRadius: '50%' }),
+            styleBehavior(map(c => ({ backgroundColor: colorShade(c, 50) }), color))
+          )()
         )
       })({ hover: hoverTether() }),
       { hover }

@@ -1,12 +1,12 @@
 import { FLOAT_PRECISION, HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { IntervalTime, PLATFORM_STAT_INTERVAL, USD_DECIMALS } from '@puppet/sdk/const'
+import { IntervalTime, PLATFORM_STAT_INTERVAL } from '@puppet/sdk/const'
 import {
-  formatFixed,
   getMappedValue,
   readableFactorPercentage,
   readablePnl,
   readableTokenAmount,
-  readableUsd
+  readableUsd,
+  SHARE_PRECISION
 } from '@puppet/sdk/core'
 import { getTokenDescription } from '@puppet/sdk/gmx'
 import { tokenInfoFor } from '@puppet/sdk/state'
@@ -39,6 +39,7 @@ import { getAddress, isAddress, isAddressEqual } from 'viem'
 import type { Address } from 'viem/accounts'
 import {
   $Baseline,
+  floorAutoscaleByAum,
   $ButtonCircular,
   $ButtonSecondary,
   $ButtonToggle,
@@ -78,9 +79,13 @@ import { $card2 } from '../common/elements/$common.js'
 import { $bagOfCoins, $trophy } from '../common/elements/$icons.js'
 import { $accountLabel, readableAccountName } from '../components/$AccountProfile.js'
 import { $SelectCollateralToken } from '../components/$CollateralTokenSelector.js'
-import { activityOptionLabelMap, activityOptionPeriodLabelMap } from '../components/$LastActivity.js'
-import { $FundEditor } from '../components/portfolio/$FundEditor.js'
+import {
+  activityOptionLabelMap,
+  activityOptionPeriodLabelMap,
+  activityOptionShortLabelMap
+} from '../components/$LastActivity.js'
 import type { ISubscribeRule } from '../components/portfolio/$MatchingRuleEditor.js'
+import { $SubscribeEditor } from '../components/portfolio/$SubscribeEditor.js'
 import * as context from '../io/context.js'
 import {
   fetchGmxTraderLeaderboardPage,
@@ -164,7 +169,7 @@ export const $Leaderboard = (config: I$Leaderboard) =>
         ),
         state()
       )
-      const shadowSort = op(uiStorage.replayWrite(localStoreSchema.leaderboard.shadowSort, changeSort), state())
+      const shadowSort = op(start(localStoreSchema.leaderboard.shadowSort.initialValue, changeSort), state())
       // Masters-view sort. There is no dedicated localStoreSchema key for this (the schema file is out of scope
       // for this change), so it is kept as in-memory reactive state seeded to sort by the active performance metric.
       const mastersSort = op(
@@ -605,7 +610,7 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                               $text(params.metric === 'navPerShare' ? 'ROI % / PnL $' : 'PnL $ / ROI %'),
                               $node(style({ textAlign: 'right', alignSelf: 'center', color: palette.foreground }))(
                                 $text(
-                                  `Last ${getMappedValue(activityOptionLabelMap, params.activityTimeframe)} activity`
+                                  `${getMappedValue(activityOptionShortLabelMap, params.activityTimeframe)} activity`
                                 )
                               )
                             ),
@@ -674,7 +679,8 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                                     baselineOptions: {
                                       baseValue: { price: 0, type: 'price' },
                                       lineWidth: 1,
-                                      lineType: LineType.Curved
+                                      lineType: LineType.Curved,
+                                      autoscaleInfoProvider: floorAutoscaleByAum(Number(row.collateralUsd) / 1e30)
                                     }
                                   })({})
                                 ),
@@ -777,14 +783,17 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                               profileSize: isDesktopScreen ? 50 : 32
                             })({})
                             const token = tokenInfoFor(params.registry, HUB_CHAIN_ID, pos.baseTokenId).token
-                            const $copy = $FundEditor({
+                            const $copy = $SubscribeEditor({
                               master: pos.master,
                               collateralToken: token,
+                              baseTokenId: pos.baseTokenId,
                               userMatchingRuleQuery,
                               draftMatchingRuleList
                             })({ changeMatchRuleList: changeMatchRuleListTether() })
-                            const $identity = $row(spacing.default, style({ alignItems: 'center', minWidth: '0' }))(
-                              $master,
+                            const $identity = $row(spacing.default, style({ alignItems: 'center', minWidth: '0', flex: 1 }))(
+                              $node(style({ display: 'flex', flex: 1, minWidth: '0', overflow: 'hidden' }))(
+                                style({ flexShrink: '1', minWidth: '0' })($master)
+                              ),
                               $copy
                             )
                             // On mobile there is no dedicated Consistency column, so fold win-rate in as a secondary line.
@@ -812,14 +821,15 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                           )(
                             $text(params.performanceMetric === 'navPerShare' ? 'ROI % / AUM' : 'PnL $ / AUM'),
                             $node(style({ textAlign: 'right', alignSelf: 'center', color: palette.foreground }))(
-                              $text(`Last ${getMappedValue(activityOptionLabelMap, params.activityTimeframe)} activity`)
+                              $text(`${getMappedValue(activityOptionShortLabelMap, params.activityTimeframe)} activity`)
                             )
                           ),
                           sortBy: params.performanceMetric,
                           gridTemplate: isDesktopScreen ? 'minmax(0, 1fr)' : '220px',
                           $bodyCallback: map(pos => {
                             const isNav = params.performanceMetric === 'navPerShare'
-                            const navReturn = (Number(formatFixed(USD_DECIMALS, pos.navPerShare)) - 1) * 100
+                            const navReturn =
+                              (Number(pos.navPerShare) / Number(FLOAT_PRECISION / SHARE_PRECISION) - 1) * 100
                             const token = tokenInfoFor(params.registry, HUB_CHAIN_ID, pos.baseTokenId).token
                             const desc = getTokenDescription(token)
                             const $primary = isNav
@@ -870,7 +880,8 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                                   baselineOptions: {
                                     baseValue: { price: 0, type: 'price' },
                                     lineWidth: 1,
-                                    lineType: LineType.Curved
+                                    lineType: LineType.Curved,
+                                    autoscaleInfoProvider: floorAutoscaleByAum(Number(pos.allocated) / 10 ** desc.decimals)
                                   }
                                 })({})
                               ),

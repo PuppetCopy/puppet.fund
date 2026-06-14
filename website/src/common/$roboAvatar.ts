@@ -26,5 +26,7 @@ export const $roboAvatar = (address: Address, size?: number) => {
   const $img = $wrapNativeElement(img)()
   return size === undefined
     ? $img
-    : $row(style({ width: `${size}px`, height: `${size}px`, borderRadius: '50%', overflow: 'hidden' }))($img)
+    : $row(style({ width: `${size}px`, height: `${size}px`, borderRadius: '50%', overflow: 'hidden', flexShrink: '0' }))(
+        $img
+      )
 }

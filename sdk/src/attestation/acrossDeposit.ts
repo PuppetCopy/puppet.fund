@@ -1,4 +1,4 @@
-import { type Address, concat, encodeFunctionData, type Hex, pad } from 'viem'
+import { type Address, concat, decodeFunctionData, encodeFunctionData, getAddress, type Hex, pad, slice } from 'viem'
 
 const ACROSS_DEPOSIT_ABI = [
   {
@@ -72,4 +72,46 @@ export function buildAcrossDeposit(params: IAcrossDepositParams): Hex {
     ]
   })
   return concat([body, ACROSS_DOMAIN_TAG])
+}
+
+// Strict inverse of buildAcrossDeposit, for SCREENING third-party-supplied calldata:
+// null on any deviation from the exact shape the builder produces (domain tag, function,
+// empty message, address-width bytes32 fields), so a screen can pin every field.
+export function decodeAcrossDeposit(callData: Hex): IAcrossDepositParams | null {
+  const tag = ACROSS_DOMAIN_TAG.slice(2)
+  if (!callData.toLowerCase().endsWith(tag)) return null
+  const body = callData.slice(0, callData.length - tag.length) as Hex
+  let args: readonly unknown[]
+  try {
+    const decoded = decodeFunctionData({ abi: ACROSS_DEPOSIT_ABI, data: body })
+    if (decoded.functionName !== 'deposit') return null
+    args = decoded.args
+  } catch {
+    return null
+  }
+  const asAddress = (value: unknown): Address | null => {
+    const word = value as Hex
+    if (slice(word, 0, 12) !== '0x000000000000000000000000') return null
+    return getAddress(slice(word, 12))
+  }
+  const depositor = asAddress(args[0])
+  const recipient = asAddress(args[1])
+  const inputToken = asAddress(args[2])
+  const outputToken = asAddress(args[3])
+  const exclusiveRelayer = asAddress(args[7])
+  if (!depositor || !recipient || !inputToken || !outputToken || !exclusiveRelayer) return null
+  if (args[11] !== '0x') return null
+  return {
+    depositor,
+    recipient,
+    inputToken,
+    outputToken,
+    inputAmount: args[4] as bigint,
+    outputAmount: args[5] as bigint,
+    destinationChainId: args[6] as bigint,
+    exclusiveRelayer,
+    quoteTimestamp: Number(args[8]),
+    fillDeadline: Number(args[9]),
+    exclusivityParameter: Number(args[10])
+  }
 }

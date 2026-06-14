@@ -628,17 +628,6 @@ export default [
   },
   {
     "type": "error",
-    "name": "Deposit__SameChainBridge",
-    "inputs": [
-      {
-        "name": "destinationChainId",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
     "name": "Deposit__ZeroBridgeOutput",
     "inputs": []
   },

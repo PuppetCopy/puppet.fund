@@ -16,7 +16,7 @@ export interface ExecContext {
   session: ISessionKey
   gasPrice: bigint
   indexerHealth: IndexerHealth
-  subaccountList: IStream<ISubaccountState[]>
+  walletState: IStream<ISubaccountState | null>
 }
 
 export async function walletClientForChain(

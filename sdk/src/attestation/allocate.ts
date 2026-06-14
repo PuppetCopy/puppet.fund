@@ -8,6 +8,7 @@ import type {
 import { type Address, encodePacked, type Hex, isAddressEqual, keccak256, type TypedDataDefinition } from 'viem'
 import { predictPuppetAccount } from '../account/index.js'
 import { CompactContractError } from '../compact/error.js'
+import { sharesFor } from '../core/math.js'
 import * as IntentLib from './intentLib.js'
 import { HUB_DOMAIN, type IDraftContext } from './shared.js'
 
@@ -74,10 +75,7 @@ export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAlloca
 
   let effectiveMasterAmount = input.masterAmount
   if (input.masterAmount > 0n) {
-    const ownerNewShares =
-      ctx.totalShareSupply === 0n
-        ? input.masterAmount
-        : (input.masterAmount * ctx.totalShareSupply) / input.acceptableNetAssetValue
+    const ownerNewShares = sharesFor(ctx.totalShareSupply, input.acceptableNetAssetValue, input.masterAmount)
     if (ownerNewShares === 0n) effectiveMasterAmount = 0n
   }
 

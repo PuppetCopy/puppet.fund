@@ -7,10 +7,9 @@ import {
   type INodeCompose,
   type IStyleCSS,
   style,
-  styleBehavior,
-  stylePseudo
+  styleBehavior
 } from 'aelea/ui'
-import { colorShade, palette } from 'aelea/ui-components-theme'
+import { palette } from 'aelea/ui-components-theme'
 import {
   $Link as $aeleaLink,
   $defaultAnchor,
@@ -36,14 +35,6 @@ const disabledStyle = (disabled: IStream<boolean>) =>
 
 export const $Link = ({ disabled = empty, $content, ...rest }: I$Link) =>
   $aeleaLink({ ...rest, $content, $anchor: $defaultLinkAnchor(disabledStyle(disabled)) })
-
-const $underlineAnchor = $defaultLinkAnchor(
-  style({ color: palette.message, textDecoration: 'underline', minWidth: 0, textDecorationColor: palette.primary }),
-  stylePseudo(':hover', { color: colorShade(palette.primary, 50) })
-)
-
-export const $anchorLink = ({ disabled = empty, $content, ...rest }: I$Link) =>
-  $aeleaLink({ ...rest, $content, $anchor: $underlineAnchor(disabledStyle(disabled)) })({})
 
 export interface I$NavLink<T extends RouteSpec> {
   route: RouteNode<T>

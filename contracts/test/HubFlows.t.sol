@@ -4,6 +4,7 @@ pragma solidity ^0.8.35;
 import {V2Base} from "./Base.t.sol";
 import {Allocate, ALLOCATE_INTENT_TYPEHASH} from "src/hub/Allocate.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
+import {FundAccount} from "src/core/FundAccount.sol";
 import {ShareLib} from "src/utils/ShareLib.sol";
 
 contract HubFlowsTest is V2Base {
@@ -58,6 +59,7 @@ contract HubFlowsTest is V2Base {
         assertEq(share.getName(), bytes32("Fund"), "name from clone args");
         assertEq(share.balanceOf(address(master.acct)), 100e6 * SP, "owner shares = stake at share precision");
         assertEq(usdc.balanceOf(fund), 98e6, "fund holds stake minus socialized fee");
+        assertEq(FundAccount(payable(fund)).signedBalanceOf(USDC_ID), 98e6, "fund signed synced to balance");
         assertEq(usdc.balanceOf(feeReceiver), 2e6, "fee paid from fund");
         assertEq(usdc.balanceOf(accountModule.predictRoute(address(master.acct))), 0, "master route drained");
     }

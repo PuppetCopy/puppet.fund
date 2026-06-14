@@ -18,13 +18,13 @@ contract ShareToken is ERC20 {
         _self = address(this);
     }
 
-    modifier onlyShareModule() {
-        _onlyShareModule();
+    modifier onlyIssuer() {
+        _onlyIssuer();
         _;
     }
 
-    function _onlyShareModule() internal view {
-        if (address(this) == _self || msg.sender != getShareModule()) revert Error.ShareToken__NotShareGate();
+    function _onlyIssuer() internal view {
+        if (address(this) == _self || msg.sender != getIssueContract()) revert Error.ShareToken__NotIssuer();
     }
 
     function getFund() public view returns (address _fund) {
@@ -34,7 +34,7 @@ contract ShareToken is ERC20 {
         }
     }
 
-    function getShareModule() public view returns (address _g) {
+    function getIssueContract() public view returns (address _g) {
         bytes memory _b = LibClone.argsOnClone(address(this), 20, 40);
         assembly ("memory-safe") {
             _g := shr(96, mload(add(_b, 0x20)))
@@ -66,14 +66,14 @@ contract ShareToken is ERC20 {
     function mint(
         address _to,
         uint _amount
-    ) external onlyShareModule {
+    ) external onlyIssuer {
         _mint(_to, _amount);
     }
 
     function mintMany(
         address[] calldata _toList,
         uint[] calldata _amountList
-    ) external onlyShareModule {
+    ) external onlyIssuer {
         for (uint _i; _i < _toList.length; ++_i) {
             uint _amount = _amountList[_i];
             if (_amount == 0) continue;
@@ -84,14 +84,14 @@ contract ShareToken is ERC20 {
     function burn(
         address _from,
         uint _amount
-    ) external onlyShareModule {
+    ) external onlyIssuer {
         _burn(_from, _amount);
     }
 
     function transfer(
         address _to,
         uint _amount
-    ) public override onlyShareModule returns (bool) {
+    ) public override onlyIssuer returns (bool) {
         _transfer(msg.sender, _to, _amount);
         return true;
     }
@@ -100,7 +100,7 @@ contract ShareToken is ERC20 {
         address _from,
         address _to,
         uint _amount
-    ) public override onlyShareModule returns (bool) {
+    ) public override onlyIssuer returns (bool) {
         _transfer(_from, _to, _amount);
         return true;
     }

@@ -1,5 +1,5 @@
 import { deriveSessionKey, SIGNER_DERIVATION_MESSAGE, signerProofDigest } from '@puppet/sdk/account'
-import { type Address, type Hex, serializeSignature, type WalletClient } from 'viem'
+import { type Address, getAddress, type Hex, serializeSignature, type WalletClient } from 'viem'
 import { sign as ecdsaSign, type PrivateKeyAccount, privateKeyToAccount } from 'viem/accounts'
 
 const STORAGE_VERSION = 2
@@ -29,6 +29,7 @@ export interface ISessionKey {
 // localStorage keys stay lowercase: opaque storage format, backward-compatible
 // with sessions written before checksum normalization was enforced.
 const storageKey = (user: Address) => `puppet:session-key:${user.toLowerCase()}`
+const LAST_USER_KEY = 'puppet:session-last-user'
 const cache = new Map<Address, ISessionKey>()
 
 function read(user: Address): IStoredSessionKey | null {
@@ -47,6 +48,27 @@ function read(user: Address): IStoredSessionKey | null {
 function write(user: Address, sig: Hex, signerProof: Hex): void {
   const entry: IStoredSessionKey = { v: STORAGE_VERSION, user, sig, signerProof }
   localStorage.setItem(storageKey(user), JSON.stringify(entry))
+  localStorage.setItem(LAST_USER_KEY, user)
+}
+
+// The site IS the wallet: a stored session signs without a live EOA connection (the EOA
+// is only ever needed to CREATE a session). This is the handoff source when nothing is
+// connected — the extension's connect redirect, or its in-memory key lost to a worker recycle.
+// Falls back to scanning for any stored session when the last-user pointer is unset (older
+// sessions, or a fresh tab that has not built the live wallet yet).
+export function lastStoredSession(): ISessionKey | null {
+  try {
+    const pointer = localStorage.getItem(LAST_USER_KEY) as Address | null
+    if (pointer) return getStoredSessionKey(pointer)
+    const prefix = 'puppet:session-key:'
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k?.startsWith(prefix)) return getStoredSessionKey(getAddress(k.slice(prefix.length)))
+    }
+    return null
+  } catch {
+    return null
+  }
 }
 
 async function buildSessionKey(user: Address, sig: Hex): Promise<ISessionKey> {
@@ -67,6 +89,9 @@ export function getStoredSessionKey(user: Address): ISessionKey | null {
   if (cached) return cached
   const stored = read(user)
   if (!stored) return null
+  // Backfill the last-user pointer for sessions written before it existed, so
+  // lastStoredSession() works without re-signing.
+  if (localStorage.getItem(LAST_USER_KEY) === null) localStorage.setItem(LAST_USER_KEY, user)
   const key = buildSessionKeyFromStored(user, stored.sig, stored.signerProof)
   cache.set(user, key)
   return key
@@ -86,4 +111,7 @@ export async function ensureSessionKey(user: Address, walletClient: WalletClient
 export function revokeSessionKey(user: Address): void {
   cache.delete(user)
   localStorage.removeItem(storageKey(user))
+  if (localStorage.getItem(LAST_USER_KEY)?.toLowerCase() === user.toLowerCase()) {
+    localStorage.removeItem(LAST_USER_KEY)
+  }
 }

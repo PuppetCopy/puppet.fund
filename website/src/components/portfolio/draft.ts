@@ -1,3 +1,4 @@
+import { SHARE_DECIMALS } from '@puppet/contracts/const'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import type {
   IAllocateInput,
@@ -6,6 +7,8 @@ import type {
   ICreateFundAccountInput,
   ICreatePuppetAccountInput,
   IDepositRoute,
+  ILiquidateInput,
+  IOperateInput,
   IRecognizeBalanceInput,
   IRedeemInput,
   ISellInput,
@@ -29,9 +32,11 @@ export type StepInput =
   | { kind: 'createPuppetAccount'; input: ICreatePuppetAccountInput }
   | { kind: 'createFundAccount'; input: ICreateFundAccountInput }
   | { kind: 'allocate'; input: IAllocateInput }
+  | { kind: 'swap'; input: IOperateInput }
   | { kind: 'sell'; input: ISellInput }
   | { kind: 'claim'; input: IClaimInput }
   | { kind: 'redeem'; input: IRedeemInput }
+  | { kind: 'liquidate'; input: ILiquidateInput }
 
 export type StepKind = StepInput['kind']
 
@@ -48,9 +53,11 @@ export const STEP_LABEL: Record<StepKind, string> = {
   createPuppetAccount: 'Create Puppet Account',
   createFundAccount: 'Create fund account',
   allocate: 'Allocate',
+  swap: 'Swap',
   sell: 'Sell',
   claim: 'Claim',
-  redeem: 'Fulfill'
+  redeem: 'Redeem',
+  liquidate: 'Liquidate'
 }
 
 export const STEP_DESCRIPTION: Record<StepKind, string> = {
@@ -65,16 +72,18 @@ export const STEP_DESCRIPTION: Record<StepKind, string> = {
     'Moves funds from your account to your wallet on another chain, usually within seconds. Your funds stay in transit and settle on-chain even if you wait.',
   recognize: 'Confirms the tokens you just sent so they show up in your balance.',
   withdrawToWallet: 'Moves funds from your account to your wallet.',
-  subscribe: 'Lets a trader pull funds from your account under the rules you set.',
+  subscribe:
+    'Authorizes this trader to commit a share of your deposited balance when they trade, under your rules. Funds move only at each match, from your balance, never up front. Unfunded matches are skipped.',
   createPuppetAccount: 'Creates your account on-chain.',
   createFundAccount: 'Creates your fund account and sweeps its deposit route on this chain.',
   allocate: 'A trader pulls funds matched from subscribers into their fund.',
-  sell: 'Queue your shares for redemption. The trader buys them back at the next fulfillment.',
-  claim: 'Withdraw the base currency you accrued from a prior buyback.',
-  redeem: 'Pay base from the master pool to retire queued shares at the current NAV.'
+  swap: 'Swaps a token your fund holds for another registered token at the best quoted route. The quote refreshes at execution and the signed minimum output is enforced on-chain.',
+  sell: 'Joins the exit queue. Payment arrives when the manager next processes redemptions.',
+  claim: 'Settles the base currency accrued to you from past redemptions into your account.',
+  redeem: 'Pays everyone in the queue their share of the chosen amount, at the fund’s verified value.',
+  liquidate:
+    'Ends this fund permanently. Every holder receives the identical closing price per share; investors claim theirs anytime.'
 }
-
-export const SHARE_DECIMALS = 18
 
 export const stepNonce = (step: StepInput): bigint | null => ('nonce' in step.input ? step.input.nonce : null)
 
@@ -137,6 +146,7 @@ export interface ISubscribeDraft extends IDraftBase, ISubscribeRule {
 export type IMasterFundStep =
   | { kind: 'transferToMaster'; input: IDepositRoute }
   | { kind: 'transferToMasterWnt'; input: IDepositRoute }
+  | { kind: 'createPuppetAccount'; input: ICreatePuppetAccountInput }
   | { kind: 'createFundAccount'; input: ICreateFundAccountInput }
   | { kind: 'bridge'; input: IBridgeInput }
 
@@ -148,8 +158,21 @@ export interface IAllocateDraft extends IDraftBase {
   baseTokenId: Hex
   name: Hex
   masterAmount: bigint
+  inputAmount: bigint
   sourceChainId: number
   inputSteps: IMasterFundStep[]
+}
+
+export interface ISwapDraft extends IDraftBase {
+  kind: 'swap'
+  chainId: number
+  destinationChainId: number
+  tokenInId: Hex
+  tokenIn: Address
+  tokenOutId: Hex
+  tokenOut: Address
+  amountIn: bigint
+  minOut: bigint
 }
 
 export interface ISellDraft extends IDraftBase {
@@ -177,7 +200,9 @@ export interface IRedeemDraft extends IDraftBase {
   baseToken: Address
   baseTokenId: Hex
   sharesOut: bigint
-  acceptableShares: bigint
+  assetsOut: bigint
+  fulfill: boolean
+  liquidate: boolean
 }
 
 // Public discriminated union — any draft kind.
@@ -186,9 +211,11 @@ export type IDraft =
   | IWithdrawDraft
   | ISubscribeDraft
   | IAllocateDraft
+  | ISwapDraft
   | ISellDraft
   | IClaimDraft
   | IRedeemDraft
 
 // Narrower union: amount-bearing drafts only (deposit + withdraw).
-export type IAmountDraft = IDepositDraft | IWithdrawDraft
+
+export { SHARE_DECIMALS }

@@ -1,6 +1,7 @@
 import { WALLET_TARGET } from '@puppet/sdk/wallet'
 
-const PUPPET_URL = import.meta.env.VITE_PUPPET_URL ?? 'http://localhost:3000'
+const PUPPET_URL = import.meta.env.VITE_PUPPET_URL
+if (!PUPPET_URL) throw new Error('VITE_PUPPET_URL was not defined at build time (wxt.config define)')
 const isPuppetSite = window.location.origin === PUPPET_URL
 
 export default defineContentScript({

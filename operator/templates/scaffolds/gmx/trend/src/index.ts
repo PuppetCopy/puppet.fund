@@ -1,6 +1,13 @@
-import { createOperatorCore, runOperator } from '@puppet.fund/operator'
-import { formatUsd, formatWeth, GMX_BASE_TOKEN_ID, gmxOperator, gmxPrice, usd, weth } from '@puppet.fund/operator/gmx'
-import { type Address, type Hex, isAddressEqual } from 'viem'
+import { createOperatorCore, pairOverBrowser, runOperator } from '@puppet.fund/operator'
+import {
+  acceptablePrice,
+  formatUsd,
+  formatWeth,
+  gmxOperator,
+  usd,
+  weth
+} from '@puppet.fund/operator/gmx'
+import { type Address, isAddressEqual } from 'viem'
 
 // A complete autonomous, long/flat trend-following agent on ETH (no LLM). Perceive (price +
 // indicators + account + positions) → decide (EMA trend, RSI filter) → size (risk budget) →
@@ -18,18 +25,12 @@ const PARAMS = {
 }
 const SLIPPAGE_BPS = 30
 const TICK_MS = 60_000
+// Keep >= the intent deadline (5min) and arm it on ATTEMPT: a dispatch that times out can
+// still land until its deadline, so a re-fire inside that window risks a doubled position.
 const COOLDOWN_MS = 5 * 60_000
 
-const core = await createOperatorCore({
-  baseTokenId: GMX_BASE_TOKEN_ID,
-  siteUrl: Bun.env.SITE_URL,
-  matchmakerUrl: Bun.env.MATCHMAKER_WS_URL,
-  indexerUrl: Bun.env.INDEXER_ENDPOINT,
-  rpcUrl: Bun.env.ARBITRUM_RPC_URL,
-  signerKey: Bun.env.OPERATOR_SIGNER_KEY as Hex | undefined,
-  user: Bun.env.OPERATOR_USER as Address | undefined,
-  pairPort: Bun.env.PAIR_PORT ? Number(Bun.env.PAIR_PORT) : undefined
-})
+const session = await pairOverBrowser(Bun.env.PAIR_URL)
+const core = await createOperatorCore(session, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
 const gmx = gmxOperator(core)
 const market = gmx.getMarket(ETH)
 let lastTradeAt = 0
@@ -77,26 +78,26 @@ async function tick(): Promise<void> {
       return
     }
     console.log(`OPEN long $${s.sizeUsd.toFixed(0)} (collateral ${s.collateralWeth.toFixed(5)} WETH)`)
+    lastTradeAt = Date.now()
     await gmx.createOrder({
       orderType: gmx.GMX_ORDER_TYPE.MarketIncrease,
       market,
       isLong: true,
       sizeDeltaUsd: usd(s.sizeUsd.toFixed(2)),
       collateralDelta: weth(s.collateralWeth.toFixed(8)),
-      acceptablePrice: gmxPrice(price * (1 + SLIPPAGE_BPS / 10_000), 18)
+      acceptablePrice: acceptablePrice(price, true, true, SLIPPAGE_BPS)
     })
-    lastTradeAt = Date.now()
   } else if (!wantLong && inLong && longPos) {
     console.log(`CLOSE long $${formatUsd(longPos.numbers.sizeInUsd)}`)
+    lastTradeAt = Date.now()
     await gmx.createOrder({
       orderType: gmx.GMX_ORDER_TYPE.MarketDecrease,
       market,
       isLong: true,
       sizeDeltaUsd: longPos.numbers.sizeInUsd, // whole size = full close
       collateralDelta: 0n, // GMX returns the position's collateral to the fund on a full close
-      acceptablePrice: gmxPrice(price * (1 - SLIPPAGE_BPS / 10_000), 18)
+      acceptablePrice: acceptablePrice(price, true, false, SLIPPAGE_BPS)
     })
-    lastTradeAt = Date.now()
   }
 }
 

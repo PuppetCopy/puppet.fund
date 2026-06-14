@@ -5,54 +5,48 @@ import {LibClone} from "solady/utils/LibClone.sol";
 
 import {ShareToken} from "./ShareToken.sol";
 import {ShareLib} from "../utils/ShareLib.sol";
-import {Account} from "../core/Account.sol";
 import {Error} from "../utils/Error.sol";
 import {Access} from "../utils/auth/Access.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";
 
 contract Issue is Access {
-    Account public immutable accountModule;
     address public immutable shareTokenImpl;
 
     constructor(
         IAuthority _authority,
-        Account _accountModule,
         address _shareTokenImpl
     ) Access(_authority) {
-        if (address(_accountModule) == address(0) || _shareTokenImpl == address(0)) revert Error.Share__InvalidImpl();
-        accountModule = _accountModule;
+        if (_shareTokenImpl == address(0)) revert Error.Share__InvalidImpl();
         shareTokenImpl = _shareTokenImpl;
     }
 
-    function predictFund(
-        ShareLib.ShareInitParams calldata _shareParams
-    ) public view returns (address) {
-        return accountModule.predictFundAccount(_shareParams.master);
-    }
-
     function predict(
+        address _fund,
         ShareLib.ShareInitParams calldata _shareParams
     ) public view returns (address) {
-        address _fund = predictFund(_shareParams);
         return LibClone.predictDeterministicAddress(
             shareTokenImpl, _cloneArgs(_fund, _shareParams), bytes32(uint(uint160(_fund))), address(this)
         );
     }
 
     function verifyShareToken(
+        address _fund,
         ShareLib.ShareInitParams calldata _shareParams
     ) external view returns (address shareToken_) {
-        shareToken_ = predict(_shareParams);
+        shareToken_ = predict(_fund, _shareParams);
         if (shareToken_.code.length == 0) revert Error.Share__NotCreated();
     }
 
     function createShareToken(
+        address _fund,
         ShareLib.ShareInitParams calldata _shareParams
     ) external auth {
-        address _fund = predictFund(_shareParams);
         address _shareToken =
             LibClone.cloneDeterministic(shareTokenImpl, _cloneArgs(_fund, _shareParams), bytes32(uint(uint160(_fund))));
-        _logEvent("CreateShareToken", abi.encode(_fund, _shareToken, _shareParams.baseTokenId, _shareParams.name));
+        _logEvent(
+            "CreateShareToken",
+            abi.encode(_fund, _shareToken, _shareParams.master, _shareParams.baseTokenId, _shareParams.name)
+        );
     }
 
     function mint(

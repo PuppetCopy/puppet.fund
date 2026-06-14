@@ -12,6 +12,7 @@ export type IStoreDefinition<TStore extends Record<string, Record<string, unknow
 }
 
 const dbConnectionMap = new Map<string, Promise<IDBDatabase>>()
+const dbConfigMap = new Map<string, { version: number; storeNames: readonly string[] }>()
 
 const META_STORE = '__schema_meta__'
 const META_KEY = 'previousDeclared'
@@ -100,10 +101,12 @@ function openConnection(name: string, version: number, storeNames: readonly stri
 
 async function requireDb(dbName: string): Promise<IDBDatabase> {
   const cached = dbConnectionMap.get(dbName)
-  if (!cached) {
+  if (cached) return cached
+  const config = dbConfigMap.get(dbName)
+  if (!config) {
     throw new Error(`uiStorage: db "${dbName}" was not initialised — call createStoreDefinition first`)
   }
-  return cached
+  return openConnection(dbName, config.version, config.storeNames)
 }
 
 async function getValue<T>(storeKey: IStreamStoreKey<T>): Promise<T> {
@@ -156,6 +159,7 @@ export function createStoreDefinition<TStore extends Record<string, Record<strin
   storeDefinitions: TStore
 ): IStoreDefinition<TStore> {
   const storeNames = Object.keys(storeDefinitions)
+  dbConfigMap.set(dbName, { version: dbVersion, storeNames })
 
   void openConnection(dbName, dbVersion, storeNames).catch(err => {
     console.error('[uiStorage] failed to open database', dbName, err)

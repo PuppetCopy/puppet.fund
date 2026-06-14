@@ -8,8 +8,10 @@ import type {
 import { type Address, isAddressEqual, type TypedDataDefinition } from 'viem'
 import { predictPuppetAccount, predictShareToken } from '../account/index.js'
 import { CompactContractError } from '../compact/error.js'
+import { CompactError } from '../compact/index.js'
+import { factor } from '../core/math.js'
 import * as IntentLib from './intentLib.js'
-import { HUB_DOMAIN, type IDraftContext } from './shared.js'
+import { HUB_DOMAIN, type IDraftContext, STAKE_RATIO_CAP } from './shared.js'
 
 export interface IRedeemInput {
   params: IAccountLib__AccountInitParams
@@ -19,18 +21,20 @@ export interface IRedeemInput {
   nonce: bigint
   share: IShareLib__ShareInitParams
   sharesOut: bigint
+  assetsOut: bigint
   acceptableNetAssetValue: bigint
-  totalShareSupply: bigint
-  acceptableShares: bigint
 }
 
 export interface IRedeemAttestContext extends IDraftContext {
   currentBlock: bigint
   shareToken: Address | null
+  closeRate: bigint
   totalShareSupply: bigint
   queuedShares: bigint
-  signedBalance: bigint
   poolTotalStake: bigint
+  masterStake: bigint
+  masterWalletShares: bigint
+  signedBalance: bigint
 }
 
 export function attestRedeemIntent(ctx: IRedeemAttestContext, input: IRedeemInput) {
@@ -45,6 +49,7 @@ export function attestRedeemIntent(ctx: IRedeemAttestContext, input: IRedeemInpu
   })
 
   if (input.acceptableNetAssetValue === 0n) throw new CompactContractError('Redeem__ZeroAcceptableNav', [])
+  if (ctx.closeRate !== 0n) throw new CompactContractError('Share__FundClosed', [])
 
   const master = predictPuppetAccount(input.params)
   if (!isAddressEqual(master, input.share.master)) {
@@ -56,31 +61,51 @@ export function attestRedeemIntent(ctx: IRedeemAttestContext, input: IRedeemInpu
   ) {
     throw new CompactContractError('Share__NotCreated', [])
   }
-  if (ctx.totalShareSupply !== input.totalShareSupply) {
-    throw new CompactContractError('Redeem__SupplyMismatch', [ctx.totalShareSupply, input.totalShareSupply])
-  }
+  const supply = ctx.totalShareSupply
+  if (supply === 0n) throw new CompactContractError('Redeem__NothingToRetire', [])
 
-  // sharesOut > 0 embeds a master self-sell before the drain: the master's shares join
-  // the pool first, so both the retire ceiling and the pool stake include them.
+  // sharesOut > 0 embeds the master self-sell before the drain: the master's shares join
+  // the queue first, so the guard, queue value and retire math all run on the enlarged pool.
   let poolShares = ctx.queuedShares
   let poolTotalStake = ctx.poolTotalStake
+  let masterStake = ctx.masterStake
+  let masterWalletShares = ctx.masterWalletShares
   if (input.sharesOut > 0n) {
+    if (input.sharesOut > masterWalletShares) {
+      throw new CompactError(
+        'REDEEM_INSUFFICIENT_SHARES',
+        `master holds ${masterWalletShares} shares, cannot queue ${input.sharesOut}`
+      )
+    }
+    if (poolTotalStake > poolShares * STAKE_RATIO_CAP) throw new CompactContractError('Share__PoolDegraded', [])
     const stakeAdded = poolTotalStake === 0n ? input.sharesOut : (input.sharesOut * poolTotalStake) / poolShares
     if (stakeAdded === 0n) throw new CompactContractError('Share__ZeroStakeAdded', [])
-    poolShares += input.sharesOut
+    masterStake += stakeAdded
     poolTotalStake += stakeAdded
+    poolShares += input.sharesOut
+    masterWalletShares -= input.sharesOut
   }
 
-  // Mirrors the retire-all path: the full pool retires when the store holds the entire
-  // supply, otherwise one share always remains.
-  const maxRetirable = poolShares === ctx.totalShareSupply ? poolShares : poolShares >= 2n ? poolShares - 1n : 0n
-  const sharesRetired = input.acceptableShares < maxRetirable ? input.acceptableShares : maxRetirable
-  const drainedBase =
-    ctx.totalShareSupply === 0n ? 0n : (sharesRetired * input.acceptableNetAssetValue) / ctx.totalShareSupply
+  // The skin-in-the-game guard: the master's share of the queue may not exceed his share
+  // of the fund, so he can never exit ahead of his investors.
+  if (masterStake > 0n) {
+    if (masterWalletShares * poolTotalStake + masterStake * poolShares < masterStake * supply) {
+      throw new CompactContractError('Redeem__MasterFractionDecreased', [])
+    }
+  }
+
+  const queueValue = (poolShares * input.acceptableNetAssetValue) / supply
+  if (input.assetsOut > queueValue) throw new CompactContractError('Redeem__DrainExceedsQueue', [])
+  const sharesRetired =
+    input.assetsOut === queueValue ? poolShares : (input.assetsOut * supply) / input.acceptableNetAssetValue
   if (sharesRetired === 0n) throw new CompactContractError('Redeem__NothingToRetire', [])
-  if (drainedBase <= input.acceptableRelayFee) throw new CompactContractError('Redeem__RelayFeeTooHigh', [])
-  IntentLib.assertOutflowCovered(ctx, { amountIn: 0n, amountOut: drainedBase })
+  if (input.assetsOut <= input.acceptableRelayFee) throw new CompactContractError('Redeem__RelayFeeTooHigh', [])
+  IntentLib.assertOutflowCovered(ctx, { amountIn: 0n, amountOut: input.assetsOut })
+
   if (poolTotalStake === 0n) throw new CompactContractError('Share__NoStakeToCredit', [])
+  if (factor(input.assetsOut - input.acceptableRelayFee, poolTotalStake) === 0n) {
+    throw new CompactContractError('Share__CreditTooSmall', [])
+  }
 
   const intent: IRedeem__RedeemIntent = {
     params: input.params,
@@ -91,9 +116,8 @@ export function attestRedeemIntent(ctx: IRedeemAttestContext, input: IRedeemInpu
     chainId: BigInt(ctx.chainId),
     share: input.share,
     sharesOut: input.sharesOut,
-    acceptableNetAssetValue: input.acceptableNetAssetValue,
-    totalShareSupply: input.totalShareSupply,
-    acceptableShares: input.acceptableShares
+    assetsOut: input.assetsOut,
+    acceptableNetAssetValue: input.acceptableNetAssetValue
   }
 
   const typedData: TypedDataDefinition = {

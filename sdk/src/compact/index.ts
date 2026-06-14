@@ -1,12 +1,13 @@
 export {
   createCompact,
   DISPATCH_TIMEOUT_MS,
-  type IAttestResult,
   type ICompact,
   type ICompactOpts,
   type IDispatchedFrame,
+  type IHeadFrame,
   type IMatchmakerStatus,
-  type IRelayRequest
+  type IRelayRequest,
+  SETTLEMENT_TIMEOUT_MS
 } from './compact.js'
 export {
   CompactContractError,

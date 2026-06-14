@@ -1,132 +1,172 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { combineMap, type IStream } from 'aelea/stream'
+import type { ISelectArgs } from '@puppet/indexer-graphql/client'
+import type { IAccountBalanceCheckpoint, IFund, IFundPosition } from '@puppet/indexer-graphql/entities'
 import { type Address, getAddress, type Hex } from 'viem'
 import { predictPuppetAccount } from '../account/index.js'
-import { type IIndexerClient, liveSelect, select } from './shared.js'
+import { type IIndexerClient, select } from './shared.js'
 
-export interface IAccountRow {
-  id: string
-  account: Address
+const ZERO_TX_HASH: Hex = '0x0000000000000000000000000000000000000000000000000000000000000000'
+
+// The latest checkpoint per (chain, token) IS the balance row: event-sourced, no
+// mutable view entity.
+export type IAccountBalanceRow = IAccountBalanceCheckpoint
+
+const latestBalanceArgs = (account: Hex): ISelectArgs<'AccountBalanceCheckpoint'> => ({
+  where: { account: { _eq: account } },
+  distinctOn: ['chainId', 'tokenId'],
+  orderBy: [{ chainId: 'asc' }, { tokenId: 'asc' }, { blockTimestamp: 'desc' }]
+})
+
+// Identity is event-sourced: derived from the raw Deploy{Puppet,Fund}Account rows (or
+// the caller's own params), not an indexer projection.
+export interface IAccountIdentity {
+  account: Hex
   chainId: bigint
   isFund: boolean
-  user?: Address
-  signer: Address
-  balanceUsd: bigint
-  lastNonce: bigint
-  lastEventBlock: bigint
-  lastEventAt: number
-  lastTransactionHash: Hex
+  user?: Hex
+  signer: Hex
 }
 
-export interface IAccountBalanceRow {
-  id: string
-  account: Address
-  chainId: bigint
-  tokenId: Hex
-  token: Address
-  signedBalance: bigint
-  recordedBalance: bigint
-  lastEventBlock: bigint
-  lastEventAt: number
-}
-
-export type ISubaccountState = IAccountRow & {
-  chains: Map<number, IAccountRow>
+export type ISubaccountState = IAccountIdentity & {
+  chains: Map<number, IAccountIdentity>
   balances: Map<Hex, IAccountBalanceRow>
+  // Session-held settlement cursor: the client learns these from its own attest results
+  // (the indexer is event-sourced and keeps no per-account aggregates).
+  lastNonce: bigint
+  lastTransactionHash: Hex
+  // The wallet's FA graph rides the state that is already passed down everywhere: a
+  // puppet row carries the funds it masters, a fund row carries its own Fund entity,
+  // and positions are this account's FundPosition rows (holder-keyed).
+  funds: IFund[]
+  positions: IFundPosition[]
+}
+
+const positionsForAccount = (account: Address, positionRows: IFundPosition[]): IFundPosition[] =>
+  positionRows.filter(p => p.holder === account)
+
+// Mastered funds, the fund's own row, AND funds this account holds positions in: a
+// puppet's position in someone else's fund still needs that Fund row downstream.
+const fundsForAccount = (account: Address, fundRows: IFund[], positions: IFundPosition[]): IFund[] => {
+  const positionFundSet = new Set(positions.map(p => p.fund))
+  return fundRows.filter(f => f.master === account || f.fund === account || positionFundSet.has(f.fund))
 }
 
 function balancesForAccount(account: Address, balanceRows: IAccountBalanceRow[]): Map<Hex, IAccountBalanceRow> {
   const balances = new Map<Hex, IAccountBalanceRow>()
   for (const balance of balanceRows) {
-    if (balance.account === account) balances.set(balance.tokenId, balance)
+    if (balance.account === account && balance.tokenId.length === 66) balances.set(balance.tokenId, balance)
   }
   return balances
 }
 
-function rowsToSubaccount(rows: IAccountRow[], balanceRows: IAccountBalanceRow[]): ISubaccountState | undefined {
-  if (rows.length === 0) return undefined
-  const chains = new Map<number, IAccountRow>()
-  for (const r of rows) chains.set(Number(r.chainId), r)
-  return { ...rows[0], chains, balances: balancesForAccount(rows[0].account, balanceRows) }
+function composeSubaccount(
+  identities: IAccountIdentity[],
+  balanceRows: IAccountBalanceRow[],
+  fundRows: IFund[],
+  positionRows: IFundPosition[]
+): ISubaccountState | undefined {
+  if (identities.length === 0) return undefined
+  const account = identities[0].account
+  const chains = new Map<number, IAccountIdentity>()
+  for (const identity of identities) chains.set(Number(identity.chainId), identity)
+  const positions = positionsForAccount(account, positionRows)
+  return {
+    ...identities[0],
+    chains,
+    balances: balancesForAccount(account, balanceRows),
+    funds: fundsForAccount(account, fundRows, positions),
+    positions,
+    lastNonce: 0n,
+    lastTransactionHash: ZERO_TX_HASH
+  }
 }
 
-function rowsToSubaccountList(rows: IAccountRow[], balanceRows: IAccountBalanceRow[]): ISubaccountState[] {
-  const buckets = new Map<string, IAccountRow[]>()
-  for (const row of rows) {
-    const list = buckets.get(row.account) ?? []
-    list.push(row)
-    buckets.set(row.account, list)
+// Identity from the raw deploy log: both deploy events emit flat identity fields.
+async function fetchDeployIdentities(sql: IIndexerClient, account: Hex): Promise<IAccountIdentity[]> {
+  const [fundRows, puppetRows] = await Promise.all([
+    select(sql, 'Account__DeployFundAccount', { where: { account: { _eq: account } }, fields: ['chainId', 'signer'] }),
+    select(sql, 'Account__DeployPuppetAccount', {
+      where: { account: { _eq: account } },
+      fields: ['chainId', 'user', 'signer']
+    })
+  ])
+  if (fundRows.length > 0) {
+    return fundRows.map(row => ({
+      account,
+      chainId: row.chainId,
+      isFund: true,
+      signer: row.signer as Hex
+    }))
   }
-  const out: ISubaccountState[] = []
-  for (const bucket of buckets.values()) {
-    const state = rowsToSubaccount(bucket, balanceRows)
-    if (state) out.push(state)
-  }
-  return out
+  return puppetRows.map(row => ({
+    account,
+    chainId: row.chainId,
+    isFund: false,
+    user: row.user as Hex,
+    signer: row.signer as Hex
+  }))
 }
 
+// Funds resolve by MASTER (indexed), known upfront: this covers mastered funds and the
+// FA's own row in the same parallel round, no position-dependent second phase. Foreign
+// funds (puppet positions in other masters' funds) ride the not-yet-built puppet flow
+// and will need the FundPosition->Fund entity relation when it lands.
 export async function getSubaccountState(sql: IIndexerClient, account: Address): Promise<ISubaccountState | undefined> {
   const checksummed = getAddress(account)
-  const [rows, balanceRows] = await Promise.all([
-    select(sql, 'Account', { where: { account: { _eq: checksummed } } }),
-    select(sql, 'AccountBalance', { where: { account: { _eq: checksummed } } })
+  const [identities, balanceRows, fundRows, positionRows] = await Promise.all([
+    fetchDeployIdentities(sql, checksummed),
+    select(sql, 'AccountBalanceCheckpoint', latestBalanceArgs(checksummed)),
+    select(sql, 'Fund', { where: { master: { _eq: checksummed } } }),
+    select(sql, 'FundPosition', { where: { holder: { _eq: checksummed } } })
   ])
-  return rowsToSubaccount(rows, balanceRows)
-}
-
-export function liveSubaccountState(sql: IIndexerClient, account: Address): IStream<ISubaccountState | undefined> {
-  const checksummed = getAddress(account)
-  return combineMap(
-    rowsToSubaccount,
-    liveSelect(sql, 'Account', { where: { account: { _eq: checksummed } } }),
-    liveSelect(sql, 'AccountBalance', { where: { account: { _eq: checksummed } } })
-  )
-}
-
-export async function getUserSubaccountList(sql: IIndexerClient, user: Address): Promise<ISubaccountState[]> {
-  const owned = await select(sql, 'Account', { where: { user: { _eq: getAddress(user) } } })
-  const puppetAccounts = owned.filter(row => !row.isFund).map(row => row.account)
-  const fundRows =
-    puppetAccounts.length > 0
-      ? await select(sql, 'Account', { where: { isFund: { _eq: true }, signer: { _in: puppetAccounts } } })
-      : []
-  const seen = new Set(owned.map(row => row.id))
-  const rows = [...owned, ...fundRows.filter(row => !seen.has(row.id))]
-  const balanceRows = await select(sql, 'AccountBalance', {
-    where: { account: { _in: rows.map(row => row.account) } }
-  })
-  return rowsToSubaccountList(rows, balanceRows)
-}
-
-export function liveUserSubaccountList(sql: IIndexerClient, user: Address): IStream<ISubaccountState[]> {
-  return combineMap(
-    (owned, allFunds, balanceRows) => {
-      const puppetAccounts = new Set(owned.filter(row => !row.isFund).map(row => row.account))
-      const seen = new Set(owned.map(row => row.id))
-      const fundRows = allFunds.filter(row => puppetAccounts.has(row.signer) && !seen.has(row.id))
-      return rowsToSubaccountList([...owned, ...fundRows], balanceRows)
-    },
-    liveSelect(sql, 'Account', { where: { user: { _eq: getAddress(user) } } }),
-    liveSelect(sql, 'Account', { where: { isFund: { _eq: true } } }),
-    liveSelect(sql, 'AccountBalance', {})
-  )
+  return composeSubaccount(identities, balanceRows, fundRows, positionRows)
 }
 
 export function stubSubaccountState(params: { user: Address; signer: Address }): ISubaccountState {
   const account = predictPuppetAccount(params)
   return {
-    id: account,
     account,
     chainId: BigInt(HUB_CHAIN_ID),
     isFund: false,
     user: params.user,
     signer: params.signer,
-    balanceUsd: 0n,
     lastNonce: 0n,
-    lastEventBlock: 0n,
-    lastEventAt: 0,
-    lastTransactionHash: '0x0000000000000000000000000000000000000000000000000000000000000000' as Hex,
+    lastTransactionHash: ZERO_TX_HASH,
     chains: new Map(),
-    balances: new Map()
+    balances: new Map(),
+    funds: [],
+    positions: []
   }
+}
+
+// Predicted addressing: wallet -> signer -> PA -> FA is a deterministic 1-1 derivation,
+// so the wallet has exactly ONE subaccount state: the PA root, with its mastered funds
+// and positions riding it. Always resolves (stub when unindexed) so the app has a global
+// state to lens from; identity comes from the caller's own session params and the raw
+// deploy rows only contribute per-chain presence.
+export async function getWalletState(
+  sql: IIndexerClient,
+  params: { user: Address; signer: Address }
+): Promise<ISubaccountState> {
+  const puppet = predictPuppetAccount(params)
+  const [deployRows, balanceRows, fundRows, positionRows] = await Promise.all([
+    select(sql, 'Account__DeployPuppetAccount', { where: { account: { _eq: puppet } }, fields: ['chainId'] }),
+    select(sql, 'AccountBalanceCheckpoint', latestBalanceArgs(puppet)),
+    select(sql, 'Fund', { where: { master: { _eq: puppet } } }),
+    select(sql, 'FundPosition', { where: { holder: { _eq: puppet } } })
+  ])
+  const identities: IAccountIdentity[] = deployRows.map(row => ({
+    account: puppet,
+    chainId: row.chainId,
+    isFund: false,
+    user: params.user as Hex,
+    signer: params.signer as Hex
+  }))
+  return (
+    composeSubaccount(identities, balanceRows, fundRows, positionRows) ?? {
+      ...stubSubaccountState(params),
+      funds: fundRows,
+      positions: positionRows
+    }
+  )
 }

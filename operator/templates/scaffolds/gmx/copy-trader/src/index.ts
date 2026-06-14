@@ -1,14 +1,15 @@
-import { createOperatorCore, runOperator } from '@puppet.fund/operator'
+import { createOperatorCore, pairOverBrowser, runOperator } from '@puppet.fund/operator'
 import {
+  acceptablePrice,
+  dominantPosition,
   formatWeth,
-  GMX_BASE_TOKEN_ID,
-  getPositionPnlUsd,
   gmxOperator,
   gmxPrice,
+  positionMetrics,
   usd,
   weth
 } from '@puppet.fund/operator/gmx'
-import { type Address, type Hex, isAddressEqual } from 'viem'
+import { type Address, isAddressEqual } from 'viem'
 
 // COPY-TRADER bot. Mirror a chosen GMX trader's position on one market — same direction and
 // (capped) leverage, sized to OUR funds — with risk caps, anti-churn rebalancing, and an active
@@ -41,17 +42,13 @@ const RISK = {
 }
 const TICK_MS = 30_000
 const COOLDOWN_MS = 60_000
+// A dispatch that fails (e.g. ack timeout) can still land until its intent deadline (5min),
+// and the cooldown above is shorter than that window — so any dispatch failure holds ALL
+// action until the deadline has passed, otherwise a re-fire can double the position.
+const INTENT_DEADLINE_MS = 5 * 60_000
 
-const core = await createOperatorCore({
-  baseTokenId: GMX_BASE_TOKEN_ID,
-  siteUrl: Bun.env.SITE_URL,
-  matchmakerUrl: Bun.env.MATCHMAKER_WS_URL,
-  indexerUrl: Bun.env.INDEXER_ENDPOINT,
-  rpcUrl: Bun.env.ARBITRUM_RPC_URL,
-  signerKey: Bun.env.OPERATOR_SIGNER_KEY as Hex | undefined,
-  user: Bun.env.OPERATOR_USER as Address | undefined,
-  pairPort: Bun.env.PAIR_PORT ? Number(Bun.env.PAIR_PORT) : undefined
-})
+const session = await pairOverBrowser(Bun.env.PAIR_URL)
+const core = await createOperatorCore(session, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
 const gmx = gmxOperator(core)
 const market = gmx.getMarket(ETH)
 const marketInfo = gmx.markets.find(m => isAddressEqual(m.marketToken as Address, market))
@@ -59,6 +56,7 @@ if (!marketInfo) throw new Error(`market ${market} not in the GMX market list`)
 const longToken = marketInfo.longToken as Address // WETH on the ETH/USDC perp; the other collateral is USDC
 type Position = Awaited<ReturnType<typeof gmx.getPositions>>[number]
 let lastActionAt = 0
+let holdUntil = 0
 
 await runOperator(core, async signal => {
   console.log(`copy-trader live on ${market} · following ${TRADER} · ${RISK.maxLeverage}x max · Ctrl-C to stop`)
@@ -83,7 +81,7 @@ async function tick(): Promise<void> {
   const ourPos = dominantPosition(await gmx.getPositions(), market)
   const traderPos = dominantPosition(await gmx.getPositions(TRADER), market)
 
-  if (Date.now() - lastActionAt < COOLDOWN_MS) return
+  if (Date.now() - lastActionAt < COOLDOWN_MS || Date.now() < holdUntil) return
 
   // 1) LIQUIDATION GUARD — our position only, before anything trader-driven.
   if (ourPos) {
@@ -98,7 +96,6 @@ async function tick(): Promise<void> {
         console.log(`LIQ-GUARD: effLev ${m.effLeverage.toFixed(1)}x — reducing $${reduceUsd.toFixed(0)} size`)
         await order(m.isLong, 'decrease', { sizeUsd: Math.min(reduceUsd, m.sizeUsd) }, price)
       }
-      lastActionAt = Date.now()
       return
     }
   }
@@ -108,7 +105,6 @@ async function tick(): Promise<void> {
   if (!traderPos && ourPos) {
     console.log('trader closed — closing our copy')
     await closePosition(ourPos, price)
-    lastActionAt = Date.now()
     return
   }
   if (traderPos && !ourPos) {
@@ -116,14 +112,12 @@ async function tick(): Promise<void> {
     if (!t) return
     console.log(`OPEN ${t.isLong ? 'long' : 'short'} $${t.sizeUsd.toFixed(0)} @ ${t.collateralWeth.toFixed(5)} WETH`)
     await order(t.isLong, 'increase', { sizeUsd: t.sizeUsd, collateralWeth: t.collateralWeth }, price)
-    lastActionAt = Date.now()
     return
   }
   if (traderPos && ourPos) {
     if (traderPos.flags.isLong !== ourPos.flags.isLong) {
       console.log('trader flipped side — closing our copy (re-opens opposite next tick)')
       await closePosition(ourPos, price)
-      lastActionAt = Date.now()
       return
     }
     const t = target(traderPos, freeWeth, price, markPrice)
@@ -139,7 +133,6 @@ async function tick(): Promise<void> {
         console.log(`REBALANCE down -$${deltaUsd.toFixed(0)} (trader shrank)`)
         await order(t.isLong, 'decrease', { sizeUsd: deltaUsd }, price)
       }
-      lastActionAt = Date.now()
     }
   }
 }
@@ -151,31 +144,17 @@ async function ethSpot(): Promise<number> {
   return Number(((await res.json()) as { price: string }).price)
 }
 
-// The account's largest open position on a market (an account may hold both sides; copy the dominant).
-function dominantPosition(positions: readonly Position[], mkt: Address): Position | null {
-  let best: Position | null = null
-  for (const p of positions) {
-    if (!isAddressEqual(p.addresses.market, mkt) || p.numbers.sizeInUsd === 0n) continue
-    if (!best || p.numbers.sizeInUsd > best.numbers.sizeInUsd) best = p
-  }
-  return best
-}
-
 // USD figures (plain numbers) for a position at the current mark, including unrealized PnL.
+// positionMetrics (kit) values collateral correctly whether the trader posted WETH or USDC —
+// getting that wrong mis-reads their leverage.
 function metrics(p: Position, markPrice: bigint) {
-  const sizeUsd = p.numbers.sizeInUsd
-  // Collateral is the long token (WETH, 18dp → value via mark price) or the short token
-  // (USDC, 6dp ≈ $1). A trader may use either; getting it wrong mis-reads their leverage.
-  const collateralUsd = isAddressEqual(p.addresses.collateralToken, longToken)
-    ? p.numbers.collateralAmount * markPrice
-    : p.numbers.collateralAmount * 10n ** 24n
-  const marginUsd = collateralUsd + getPositionPnlUsd(p.flags.isLong, sizeUsd, p.numbers.sizeInTokens, markPrice)
+  const m = positionMetrics(p, markPrice, longToken)
   return {
-    isLong: p.flags.isLong,
-    sizeUsd: Number(sizeUsd) / 1e30,
-    marginUsd: Number(marginUsd) / 1e30,
-    leverage: Number(sizeUsd) / Number(collateralUsd),
-    effLeverage: marginUsd > 0n ? Number(sizeUsd) / Number(marginUsd) : Number.POSITIVE_INFINITY
+    isLong: m.isLong,
+    sizeUsd: Number(m.sizeUsd) / 1e30,
+    marginUsd: Number(m.marginUsd) / 1e30,
+    leverage: m.leverage,
+    effLeverage: m.effLeverage
   }
 }
 
@@ -189,13 +168,13 @@ function target(traderPos: Position, freeWeth: number, price: number, markPrice:
 }
 
 function closePosition(p: Position, price: number) {
-  return gmx.createOrder({
+  return dispatch({
     orderType: gmx.GMX_ORDER_TYPE.MarketDecrease,
     market,
     isLong: p.flags.isLong,
     sizeDeltaUsd: p.numbers.sizeInUsd, // whole size
     collateralDelta: 0n, // collateral returns to the fund async on keeper execution
-    acceptablePrice: acceptablePrice(p.flags.isLong, false, price)
+    acceptablePrice: acceptablePrice(price, p.flags.isLong, false, RISK.slippageBps)
   })
 }
 
@@ -205,19 +184,25 @@ function order(
   amounts: { sizeUsd?: number; collateralWeth?: number },
   price: number
 ) {
-  return gmx.createOrder({
+  return dispatch({
     orderType: kind === 'increase' ? gmx.GMX_ORDER_TYPE.MarketIncrease : gmx.GMX_ORDER_TYPE.MarketDecrease,
     market,
     isLong,
     sizeDeltaUsd: amounts.sizeUsd === undefined ? 0n : usd(amounts.sizeUsd.toFixed(2)),
     collateralDelta: amounts.collateralWeth === undefined ? 0n : weth(amounts.collateralWeth.toFixed(8)),
-    acceptablePrice: acceptablePrice(isLong, kind === 'increase', price)
+    acceptablePrice: acceptablePrice(price, isLong, kind === 'increase', RISK.slippageBps)
   })
 }
 
-// Slippage-bounded price in GMX units. Up for a long increase / short decrease (buying), down for
-// a short increase / long decrease (selling).
-function acceptablePrice(isLong: boolean, isIncrease: boolean, price: number): bigint {
-  const slip = RISK.slippageBps / 10_000
-  return gmxPrice(price * (isIncrease === isLong ? 1 + slip : 1 - slip), 18)
+// The cooldown is armed on ATTEMPT (before the await), and a failed dispatch holds all action
+// for the full intent deadline: the intent may still land, and acting on a stale view of it
+// is how positions get doubled.
+async function dispatch(params: Parameters<typeof gmx.createOrder>[0]) {
+  lastActionAt = Date.now()
+  try {
+    return await gmx.createOrder(params)
+  } catch (err) {
+    holdUntil = Date.now() + INTENT_DEADLINE_MS
+    throw err
+  }
 }

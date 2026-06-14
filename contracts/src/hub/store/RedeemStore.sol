@@ -10,11 +10,13 @@ import {IAuthority} from "../../utils/interfaces/IAuthority.sol";
 
 contract RedeemStore is BankStore {
     struct Pool {
+        uint epoch;
         uint accruedPerStake;
         uint totalStake;
     }
 
     struct Position {
+        uint epoch;
         uint stake;
         uint cursor;
         uint accrued;
@@ -22,6 +24,8 @@ contract RedeemStore is BankStore {
 
     mapping(address fund => Pool) public poolMap;
     mapping(address fund => mapping(address holder => Position)) public positionMap;
+    mapping(address fund => mapping(uint epoch => uint)) public closedEpochAccruedMap;
+    mapping(address fund => uint) public closeRateMap;
 
     constructor(
         IAuthority _authority
@@ -62,17 +66,39 @@ contract RedeemStore is BankStore {
         delete positionMap[_fund][_holder];
     }
 
+    function closeFund(
+        address _fund,
+        uint _closeRate
+    ) external auth {
+        closeRateMap[_fund] = _closeRate;
+    }
+
+    function recognize(
+        IERC20 _token,
+        uint _amount
+    ) external auth {
+        signedBalanceMap[_token] += _amount;
+    }
+
+    function rotatePool(
+        address _fund
+    ) external auth {
+        Pool storage _pool = poolMap[_fund];
+        closedEpochAccruedMap[_fund][_pool.epoch] = _pool.accruedPerStake;
+        _pool.epoch += 1;
+        _pool.accruedPerStake = 0;
+        _pool.totalStake = 0;
+    }
+
     function creditPool(
         address _fund,
-        IERC20 _token,
-        address _depositor,
-        uint _amount,
-        uint _gasLimit
+        uint _amount
     ) external auth returns (uint accruedPerStake_, uint totalStake_) {
         Pool storage _pool = poolMap[_fund];
         if (_pool.totalStake == 0) revert Error.Share__NoStakeToCredit();
-        _transferIn(_token, _depositor, _amount, _gasLimit);
-        _pool.accruedPerStake += Precision.toFactor(_amount, _pool.totalStake);
+        uint _credit = Precision.toFactor(_amount, _pool.totalStake);
+        if (_credit == 0) revert Error.Share__CreditTooSmall();
+        _pool.accruedPerStake += _credit;
         return (_pool.accruedPerStake, _pool.totalStake);
     }
 

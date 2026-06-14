@@ -66,7 +66,7 @@ contract MasterGate is BaseGate, EIP712 {
         IERC20 _token = IntentLib.verifyTokenAndCap(registerModule, _intent.tokenId, address(0), _intent.sweepAmount);
 
         (FundAccount _account, address _route) =
-            accountModule.createFundAccount(address(accountModule.verifyPuppetAccount(_intent.params)));
+            accountModule.createFundAccount(_intent.params.user, address(accountModule.verifyPuppetAccount(_intent.params)));
 
         accountModule.dispatch(
             IAccount(address(_account)),
@@ -77,7 +77,7 @@ contract MasterGate is BaseGate, EIP712 {
                 _actualRelayFee,
                 transferGasLimit
             ),
-            CallLib.noTransfers(),
+            CallLib.signTransfer(_intent.tokenId, _token, _intent.sweepAmount, _actualRelayFee),
             _hashTypedDataV4(
                 keccak256(
                     abi.encode(
@@ -98,6 +98,8 @@ contract MasterGate is BaseGate, EIP712 {
             attestor,
             _intent.nonce
         );
+
+        _logEvent("CreateFundAccount", abi.encode(_intent, address(_account), _route, _actualRelayFee));
     }
 
     function operate(
@@ -138,6 +140,6 @@ contract MasterGate is BaseGate, EIP712 {
             _intent.nonce
         );
 
-        _logEvent("Operate", abi.encode(_intent, address(_account), msg.sender, result_));
+        _logEvent("Operate", abi.encode(_intent, address(_account), result_));
     }
 }

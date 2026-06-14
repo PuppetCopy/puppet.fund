@@ -47,6 +47,67 @@ export default [
   },
   {
     "type": "function",
+    "name": "closeFund",
+    "inputs": [
+      {
+        "name": "_fund",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_closeRate",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "closeRateMap",
+    "inputs": [
+      {
+        "name": "fund",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "closedEpochAccruedMap",
+    "inputs": [
+      {
+        "name": "fund",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "epoch",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "creditPool",
     "inputs": [
       {
@@ -55,22 +116,7 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_token",
-        "type": "address",
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "_depositor",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
         "name": "_amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_gasLimit",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -124,6 +170,11 @@ export default [
         "internalType": "struct RedeemStore.Pool",
         "components": [
           {
+            "name": "epoch",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
             "name": "accruedPerStake",
             "type": "uint256",
             "internalType": "uint256"
@@ -159,6 +210,11 @@ export default [
         "type": "tuple",
         "internalType": "struct RedeemStore.Position",
         "components": [
+          {
+            "name": "epoch",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
           {
             "name": "stake",
             "type": "uint256",
@@ -210,6 +266,11 @@ export default [
     ],
     "outputs": [
       {
+        "name": "epoch",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
         "name": "accruedPerStake",
         "type": "uint256",
         "internalType": "uint256"
@@ -239,6 +300,11 @@ export default [
     ],
     "outputs": [
       {
+        "name": "epoch",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
         "name": "stake",
         "type": "uint256",
         "internalType": "uint256"
@@ -255,6 +321,37 @@ export default [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "recognize",
+    "inputs": [
+      {
+        "name": "_token",
+        "type": "address",
+        "internalType": "contract IERC20"
+      },
+      {
+        "name": "_amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "rotatePool",
+    "inputs": [
+      {
+        "name": "_fund",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -288,6 +385,11 @@ export default [
         "type": "tuple",
         "internalType": "struct RedeemStore.Pool",
         "components": [
+          {
+            "name": "epoch",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
           {
             "name": "accruedPerStake",
             "type": "uint256",
@@ -323,6 +425,11 @@ export default [
         "type": "tuple",
         "internalType": "struct RedeemStore.Position",
         "components": [
+          {
+            "name": "epoch",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
           {
             "name": "stake",
             "type": "uint256",
@@ -432,6 +539,11 @@ export default [
   },
   {
     "type": "error",
+    "name": "Share__CreditTooSmall",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "Share__NoStakeToCredit",
     "inputs": []
   },
@@ -462,32 +574,6 @@ export default [
       },
       {
         "name": "receiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "TransferUtils__TokenTransferFromError",
-    "inputs": [
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "contract IERC20"
-      },
-      {
-        "name": "from",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "to",
         "type": "address",
         "internalType": "address"
       },

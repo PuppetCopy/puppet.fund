@@ -25,8 +25,10 @@ export async function pollRouteBalance(
 }
 
 export async function fetchAccountSurplus(sql: IIndexerClient, chainId: bigint, account: Address): Promise<bigint> {
-  const rows = await select(sql, 'AccountBalance', {
+  const rows = await select(sql, 'AccountBalanceCheckpoint', {
     where: { account: { _eq: getAddress(account) }, chainId: { _eq: chainId } },
+    distinctOn: ['tokenId'],
+    orderBy: [{ tokenId: 'asc' }, { blockTimestamp: 'desc' }],
     fields: ['recordedBalance', 'signedBalance']
   })
   let surplus = 0n

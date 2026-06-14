@@ -1,12 +1,6 @@
-import {
-  buildSelectDocument,
-  type EntityTypeMap,
-  type IEntityName,
-  type ISelectArgs,
-  parseEntityRow,
-  selectVariables
-} from '@puppet/indexer-graphql/client'
-import { disposeWith, fromPromise, type IStream, map, merge, op } from 'aelea/stream'
+import type { EntityTypeMap, IEntityName, ISelectArgs } from '@puppet/indexer-graphql/client'
+import { buildSelectDocument, parseEntityRow, selectVariables } from '@puppet/indexer-graphql/client'
+import { disposeWith, type IStream, map, op } from 'aelea/stream'
 import { multicast, stream } from 'aelea/stream-extended'
 import { createClient as createWsClient, type Client as WsClient } from 'graphql-ws'
 import { recover } from '../core/stream/recover.js'
@@ -30,8 +24,17 @@ export class GraphqlQueryError extends Error {
   }
 }
 
+// The socket must outlive transient drops (wallet popups, chain switches, tab
+// backgrounding): graphql-ws re-subscribes every active operation after a reconnect,
+// so retrying here is what keeps liveSelect streams emitting for the whole session.
 export function createIndexerClient(httpEndpoint: string, wsEndpoint = deriveWsUrl(httpEndpoint)): IIndexerClient {
-  const wsClient = createWsClient({ url: wsEndpoint, lazy: true, retryAttempts: 0 })
+  const wsClient = createWsClient({
+    url: wsEndpoint,
+    lazy: true,
+    retryAttempts: Number.POSITIVE_INFINITY,
+    shouldRetry: () => true,
+    keepAlive: 12_000
+  })
   return { httpEndpoint, wsClient }
 }
 
@@ -87,10 +90,7 @@ export function liveSelect<K extends IEntityName>(
     document,
     selectVariables(args as ISelectArgs<IEntityName>)
   )
-  return merge(
-    fromPromise(select(client, entity, args)),
-    map(data => (data[entity] ?? []).map(row => parseEntityRow(entity, row)), subscription)
-  )
+  return map(data => (data[entity] ?? []).map(row => parseEntityRow(entity, row)), subscription)
 }
 
 export function live<T>(client: IIndexerClient, document: string, variables?: Record<string, unknown>): IStream<T> {

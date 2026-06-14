@@ -17,7 +17,7 @@ bun run dev
 Create your account and allocate a **WETH** fund on the site first (GMX pays its keeper fee in
 WETH, so the operator runs entirely in WETH). `bun run dev` prints a pairing link — approve it on
 the site; the operator receives your session key (memory only) **and** the site's
-matchmaker/indexer endpoints over the tunnel, so there's nothing to configure. RPC defaults to the
+matchmaker endpoint over the tunnel, so there's nothing to configure. RPC defaults to the
 public Arbitrum endpoint — set `ARBITRUM_RPC_URL` for anything beyond a first run. Copy
 `.env.example` to `.env` only for that, to override an endpoint, pair a local site, or run
 headless. The operator can open and manage positions but **can never withdraw**. To edit, Ctrl-C
@@ -30,12 +30,13 @@ and hands you the `runOperator(core, …)` body. Call connection/account actions
 actions on `gmx`. No required shape: a poll loop, a one-shot, a webhook, or an event subscription
 all work.
 
-- **core** (connection + account): `getFundBalance()` · `isOpen()` · `status` · `operate(callList)` · `close()` — plus `account` (your signing account) and `fund` (the pooled vehicle that holds capital and carries positions)
+- **core** (connection + account): `getFundBalance()` · `getFundSignedBalance()` · `isOpen()` · `status` · `operate(callList, transferList?)` · `close()` — plus `account` (your signing account) and `fund` (the pooled vehicle that holds capital and carries positions)
 - **gmx** (venue): `getPositions(account?)` · `getOrders(account?)` · `getMarket(indexToken)` · `markets` · `createOrder(order)` · `cancelOrder` · `updateOrder`
 
 `gmx.createOrder` is the single primitive for every order type (market/limit/stop via `orderType` +
-`triggerPrice`); `core.operate()` is the escape hatch for anything else (swaps, claims). `usd()` /
+`triggerPrice`); `core.operate()` is the raw dispatch underneath it (the attestor co-signs only
+GMX-perimeter calls today, so swaps/claims/foreign targets are rejected). `usd()` /
 `weth()` build amounts from decimal strings. **`acceptablePrice` uses `gmxPrice(usd, decimals)`** —
 GMX prices are `usd × 10^(30 − tokenDecimals)` (ETH = ×10¹²), **not** the 30-decimal `usd()`. Gate
-trading on `core.isOpen()`. Collateral GMX frees on a close returns to the fund on its own and
-shows up in `getFundBalance()` — no extra step.
+trading on `core.isOpen()`. Collateral GMX frees on a close returns to the fund on its own, shows
+up in `getFundBalance()`, and your next `createOrder` re-signs it automatically — no extra step.

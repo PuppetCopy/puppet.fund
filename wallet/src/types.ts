@@ -23,9 +23,3 @@ export interface EIP6963AnnounceProviderEvent extends CustomEvent {
   type: 'eip6963:announceProvider'
   detail: EIP6963ProviderDetail
 }
-
-export interface TransactionParams {
-  to: string
-  data?: string
-  value?: string
-}

@@ -6,11 +6,12 @@ export {
   formatThrownError,
   humanizeContractError,
   humanizeErrorCode,
-  type IAttestResult,
   type ICompact,
   type ICompactOpts,
+  type IDispatchedFrame,
   type IMatchmakerStatus
 } from '@puppet/sdk/compact'
+export type { IPairedSession } from '@puppet/sdk/account'
 export { createOperatorCore, type IOperatorConfig, type IOperatorCore } from './core.js'
 export { type IClosable, runOperator } from './lifecycle.js'
-export { pairOverBrowser } from './pair.js'
+export { buildSession, pairOverBrowser } from './pair.js'

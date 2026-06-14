@@ -4,6 +4,8 @@ interface IGmxOraclePrice {
   price: bigint
 }
 
+import { CHAIN_TOKEN_MAP, HUB_CHAIN_ID } from '@puppet/contracts/const'
+import { ADDRESS_ZERO } from '@puppet/sdk/const'
 import { getMappedValueFallback, periodicRun } from '@puppet/sdk/core'
 import { type IStream, map, op, skipRepeats } from 'aelea/stream'
 import { state } from 'aelea/stream-extended'
@@ -73,7 +75,7 @@ export const latestPriceMap = op(
         out[item.tokenAddress] = {
           updateTimestamp: timestampMs,
           token: item.tokenAddress,
-          price: BigInt(item.maxPriceFull)
+          price: (BigInt(item.minPriceFull) + BigInt(item.maxPriceFull)) / 2n
         }
       }
       return out
@@ -84,15 +86,16 @@ export const latestPriceMap = op(
 
 const priceForCache = new Map<Address, IStream<bigint | null>>()
 export function priceFor(address: Address): IStream<bigint | null> {
-  const existing = priceForCache.get(address)
+  const lookup = address === ADDRESS_ZERO ? (CHAIN_TOKEN_MAP[HUB_CHAIN_ID].WETH as Address) : address
+  const existing = priceForCache.get(lookup)
   if (existing) return existing
   const stream = op(
     latestPriceMap,
-    map(pm => getMappedValueFallback(pm, address, null)?.price ?? null),
+    map(pm => getMappedValueFallback(pm, lookup, null)?.price ?? null),
     skipRepeats,
     state(null)
   )
-  priceForCache.set(address, stream)
+  priceForCache.set(lookup, stream)
   return stream
 }
 

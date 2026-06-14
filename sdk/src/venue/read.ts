@@ -12,7 +12,10 @@ export interface IAccountPosition {
   isLong: boolean
   status: IAccountPositionStatus
   sizeInUsd: bigint
+  sizeInTokens: bigint
   collateralInUsd: bigint
+  // Marked PnL at the last on-chain update; callers re-mark live against the index price.
+  pnl: bigint
   realizedPnlUsd: bigint
   cumulativeSizeInUsd: bigint
   openedAt: number
@@ -29,7 +32,9 @@ const POSITION_FIELDS = [
   'isLong',
   'status',
   'sizeInUsd',
+  'sizeInTokens',
   'collateralInUsd',
+  'pnl',
   'realizedPnlUsd',
   'cumulativeSizeInUsd',
   'openedAt',
@@ -59,7 +64,9 @@ export async function fetchPositions(
     isLong: r.isLong,
     status: r.status as IAccountPositionStatus,
     sizeInUsd: r.sizeInUsd,
+    sizeInTokens: r.sizeInTokens,
     collateralInUsd: r.collateralInUsd,
+    pnl: r.pnl,
     realizedPnlUsd: r.realizedPnlUsd,
     cumulativeSizeInUsd: r.cumulativeSizeInUsd,
     openedAt: r.openedAt,

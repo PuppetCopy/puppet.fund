@@ -4,6 +4,7 @@ import type { IClaimInput } from './claim.js'
 import type { ICreatePuppetAccountInput } from './createAccount.js'
 import type { ICreateFundAccountInput } from './createFundAccount.js'
 import type { IDepositRoute } from './depositRoute.js'
+import type { ILiquidateInput } from './liquidate.js'
 import type { IOperateInput } from './operate.js'
 import type { IRecognizeBalanceInput } from './recognizeBalance.js'
 import type { IRedeemInput } from './redeem.js'
@@ -21,6 +22,7 @@ export type IInputByKind = {
   sell: ISellInput
   claim: IClaimInput
   redeem: IRedeemInput
+  liquidate: ILiquidateInput
   recognize: IRecognizeBalanceInput
   withdrawToWallet: IWithdrawToWalletInput
   bridge: IBridgeInput
@@ -30,12 +32,20 @@ export type IInputByKind = {
 }
 
 export {
+  ACROSS_SPOKE_POOL,
+  acrossSpokePool,
+  buildAcrossDeposit,
+  decodeAcrossDeposit,
+  type IAcrossDepositParams
+} from './acrossDeposit.js'
+export {
   attestAllocateIntent,
   type IAllocateAttestContext,
   type IAllocateInput,
   type IAllocateRulePosition
 } from './allocate.js'
 export { attestBridgeIntent, type IBridgeAttestContext, type IBridgeInput } from './bridge.js'
+export { BRIDGE_MAX_SLIPPAGE_BPS, verifyBridgeQuoteRatio } from './bridgeGuard.js'
 export { attestClaimIntent, type IClaimAttestContext, type IClaimInput } from './claim.js'
 export {
   computeAllocation,
@@ -56,6 +66,7 @@ export {
 export type { IDepositMode, IDepositRoute } from './depositRoute.js'
 export { resolveDispatchChainId, resolveDispatchNetwork } from './dispatch.js'
 export * as IntentLib from './intentLib.js'
+export { attestLiquidateIntent, type ILiquidateAttestContext, type ILiquidateInput } from './liquidate.js'
 export { attestOperateIntent, type IOperateAttestContext, type IOperateInput } from './operate.js'
 export {
   attestRecognizeBalanceIntent,
@@ -66,7 +77,7 @@ export { attestRedeemIntent, type IRedeemAttestContext, type IRedeemInput } from
 export * from './rule.js'
 export { attestSellIntent, type ISellAttestContext, type ISellInput } from './sell.js'
 export type { IActionKind, IDraftContext, IIntentByKind } from './shared.js'
-export { fetchAccount, fetchAccountOrThrow } from './shared.js'
+export { STAKE_RATIO_CAP } from './shared.js'
 export { attestSubscribeIntent, type ISubscribeAttestContext, type ISubscribeInput, signMandate } from './subscribe.js'
 export {
   attestWithdrawToBridgeIntent,

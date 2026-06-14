@@ -1,6 +1,6 @@
 {
   "name": "@puppet.fund/operator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "BUSL-1.1",
   "description": "Build autonomous trading operators on Puppet",
   "type": "module",
@@ -22,27 +22,20 @@
     "dist"
   ],
   "scripts": {
-    "build": "vite build && bun run rollup-dts",
-    "rollup-dts": "bun scripts/rollup-dts.ts",
+    "build": "tsdown",
     "clean": "rm -rf dist",
     "test": "bun test",
     "tsgo:check": "tsgo --noEmit"
   },
   "dependencies": {
-    "@noble/curves": "2.2.0",
-    "@noble/hashes": "2.2.0",
-    "aelea": "catalog:",
-    "graphql-ws": "catalog:",
     "viem": "catalog:"
   },
   "devDependencies": {
-    "@microsoft/api-extractor": "7.58.7",
     "@puppet/contracts": "workspace:*",
     "@puppet/sdk": "workspace:*",
     "@types/bun": "catalog:",
-    "typescript": "catalog:",
-    "vite": "catalog:",
-    "vite-plugin-dts": "5.0.2"
+    "tsdown": "0.22.2",
+    "typescript": "catalog:"
   },
   "keywords": [
     "puppet",

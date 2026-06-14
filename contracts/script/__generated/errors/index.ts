@@ -454,6 +454,11 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
+    name: "Share__MasterCannotSell",
+    inputs: []
+  },
+  {
+    type: "error",
     name: "Share__Empty",
     inputs: []
   },
@@ -470,6 +475,21 @@ export const puppetErrorAbi = [
   {
     type: "error",
     name: "Share__NoStakeToCredit",
+    inputs: []
+  },
+  {
+    type: "error",
+    name: "Share__CreditTooSmall",
+    inputs: []
+  },
+  {
+    type: "error",
+    name: "Share__PoolDegraded",
+    inputs: []
+  },
+  {
+    type: "error",
+    name: "Share__FundClosed",
     inputs: []
   },
   {
@@ -500,22 +520,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Redeem__SupplyMismatch",
-    inputs: [
-      {
-        name: "current",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "expected",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
     name: "Redeem__NothingToRetire",
     inputs: []
   },
@@ -526,7 +530,17 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "ShareToken__NotShareGate",
+    name: "Redeem__MasterFractionDecreased",
+    inputs: []
+  },
+  {
+    type: "error",
+    name: "Redeem__DrainExceedsQueue",
+    inputs: []
+  },
+  {
+    type: "error",
+    name: "ShareToken__NotIssuer",
     inputs: []
   },
   {

@@ -17,8 +17,9 @@ import {
   stylePseudo
 } from 'aelea/ui'
 import { spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
+import { palette } from 'aelea/ui-components-theme'
 import type { Chain } from 'viem/chains'
+import { $caretDown } from './$icons.js'
 
 export const $elipsisTextWrapper = $node(
   style({ overflow: 'hidden', minHeight: 0, whiteSpace: 'nowrap', textOverflow: 'ellipsis' })
@@ -28,8 +29,8 @@ export const $anchor = $element('a')(
   spacing.tiny,
   attr({ target: '_blank' }),
   stylePseudo(':hover', {
-    color: `${colorShade(palette.primary, 50)}!important`,
-    fill: colorShade(palette.primary, 50)
+    color: `${palette.primary}!important`,
+    fill: palette.primary
   }),
   style({
     cursor: 'pointer',
@@ -78,6 +79,14 @@ export const $icon = ({
     isStream(fill) ? styleBehavior(map(f => ({ fill: f }), fill)) : style({ fill }),
     svgOps
   )($content)
+
+export const $popoverCaret = (): I$Node =>
+  $icon({
+    $content: $caretDown,
+    width: '9px',
+    viewBox: '0 0 32 32',
+    svgOps: style({ minWidth: '9px', opacity: '0.6' })
+  })
 
 // Keyboard activation for non-native interactive elements (div/role=button|menuitem|option).
 // Treats Enter/Space (and any `extraKeys`) like a click so AT/keyboard users can trigger the

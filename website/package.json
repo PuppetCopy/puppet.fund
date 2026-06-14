@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "VITE_PWA_DEV=true bun --bun vite",
+    "dev": "VITE_PWA_DEV=false bun --bun vite",
     "dev:generate-pwa-assets": "bun --bun pwa-assets-generator",
     "build": "NODE_ENV=production bun --bun vite build",
     "clean": "bun run clean:rimraf && tsgo -build --clean",
@@ -17,9 +17,9 @@
   "dependencies": {
     "@puppet/contracts": "workspace:*",
     "@puppet/sdk": "workspace:*",
-    "@wagmi/connectors": "8.0.15",
     "@wagmi/core": "3.5.0",
-    "@wonderland/interop-cross-chain": "0.13.2",
+    "@walletconnect/sign-client": "2.23.9",
+    "@walletconnect/utils": "2.23.9",
     "abitype": "catalog:",
     "aelea": "catalog:",
     "color": "5.0.3",
@@ -30,8 +30,8 @@
   },
   "devDependencies": {
     "@puppet/indexer-graphql": "workspace:*",
-    "@types/bun": "catalog:",
     "@rollup/plugin-replace": "6.0.3",
+    "@types/bun": "catalog:",
     "@vite-pwa/assets-generator": "1.0.2",
     "dotenv": "catalog:",
     "rimraf": "6.1.3",

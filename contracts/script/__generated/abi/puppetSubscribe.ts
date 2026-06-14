@@ -159,11 +159,6 @@ export default [
         "internalType": "contract IERC20"
       },
       {
-        "name": "_baseTokenId",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
         "name": "_digest",
         "type": "bytes32",
         "internalType": "bytes32"

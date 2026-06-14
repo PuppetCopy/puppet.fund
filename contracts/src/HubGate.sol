@@ -22,7 +22,13 @@ import {ShareLib} from "./utils/ShareLib.sol";
 import {Allocate, ALLOCATE_INTENT_TYPEHASH} from "./hub/Allocate.sol";
 import {AllocateStore} from "./hub/store/AllocateStore.sol";
 import {Subscribe, SUBSCRIBE_INTENT_TYPEHASH} from "./hub/Subscribe.sol";
-import {Redeem, SELL_INTENT_TYPEHASH, CLAIM_INTENT_TYPEHASH, REDEEM_INTENT_TYPEHASH} from "./hub/Redeem.sol";
+import {
+    Redeem,
+    SELL_INTENT_TYPEHASH,
+    CLAIM_INTENT_TYPEHASH,
+    REDEEM_INTENT_TYPEHASH,
+    LIQUIDATE_INTENT_TYPEHASH
+} from "./hub/Redeem.sol";
 import {RedeemStore} from "./hub/store/RedeemStore.sol";
 import {RegisterToken} from "./core/RegisterToken.sol";
 
@@ -100,7 +106,7 @@ contract HubGate is BaseGate, EIP712 {
     function predictShareToken(
         ShareLib.ShareInitParams calldata _shareParams
     ) public view returns (ShareToken) {
-        return ShareToken(shareModule.predict(_shareParams));
+        return ShareToken(shareModule.predict(accountModule.predictFundAccount(_shareParams.master), _shareParams));
     }
 
     function subscribe(
@@ -140,7 +146,6 @@ contract HubGate is BaseGate, EIP712 {
             accountModule,
             allocateStore,
             _base,
-            _intent.baseTokenId,
             _digest,
             _domainSeparatorV4(),
             _userSignature,
@@ -344,15 +349,64 @@ contract HubGate is BaseGate, EIP712 {
                     _intent.chainId,
                     ShareLib.hashShare(_intent.share),
                     _intent.sharesOut,
-                    _intent.acceptableNetAssetValue,
-                    _intent.totalShareSupply,
-                    _intent.acceptableShares
+                    _intent.assetsOut,
+                    _intent.acceptableNetAssetValue
                 )
             )
         );
 
         IntentLib.verifyRelayFeeRatio(_actualRelayFee, _intent.acceptableNetAssetValue, maxRelayFeeBps);
         redeemModule.redeem(
+            _intent,
+            redeemStore,
+            accountModule,
+            shareModule,
+            _baseToken,
+            _fundAccount,
+            _digest,
+            _userSignature,
+            _attestorSignature,
+            attestor,
+            transferGasLimit,
+            feeReceiver,
+            _actualRelayFee
+        );
+    }
+
+    function liquidate(
+        Redeem.LiquidateIntent calldata _intent,
+        bytes calldata _userSignature,
+        bytes calldata _attestorSignature,
+        uint _actualRelayFee
+    ) external {
+        IntentLib.verifyChainId(_intent.chainId);
+        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, _blockNumber(), maxBlockDelay);
+        IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
+        PuppetAccount _master = accountModule.verifyPuppetAccount(_intent.params);
+        if (address(_master) != _intent.share.master) {
+            revert Error.Share__MasterMismatch(address(_master), _intent.share.master);
+        }
+        address _fundAccount = address(accountModule.verifyFundAccount(address(_master)));
+        IERC20 _baseToken = IntentLib.verifyTokenAndCap(registerModule, _intent.share.baseTokenId, address(0), 0);
+
+        bytes32 _digest = _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    LIQUIDATE_INTENT_TYPEHASH,
+                    AccountLib.hashAccount(_intent.params),
+                    _intent.blockNumber,
+                    _intent.deadline,
+                    _intent.acceptableRelayFee,
+                    _intent.nonce,
+                    _intent.chainId,
+                    ShareLib.hashShare(_intent.share),
+                    _intent.acceptableNetAssetValue
+                )
+            )
+        );
+
+        IntentLib.verifyRelayFeeRatio(_actualRelayFee, _intent.acceptableNetAssetValue, maxRelayFeeBps);
+        redeemModule.liquidate(
             _intent,
             redeemStore,
             accountModule,
@@ -441,7 +495,6 @@ contract HubGate is BaseGate, EIP712 {
         );
 
         PuppetAccount _puppetAccount = accountModule.verifyPuppetAccount(_intent.params);
-        address _recipient = _puppetAccount.getUser();
         address _route = accountModule.predictRoute(address(_puppetAccount));
 
         uint _routeBalance = _token.balanceOf(_route);
@@ -495,6 +548,6 @@ contract HubGate is BaseGate, EIP712 {
             _intent.nonce
         );
 
-        _logEvent("WithdrawToBridge", abi.encode(_intent, _puppetAccount, _recipient));
+        _logEvent("WithdrawToBridge", abi.encode(_intent, _puppetAccount));
     }
 }

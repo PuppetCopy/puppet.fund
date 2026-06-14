@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { createOperatorCore, runOperator } from '@puppet.fund/operator'
-import { formatWeth, GMX_BASE_TOKEN_ID, gmxOperator, gmxPrice, usd, weth } from '@puppet.fund/operator/gmx'
-import { type Address, type Hex, isAddressEqual } from 'viem'
+import { createOperatorCore, pairOverBrowser, runOperator } from '@puppet.fund/operator'
+import { acceptablePrice, formatWeth, gmxOperator, usd, weth } from '@puppet.fund/operator/gmx'
+import { type Address, isAddressEqual } from 'viem'
 
 // A basic LLM (Claude) agent: same perceive / size / execute as a deterministic bot, but the
 // DECISION (long / flat) is delegated to a model via structured tool use. This is the "agentic"
@@ -13,19 +13,18 @@ const ETH = '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1' as Address
 const PARAMS = { riskPerTradeBps: 100, stopLossPct: 3, leverage: 2, maxPositionUsd: 250, minPositionUsd: 25 }
 const SLIPPAGE_BPS = 30
 const TICK_MS = 5 * 60_000
+// Keep >= the intent deadline (5min) and arm it on ATTEMPT: a dispatch that times out can
+// still land until its deadline, so a re-fire inside that window risks a doubled position.
 const COOLDOWN_MS = 10 * 60_000
 
+// Fail fast and clearly, before pairing: the SDK reads the key lazily and would otherwise
+// crash mid-run with a raw credentials error (or silently pick up an ambient dev key).
+if (!Bun.env.ANTHROPIC_API_KEY) {
+  throw new Error('set ANTHROPIC_API_KEY in .env (cp .env.example .env) — get a key at https://console.anthropic.com')
+}
 const anthropic = new Anthropic() // reads ANTHROPIC_API_KEY
-const core = await createOperatorCore({
-  baseTokenId: GMX_BASE_TOKEN_ID,
-  siteUrl: Bun.env.SITE_URL,
-  matchmakerUrl: Bun.env.MATCHMAKER_WS_URL,
-  indexerUrl: Bun.env.INDEXER_ENDPOINT,
-  rpcUrl: Bun.env.ARBITRUM_RPC_URL,
-  signerKey: Bun.env.OPERATOR_SIGNER_KEY as Hex | undefined,
-  user: Bun.env.OPERATOR_USER as Address | undefined,
-  pairPort: Bun.env.PAIR_PORT ? Number(Bun.env.PAIR_PORT) : undefined
-})
+const session = await pairOverBrowser(Bun.env.PAIR_URL)
+const core = await createOperatorCore(session, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
 const gmx = gmxOperator(core)
 const market = gmx.getMarket(ETH)
 let lastTradeAt = 0
@@ -112,25 +111,25 @@ async function tick(): Promise<void> {
       console.log('skip open: free balance below the minimum position size')
       return
     }
+    lastTradeAt = Date.now()
     await gmx.createOrder({
       orderType: gmx.GMX_ORDER_TYPE.MarketIncrease,
       market,
       isLong: true,
       sizeDeltaUsd: usd(s.sizeUsd.toFixed(2)),
       collateralDelta: weth(s.collateralWeth.toFixed(8)),
-      acceptablePrice: gmxPrice(price * (1 + SLIPPAGE_BPS / 10_000), 18)
+      acceptablePrice: acceptablePrice(price, true, true, SLIPPAGE_BPS)
     })
-    lastTradeAt = Date.now()
   } else if (action === 'close' && inLong && longPos) {
+    lastTradeAt = Date.now()
     await gmx.createOrder({
       orderType: gmx.GMX_ORDER_TYPE.MarketDecrease,
       market,
       isLong: true,
       sizeDeltaUsd: longPos.numbers.sizeInUsd,
       collateralDelta: 0n,
-      acceptablePrice: gmxPrice(price * (1 - SLIPPAGE_BPS / 10_000), 18)
+      acceptablePrice: acceptablePrice(price, true, false, SLIPPAGE_BPS)
     })
-    lastTradeAt = Date.now()
   }
 }
 

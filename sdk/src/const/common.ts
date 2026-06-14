@@ -38,6 +38,8 @@ export const BALANCE_TIMELINE_BUCKETS = 200
 
 export const DEFAULT_DEADLINE_SEC = IntervalTime.MIN5
 
+export const DEFAULT_MATCHMAKER_URL = 'wss://puppet.fund/api/matchmaker'
+
 // Editors tolerate live network fees within this fraction above the saved
 // `acceptableRelayFee` before surfacing a "fee has risen" alert. Below this
 // margin, dust-level RPC ticks would otherwise spuriously trip the alert.

@@ -1,7 +1,8 @@
-import { CHAIN_TOKEN_MAP, HUB_CHAIN_ID, TOKEN_ID } from '@puppet/contracts/const'
+import { TOKEN_ID } from '@puppet/contracts/const'
 import { ARBITRUM_MARKET_LIST, GMX_V2_CONTRACT_MAP } from '@puppet/contracts/gmx'
 import type { IIAccount__Call } from '@puppet/contracts/types'
-import { calculateExecutionFee, getGasLimitsConfig, type IGasLimitsConfig } from '@puppet/sdk/gmx'
+import { symbolForBaseTokenId } from '@puppet/sdk/account'
+import { calculateExecutionFee, getGasLimitsConfig, getPositionPnlUsd, type IGasLimitsConfig } from '@puppet/sdk/gmx'
 import {
   buildGmxOrderCalls,
   GMX_DECREASE_SWAP_TYPE,
@@ -10,7 +11,17 @@ import {
   type IGmxOrder,
   selectGmxMarket
 } from '@puppet/sdk/venue'
-import { type Address, encodeFunctionData, formatUnits, type Hex, isAddressEqual, parseUnits } from 'viem'
+import {
+  type Address,
+  encodeFunctionData,
+  erc20Abi,
+  formatUnits,
+  getAddress,
+  type Hex,
+  isAddressEqual,
+  parseUnits,
+  zeroAddress
+} from 'viem'
 import type { IOperatorCore } from '../core.js'
 
 export { GMX_DECREASE_SWAP_TYPE, GMX_ORDER_TYPE, type IGmxOrder } from '@puppet/sdk/venue'
@@ -36,6 +47,60 @@ export { calculateExecutionFee, getGasLimitsConfig, getPositionPnlUsd, type IGas
 
 export const GMX_BASE_TOKEN_ID = TOKEN_ID.WETH
 
+export const acceptablePrice = (
+  spotUsd: number,
+  isLong: boolean,
+  isIncrease: boolean,
+  slippageBps: number,
+  indexTokenDecimals = 18
+): bigint =>
+  gmxPrice(spotUsd * (isIncrease === isLong ? 1 + slippageBps / 10_000 : 1 - slippageBps / 10_000), indexTokenDecimals)
+
+export interface IGmxPositionView {
+  addresses: { market: Address; collateralToken: Address }
+  numbers: { sizeInUsd: bigint; sizeInTokens: bigint; collateralAmount: bigint }
+  flags: { isLong: boolean }
+}
+
+export function dominantPosition<T extends IGmxPositionView>(positions: readonly T[], market: Address): T | null {
+  let best: T | null = null
+  for (const p of positions) {
+    if (!isAddressEqual(p.addresses.market, market) || p.numbers.sizeInUsd === 0n) continue
+    if (!best || p.numbers.sizeInUsd > best.numbers.sizeInUsd) best = p
+  }
+  return best
+}
+
+export interface IGmxPositionMetrics {
+  isLong: boolean
+  sizeUsd: bigint
+  collateralUsd: bigint
+  marginUsd: bigint
+  leverage: number
+  effLeverage: number
+}
+
+export function positionMetrics(
+  p: IGmxPositionView,
+  markPrice: bigint,
+  longToken: Address,
+  shortTokenDecimals = 6
+): IGmxPositionMetrics {
+  const sizeUsd = p.numbers.sizeInUsd
+  const collateralUsd = isAddressEqual(p.addresses.collateralToken, longToken)
+    ? p.numbers.collateralAmount * markPrice
+    : p.numbers.collateralAmount * 10n ** BigInt(30 - shortTokenDecimals)
+  const marginUsd = collateralUsd + getPositionPnlUsd(p.flags.isLong, sizeUsd, p.numbers.sizeInTokens, markPrice)
+  return {
+    isLong: p.flags.isLong,
+    sizeUsd,
+    collateralUsd,
+    marginUsd,
+    leverage: collateralUsd > 0n ? Number(sizeUsd) / Number(collateralUsd) : Number.POSITIVE_INFINITY,
+    effLeverage: marginUsd > 0n ? Number(sizeUsd) / Number(marginUsd) : Number.POSITIVE_INFINITY
+  }
+}
+
 export interface IGmxOptions {
   executionFeeBufferBps?: bigint
 }
@@ -50,9 +115,6 @@ export interface IUpdateOrder {
 }
 
 export function gmxOperator(core: IOperatorCore, opts: IGmxOptions = {}) {
-  if (!isAddressEqual(core.token, CHAIN_TOKEN_MAP[HUB_CHAIN_ID].WETH as Address)) {
-    throw new Error('gmxOperator needs a WETH-based core — create it with baseTokenId GMX_BASE_TOKEN_ID')
-  }
   const { operate, publicClient, token, fund } = core
 
   const executionFeeBufferBps = opts.executionFeeBufferBps ?? 2_000n
@@ -69,14 +131,32 @@ export function gmxOperator(core: IOperatorCore, opts: IGmxOptions = {}) {
 
   async function createOrder(p: IGmxOrder) {
     const executionFee = p.executionFee ?? (await quoteExecutionFee(p.orderType))
-    const { callList, amountOut } = buildGmxOrderCalls(p, { master: fund, baseToken: token, executionFee })
-    if (amountOut > 0n) {
-      const balance = await core.getFundBalance()
-      if (balance < amountOut) {
-        throw new Error(`fund balance ${balance} below required ${amountOut} — allocate more on the site or size down`)
-      }
-    }
-    return operate(callList)
+    const { callList, outflows } = buildGmxOrderCalls(p, { master: fund, baseToken: token, executionFee })
+    // Each outflow is a SIGNED leg: amountOut leaves the fund (collateral and/or the native
+    // execution fee), amountIn = surplus (base GMX paid back since the last order — freed
+    // collateral, fee refunds) rides along so the spendable balance converges to the live
+    // balance on every order. Native legs read the account ETH balance, ERC-20 legs balanceOf.
+    const transferList = await Promise.all(
+      outflows.map(async o => {
+        const outToken = getAddress(o.token)
+        const tokenId = core.tokenIdFor(outToken)
+        const isNative = isAddressEqual(outToken, zeroAddress)
+        const [balance, signed] = await Promise.all([
+          isNative
+            ? publicClient.getBalance({ address: fund })
+            : publicClient.readContract({ address: outToken, abi: erc20Abi, functionName: 'balanceOf', args: [fund] }),
+          core.readSignedBalance(tokenId)
+        ])
+        if (o.amountOut > balance) {
+          const sym = symbolForBaseTokenId(tokenId) ?? outToken
+          throw new Error(
+            `insufficient ${sym}: fund holds ${balance}, order needs ${o.amountOut} — allocate more on the site or size down`
+          )
+        }
+        return { tokenId, token: outToken, amountIn: balance > signed ? balance - signed : 0n, amountOut: o.amountOut }
+      })
+    )
+    return operate(callList, transferList)
   }
 
   return {

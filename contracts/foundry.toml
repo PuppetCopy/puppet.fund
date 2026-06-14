@@ -10,6 +10,7 @@
   ignored_warnings_from = ["test", "lib"]  # Silence solc warnings from test fixtures and vendored libs; src/ + script/ stay verbose
   fs_permissions = [
     { access = "read-write", path = "./deployments.toml" },
+    { access = "read-write", path = "./deployments.local.toml" },
     { access = "read", path = "./const.toml" },
     { access = "read-write", path = "./broadcast" }
   ]

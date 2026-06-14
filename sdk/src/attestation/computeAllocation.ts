@@ -1,4 +1,5 @@
 import type { Address, Hex } from 'viem'
+import { sharesFor } from '../core/math.js'
 import { decodeRuleBody } from './rule.js'
 
 const RATE_PRECISION = 10_000n
@@ -47,7 +48,7 @@ function resolveAmount(ctx: IComputeAllocationContext, puppet: IAllocationPuppet
   if (amount > puppet.signedBalance) amount = puppet.signedBalance
   if (amount === 0n) return 0n
 
-  const shares = ctx.totalShareSupply === 0n ? amount : (amount * ctx.totalShareSupply) / ctx.acceptableNetAssetValue
+  const shares = sharesFor(ctx.totalShareSupply, ctx.acceptableNetAssetValue, amount)
   return shares === 0n ? 0n : amount
 }
 

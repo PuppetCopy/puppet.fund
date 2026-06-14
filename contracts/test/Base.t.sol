@@ -83,7 +83,7 @@ contract V2Base is Test {
         dictate.setAccess(attest, address(accountModule));
         walletDeposit = new Deposit(dictate);
 
-        shareGate = new Issue(dictate, accountModule, address(new ShareToken()));
+        shareGate = new Issue(dictate, address(new ShareToken()));
         allocate = new Allocate(dictate);
         allocateStore = new AllocateStore(dictate);
         subscribe = new Subscribe(dictate);

@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.100.1",
-    "@puppet.fund/operator": "0.1.0",
+    "@puppet.fund/operator": "^0.2.0",
     "viem": "2.51.3"
   },
   "devDependencies": {

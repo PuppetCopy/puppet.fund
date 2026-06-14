@@ -146,6 +146,19 @@ export default [
   },
   {
     "type": "function",
+    "name": "getIssueContract",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "_g",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "getName",
     "inputs": [],
     "outputs": [
@@ -153,19 +166,6 @@ export default [
         "name": "_name",
         "type": "bytes32",
         "internalType": "bytes32"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "getShareModule",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "_g",
-        "type": "address",
-        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -463,7 +463,7 @@ export default [
   },
   {
     "type": "error",
-    "name": "ShareToken__NotShareGate",
+    "name": "ShareToken__NotIssuer",
     "inputs": []
   },
   {

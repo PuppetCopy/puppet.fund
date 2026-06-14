@@ -1,19 +1,29 @@
 import { handleWebsiteMessage } from '../lib/messageHandler.js'
-import { handleRpcRequest } from '../lib/rpcHandler.js'
-import { DEFAULT_STATE, type StoredState } from '../lib/state.js'
+import { handleRpcRequest, type RpcDeps } from '../lib/rpcHandler.js'
 
-const PUPPET_URL = import.meta.env.VITE_PUPPET_URL ?? 'http://localhost:3000'
+const PUPPET_URL = import.meta.env.VITE_PUPPET_URL
+const MATCHMAKER_WS_URL = import.meta.env.VITE_MATCHMAKER_WS_URL
+if (!PUPPET_URL) throw new Error('VITE_PUPPET_URL was not defined at build time (wxt.config define)')
+if (!MATCHMAKER_WS_URL) throw new Error('VITE_MATCHMAKER_WS_URL was not defined at build time (wxt.config define)')
+
+const DEPS: RpcDeps = {
+  puppetUrl: PUPPET_URL,
+  operate: {
+    matchmakerUrl: MATCHMAKER_WS_URL,
+    puppetUrl: PUPPET_URL
+  }
+}
 
 export default defineBackground(() => {
-  const state: StoredState = { ...DEFAULT_STATE }
-
   chrome.action.onClicked.addListener(() => {
-    chrome.tabs.create({ url: `${PUPPET_URL}/portfolio` })
+    chrome.tabs.create({ url: `${DEPS.puppetUrl}/portfolio` })
   })
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  const siteOrigin = new URL(PUPPET_URL).origin
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type) {
-      handleWebsiteMessage(message, { state })
+      handleWebsiteMessage(message, siteOrigin)
         .then(result => sendResponse({ success: true, result }))
         .catch(error => {
           console.error('[Puppet] Error:', error.message)
@@ -23,7 +33,10 @@ export default defineBackground(() => {
     }
 
     if (message.method) {
-      handleRpcRequest(message, { state, puppetUrl: PUPPET_URL })
+      // The requesting dApp's origin + tab (the content script forwarding the call runs in
+      // its page) — the tab id lets us return focus there after the user approves.
+      const requesterOrigin = sender.origin ?? (sender.url ? new URL(sender.url).origin : '')
+      handleRpcRequest(message, DEPS, requesterOrigin, sender.tab?.id)
         .then(result => sendResponse({ result }))
         .catch(error => {
           console.error('[Puppet] RPC Error:', error.message)

@@ -88,6 +88,11 @@ export default [
     "name": "createFundAccount",
     "inputs": [
       {
+        "name": "_user",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
         "name": "_signer",
         "type": "address",
         "internalType": "address"

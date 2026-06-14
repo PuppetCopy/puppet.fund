@@ -5,18 +5,16 @@ export const routeSchema = createRouteSchema({
   fragment: '',
   title: 'Puppet',
   children: {
-    home: { fragment: 'home', title: 'Home' },
-    hello: { fragment: 'hello', title: 'Get Started' },
     leaderboard: { fragment: 'leaderboard', title: 'Leaderboard' },
-    master: {
-      fragment: 'master',
+    fund: {
+      fragment: 'fund',
       children: {
-        detail: { fragment: ETH_ADDRESS_REGEXP, param: 'address', title: 'Master' }
+        detail: { fragment: ETH_ADDRESS_REGEXP, param: 'address', title: 'Fund' }
       }
     },
     portfolio: {
       fragment: 'portfolio',
-      title: 'Portfolio'
+      title: 'Wallet Page'
     }
   }
 } as const)

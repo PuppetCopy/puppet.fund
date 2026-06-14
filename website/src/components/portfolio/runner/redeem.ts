@@ -1,14 +1,14 @@
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import {
   type IClaimInput,
+  type ILiquidateInput,
   type IRedeemInput,
   type ISellInput,
   resolveDispatchChainId,
   resolveDispatchNetwork
 } from '@puppet/sdk/attestation'
-import { evaluateAccountNav } from '@puppet/sdk/evaluation'
+import { evaluateAccountNav } from '@puppet/sdk/evaluate'
 import {
-  fetchRouteBalance,
   getAcceptableRelayFee,
   getFundPoolState,
   getSubaccountState,
@@ -69,7 +69,7 @@ export async function buildSellInput(draft: ISellDraft, ctx: ExecContext): Promi
 
 export async function buildRedeemInput(draft: IRedeemDraft, ctx: ExecContext): Promise<IRedeemInput> {
   const fund = await resolveFund(draft, ctx)
-  const [pool, acceptableRelayFee, redeemEval, liveBalance] = await Promise.all([
+  const [pool, acceptableRelayFee, redeemEval] = await Promise.all([
     getFundPoolState(ctx.sql, draft.masterAccount),
     getAcceptableRelayFee(ctx.gasPrice, 'HubGate', 'redeem', draft.baseToken, homePublicClient),
     evaluateAccountNav(ctx.sql, {
@@ -79,13 +79,19 @@ export async function buildRedeemInput(draft: IRedeemDraft, ctx: ExecContext): P
       health: ctx.indexerHealth,
       kind: 'redeem',
       subaccount: fund
-    }),
-    fetchRouteBalance(homePublicClient, draft.baseToken, draft.masterAccount)
+    })
   ])
-  // The fund pays sharesRetired * nav / supply (payout + relay fee) out of its live token balance, so an
-  // indexer-overstated signed balance (fee debits are invisible to events) reverts the dispatch on-chain.
-  // Clamp the attested NAV to what the fund can actually pay.
-  const acceptableNetAssetValue = redeemEval.navSigned < liveBalance ? redeemEval.navSigned : liveBalance
+  // navSigned builds on the fund's SIGNED balances (true accounting), which is exactly
+  // what the drain can pay; no live clamp needed.
+  const acceptableNetAssetValue = redeemEval.navSigned
+  // Signed always equals executed: assetsOut above the live queue value reverts, so the
+  // amount re-derives at sign time. A fulfill signs exactly the queue's worth; a queue
+  // that grew in-flight simply makes the same signed amount a graceful partial.
+  const queueValue =
+    pool.totalShareSupply === 0n
+      ? 0n
+      : ((pool.queuedShares + draft.sharesOut) * acceptableNetAssetValue) / pool.totalShareSupply
+  const assetsOut = draft.fulfill || draft.assetsOut > queueValue ? queueValue : draft.assetsOut
   return {
     params: {
       user: ctx.wallet.address,
@@ -101,9 +107,39 @@ export async function buildRedeemInput(draft: IRedeemDraft, ctx: ExecContext): P
       name: await fundName(draft.masterAccount)
     },
     sharesOut: draft.sharesOut,
-    acceptableNetAssetValue,
-    totalShareSupply: pool.totalShareSupply,
-    acceptableShares: draft.acceptableShares
+    assetsOut,
+    acceptableNetAssetValue
+  }
+}
+
+export async function buildLiquidateInput(draft: IRedeemDraft, ctx: ExecContext): Promise<ILiquidateInput> {
+  const fund = await resolveFund(draft, ctx)
+  const [acceptableRelayFee, liquidateEval] = await Promise.all([
+    getAcceptableRelayFee(ctx.gasPrice, 'HubGate', 'liquidate', draft.baseToken, homePublicClient),
+    evaluateAccountNav(ctx.sql, {
+      master: draft.masterAccount,
+      baseToken: draft.baseToken,
+      baseTokenId: draft.baseTokenId,
+      health: ctx.indexerHealth,
+      kind: 'liquidate',
+      subaccount: fund
+    })
+  ])
+  return {
+    params: {
+      user: ctx.wallet.address,
+      signer: ctx.session.signer
+    },
+    blockNumber: indexerBlock(ctx.indexerHealth, resolveDispatchNetwork(resolveDispatchChainId(undefined))),
+    deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
+    acceptableRelayFee,
+    nonce: randomNonce(),
+    share: {
+      master: fund.signer,
+      baseTokenId: draft.baseTokenId,
+      name: await fundName(draft.masterAccount)
+    },
+    acceptableNetAssetValue: liquidateEval.navSigned
   }
 }
 

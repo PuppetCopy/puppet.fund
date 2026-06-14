@@ -255,6 +255,150 @@ export default [
   },
   {
     "type": "function",
+    "name": "liquidate",
+    "inputs": [
+      {
+        "name": "_intent",
+        "type": "tuple",
+        "internalType": "struct Redeem.LiquidateIntent",
+        "components": [
+          {
+            "name": "params",
+            "type": "tuple",
+            "internalType": "struct AccountLib.AccountInitParams",
+            "components": [
+              {
+                "name": "user",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "signer",
+                "type": "address",
+                "internalType": "address"
+              }
+            ]
+          },
+          {
+            "name": "blockNumber",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "acceptableRelayFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "nonce",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "chainId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "share",
+            "type": "tuple",
+            "internalType": "struct ShareLib.ShareInitParams",
+            "components": [
+              {
+                "name": "master",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "baseTokenId",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              },
+              {
+                "name": "name",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              }
+            ]
+          },
+          {
+            "name": "acceptableNetAssetValue",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      },
+      {
+        "name": "_store",
+        "type": "address",
+        "internalType": "contract RedeemStore"
+      },
+      {
+        "name": "_accountGate",
+        "type": "address",
+        "internalType": "contract Account"
+      },
+      {
+        "name": "_shareGate",
+        "type": "address",
+        "internalType": "contract Issue"
+      },
+      {
+        "name": "_baseToken",
+        "type": "address",
+        "internalType": "contract IERC20"
+      },
+      {
+        "name": "_fund",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_digest",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "_userSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_attestorSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_attestor",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_transferGasLimit",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_feeReceiver",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_actualRelayFee",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "redeem",
     "inputs": [
       {
@@ -332,17 +476,12 @@ export default [
             "internalType": "uint256"
           },
           {
+            "name": "assetsOut",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
             "name": "acceptableNetAssetValue",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "totalShareSupply",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "acceptableShares",
             "type": "uint256",
             "internalType": "uint256"
           }
@@ -620,6 +759,16 @@ export default [
   },
   {
     "type": "error",
+    "name": "Redeem__DrainExceedsQueue",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Redeem__MasterFractionDecreased",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "Redeem__NothingToRetire",
     "inputs": []
   },
@@ -630,23 +779,12 @@ export default [
   },
   {
     "type": "error",
-    "name": "Redeem__SupplyMismatch",
-    "inputs": [
-      {
-        "name": "current",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "expected",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
+    "name": "Redeem__ZeroAcceptableNav",
+    "inputs": []
   },
   {
     "type": "error",
-    "name": "Redeem__ZeroAcceptableNav",
+    "name": "Share__CreditTooSmall",
     "inputs": []
   },
   {
@@ -656,7 +794,22 @@ export default [
   },
   {
     "type": "error",
+    "name": "Share__FundClosed",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "Share__InsufficientClaimable",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Share__MasterCannotSell",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Share__PoolDegraded",
     "inputs": []
   },
   {

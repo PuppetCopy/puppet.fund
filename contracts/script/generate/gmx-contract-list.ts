@@ -6,6 +6,10 @@ const OUT_DIR = './script/__generated/gmx'
 const CONTRACT_MAPPINGS = {
   Reader: 'GmxReaderV2',
   ExchangeRouter: 'GmxExchangeRouter',
+  // The immutable SyntheticsRouter — the contract tokens are APPROVED to. ExchangeRouter
+  // pulls collateral via Router.pluginTransfer -> transferFrom, so the ERC-20 spender is
+  // this Router, NOT the ExchangeRouter. Verified on-chain: ExchangeRouter.router() == this.
+  Router: 'GmxRouter',
   OrderVault: 'GmxOrderVault',
   DataStore: 'GmxDatastore',
   EventEmitter: 'GmxEventEmitter'

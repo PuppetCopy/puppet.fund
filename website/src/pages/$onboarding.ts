@@ -1,9 +1,11 @@
-import { nowWith } from 'aelea/stream'
+import { map, nowWith, switchLatest } from 'aelea/stream'
+import { state } from 'aelea/stream-extended'
 import { $element, $node, $text, attr, effectProp, type I$Node, style, stylePseudo } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $copy, $icon, text } from '@/ui-components'
+import { $check, $copy, $icon, text } from '@/ui-components'
 import { $card } from '../common/elements/$common.js'
+import { subject } from '../utils/subject.js'
 
 export const $stageHeader = (n: number, title: string): I$Node =>
   $row(spacing.default, style({ alignItems: 'center' }))(
@@ -47,27 +49,12 @@ export const $bulletList = (items: [string, string][]): I$Node =>
     )
   )
 
-export const $codeBlock = (lines: string[]): I$Node =>
-  $element('pre')(
-    style({
-      background: palette.background,
-      border: `1px solid ${colorShade(palette.foreground, 18)}`,
-      borderRadius: '6px',
-      padding: '14px 16px',
-      fontSize: text.sm,
-      fontFamily: 'monospace',
-      color: palette.message,
-      whiteSpace: 'pre-wrap',
-      lineHeight: '1.5',
-      margin: '0'
-    })
-  )($text(lines.join('\n')))
-
 // A terminal-style command card: a header (>_ label + copy button) over a dark body where each line
 // renders as a `$ ` prompt + the command (leading binary tinted). The copy button writes all lines to
 // the clipboard. Used for scaffold / setup commands in the onboarding guide.
-export const $terminal = (lines: string[], label = 'terminal'): I$Node =>
-  $column(
+export const $terminal = (lines: string[], label = 'terminal'): I$Node => {
+  const copied = subject<boolean>()
+  return $column(
     style({
       border: `1px solid ${colorShade(palette.foreground, 30)}`,
       borderRadius: '10px',
@@ -124,28 +111,24 @@ export const $terminal = (lines: string[], label = 'terminal'): I$Node =>
           'onclick',
           nowWith(() => () => {
             navigator.clipboard?.writeText(lines.join('\n'))
+            copied.push(true)
+            setTimeout(() => copied.push(false), 5_000)
           })
         )
-      )($icon({ $content: $copy, width: '15px', viewBox: '0 0 24 24', fill: palette.foreground }))
+      )(
+        switchLatest(
+          map(
+            isCopied =>
+              isCopied
+                ? $icon({ $content: $check, width: '15px', viewBox: '0 0 24 24', fill: palette.positive })
+                : $icon({ $content: $copy, width: '15px', viewBox: '0 0 24 24', fill: palette.foreground }),
+            state(false, copied.stream)
+          )
+        )
+      )
     )
   )
-
-export const $envBlock = (rows: [string, string][]): I$Node =>
-  $element('pre')(
-    style({
-      background: palette.background,
-      border: `1px solid ${colorShade(palette.foreground, 18)}`,
-      borderRadius: '6px',
-      padding: '14px 16px',
-      fontSize: text.sm,
-      fontFamily: 'monospace',
-      color: palette.message,
-      whiteSpace: 'pre-wrap',
-      overflowWrap: 'anywhere',
-      lineHeight: '1.6',
-      margin: '0'
-    })
-  )($text(rows.map(([k, v]) => `${k}=${v}`).join('\n')))
+}
 
 export const $callout = (s: string): I$Node =>
   $node(

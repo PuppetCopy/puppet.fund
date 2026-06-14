@@ -1,4 +1,4 @@
-import { BASIS_POINTS, FLOAT_PRECISION } from '@puppet/contracts/const'
+import { BASIS_POINTS, FLOAT_PRECISION, SHARE_PRECISION } from '@puppet/contracts/const'
 
 export function safeDiv(a: bigint, b: bigint): bigint {
   if (b === 0n) {
@@ -53,3 +53,13 @@ export function abs(a: bigint): bigint {
 export function delta(a: bigint, b: bigint): bigint {
   return a > b ? a - b : b - a
 }
+
+// Mirrors AllocateModule._calcShares exactly: the bootstrap mint is amount x
+// SHARE_PRECISION (so the first share unit is worth 1e-12 base), later mints price at
+// the pre-mint supply over attested NAV.
+export function sharesFor(totalShareSupply: bigint, netAssetValue: bigint, amount: bigint): bigint {
+  if (totalShareSupply === 0n) return amount * SHARE_PRECISION
+  return (amount * totalShareSupply) / netAssetValue
+}
+
+export { SHARE_PRECISION }

@@ -1,16 +1,13 @@
+import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { predictFundAccount, predictPuppetAccount } from '@puppet/sdk/account'
 import type { IntervalTime } from '@puppet/sdk/const'
 import { ignoreAll } from '@puppet/sdk/core'
+import { getWalletState, type IAccountBalanceRow, type ISubaccountState, selectOne } from '@puppet/sdk/state'
 import {
-  getUserSubaccountList,
-  type IAccountBalanceRow,
-  type IAccountRow,
-  type ISubaccountState
-} from '@puppet/sdk/state'
-import {
-  combine,
-  empty,
+  awaitPromises,
+  filter,
   type IStream,
+  just,
   map,
   merge,
   op,
@@ -25,9 +22,9 @@ import {
 } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $node, $text, $wrapNativeElement, component, style } from 'aelea/ui'
-import { $column, $row, designSheet, isMobileScreen, spacing } from 'aelea/ui-components'
+import { $column, designSheet, isMobileScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
-import { contains, match } from 'aelea/ui-router'
+import { contains, locationChange, match } from 'aelea/ui-router'
 import { getAddress, type Hex } from 'viem'
 import type { Address } from 'viem/accounts'
 import { $alertPositiveContainer, $ButtonSecondary, $defaultMiniButtonSecondary, fadeIn } from '@/ui-components'
@@ -37,9 +34,10 @@ import { routeSchema } from '../app/routeSchema.js'
 import { pwaUpgradeNotification } from '../app/sw/swUtils.js'
 import { $midContainer } from '../common/$common.js'
 import { $ActionDrawer, type IDraft } from '../components/$ActionDrawer.js'
+// Browser extension sunset for now; revive with the $ExtensionBanner mount below.
+// import { $ExtensionBanner } from '../components/$ExtensionBanner.js'
 import { $MainMenu } from '../components/$MainMenu.js'
 import { $PairBanner } from '../components/$PairBanner.js'
-import { $ServicesConnectivity } from '../components/$ServicesConnectivity.js'
 import type { ISubscribeRule } from '../components/portfolio/$MatchingRuleEditor.js'
 import type {
   IAllocateDraft,
@@ -48,23 +46,23 @@ import type {
   IRedeemDraft,
   ISellDraft,
   ISubscribeDraft,
+  ISwapDraft,
   IWithdrawDraft
 } from '../components/portfolio/draft.js'
 import { computeSignedDelta, type IAttestation } from '../components/portfolio/runner/steps.js'
 import { fetchUserSubscriptions } from '../io/indexer/query.js'
 import { sqlClient } from '../io/indexer/sql.js'
-import { compact } from '../io/matchmaker/index.js'
-import { subject } from '../utils/subject.js'
-import { type IConnectedWallet, setActiveSubaccount, walletQuery } from '../wallet/index.js'
-import { $HelloPage } from './$HelloPage.js'
+import { type IConnectedWallet, walletQuery } from '../wallet/index.js'
 import { $Home } from './$Home.js'
 import { $Leaderboard } from './$Leaderboard.js'
-import { $MasterPage } from './$MasterPage.js'
 import { $Portfolio } from './$Portfolio.js'
+import { $PublicFundPage } from './$PublicFundPage.js'
 
 interface IApp {}
 
-const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'redeem', 'createFundAccount'])
+const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'redeem', 'liquidate', 'createFundAccount'])
+
+const PA_CREDIT_REFRESH: ReadonlySet<string> = new Set(['sell', 'claim', 'redeem', 'liquidate'])
 
 const ZERO_TOKEN = '0x0000000000000000000000000000000000000000' as Address
 
@@ -73,122 +71,46 @@ function accountForRequest(req: IAttestation['request']): Address {
   return FUND_ROUTED.has(req.kind) ? predictFundAccount(account) : account
 }
 
-function tokenIdForRequest(req: IAttestation['request']): Hex {
-  const intent = req.intent as { tokenId?: Hex; baseTokenId?: Hex }
-  return intent.tokenId ?? intent.baseTokenId ?? ('0x' as Hex)
-}
-
 function stubBalanceRow(account: Address, chainId: bigint, tokenId: Hex, signedBalance: bigint): IAccountBalanceRow {
   return {
-    id: `${chainId}-${account}-${tokenId}`,
+    id: `${chainId}-${account}-${tokenId}:0`,
     account,
     chainId,
     tokenId,
-    token: ZERO_TOKEN,
+    blockNumber: 0n,
+    blockTimestamp: 0,
     signedBalance,
-    recordedBalance: signedBalance,
-    lastEventBlock: 0n,
-    lastEventAt: 0
+    recordedBalance: signedBalance
   }
 }
 
-// Fold an attest into the subaccount list using the intent + actualRelayFee.
-// createPuppet/createFund insert a new standalone leaf from their own params;
-// other kinds adjust the per-token signedBalance on the dispatched account.
-function applySubaccountAttest(list: ISubaccountState[], settled: IAttestation): ISubaccountState[] {
+function applyWalletAttest(state: ISubaccountState | null, settled: IAttestation): ISubaccountState | null {
+  if (state === null) return null
   const { request, result } = settled
-  const chainId = (request.intent as { chainId: bigint }).chainId
-  const cid = Number(chainId)
-  const fee = result.actualRelayFee
-  const nonce = (request.intent as { nonce: bigint }).nonce
-  const tokenId = tokenIdForRequest(request)
-
-  if (request.kind === 'createPuppetAccount') {
-    const params = request.input.params
-    const account = predictPuppetAccount(params)
-    if (list.some(s => s.account === account)) return list
-    const initialDeposit = (request.input as { initialDepositAmount: bigint }).initialDepositAmount
-    const leaf: IAccountRow = {
-      id: `${chainId}-${account}`,
-      account,
-      chainId,
-      isFund: false,
-      user: getAddress(params.user),
-      signer: getAddress(params.signer),
-      balanceUsd: 0n,
-      lastNonce: nonce,
-      lastEventBlock: 0n,
-      lastEventAt: 0,
-      lastTransactionHash: result.txHash
-    }
-    const balances = new Map<Hex, IAccountBalanceRow>([
-      [tokenId, stubBalanceRow(account, chainId, tokenId, initialDeposit - fee)]
-    ])
-    return [...list, { ...leaf, chains: new Map([[cid, leaf]]), balances }]
-  }
-
-  if (request.kind === 'createFundAccount') {
-    const master = predictPuppetAccount((request.input as { params: { user: Address; signer: Address } }).params)
-    const account = predictFundAccount(master)
-    if (list.some(s => s.account === account)) return list
-    const sweepAmount = (request.input as { sweepAmount: bigint }).sweepAmount
-    const leaf: IAccountRow = {
-      id: `${chainId}-${account}`,
-      account,
-      chainId,
-      isFund: true,
-      user: list.find(s => s.account === getAddress(master))?.user ?? getAddress(master),
-      signer: getAddress(master),
-      balanceUsd: 0n,
-      lastNonce: nonce,
-      lastEventBlock: 0n,
-      lastEventAt: 0,
-      lastTransactionHash: result.txHash
-    }
-    const balances = new Map<Hex, IAccountBalanceRow>([
-      [tokenId, stubBalanceRow(account, chainId, tokenId, sweepAmount - fee)]
-    ])
-    return [...list, { ...leaf, chains: new Map([[cid, leaf]]), balances }]
-  }
-
-  // Adjust the per-token signedBalance on the dispatched account.
   const target = accountForRequest(request)
-  const delta = computeSignedDelta(request, fee)
+  if (target !== state.account) return { ...state, lastTransactionHash: result.txHash }
+  const chainId = (request.intent as { chainId: bigint }).chainId
+  const nonce = (request.intent as { nonce: bigint }).nonce
+  const tokenId = settled.tokenId
+  const delta = computeSignedDelta(request, result.actualRelayFee)
+  const existing = state.balances.get(tokenId)
+  const nextBalance: IAccountBalanceRow = existing
+    ? { ...existing, signedBalance: existing.signedBalance + delta }
+    : stubBalanceRow(state.account, chainId, tokenId, delta)
+  const balances = new Map(state.balances)
+  balances.set(tokenId, nextBalance)
+  return { ...state, balances, lastNonce: nonce, lastTransactionHash: result.txHash }
+}
 
-  if (request.kind === 'allocate' && !list.some(s => s.account === target)) {
-    const master = predictPuppetAccount((request.input as { params: { user: Address; signer: Address } }).params)
-    const leaf: IAccountRow = {
-      id: `${chainId}-${target}`,
-      account: target,
-      chainId,
-      isFund: true,
-      user: list.find(s => s.account === master)?.user ?? master,
-      signer: master,
-      balanceUsd: 0n,
-      lastNonce: nonce,
-      lastEventBlock: 0n,
-      lastEventAt: 0,
-      lastTransactionHash: result.txHash
-    }
-    const balances = new Map<Hex, IAccountBalanceRow>([[tokenId, stubBalanceRow(target, chainId, tokenId, delta)]])
-    return [...list, { ...leaf, chains: new Map([[cid, leaf]]), balances }]
-  }
+type IBalanceRefresh = { refresh: true; tokenId: Hex; row: IAccountBalanceRow }
+type IRootFold = IAttestation | IBalanceRefresh
 
-  return list.map(sub => {
-    if (sub.account !== target) return sub
-    const existing = sub.balances.get(tokenId)
-    const nextBalance: IAccountBalanceRow = existing
-      ? { ...existing, signedBalance: existing.signedBalance + delta }
-      : stubBalanceRow(sub.account, chainId, tokenId, delta)
-    const newBalances = new Map(sub.balances)
-    newBalances.set(tokenId, nextBalance)
-    return {
-      ...sub,
-      balances: newBalances,
-      lastNonce: nonce,
-      lastTransactionHash: result.txHash
-    }
-  })
+function applyRootFold(state: ISubaccountState | null, fold: IRootFold): ISubaccountState | null {
+  if (!('refresh' in fold)) return applyWalletAttest(state, fold)
+  if (state === null) return null
+  const balances = new Map(state.balances)
+  balances.set(fold.tokenId, fold.row)
+  return { ...state, balances }
 }
 
 export const $Main = (_config: IApp = {}) =>
@@ -205,6 +127,7 @@ export const $Main = (_config: IApp = {}) =>
       [changeAllocateDraft, changeAllocateDraftTether]: IBehavior<IAllocateDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
       [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft>,
+      [changeSwapDraft, changeSwapDraftTether]: IBehavior<ISwapDraft>,
       [clearDrafts, clearDraftsTether]: IBehavior<null>,
       [releaseDraft, releaseDraftTether]: IBehavior<string>,
       [changeAttest, changeAttestTether]: IBehavior<IAttestation>
@@ -219,32 +142,46 @@ export const $Main = (_config: IApp = {}) =>
       )
       const indexTokenList = uiStorage.replayWrite(localStoreSchema.global.indexTokenList, selectIndexTokenList)
 
-      const userSubaccountListQuery: IStream<Promise<ISubaccountState[]>> = op(
-        walletQuery,
-        map(async query => {
-          const wallet: IConnectedWallet | null = await query
-          if (!wallet) return [] as ISubaccountState[]
-          const res = await getUserSubaccountList(sqlClient, wallet.address)
-          return res
-        }),
-        state()
-      )
+      const loadWalletState = async (wallet: IConnectedWallet | null): Promise<ISubaccountState | null> => {
+        if (!wallet) return null
+        const signer = wallet.session?.signer ?? (await recoverDeployedSigner(wallet.address))
+        if (!signer) return null
+        return getWalletState(sqlClient, { user: wallet.address, signer })
+      }
 
-      const subaccountList: IStream<Promise<ISubaccountState[]>> = op(
+      const recoverDeployedSigner = async (user: Address): Promise<Address | undefined> => {
+        const row = await selectOne(sqlClient, 'Account__DeployPuppetAccount', {
+          where: { user: { _eq: getAddress(user) } },
+          fields: ['signer']
+        })
+        return row?.signer as Address | undefined
+      }
+
+      const walletState: IStream<ISubaccountState | null> = op(
         walletQuery,
         switchMap(async walletPromise => {
-          const wallet = await walletPromise
-          if (!wallet) return empty
-          const initial = await getUserSubaccountList(sqlClient, wallet.address)
-          const reduced: IStream<ISubaccountState[]> = state(
-            initial,
-            reduce(applySubaccountAttest, initial, changeAttest)
+          const initial = await loadWalletState(await walletPromise)
+          const refreshFolds: IStream<IRootFold> = op(
+            changeAttest,
+            map(async (settled): Promise<IBalanceRefresh | null> => {
+              if (initial === null || !PA_CREDIT_REFRESH.has(settled.request.kind)) return null
+              const row = await selectOne(sqlClient, 'AccountBalanceCheckpoint', {
+                where: {
+                  account: { _eq: initial.account },
+                  chainId: { _eq: BigInt(HUB_CHAIN_ID) },
+                  tokenId: { _eq: settled.tokenId }
+                },
+                orderBy: { blockTimestamp: 'desc' }
+              })
+              return row ? { refresh: true, tokenId: settled.tokenId, row } : null
+            }),
+            awaitPromises,
+            filter((r): r is IBalanceRefresh => r !== null)
           )
-          return map(list => Promise.resolve(list), reduced)
+          return state(initial, reduce(applyRootFold, initial, merge(changeAttest, refreshFolds)))
         }),
         switchLatest,
-        state(),
-        src => merge(src, userSubaccountListQuery)
+        state()
       )
 
       const walletAddress: IStream<string | null> = op(
@@ -253,65 +190,22 @@ export const $Main = (_config: IApp = {}) =>
         map(w => w?.address.toLowerCase() ?? null)
       )
 
-      let activeMasterByWallet: Record<string, Address | null> = {}
-
-      const autoDefaultActive = subject<Address>()
-
-      const activeMasterMap: IStream<Record<string, Address | null>> = op(
-        uiStorage.replayWrite(
-          localStoreSchema.global.activeMasterByWallet,
-          sampleMap(
-            (wallet, addr) =>
-              wallet ? (activeMasterByWallet = { ...activeMasterByWallet, [wallet]: addr }) : activeMasterByWallet,
-            walletAddress,
-            autoDefaultActive.stream
+      const userMatchingRuleQuery = op(
+        sampleMap(
+          (root: ISubaccountState | null) => (root ? fetchUserSubscriptions(root.account) : Promise.resolve([])),
+          walletState,
+          merge(
+            op(
+              walletState,
+              map(root => root?.account ?? null),
+              skipRepeats
+            ),
+            op(
+              changeAttest,
+              filter(settled => settled.request.kind === 'subscribe')
+            )
           )
         ),
-        tap(m => {
-          activeMasterByWallet = m
-        }),
-        state()
-      )
-
-      const subaccountAddressList: IStream<Address[]> = op(
-        subaccountList,
-        switchPromises,
-        map(list => list.map(a => a.account))
-      )
-
-      const activeMaster: IStream<Address | null> = op(
-        combine({ map: activeMasterMap, wallet: walletAddress, accounts: subaccountAddressList }),
-        map(p => {
-          if (!p.wallet) return null
-          if (p.accounts.length === 0) return null
-          const persisted = p.map[p.wallet]
-          if (persisted && p.accounts.includes(persisted)) return persisted
-          const pick = p.accounts[0]
-          autoDefaultActive.push(pick)
-          return pick
-        }),
-        skipRepeats,
-        state()
-      )
-
-      const $extensionSync = op(
-        combine({ addr: activeMaster, wallet: switchPromises(walletQuery) }),
-        map(p => {
-          setActiveSubaccount(p.addr, p.wallet?.session?.privateKey ?? null).catch(e =>
-            console.error('[Puppet] extension sync failed', e)
-          )
-          return $node(style({ display: 'none' }))()
-        })
-      )
-
-      const userMatchingRuleQuery = op(
-        userSubaccountListQuery,
-        map(async query => {
-          const accounts = await query
-          if (accounts.length === 0) return []
-          const lists = await Promise.all(accounts.map(a => fetchUserSubscriptions(a.account)))
-          return lists.flat()
-        }),
         state()
       )
 
@@ -319,6 +213,7 @@ export const $Main = (_config: IApp = {}) =>
         | { type: 'set-subscribes'; list: ISubscribeRule[] }
         | { type: 'upsert'; draft: IDepositDraft | IWithdrawDraft }
         | { type: 'allocate'; draft: IAllocateDraft }
+        | { type: 'swap'; draft: ISwapDraft }
         | { type: 'sell-claim'; draft: ISellDraft | IClaimDraft }
         | { type: 'redeem'; draft: IRedeemDraft }
         | { type: 'release'; key: string }
@@ -330,10 +225,11 @@ export const $Main = (_config: IApp = {}) =>
         deposit: 0,
         subscribe: 1,
         allocate: 2,
-        sell: 3,
-        redeem: 4,
-        claim: 5,
-        withdraw: 6
+        swap: 3,
+        sell: 4,
+        redeem: 5,
+        claim: 6,
+        withdraw: 7
       }
       const normalizeDraftList = (list: IDraft[]): IDraft[] =>
         [...list]
@@ -355,6 +251,11 @@ export const $Main = (_config: IApp = {}) =>
                 const idx = list.findIndex(d => d.id === event.draft.id)
                 return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
               }
+              if (event.type === 'swap') {
+                if (event.draft.amountIn === 0n) return list.filter(d => d.id !== event.draft.id)
+                const idx = list.findIndex(d => d.id === event.draft.id)
+                return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
+              }
               if (event.type === 'sell-claim') {
                 const amount = event.draft.kind === 'sell' ? event.draft.sharesOut : event.draft.amount
                 if (amount === 0n) return list.filter(d => d.id !== event.draft.id)
@@ -362,7 +263,8 @@ export const $Main = (_config: IApp = {}) =>
                 return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
               }
               if (event.type === 'redeem') {
-                if (event.draft.acceptableShares === 0n) return list.filter(d => d.id !== event.draft.id)
+                if (event.draft.assetsOut === 0n && !event.draft.fulfill && !event.draft.liquidate)
+                  return list.filter(d => d.id !== event.draft.id)
                 const idx = list.findIndex(d => d.id === event.draft.id)
                 return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
               }
@@ -420,6 +322,7 @@ export const $Main = (_config: IApp = {}) =>
             map((list): DraftEvent => ({ type: 'set-subscribes', list }), changeMatchRuleList),
             map((draft): DraftEvent => ({ type: 'upsert', draft }), changeDraft),
             map((draft): DraftEvent => ({ type: 'allocate', draft }), changeAllocateDraft),
+            map((draft): DraftEvent => ({ type: 'swap', draft }), changeSwapDraft),
             map((draft): DraftEvent => ({ type: 'sell-claim', draft }), changeRedeemDraft),
             map((draft): DraftEvent => ({ type: 'redeem', draft }), changeFulfillDraft),
             map((key): DraftEvent => ({ type: 'release', key }), releaseDraft),
@@ -451,6 +354,14 @@ export const $Main = (_config: IApp = {}) =>
       )
       const draftAllocateList: IStream<IAllocateDraft[]> = map(
         list => list.filter((d): d is IAllocateDraft => d.kind === 'allocate'),
+        draftList
+      )
+      const draftRedeemList: IStream<IRedeemDraft[]> = map(
+        list => list.filter((d): d is IRedeemDraft => d.kind === 'redeem'),
+        draftList
+      )
+      const draftSwapList: IStream<ISwapDraft[]> = map(
+        list => list.filter((d): d is ISwapDraft => d.kind === 'swap'),
         draftList
       )
 
@@ -497,30 +408,30 @@ export const $Main = (_config: IApp = {}) =>
             )
           }, pwaUpgradeNotification),
 
-          $MainMenu({ subaccountList })({}),
+          $MainMenu({ walletState })({}),
 
-          $PairBanner({ walletQuery, subaccountList })({}),
+          $PairBanner({ walletQuery, walletState })({}),
+          // $ExtensionBanner({ walletQuery })({}),
 
-          contains(routeSchema.home)($midContainer(fadeIn($Home({})({})))),
-          contains(routeSchema.hello)(
+          match(routeSchema)(
             $midContainer(
               fadeIn(
-                $HelloPage({
+                $Home({
                   walletQuery,
-                  subaccountList,
-                  draftDepositList,
-                  draftWithdrawList,
-                  draftAllocateList
+                  walletState,
+                  draftAllocateList,
+                  draftRedeemList,
+                  draftSwapList
                 })({
-                  changeDraft: changeDraftTether(),
                   changeAllocateDraft: changeAllocateDraftTether(),
                   changeRedeemDraft: changeRedeemDraftTether(),
-                  changeFulfillDraft: changeFulfillDraftTether()
+                  changeFulfillDraft: changeFulfillDraftTether(),
+                  changeSwapDraft: changeSwapDraftTether()
                 })
               )
             )
           ),
-          match(routeSchema)(
+          match(routeSchema.leaderboard)(
             $midContainer(
               fadeIn(
                 $Leaderboard({
@@ -538,20 +449,30 @@ export const $Main = (_config: IApp = {}) =>
               )
             )
           ),
-          contains(routeSchema.master.detail)(
-            fadeIn(
-              $MasterPage({
-                userMatchingRuleQuery,
-                activityTimeframe,
-                collateralTokenList,
-                indexTokenList,
-                draftMatchingRuleList
-              })({
-                selectCollateralTokenList: selectCollateralTokenListTether(),
-                selectIndexTokenList: selectIndexTokenListTether(),
-                changeActivityTimeframe: changeActivityTimeframeTether(),
-                changeMatchRuleList: changeMatchRuleListTether()
-              })
+          contains(routeSchema.fund.detail)(
+            switchLatest(
+              map(
+                () =>
+                  fadeIn(
+                    $PublicFundPage({
+                      userMatchingRuleQuery,
+                      activityTimeframe,
+                      collateralTokenList,
+                      indexTokenList,
+                      draftMatchingRuleList
+                    })({
+                      selectCollateralTokenList: selectCollateralTokenListTether(),
+                      selectIndexTokenList: selectIndexTokenListTether(),
+                      changeActivityTimeframe: changeActivityTimeframeTether(),
+                      changeMatchRuleList: changeMatchRuleListTether()
+                    })
+                  ),
+                op(
+                  merge(just(null), locationChange),
+                  map(() => document.location.pathname),
+                  skipRepeats
+                )
+              )
             )
           ),
           match(routeSchema.portfolio)(
@@ -561,9 +482,12 @@ export const $Main = (_config: IApp = {}) =>
                   draftDepositList,
                   draftWithdrawList,
                   draftAllocateList,
+                  draftRedeemList,
+                  draftSwapList,
+                  draftMatchingRuleList,
                   userMatchingRuleQuery,
                   walletQuery,
-                  subaccountList,
+                  walletState,
                   activityTimeframe,
                   collateralTokenList,
                   indexTokenList
@@ -574,17 +498,13 @@ export const $Main = (_config: IApp = {}) =>
                   changeDraft: changeDraftTether(),
                   changeRedeemDraft: changeRedeemDraftTether(),
                   changeAllocateDraft: changeAllocateDraftTether(),
-                  changeFulfillDraft: changeFulfillDraftTether()
+                  changeFulfillDraft: changeFulfillDraftTether(),
+                  changeSwapDraft: changeSwapDraftTether(),
+                  changeMatchRuleList: changeMatchRuleListTether()
                 })
               )
             )
           ),
-          $row(style({ position: 'fixed', zIndex: 100, right: '16px', bottom: '16px' }))(
-            $ServicesConnectivity({ matchmaker: compact.status })({})
-          ),
-
-          switchLatest($extensionSync),
-
           contains(routeSchema)(
             $column(
               style({
@@ -598,10 +518,11 @@ export const $Main = (_config: IApp = {}) =>
                 zIndex: 10
               })
             )(
-              $ActionDrawer({ draftList, subaccountList })({
+              $ActionDrawer({ draftList, walletState })({
                 clearDrafts: clearDraftsTether(),
                 releaseDraft: releaseDraftTether(),
-                changeAttest: changeAttestTether()
+                changeAttest: changeAttestTether(),
+                changeDraft: changeDraftTether()
               })
             )
           )

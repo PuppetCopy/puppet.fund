@@ -109,10 +109,11 @@ contract Account is Permission {
         address _account = LibClone.cloneDeterministic(puppetAccountImpl, _args, keccak256(_args));
         route_ = _deployRoute(_account);
         account_ = PuppetAccount(payable(_account));
-        _logEvent("DeployPuppetAccount", abi.encode(_params, _account, route_));
+        _logEvent("DeployPuppetAccount", abi.encode(_params.user, _params.signer, _account, route_));
     }
 
     function createFundAccount(
+        address _user,
         address _signer
     ) external auth returns (FundAccount account_, address route_) {
         if (_signer == address(0)) revert Error.Account__InvalidUser();
@@ -120,7 +121,7 @@ contract Account is Permission {
         address _account = LibClone.cloneDeterministic(fundAccountImpl, _args, keccak256(_args));
         route_ = _deployRoute(_account);
         account_ = FundAccount(payable(_account));
-        _logEvent("DeployFundAccount", abi.encode(_signer, _account, route_));
+        _logEvent("DeployFundAccount", abi.encode(_user, _signer, _account, route_));
     }
 
     function dispatch(

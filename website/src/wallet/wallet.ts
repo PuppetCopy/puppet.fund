@@ -12,6 +12,7 @@ import {
   getConnection,
   getConnectors,
   getPublicClient,
+  reconnect,
   disconnect as wagmiDisconnect,
   watchConnection,
   watchConnectors
@@ -20,8 +21,7 @@ import type { IStream } from 'aelea/stream'
 import { fromCallback } from 'aelea/stream-extended'
 import { type Chain, fallback, http, type PublicClient } from 'viem'
 
-export const WALLETCONNECT_PROJECT_ID = 'b81521b9a6d17b1d070aa5899c2fdcfe'
-
+export const WALLETCONNECT_PROJECT_ID = '37a9b5a1299a3d3d2ddecf4f022030f5'
 // Injected at build time by vite's `define` from `SITE_CONFIG`.
 declare const __WC_METADATA__: {
   name: string
@@ -46,6 +46,12 @@ export const wagmi: Config = createConfig({
     VIEM_CHAINS.map(chain => [chain.id, proxyTransport(CHAIN_NETWORK_MAP[chain.id], chain)])
   ) as Record<ChainId, ReturnType<typeof proxyTransport>>
 })
+
+// wagmi persists connection state to storage but drops `status` on rehydrate (it "messes
+// with reconnection"), so a reload reports `disconnected` until reconnect() re-establishes
+// the live connector. Fire it once at startup; consumers re-read via the `connection` stream
+// (watchConnection emits the reconnecting → connected transition).
+export const walletReconnected: Promise<void> = reconnect(wagmi).then(() => undefined)
 
 export const publicClientMap: Record<number, PublicClient> = Object.fromEntries(
   VIEM_CHAINS.flatMap(chain => {

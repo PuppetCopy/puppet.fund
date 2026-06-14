@@ -6,6 +6,7 @@ import { state } from 'aelea/stream-extended'
 import type { Address, Chain, Client, Hex, Transport } from 'viem'
 import { isAddressEqual } from 'viem'
 import { readContract } from 'viem/actions'
+import { ADDRESS_ZERO } from '../const/common.js'
 import { periodicRun } from '../core/stream/recover.js'
 
 // Minimum client shape we rely on: transport + chain. Accepts viem's
@@ -104,7 +105,7 @@ const WETH_ADDRESSES: readonly Address[] = Object.values(CHAIN_TOKEN_MAP).map(c 
 const USDC_ADDRESSES: readonly Address[] = Object.values(CHAIN_TOKEN_MAP).map(c => c.USDC as Address)
 
 export async function getTokenPerEth(oracleClient: FeeClient, token: Address): Promise<bigint> {
-  if (WETH_ADDRESSES.some(a => isAddressEqual(token, a))) return WEI_PER_ETH
+  if (token === ADDRESS_ZERO || WETH_ADDRESSES.some(a => isAddressEqual(token, a))) return WEI_PER_ETH
   if (USDC_ADDRESSES.some(a => isAddressEqual(token, a))) {
     if (oracleClient.chain?.id !== HUB_CHAIN_ID) {
       throw new Error('USDC fee quote requires Arbitrum oracle client')
@@ -137,13 +138,14 @@ export function computeRelayFee(
 }
 
 /** Tokens that can pay relay fees today (extend as registry grows). */
-export const SUPPORTED_FEE_TOKEN_IDS = [TOKEN_ID.USDC, TOKEN_ID.WETH] as const
+export const SUPPORTED_FEE_TOKEN_IDS = [TOKEN_ID.USDC, TOKEN_ID.WETH, TOKEN_ID.ETH] as const
 
+// Native ether prices as WETH: the identity short-circuit in `getTokenPerEth` applies.
 function feeTokenAddress(baseTokenId: Hex, chainId: number): Address {
   const tokens = CHAIN_TOKEN_MAP[chainId as keyof typeof CHAIN_TOKEN_MAP]
   if (!tokens) throw new Error(`no token map for chain ${chainId}`)
   if (baseTokenId === TOKEN_ID.USDC) return tokens.USDC as Address
-  if (baseTokenId === TOKEN_ID.WETH) return tokens.WETH as Address
+  if (baseTokenId === TOKEN_ID.WETH || baseTokenId === TOKEN_ID.ETH) return tokens.WETH as Address
   throw new Error(`unsupported fee token ${baseTokenId}`)
 }
 

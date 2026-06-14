@@ -35,7 +35,8 @@ export async function buildSubscribeInput(draft: ISubscribeDraft, ctx: ExecConte
     'HubGate',
     'subscribe',
     draft.baseToken,
-    homePublicClient
+    homePublicClient,
+    1n
   )
 
   const ruleBody = {

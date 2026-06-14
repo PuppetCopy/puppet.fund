@@ -197,9 +197,6 @@ contract AccountGate is BaseGate, EIP712 {
         if (_intent.destinationChainId != hubChainId) {
             revert Error.Deposit__InvalidDestinationChain(hubChainId, _intent.destinationChainId);
         }
-        if (_intent.destinationChainId == block.chainid) {
-            revert Error.Deposit__SameChainBridge(_intent.destinationChainId);
-        }
         if (_intent.outputAmount == 0) revert Error.Deposit__ZeroBridgeOutput();
         if (_actualRelayFee >= _intent.inputAmount) revert Error.Deposit__RelayFeeTooHigh();
 

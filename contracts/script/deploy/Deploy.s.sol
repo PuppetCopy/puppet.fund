@@ -17,6 +17,8 @@ import {FundAccount} from "src/core/FundAccount.sol";
 import {Route} from "src/core/Route.sol";
 import {Deposit} from "src/core/Deposit.sol";
 import {BaseGate} from "src/utils/BaseGate.sol";
+import {Access} from "src/utils/auth/Access.sol";
+import {Permission} from "src/utils/auth/Permission.sol";
 import {AccountGate} from "src/AccountGate.sol";
 import {MasterGate} from "src/MasterGate.sol";
 import {HubGate} from "src/HubGate.sol";
@@ -39,15 +41,18 @@ contract Deploy is BaseScript {
     function deployHub() public {
         require(block.chainid == _getHubChainId(), "Deploy: deployHub must run on the hub chain");
         _requireDeployConfig();
-        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
         string[] memory core = _coreContracts();
-        for (uint i; i < core.length; ++i) {
-            _deploy(core[i]);
-        }
         string[] memory hub = _hubContracts();
-        for (uint i; i < hub.length; ++i) {
-            _deploy(hub[i]);
+        string[] memory names = new string[](core.length + hub.length);
+        for (uint i; i < core.length; ++i) {
+            names[i] = core[i];
         }
+        for (uint i; i < hub.length; ++i) {
+            names[core.length + i] = hub[i];
+        }
+        _planAndGate(names);
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
+        _executePlan();
         _wireCore();
         _wireHub();
         _registerTokens();
@@ -57,14 +62,169 @@ contract Deploy is BaseScript {
     function deploySpoke() public {
         require(block.chainid != _getHubChainId(), "Deploy: deploySpoke must run on a non-hub chain");
         _requireDeployConfig();
+        _planAndGate(_coreContracts());
         vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
-        string[] memory core = _coreContracts();
-        for (uint i; i < core.length; ++i) {
-            _deploy(core[i]);
-        }
+        _executePlan();
         _wireCore();
         _registerTokens();
         vm.stopBroadcast();
+    }
+
+    // The pre-broadcast gate is the doctrine's enforcement point: logic swaps are free,
+    // a store re-key demands an explicit MIGRATE_STORES ack, and a root re-key is only
+    // sanctioned by a protocol.version bump (= deliberate universe migration). The
+    // universe signal is derived, not recorded: Dictate's address is a pure function of
+    // the version salt, so a moved Dictate anchor IS the bump. Nothing is signed or
+    // written before the whole plan passes.
+    function _planAndGate(
+        string[] memory names
+    ) internal {
+        uint version = _getVersion();
+        bool universe = _isUniverseMigration(version);
+        string memory storeAck = vm.envOr("MIGRATE_STORES", string(""));
+        bytes32 salt = bytes32(version);
+        bool refused;
+        console2.log("=== deploy plan | version:", version, universe ? "| UNIVERSE MIGRATION" : "");
+        for (uint i; i < names.length; ++i) {
+            Meta memory m = _meta(names[i]);
+            bytes32 initCodeHash = keccak256(bytes.concat(m.creationCode, m.ctorArgs));
+            address predicted = address(
+                uint160(uint(keccak256(abi.encodePacked(bytes1(0xff), address(FACTORY), salt, initCodeHash))))
+            );
+            _plannedAddr[keccak256(bytes(names[i]))] = predicted;
+            address prev = _addrOrZero(_isRouter(names[i]) ? string.concat(names[i], "Impl") : names[i]);
+            bool deployNeeded = predicted.code.length == 0;
+            bool drift = prev != address(0) && prev != predicted;
+            _plan.push(
+                Plan({
+                    name: names[i],
+                    class: m.class,
+                    universal: m.universal,
+                    predicted: predicted,
+                    prev: prev,
+                    deployNeeded: deployNeeded
+                })
+            );
+            console2.log(
+                string.concat(
+                    _classLabel(m.class), drift ? " drift " : (deployNeeded ? " new   " : " keep  "), names[i]
+                ),
+                predicted
+            );
+            if (drift && !universe) {
+                if (m.class == Class.Root) {
+                    console2.log("    REFUSED: root re-key orphans derived addresses; bump protocol.version");
+                    refused = true;
+                } else if (m.class == Class.Store && !_listContains(storeAck, names[i])) {
+                    console2.log("    REFUSED: store re-key resets state; ack with MIGRATE_STORES");
+                    refused = true;
+                }
+            }
+        }
+        require(!refused, "Deploy: plan refused");
+    }
+
+    function _isUniverseMigration(
+        uint version
+    ) internal returns (bool) {
+        Meta memory m = _meta("Dictate");
+        address predicted = address(
+            uint160(
+                uint(
+                    keccak256(
+                        abi.encodePacked(
+                            bytes1(0xff),
+                            address(FACTORY),
+                            bytes32(version),
+                            keccak256(bytes.concat(m.creationCode, m.ctorArgs))
+                        )
+                    )
+                )
+            )
+        );
+        address recorded = _addrOrZero("Dictate");
+        return recorded == address(0) || recorded != predicted;
+    }
+
+    function _executePlan() internal {
+        bytes32 salt = bytes32(_getVersion());
+        for (uint i; i < _plan.length; ++i) {
+            Plan memory p = _plan[i];
+            if (p.deployNeeded) {
+                Meta memory m = _meta(p.name);
+                FACTORY.safeCreate2(salt, bytes.concat(m.creationCode, m.ctorArgs));
+            }
+            if (_isRouter(p.name)) continue;
+            if (p.universal) _setCoreAddress(p.name, p.predicted, p.deployNeeded);
+            else _setChainAddress(p.name, p.predicted);
+        }
+    }
+
+    function _prevOf(
+        string memory name
+    ) internal view returns (address) {
+        bytes32 k = keccak256(bytes(name));
+        for (uint i; i < _plan.length; ++i) {
+            if (keccak256(bytes(_plan[i].name)) == k) return _plan[i].prev;
+        }
+        return address(0);
+    }
+
+    function _grantAccess(
+        Dictate dictate,
+        string memory targetName,
+        string memory granteeName
+    ) internal {
+        address target = _specAddr(targetName);
+        address grantee = _specAddr(granteeName);
+        address prevGrantee = _prevOf(granteeName);
+        if (prevGrantee != address(0) && prevGrantee != grantee && _prevOf(targetName) == target) {
+            dictate.removeAccess(Access(target), prevGrantee);
+        }
+        dictate.setAccess(Access(target), grantee);
+    }
+
+    function _grantPermission(
+        Dictate dictate,
+        string memory targetName,
+        bytes4 selector,
+        string memory granteeName
+    ) internal {
+        address target = _specAddr(targetName);
+        address grantee = _specAddr(granteeName);
+        address prevGrantee = _prevOf(granteeName);
+        if (prevGrantee != address(0) && prevGrantee != grantee && _prevOf(targetName) == target) {
+            dictate.removePermission(Permission(target), selector, prevGrantee);
+        }
+        dictate.setPermission(Permission(target), selector, grantee);
+    }
+
+    function _classLabel(
+        Class c
+    ) internal pure returns (string memory) {
+        if (c == Class.Root) return "[root ]";
+        if (c == Class.Store) return "[store]";
+        return "[logic]";
+    }
+
+    function _listContains(
+        string memory csv,
+        string memory name
+    ) internal pure returns (bool) {
+        bytes memory h = bytes(csv);
+        bytes memory n = bytes(name);
+        if (n.length == 0 || h.length < n.length) return false;
+        for (uint i; i + n.length <= h.length; ++i) {
+            bool ok = true;
+            for (uint j; j < n.length; ++j) {
+                if (h[i + j] != n[j]) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) return true;
+        }
+        return false;
     }
 
     function redeployGate(
@@ -74,7 +234,12 @@ contract Deploy is BaseScript {
         vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
         Dictate dictate = Dictate(_getCoreAddress("Dictate"));
         Meta memory m = _meta(name);
-        address impl = _create(bytes.concat(m.creationCode, m.ctorArgs));
+        bytes memory initCode = bytes.concat(m.creationCode, m.ctorArgs);
+        bytes32 salt = bytes32(_getVersion());
+        address impl = address(
+            uint160(uint(keccak256(abi.encodePacked(bytes1(0xff), address(FACTORY), salt, keccak256(initCode)))))
+        );
+        if (impl.code.length == 0) FACTORY.safeCreate2(salt, initCode);
         bytes32 nameB;
         assembly {
             nameB := mload(add(name, 32))
@@ -94,11 +259,18 @@ contract Deploy is BaseScript {
     function _registerTokens() internal {
         Dictate dictate = Dictate(_specAddr("Dictate"));
         RegisterToken register = RegisterToken(_specAddr("RegisterToken"));
-        string[2] memory symbols = ["USDC", "WETH"];
+        string[] memory symbols = vm.parseTomlKeys(_const, string.concat(".", _chainKey(), ".token"));
         dictate.setAccess(register, DEPLOYER_ADDRESS);
         for (uint i; i < symbols.length; ++i) {
-            IERC20 token = _getChainToken(symbols[i]);
-            address hubToken = _const.readAddress(string.concat(".", _hubChainKey(), ".token.", symbols[i]));
+            address raw = _const.readAddress(string.concat(".", _chainKey(), ".token.", symbols[i]));
+            IERC20 token;
+            address hubToken;
+            if (raw == address(0)) {
+                hubToken = _const.readAddress(string.concat(".", _hubChainKey(), ".token.WETH"));
+            } else {
+                token = _getChainToken(symbols[i]);
+                hubToken = _const.readAddress(string.concat(".", _hubChainKey(), ".token.", symbols[i]));
+            }
             register.registerToken(keccak256(bytes(symbols[i])), token, 0, hubToken);
         }
         register.setWnt(keccak256("WETH"));
@@ -170,32 +342,13 @@ contract Deploy is BaseScript {
         names[7] = "HubGate";
     }
 
-    function _deploy(
-        string memory name
-    ) internal returns (address addr) {
-        Meta memory m = _meta(name);
-        bytes memory initCode = bytes.concat(m.creationCode, m.ctorArgs);
-        if (m.isCore) {
-            addr = address(
-                uint160(
-                    uint(keccak256(abi.encodePacked(bytes1(0xff), address(FACTORY), bytes32(0), keccak256(initCode))))
-                )
-            );
-            if (addr.code.length == 0) FACTORY.safeCreate2(bytes32(0), initCode);
-            _setCoreAddress(name, addr, true);
-            return addr;
-        }
-        addr = _create(initCode);
-        _setChainAddress(name, addr);
-    }
-
     function _wireCore() internal {
         Dictate dictate = Dictate(_specAddr("Dictate"));
         AccountContract accountModule = AccountContract(_specAddr("Account"));
         Deposit walletDeposit = Deposit(_specAddr("Deposit"));
 
         // Account is the ONLY authorized caller of Attest.execute/executeMandate (the account's gate).
-        dictate.setAccess(Attest(_specAddr("Attest")), address(accountModule));
+        _grantAccess(dictate, "Attest", "Account");
 
         address accountGateImpl = _specAddr("AccountGate");
         address accountGateProxy = dictate.setGate("AccountGate", accountGateImpl);
@@ -218,40 +371,65 @@ contract Deploy is BaseScript {
     function _wireHub() internal {
         Dictate dictate = Dictate(_specAddr("Dictate"));
         AccountContract accountModule = AccountContract(_specAddr("Account"));
-        Issue shareModule = Issue(_specAddr("Issue"));
-        RedeemStore redeemStore = RedeemStore(_specAddr("RedeemStore"));
-        AllocateStore allocateStore = AllocateStore(_specAddr("AllocateStore"));
-        Redeem redeem = Redeem(_specAddr("Redeem"));
-        Subscribe subscribe = Subscribe(_specAddr("Subscribe"));
-        Allocate allocate = Allocate(_specAddr("Allocate"));
+        Access subscribe = Access(_specAddr("Subscribe"));
+        Access allocate = Access(_specAddr("Allocate"));
+        Access redeem = Access(_specAddr("Redeem"));
 
         address hubImpl = _specAddr("HubGate");
         address hubProxy = dictate.setGate("HubGate", hubImpl);
         _setChainAddress("HubGateImpl", hubImpl);
         _setChainAddress("HubGate", hubProxy);
 
-        dictate.setAccess(allocateStore, address(subscribe));
-        dictate.setAccess(allocateStore, address(allocate));
-        dictate.setAccess(redeemStore, address(redeem));
-        dictate.setAccess(shareModule, address(allocate));
-        dictate.setAccess(shareModule, address(redeem));
+        _grantAccess(dictate, "AllocateStore", "Subscribe");
+        _grantAccess(dictate, "AllocateStore", "Allocate");
+        _grantAccess(dictate, "RedeemStore", "Redeem");
+        _grantAccess(dictate, "Issue", "Allocate");
+        _grantAccess(dictate, "Issue", "Redeem");
         dictate.setAccess(subscribe, hubProxy);
         dictate.setAccess(allocate, hubProxy);
         dictate.setAccess(redeem, hubProxy);
 
         dictate.setPermission(accountModule, AccountContract.dispatch.selector, hubProxy);
-        dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, address(allocate));
-        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(subscribe));
-        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(allocate));
-        dictate.setPermission(accountModule, AccountContract.dispatchMandate.selector, address(allocate));
-        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(redeem));
+        _grantPermission(dictate, "Account", AccountContract.createFundAccount.selector, "Allocate");
+        _grantPermission(dictate, "Account", AccountContract.dispatch.selector, "Subscribe");
+        _grantPermission(dictate, "Account", AccountContract.dispatch.selector, "Allocate");
+        _grantPermission(dictate, "Account", AccountContract.dispatchMandate.selector, "Allocate");
+        _grantPermission(dictate, "Account", AccountContract.dispatch.selector, "Redeem");
+    }
+
+    function _gateConfig() internal view returns (BaseGate.Config memory) {
+        return BaseGate.Config({
+            attestor: ATTESTOR_ADDRESS,
+            feeReceiver: RELAYER_ADDRESS,
+            transferGasLimit: _getTransferGasLimit(),
+            maxBlockDelay: _getMaxBlockDelay(),
+            maxRelayFeeBps: _getMaxRelayFeeBps()
+        });
+    }
+
+    enum Class {
+        Root,
+        Store,
+        Logic
     }
 
     struct Meta {
         bytes creationCode;
         bytes ctorArgs;
-        bool isCore;
+        Class class;
+        bool universal;
     }
+
+    struct Plan {
+        string name;
+        Class class;
+        bool universal;
+        address predicted;
+        address prev;
+        bool deployNeeded;
+    }
+
+    Plan[] internal _plan;
 
     function _isRouter(
         string memory name
@@ -263,32 +441,36 @@ contract Deploy is BaseScript {
 
     function _meta(
         string memory name
-    ) internal view returns (Meta memory) {
+    ) internal returns (Meta memory) {
         bytes32 k = keccak256(bytes(name));
         if (k == keccak256("Dictate")) {
             return
-                Meta({creationCode: type(Dictate).creationCode, ctorArgs: abi.encode(GOVERNOR_ADDRESS), isCore: true});
+                Meta({creationCode: type(Dictate).creationCode, ctorArgs: abi.encode(GOVERNOR_ADDRESS), class: Class.Root, universal: true});
         }
         if (k == keccak256("RegisterToken")) {
             return Meta({
                 creationCode: type(RegisterToken).creationCode,
                 ctorArgs: abi.encode(_specAddr("Dictate"), _getHubChainId()),
-                isCore: true
+                class: Class.Store,
+                universal: true
             });
         }
         if (k == keccak256("PuppetAccount")) {
-            return Meta({creationCode: type(PuppetAccount).creationCode, ctorArgs: "", isCore: true});
+            return Meta({creationCode: type(PuppetAccount).creationCode, ctorArgs: "", class: Class.Root, universal: true});
         }
         if (k == keccak256("FundAccount")) {
-            return Meta({creationCode: type(FundAccount).creationCode, ctorArgs: "", isCore: true});
+            return Meta({creationCode: type(FundAccount).creationCode, ctorArgs: "", class: Class.Root, universal: true});
         }
         if (k == keccak256("Route")) {
-            return Meta({creationCode: type(Route).creationCode, ctorArgs: "", isCore: true});
+            return Meta({creationCode: type(Route).creationCode, ctorArgs: "", class: Class.Root, universal: true});
         }
         if (k == keccak256("Attest")) {
             return
                 Meta({
-                    creationCode: type(Attest).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: true
+                    creationCode: type(Attest).creationCode,
+                    ctorArgs: abi.encode(_specAddr("Dictate")),
+                    class: Class.Root,
+                    universal: true
                 });
         }
         if (k == keccak256("Account")) {
@@ -301,13 +483,17 @@ contract Deploy is BaseScript {
                     _specAddr("FundAccount"),
                     _specAddr("Route")
                 ),
-                isCore: true
+                class: Class.Store,
+                universal: true
             });
         }
         if (k == keccak256("Deposit")) {
             return
                 Meta({
-                    creationCode: type(Deposit).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: true
+                    creationCode: type(Deposit).creationCode,
+                    ctorArgs: abi.encode(_specAddr("Dictate")),
+                    class: Class.Logic,
+                    universal: true
                 });
         }
         if (k == keccak256("AccountGate")) {
@@ -319,71 +505,72 @@ contract Deploy is BaseScript {
                     _specAddr("Deposit"),
                     _specAddr("RegisterToken"),
                     _getHubChainId(),
-                    BaseGate.Config({
-                        attestor: ATTESTOR_ADDRESS,
-                        feeReceiver: RELAYER_ADDRESS,
-                        transferGasLimit: _getTransferGasLimit(),
-                        maxBlockDelay: _getMaxBlockDelay(),
-                        maxRelayFeeBps: _getMaxRelayFeeBps()
-                    })
+                    _gateConfig()
                 ),
-                isCore: false
+                class: Class.Logic,
+                universal: false
             });
         }
         if (k == keccak256("MasterGate")) {
             return Meta({
                 creationCode: type(MasterGate).creationCode,
                 ctorArgs: abi.encode(
-                    _specAddr("Dictate"),
-                    _specAddr("Account"),
-                    _specAddr("RegisterToken"),
-                    BaseGate.Config({
-                        attestor: ATTESTOR_ADDRESS,
-                        feeReceiver: RELAYER_ADDRESS,
-                        transferGasLimit: _getTransferGasLimit(),
-                        maxBlockDelay: _getMaxBlockDelay(),
-                        maxRelayFeeBps: _getMaxRelayFeeBps()
-                    })
+                    _specAddr("Dictate"), _specAddr("Account"), _specAddr("RegisterToken"), _gateConfig()
                 ),
-                isCore: false
+                class: Class.Logic,
+                universal: false
             });
         }
         if (k == keccak256("ShareToken")) {
-            return Meta({creationCode: type(ShareToken).creationCode, ctorArgs: "", isCore: false});
+            return Meta({creationCode: type(ShareToken).creationCode, ctorArgs: "", class: Class.Root, universal: false});
         }
         if (k == keccak256("Issue")) {
             return Meta({
                 creationCode: type(Issue).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate"), _specAddr("Account"), _specAddr("ShareToken")),
-                isCore: false
+                ctorArgs: abi.encode(_specAddr("Dictate"), _specAddr("ShareToken")),
+                class: Class.Root,
+                universal: false
             });
         }
         if (k == keccak256("RedeemStore")) {
             return Meta({
-                creationCode: type(RedeemStore).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: false
+                creationCode: type(RedeemStore).creationCode,
+                ctorArgs: abi.encode(_specAddr("Dictate")),
+                class: Class.Store,
+                universal: false
             });
         }
         if (k == keccak256("Redeem")) {
             return
                 Meta({
-                    creationCode: type(Redeem).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: false
+                    creationCode: type(Redeem).creationCode,
+                    ctorArgs: abi.encode(_specAddr("Dictate")),
+                    class: Class.Logic,
+                    universal: false
                 });
         }
         if (k == keccak256("AllocateStore")) {
             return Meta({
                 creationCode: type(AllocateStore).creationCode,
                 ctorArgs: abi.encode(_specAddr("Dictate")),
-                isCore: false
+                class: Class.Store,
+                universal: false
             });
         }
         if (k == keccak256("Subscribe")) {
             return Meta({
-                creationCode: type(Subscribe).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: false
+                creationCode: type(Subscribe).creationCode,
+                ctorArgs: abi.encode(_specAddr("Dictate")),
+                class: Class.Logic,
+                universal: false
             });
         }
         if (k == keccak256("Allocate")) {
             return Meta({
-                creationCode: type(Allocate).creationCode, ctorArgs: abi.encode(_specAddr("Dictate")), isCore: false
+                creationCode: type(Allocate).creationCode,
+                ctorArgs: abi.encode(_specAddr("Dictate")),
+                class: Class.Logic,
+                universal: false
             });
         }
         if (k == keccak256("HubGate")) {
@@ -399,15 +586,10 @@ contract Deploy is BaseScript {
                     _specAddr("Redeem"),
                     _specAddr("RedeemStore"),
                     _specAddr("RegisterToken"),
-                    BaseGate.Config({
-                        attestor: ATTESTOR_ADDRESS,
-                        feeReceiver: RELAYER_ADDRESS,
-                        transferGasLimit: _getTransferGasLimit(),
-                        maxBlockDelay: _getMaxBlockDelay(),
-                        maxRelayFeeBps: _getMaxRelayFeeBps()
-                    })
+                    _gateConfig()
                 ),
-                isCore: false
+                class: Class.Logic,
+                universal: false
             });
         }
         revert(string.concat("Deploy: unknown contract ", name));
@@ -461,8 +643,8 @@ contract Deploy is BaseScript {
 
     function _addrOrZero(
         string memory name
-    ) internal view returns (address) {
-        string memory fresh = vm.readFile(DEPLOYMENTS_PATH);
+    ) internal returns (address) {
+        string memory fresh = vm.readFile(_deploymentsPath());
         string memory coreKey = string.concat(".core.", name, ".address");
         if (vm.keyExistsToml(fresh, coreKey)) {
             address a = fresh.readAddress(coreKey);

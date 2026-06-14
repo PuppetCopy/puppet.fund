@@ -1,6 +1,7 @@
-import { readableUsd } from '@puppet/sdk/core'
-import type { ISubaccountState } from '@puppet/sdk/state'
+import { FLOAT_PRECISION, HUB_CHAIN_ID } from '@puppet/contracts/const'
+import { computeClaimable, computeQueuedShares, type ISubaccountState, type ITokenRegistryMap } from '@puppet/sdk/state'
 import {
+  combine,
   constant,
   empty,
   filter,
@@ -44,7 +45,7 @@ import {
 } from 'aelea/ui-components'
 import { colorShade, palette, type Theme, theme } from 'aelea/ui-components-theme'
 import { $defaultAnchor, $Link, locationChange, pushUrl, type Route } from 'aelea/ui-router'
-import type { Address } from 'viem'
+import { type Address, formatUnits, getAddress, type Hex } from 'viem'
 import {
   $alertIntermediateSpinnerContainer,
   $anchor,
@@ -63,17 +64,22 @@ import { routeSchema } from '../app/routeSchema.js'
 import { $jazzicon } from '../common/$avatar.js'
 import { $puppetLogo } from '../common/$icons.js'
 import { DOCS_URL, GITHUB_REPO_URL } from '../const/links.js'
+import * as context from '../io/context.js'
+import { latestPriceMap } from '../io/gmx/priceFeed.js'
+import { matchmakerStatus } from '../io/matchmaker/index.js'
 import { $separator2 } from '../pages/common.js'
 import { type connectWallet, type IConnectedWallet, walletQuery } from '../wallet/index.js'
 import { $accountLabel } from './$AccountProfile.js'
+import { $ServicesConnectivity } from './$ServicesConnectivity.js'
+import { $WalletLink } from './$WalletLink.js'
 import { $ThemePicker } from './$ThemePicker.js'
 import { $WalletConnect } from './$WalletConnect.js'
 
 interface I$MainMenu {
-  subaccountList: IStream<Promise<ISubaccountState[]>>
+  walletState: IStream<ISubaccountState | null>
 }
 
-export const $MainMenu = ({ subaccountList }: I$MainMenu) =>
+export const $MainMenu = ({ walletState }: I$MainMenu) =>
   component(
     (
       [clickPopoverClaim, clickPopoverClaimTether]: IBehavior<any, any>,
@@ -104,7 +110,6 @@ export const $MainMenu = ({ subaccountList }: I$MainMenu) =>
             getTrigger()?.focus()
           })
         )
-      const subaccountListState: IStream<ISubaccountState[]> = op(subaccountList, switchPromises, state())
 
       const iconCircularStyle = style({
         padding: '0 4px',
@@ -251,7 +256,8 @@ export const $MainMenu = ({ subaccountList }: I$MainMenu) =>
             })({})
           ),
 
-          $row(style({ flex: 1, alignItems: 'center', placeContent: 'center' }))(
+          $row(spacing.default, style({ flex: 1, alignItems: 'center', placeContent: 'center' }))(
+            $ServicesConnectivity({ matchmaker: matchmakerStatus })({}),
             $intermediatePromise({
               $loader: $node(style({ position: 'relative', display: 'inline-flex', borderRadius: '50px' }))(
                 style({ position: 'relative' })($target),
@@ -294,14 +300,50 @@ export const $MainMenu = ({ subaccountList }: I$MainMenu) =>
                   overflow: 'hidden'
                 })
 
+                const registryState: IStream<ITokenRegistryMap> = op(
+                  context.tokenRegistryQuery,
+                  switchPromises,
+                  state()
+                )
+                // Total account value, lensed off the root PA state: cash + per-position
+                // value (claimable + held shares at fund NAV). The fund's own cash is the
+                // backing of those shares, so position value IS the wallet's claim on it.
                 const totalUsdText: IStream<string> = op(
-                  subaccountListState,
-                  map(list => `$${readableUsd(list.reduce((acc, a) => acc + a.balanceUsd, 0n))}`),
+                  combine({ root: walletState, prices: latestPriceMap, registry: registryState }),
+                  map(p => {
+                    if (!p.root) return '-'
+                    const priceOf = (tokenId: Hex): bigint => {
+                      const hubToken = p.registry.get(HUB_CHAIN_ID)?.get(tokenId)?.token
+                      return (hubToken ? p.prices[hubToken]?.price : undefined) ?? 0n
+                    }
+                    const fundById = new Map(p.root.funds.map(f => [getAddress(f.fund), f] as const))
+                    let total = 0n
+                    for (const [tokenId, row] of p.root.balances) total += row.signedBalance * priceOf(tokenId)
+                    for (const pos of p.root.positions) {
+                      const fund = fundById.get(getAddress(pos.fund))
+                      if (!fund) continue
+                      const px = priceOf(fund.baseTokenId as Hex)
+                      const redeemPos = {
+                        sharesHeld: pos.sharesHeld,
+                        stake: pos.stake,
+                        cursor: pos.cursor,
+                        accrued: pos.accrued,
+                        accruedPerStake: fund.accruedPerStake,
+                        totalStake: fund.totalStake,
+                        queuedShares: fund.queuedShares
+                      }
+                      total +=
+                        (computeClaimable(redeemPos) +
+                          ((pos.sharesHeld + computeQueuedShares(redeemPos)) * fund.navPerShare) / FLOAT_PRECISION) *
+                        px
+                    }
+                    return `$${Number(formatUnits(total, 30)).toFixed(2)}`
+                  }),
                   start('-')
                 )
 
                 return $element('a')(
-                  attr({ 'aria-label': 'Portfolio', href: '/portfolio' }),
+                  attr({ 'aria-label': 'Wallet Page', href: '/portfolio' }),
                   style({
                     display: 'inline-flex',
                     alignItems: 'center',
@@ -337,7 +379,8 @@ export const $MainMenu = ({ subaccountList }: I$MainMenu) =>
                   )
                 )
               }, walletQuery)
-            })
+            }),
+            $WalletLink({ walletState: op(walletQuery, switchPromises, state()) })({})
           ),
 
           $row(spacing.big, style({ flex: 1, placeContent: 'flex-end', alignItems: 'center' }))(

@@ -1,22 +1,19 @@
 import {
+  dustToZeroUsd,
   getMappedValueFallback,
   type IMarketDescription,
   type ITokenDescription,
-  lst,
   readableDate,
-  readableExactTokenAmount,
   readableLeverage,
-  readablePercentage,
   readablePnl,
-  readableUsd,
-  toBasisPoints
+  readableUsd
 } from '@puppet/sdk/core'
 import { getLiquidationPrice, getPositionPnlUsd, getTokenDescription, liquidationWeight } from '@puppet/sdk/gmx'
-import { empty, filterNull, type IStream, map, skipRepeats, toStream } from 'aelea/stream'
+import { empty, type IStream, map, skipRepeats, toStream } from 'aelea/stream'
 import type { IBehavior, IComposeBehavior } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, type INode, nodeEvent, style, styleInline } from 'aelea/ui'
 import { $column, $row, $separator, isDesktopScreen, layoutSheet, spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
+import { palette } from 'aelea/ui-components-theme'
 import type { Address } from 'viem/accounts'
 import {
   $errorCard,
@@ -25,7 +22,6 @@ import {
   $Link,
   $labeledDivider,
   $labeledValue,
-  $puppeteer,
   $Tooltip,
   $tokenIconMap,
   $unknown,
@@ -37,6 +33,7 @@ import { latestPriceMap } from '../io/gmx/priceFeed.js'
 import { $separator2 } from '../pages/common.js'
 import type { IPosition } from '../pages/types.js'
 import { isPositionSettled } from '../utils/utils.js'
+import { $jazzicon } from './$avatar.js'
 import { $roboAvatar } from './$roboAvatar.js'
 
 export const $midContainer = $column(
@@ -132,50 +129,6 @@ export const $tokenIcon = (tokenDesc: ITokenDescription, size = '32px', color = 
   })
 }
 
-export const $masterDisplay = ({ address, size = 36 }: { address: Address; size?: number }) => {
-  const badge = Math.round(size * 0.5)
-  return $row(spacing.small, style({ alignItems: 'center' }))(
-    $node(style({ position: 'relative', width: `${size}px`, height: `${size}px`, flexShrink: '0' }))(
-      $roboAvatar(address, size),
-      $node(
-        style({
-          position: 'absolute',
-          right: '-3px',
-          bottom: '-3px',
-          width: `${badge}px`,
-          height: `${badge}px`,
-          borderRadius: '50%',
-          background: palette.background,
-          border: `1px solid ${colorShade(palette.foreground, 35)}`,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center'
-        })
-      )(
-        $icon({
-          $content: $puppeteer,
-          viewBox: '0 0 32 32',
-          width: `${Math.round(badge * 0.62)}px`,
-          fill: palette.message
-        })
-      )
-    ),
-    $accountLabel({ address })
-  )
-}
-
-export const $tokenIconWithAmount = (
-  tokenDesc: ITokenDescription,
-  amount: bigint,
-  size = '18px',
-  color = palette.message
-) => {
-  return $row(spacing.small, style({ alignItems: 'center' }))(
-    $tokenIcon(tokenDesc, size, color),
-    $text(readableExactTokenAmount(tokenDesc, amount))
-  )
-}
-
 export const $tokenIconByAddress = (tokenAddress: Address, size = '24px') => {
   const tokenDesc = getTokenDescription(tokenAddress)
 
@@ -201,7 +154,7 @@ export const $puppetList = (puppets?: Address[], click?: IComposeBehavior<INode,
   return $row(style({ cursor: 'pointer' }))(
     ...puppets.map(account => {
       if (!click) {
-        return style({ marginRight: '-12px', border: '2px solid black' })($roboAvatar(account, 25))
+        return style({ marginRight: '-12px', border: '2px solid black' })($jazzicon(account, 25))
       }
 
       return click(
@@ -212,7 +165,7 @@ export const $puppetList = (puppets?: Address[], click?: IComposeBehavior<INode,
           history.pushState({}, '', url)
           return url
         })
-      )(style({ marginRight: '-12px', border: '2px solid black' })($roboAvatar(account, 25)))
+      )(style({ marginRight: '-12px', border: '2px solid black' })($jazzicon(account, 25)))
     })
     // $content
   )
@@ -225,30 +178,12 @@ export const $leverage = (size: bigint, collateral: bigint) => {
 }
 
 export const $pnlDisplay = (pnlSrc: IStream<bigint> | bigint, bold = true) => {
-  const pnl = toStream(pnlSrc)
+  const pnl = map(dustToZeroUsd, toStream(pnlSrc))
   const display = map(value => readablePnl(value), pnl)
   const displayColor = skipRepeats(
     map(value => {
       return value > 0n ? palette.positive : value === 0n ? palette.foreground : palette.negative
     }, pnl)
-  )
-
-  const colorStyle = styleInline(
-    map(color => {
-      return { color }
-    }, displayColor)
-  )
-
-  return $node(colorStyle, style({ fontWeight: bold ? 'bold' : 'normal' }))($text(display))
-}
-
-export const $roiDisplay = (roiSrc: IStream<bigint> | bigint, bold = true) => {
-  const roi = toStream(roiSrc)
-  const display = map(value => readablePercentage(value), roi)
-  const displayColor = skipRepeats(
-    map(value => {
-      return value > 0n ? palette.positive : value === 0n ? palette.foreground : palette.negative
-    }, roi)
   )
 
   const colorStyle = styleInline(
@@ -268,13 +203,6 @@ export const $drawdownDisplay = (maxDrawdown: bigint) => {
   return $node(style({ color }))($text(`${percentage.toFixed(1)}%`))
 }
 
-export const $sharpeDisplay = (sharpeRatio: bigint) => {
-  // sharpeRatio is scaled x100 (150 = 1.5)
-  const ratio = Number(sharpeRatio) / 100
-  const color = sharpeRatio > 100n ? palette.positive : sharpeRatio < 0n ? palette.negative : palette.foreground
-  return $node(style({ color }))($text(ratio.toFixed(2)))
-}
-
 export const $winRateDisplay = (wins: number, losses: number) => {
   const total = wins + losses
   if (total === 0) return $node(style({ color: palette.foreground }))($text('-'))
@@ -286,31 +214,6 @@ export const $winRateDisplay = (wins: number, losses: number) => {
     $node(style({ color, fontWeight: 'bold' }))($text(`${rate.toFixed(0)}%`)),
     $node(style({ fontSize: text.xs, color: palette.foreground }))($text(`${wins}W / ${losses}L`))
   )
-}
-
-export const $positionRoi = (pos: IPosition, _puppet?: Address) => {
-  const indexToken = pos.indexToken
-  const lstIncrease = lst(pos.increaseList)
-  const collateralUsd = lstIncrease.collateralTokenPriceMin * pos.maxCollateralInUsd
-  const latestPrice = filterNull(
-    map(pm => {
-      const price = getMappedValueFallback(pm, indexToken, null)
-      return price ? price.price : null
-    }, latestPriceMap)
-  )
-
-  const roi = isPositionSettled(pos)
-    ? readablePercentage(toBasisPoints(pos.realisedPnlUsd, collateralUsd))
-    : map(markPrice => {
-        const delta = getPositionPnlUsd(
-          pos.isLong,
-          pos.lastUpdate.sizeInUsd,
-          pos.lastUpdate.sizeInTokens,
-          markPrice as bigint
-        )
-        return readablePercentage(toBasisPoints(pos.realisedPnlUsd + delta, collateralUsd))
-      }, latestPrice)
-  return $node(style({ fontSize: text.sm }))($text(roi))
 }
 
 // Default minCollateralFactor (1% = 1e28 with 30 decimals)
@@ -363,16 +266,6 @@ export const $marketLabel = (market: IMarketDescription, showLabel = true) => {
           )
         )
       : empty
-  )
-}
-
-export const $marketSmallLabel = (market: IMarketDescription) => {
-  const indexTokenDescription = getTokenDescription(market.indexToken)
-  const $iconG = $tokenIconMap[indexTokenDescription.symbol]
-
-  return $row(spacing.small, style({ cursor: 'pointer', alignItems: 'center' }))(
-    $icon({ $content: $iconG, width: '24px', viewBox: '0 0 32 32' }),
-    $node(style({ fontWeight: 'bold' }))($text(indexTokenDescription.symbol))
   )
 }
 
@@ -440,10 +333,10 @@ export const $MasterDisplay = (config: I$MasterDisplay) =>
 
     return [
       $Link({
-        $content: $row(spacing.small, style({ alignItems: 'center', textDecoration: 'none' }))(
+        $content: $row(spacing.small, style({ alignItems: 'center', textDecoration: 'none', minWidth: '0' }))(
           $roboAvatar(avatarSeed ?? address, profileSize),
           labelSize === undefined || labelSize > 0
-            ? $column(style({ gap: '3px' }))(
+            ? $column(style({ gap: '3px', minWidth: '0' }))(
                 $accountLabel({
                   address,
                   ensName,
@@ -452,7 +345,7 @@ export const $MasterDisplay = (config: I$MasterDisplay) =>
                 puppetList.length > 0
                   ? $row(style({ alignItems: 'center' }))(
                       ...puppetList.map(puppet => {
-                        return style({ marginRight: '-12px', border: '2px solid black' })($roboAvatar(puppet, 25))
+                        return style({ marginRight: '-12px', border: '2px solid black' })($jazzicon(puppet, 25))
                       }),
                       $node(style({ gap: '8px', marginLeft: '16px', fontSize: text.sm }))($text(`${puppetList.length}`))
                     )
@@ -462,7 +355,7 @@ export const $MasterDisplay = (config: I$MasterDisplay) =>
               )
             : empty
         ),
-        route: routeSchema.master.detail,
+        route: routeSchema.fund.detail,
         params: { address }
       })({ click: clickTether() }),
 

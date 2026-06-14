@@ -354,5 +354,10 @@ export default [
     "type": "error",
     "name": "Share__Empty",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Share__FundClosed",
+    "inputs": []
   }
 ] as const

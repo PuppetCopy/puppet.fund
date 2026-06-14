@@ -151,6 +151,17 @@ export interface IRedeem__ClaimIntent {
   amount: bigint
 }
 
+export interface IRedeem__LiquidateIntent {
+  params: IAccountLib__AccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  share: IShareLib__ShareInitParams
+  acceptableNetAssetValue: bigint
+}
+
 export interface IRedeem__RedeemIntent {
   params: IAccountLib__AccountInitParams
   blockNumber: bigint
@@ -160,9 +171,8 @@ export interface IRedeem__RedeemIntent {
   chainId: bigint
   share: IShareLib__ShareInitParams
   sharesOut: bigint
+  assetsOut: bigint
   acceptableNetAssetValue: bigint
-  totalShareSupply: bigint
-  acceptableShares: bigint
 }
 
 export interface IRedeem__SellIntent {
@@ -177,11 +187,13 @@ export interface IRedeem__SellIntent {
 }
 
 export interface IRedeemStore__Pool {
+  epoch: bigint
   accruedPerStake: bigint
   totalStake: bigint
 }
 
 export interface IRedeemStore__Position {
+  epoch: bigint
   stake: bigint
   cursor: bigint
   accrued: bigint

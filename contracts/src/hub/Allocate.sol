@@ -77,11 +77,12 @@ contract Allocate is Access {
         }
 
         address _fundAccount = _accountGate.predictFundAccount(_intent.share.master);
-        if (_fundAccount.code.length == 0) _accountGate.createFundAccount(_intent.share.master);
-        ShareToken _shareToken = ShareToken(_shareGate.predict(_intent.share));
+        if (_fundAccount.code.length == 0) _accountGate.createFundAccount(_intent.params.user, _intent.share.master);
+        if (_redeemStore.closeRateMap(_fundAccount) != 0) revert Error.Share__FundClosed();
+        ShareToken _shareToken = ShareToken(_shareGate.predict(_fundAccount, _intent.share));
         uint _preMintSupply;
         if (address(_shareToken).code.length == 0) {
-            _shareGate.createShareToken(_intent.share);
+            _shareGate.createShareToken(_fundAccount, _intent.share);
         } else {
             _preMintSupply = _shareToken.totalSupply();
             if (_preMintSupply == 0 && _redeemStore.getPool(_fundAccount).totalStake != 0) {
@@ -170,7 +171,7 @@ contract Allocate is Access {
         _accountGate.dispatch(
             IAccount(_fundAccount),
             CallLib.feeOnly(_base, _feeReceiver, _actualRelayFee, _transferGasLimit),
-            CallLib.noTransfers(),
+            CallLib.signTransfer(_intent.share.baseTokenId, _base, fundAccountIn_, _actualRelayFee),
             _digest,
             _userSignature,
             _attestorSignature,
@@ -192,7 +193,9 @@ contract Allocate is Access {
                 _ownerNewShares,
                 _puppetSharesMintedList,
                 _totalMatched,
-                _preMintSupply + _ownerNewShares + _totalPuppetMinted
+                _preMintSupply,
+                _totalPuppetMinted,
+                _actualRelayFee
             )
         );
     }

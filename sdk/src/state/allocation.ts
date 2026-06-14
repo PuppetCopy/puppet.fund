@@ -1,7 +1,6 @@
-import type { IAccountBalance, IFund } from '@puppet/indexer-graphql/entities'
-import { type IStream, just, map, op, switchMap } from 'aelea/stream'
+import type { IAccountBalanceCheckpoint, IFund } from '@puppet/indexer-graphql/entities'
 import { type Address, getAddress } from 'viem'
-import { type IIndexerClient, liveSelect, select, selectOne } from './shared.js'
+import { type IIndexerClient, select, selectOne } from './shared.js'
 
 export interface IFundAllocation {
   idle: bigint
@@ -9,7 +8,7 @@ export interface IFundAllocation {
   total: bigint
 }
 
-type IBalanceRow = Pick<IAccountBalance, 'signedBalance'>
+type IBalanceRow = Pick<IAccountBalanceCheckpoint, 'signedBalance'>
 
 const FUND_FIELDS = ['baseTokenId', 'totalAllocated', 'totalShareSupply', 'queuedShares'] as const
 const BALANCE_FIELDS = ['signedBalance'] as const
@@ -29,26 +28,11 @@ export async function getFundAllocation(sql: IIndexerClient, fund: Address): Pro
   const lower = getAddress(fund)
   const fundRow = await selectOne(sql, 'Fund', { where: { id: { _eq: lower } }, fields: FUND_FIELDS })
   if (!fundRow) return EMPTY_ALLOCATION
-  const balance = await select(sql, 'AccountBalance', {
+  const balance = await select(sql, 'AccountBalanceCheckpoint', {
     where: { account: { _eq: lower }, tokenId: { _eq: fundRow.baseTokenId } },
+    distinctOn: ['chainId', 'tokenId'],
+    orderBy: [{ chainId: 'asc' }, { tokenId: 'asc' }, { blockTimestamp: 'desc' }],
     fields: BALANCE_FIELDS
   })
   return buildAllocation(balance, fundRow)
-}
-
-export function liveFundAllocation(sql: IIndexerClient, fund: Address): IStream<IFundAllocation> {
-  const lower = getAddress(fund)
-  const fundStream = liveSelect(sql, 'Fund', { where: { id: { _eq: lower } }, fields: FUND_FIELDS })
-  return op(
-    fundStream,
-    switchMap(funds => {
-      const fundRow = funds[0]
-      if (!fundRow) return just(EMPTY_ALLOCATION)
-      const rows = liveSelect(sql, 'AccountBalance', {
-        where: { account: { _eq: lower }, tokenId: { _eq: fundRow.baseTokenId } },
-        fields: BALANCE_FIELDS
-      })
-      return map(balance => buildAllocation(balance, fundRow), rows)
-    })
-  )
 }

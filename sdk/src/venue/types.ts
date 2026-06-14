@@ -1,7 +1,7 @@
 import type { Address, Hex } from 'viem'
-import type { IPlatformEvalParams, IPlatformValuation } from '../evaluation/types.js'
+import type { IPlatformEvalParams, IPlatformValuation } from '../evaluate/types.js'
 
-export type { INavPosition, IPlatformEvalParams, IPlatformValuation, IVenueFacets } from '../evaluation/types.js'
+export type { INavPosition, IPlatformEvalParams, IPlatformValuation, IVenueFacets } from '../evaluate/types.js'
 
 export interface IGuardReason {
   code: string

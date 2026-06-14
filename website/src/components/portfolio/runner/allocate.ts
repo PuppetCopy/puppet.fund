@@ -5,7 +5,7 @@ import {
   resolveDispatchChainId,
   resolveDispatchNetwork
 } from '@puppet/sdk/attestation'
-import { evaluateAccountNav } from '@puppet/sdk/evaluation'
+import { evaluateAccountNav } from '@puppet/sdk/evaluate'
 import {
   getAcceptableRelayFee,
   getSubaccountState,
@@ -36,7 +36,7 @@ export async function gatherMatched(
   masterAmount: bigint,
   subaccount?: ISubaccountState
 ): Promise<IGatheredAllocation> {
-  const [puppets, pool] = await Promise.all([fetchMasterSubscribers(fund), fetchMasterPoolState(fund)])
+  const [puppets, pool] = await Promise.all([fetchMasterSubscribers(fund, baseTokenId), fetchMasterPoolState(fund)])
 
   const totalShareSupply = pool?.totalShareSupply ?? 0n
   const queuedShares = pool?.queuedShares ?? 0n
@@ -90,7 +90,8 @@ export async function buildAllocateInput(draft: IAllocateDraft, ctx: ExecContext
     'HubGate',
     'allocate',
     draft.baseToken,
-    homePublicClient
+    homePublicClient,
+    BigInt(gathered.matched.puppetList.length)
   )
 
   return {

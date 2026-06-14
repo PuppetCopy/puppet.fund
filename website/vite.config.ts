@@ -140,10 +140,9 @@ export default defineConfig(({ command }) => {
         strategies: 'injectManifest',
         injectManifest: {
           maximumFileSizeToCacheInBytes: 2_000_000,
-          globPatterns: ['**/*.{js,html,svg,ico,woff2,png}'],
-          globIgnores: ['**/sdk-*.js', '**/sdk-*.js.map']
+          globPatterns: ['**/*.{js,html,svg,ico,woff2,png}']
         },
-        injectRegister: 'auto',
+        injectRegister: false,
         srcDir: 'src/app/sw',
         filename: 'service-worker.ts',
         pwaAssets: {
@@ -172,7 +171,7 @@ export default defineConfig(({ command }) => {
         // Note: workbox options are not used with injectManifest strategy
         // Service worker lifecycle is controlled in src/app/sw/service-worker.ts
         devOptions: {
-          enabled: !!Bun.env.VITE_PWA_DEV,
+          enabled: true,
           navigateFallback: 'index.html',
           suppressWarnings: true,
           type: 'module'

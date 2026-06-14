@@ -5,12 +5,27 @@
 // the POST (port squat, loopback sniff) gets ciphertext it cannot read, because
 // the public key in the link came from the agent's own terminal output.
 
+import type { IAccountLib__AccountInitParams, IShareLib__ShareInitParams } from '@puppet/contracts/types'
+import type { Hex } from 'viem'
+import { decode, encode } from '../compact/frame.js'
+import type { ITokenInfo } from '../state/index.js'
+
 const CURVE = { name: 'ECDH', namedCurve: 'P-256' } as const
 
 export interface ISealedPayload {
   epk: string
   iv: string
   ct: string
+}
+
+// The sealed pairing handshake: the site hands the agent its whole identity in one shot, in the
+// same canonical shapes the SDK uses everywhere — `params` is the account, `share` the fund.
+export interface IPairedSession {
+  signerKey: Hex
+  params: IAccountLib__AccountInitParams
+  share: IShareLib__ShareInitParams
+  matchmakerUrl: string
+  tokenRegistry?: ITokenInfo[]
 }
 
 export interface IPairingKeypair {
@@ -35,7 +50,7 @@ export async function sealPairingPayload(agentPublicKey: string, payload: unknow
     ['encrypt']
   )
   const iv = crypto.getRandomValues(new Uint8Array(12))
-  const data = new TextEncoder().encode(JSON.stringify(payload))
+  const data = new TextEncoder().encode(encode(payload))
   const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv as BufferSource }, aesKey, data as BufferSource)
   const ephRaw = await crypto.subtle.exportKey('raw', eph.publicKey)
   return { epk: b64urlEncode(new Uint8Array(ephRaw)), iv: b64urlEncode(iv), ct: b64urlEncode(new Uint8Array(ct)) }
@@ -55,7 +70,7 @@ export async function openPairingPayload<T>(privateKey: CryptoKey, sealed: ISeal
     aesKey,
     b64urlDecode(sealed.ct) as BufferSource
   )
-  return JSON.parse(new TextDecoder().decode(pt)) as T
+  return decode(new TextDecoder().decode(pt)) as T
 }
 
 function b64urlEncode(bytes: Uint8Array): string {

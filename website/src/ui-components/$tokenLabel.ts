@@ -1,11 +1,9 @@
 import type { ITokenDescription } from '@puppet/sdk/core'
-import { getMappedValue, readableHash } from '@puppet/sdk/core'
-import { getMarketDescription, getTokenDescription } from '@puppet/sdk/gmx'
+import { getMappedValue } from '@puppet/sdk/core'
 import { empty } from 'aelea/stream'
 import { $node, $text, type I$Node, type I$Slottable, style } from 'aelea/ui'
 import { $column, $row, $Tooltip, layoutSheet, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
-import type { Address } from 'viem'
 import { text } from '@/ui-components'
 import { $tokenIcon, $tokenLabeled } from '../common/$common.js'
 import { $elipsisTextWrapper, $icon, $label } from './$common.js'
@@ -49,16 +47,3 @@ export const $marketLabel = (
     })({}),
     $marketLabelExtra ? $elipsisTextWrapper($marketLabelExtra) : empty
   )
-
-export const $marketLabelByAddress = (marketToken: Address, $extraLabel?: I$Slottable) => {
-  const market = getMarketDescription(marketToken)
-  if (!market) {
-    return $node(style({ fontSize: text.sm, color: palette.foreground }))($text(readableHash(marketToken)))
-  }
-  return $marketLabel(
-    getTokenDescription(market.indexToken),
-    getTokenDescription(market.longToken),
-    getTokenDescription(market.shortToken),
-    $extraLabel
-  )
-}
