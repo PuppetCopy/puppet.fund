@@ -1,4 +1,13 @@
-import { type Address, getAddress, type Hex } from 'viem'
+import { type Address, getAddress, type Hex, isAddressEqual } from 'viem'
+import { PROTOCOL } from '@puppet/contracts/const'
+import { type ChainId } from '@puppet/sdk/const'
+import { wrappedNativeAddressOf } from '@puppet/sdk/state'
+
+// Across resolves tokens by ERC20 address; the EIP-7528 native sentinel has no tokenDetails (the API 404s on it), so a
+// native leg is quoted as its wrapped-native ERC20. The route is WETH-funded and the gate forwards value:0, so the
+// wrapped form is also what runs on-chain.
+const providerToken = (token: Address, chainId: number): Address =>
+  isAddressEqual(token, PROTOCOL.nativeToken) ? wrappedNativeAddressOf(chainId as ChainId) : token
 
 const SUGGESTED_FEES_PATH = '/api/swap/across/suggested-fees'
 const SWAP_APPROVAL_PATH = '/api/swap/across/swap/approval'
@@ -45,8 +54,8 @@ export async function fetchAcrossBridgeQuote(params: IAcrossBridgeQuoteParams) {
     SUGGESTED_FEES_PATH,
     {
       amount: params.inputAmount.toString(),
-      inputToken: params.inputToken,
-      outputToken: params.outputToken,
+      inputToken: providerToken(params.inputToken, params.originChainId),
+      outputToken: providerToken(params.outputToken, params.destinationChainId),
       originChainId: String(params.originChainId),
       destinationChainId: String(params.destinationChainId),
       recipient: params.recipient
@@ -112,8 +121,8 @@ export async function fetchAcrossSwapQuote(params: {
     {
       tradeType: 'exactInput',
       amount: params.inputAmount.toString(),
-      inputToken: params.inputToken,
-      outputToken: params.outputToken,
+      inputToken: providerToken(params.inputToken, params.originChainId),
+      outputToken: providerToken(params.outputToken, params.destinationChainId),
       originChainId: String(params.originChainId),
       destinationChainId: String(params.destinationChainId),
       depositor: params.depositor,

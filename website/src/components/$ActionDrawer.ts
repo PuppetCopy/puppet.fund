@@ -512,9 +512,10 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
         // addresses come from the registry, so resolve it first then fan the
         // distinct base tokens out into priceFor streams (positional, by index).
         return switchMap((registry: ITokenRegistryMap) => {
-          const tokenPriceStreams = tokens.map(t =>
-            priceFor(getAddress(tokenInfoFor(registry, HUB_CHAIN_ID, t).token))
-          )
+          const tokenPriceStreams = tokens.map(t => {
+            const info = registry.get(HUB_CHAIN_ID)?.get(getAddress(t))
+            return info ? priceFor(getAddress(info.token)) : just<bigint | null>(null)
+          })
           return op(
             combineMap(
               (_gas: bigint, ...rest: (RelayFeeMap | bigint | null)[]): FeeBreakdown => {

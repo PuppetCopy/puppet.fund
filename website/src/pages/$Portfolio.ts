@@ -295,19 +295,33 @@ export const $Portfolio = ({
                   const fundedIds = registeredIds.filter(
                     tid => (p.root?.balances.get(tid)?.signedBalance ?? 0n) > 0n
                   )
+                  const needsDepositIds = [
+                    ...new Set([...activeRules, ...pendingRules].map(rule => rule.baseToken as Hex))
+                  ].filter(tid => registeredIds.includes(tid) && !fundedIds.includes(tid))
+                  const $needsDepositList =
+                    needsDepositIds.length === 0
+                      ? $node()
+                      : $column(spacing.default)(
+                          ...needsDepositIds.map(tid =>
+                            $balanceEditor(tid, 'Deposit to fund your pending allocation')
+                          )
+                        )
                   const $depositList =
-                    fundedIds.length === 0
+                    fundedIds.length === 0 && needsDepositIds.length === 0
                       ? $emptyBalances
-                      : switchLatest(
-                          map(collateral => {
-                            const ids = fundedIds.filter(tid => {
-                              const token = p.registry.get(HUB_CHAIN_ID)?.get(tid)?.token
-                              if (token === undefined) return false
-                              if (token === PROTOCOL.nativeToken) return true
-                              return collateral.length === 0 || collateral.some(c => isAddressEqual(c, token))
-                            })
-                            return $column(spacing.default)(...ids.map(tid => $balanceEditor(tid)))
-                          }, collateralTokenList)
+                      : $column(spacing.default)(
+                          $needsDepositList,
+                          switchLatest(
+                            map(collateral => {
+                              const ids = fundedIds.filter(tid => {
+                                const token = p.registry.get(HUB_CHAIN_ID)?.get(tid)?.token
+                                if (token === undefined) return false
+                                if (token === PROTOCOL.nativeToken) return true
+                                return collateral.length === 0 || collateral.some(c => isAddressEqual(c, token))
+                              })
+                              return $column(spacing.default)(...ids.map(tid => $balanceEditor(tid)))
+                            }, collateralTokenList)
+                          )
                         )
 
                   const fundStubBase = stubSubaccountState({ user: wallet.address, signer })

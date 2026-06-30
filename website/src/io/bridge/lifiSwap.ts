@@ -1,4 +1,13 @@
-import type { Address, Hex } from 'viem'
+import { type Address, type Hex, isAddressEqual } from 'viem'
+import { PROTOCOL } from '@puppet/contracts/const'
+import { type ChainId } from '@puppet/sdk/const'
+import { wrappedNativeAddressOf } from '@puppet/sdk/state'
+
+// An external swap API resolves tokens by ERC20 address; the EIP-7528 native sentinel has no tokenDetails, so a native
+// leg is quoted (and executed) as its wrapped-native ERC20. The route is WETH-funded and the gate forwards value:0, so
+// the wrapped form is also what runs on-chain.
+const providerToken = (token: Address, chainId: number): Address =>
+  isAddressEqual(token, PROTOCOL.nativeToken) ? wrappedNativeAddressOf(chainId as ChainId) : token
 
 const QUOTE_PATH = '/api/swap/lifi/v1/quote'
 // A LI.FI route may be cross-chain (it bridges, like Across), so the fill window must cover the bridge-fill latency:
@@ -28,11 +37,12 @@ interface ILifiQuoteResponse {
 }
 
 async function fetchLifiQuote(params: ILifiSwapParams): Promise<ILifiQuoteResponse> {
+  const toChain = params.toChainId ?? params.chainId
   const query = new URLSearchParams({
     fromChain: String(params.chainId),
-    toChain: String(params.toChainId ?? params.chainId),
-    fromToken: params.inputToken,
-    toToken: params.outputToken,
+    toChain: String(toChain),
+    fromToken: providerToken(params.inputToken, params.chainId),
+    toToken: providerToken(params.outputToken, toChain),
     fromAmount: params.inputAmount.toString(),
     fromAddress: params.fromAddress,
     toAddress: params.toAddress,

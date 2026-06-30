@@ -413,7 +413,7 @@ export const $FundEditor = ({
         quoteParams,
         map(async (p): Promise<IQuoteStatus> => {
           if (p.bid === null) return { status: 'idle', quote: null }
-          const token = p.sel.token ?? p.bid
+          const token = p.sel.isNative ? wrappedNativeAddressOf(p.sel.chainId as ChainId) : (p.sel.token ?? p.bid)
           if (!needsBridge(p.sel, p.bid) || p.amount + p.surplus === 0n) return { status: 'idle', quote: null }
           const inputToken = tokenRegistry.get(p.sel.chainId as ChainId)?.get(token)?.token
           if (!inputToken) return { status: 'idle', quote: null }
