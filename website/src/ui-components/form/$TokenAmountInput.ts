@@ -1,4 +1,3 @@
-import { parseReadableNumber } from '@puppet/sdk/core'
 import { filter, type IStream, map, tap } from 'aelea/stream'
 import type { IBehavior } from 'aelea/stream-extended'
 import {
@@ -90,10 +89,13 @@ export const $TokenAmountInput = ({ decimals, valueToShow, $input = $defaultToke
             }
             if (target.value !== formatted) target.value = formatted
             target.setSelectionRange(newCaret, newCaret)
-            const parsed = parseReadableNumber(clean)
-            if (!Number.isFinite(parsed)) return 0n
+            // Parse the cleaned decimal string straight to a bigint. Never route through a JS float: String(parseFloat)
+            // loses precision past ~15 significant digits and renders sub-1e-6 values in exponent form, both of which
+            // would silently corrupt the signed amount. Normalize to a single dot and clamp the fraction to `decimals`.
+            const decDigits = decPart ? decPart.slice(1).split('.')[0].slice(0, decimals) : ''
+            const normalized = decDigits ? `${intPart || '0'}.${decDigits}` : intPart || '0'
             try {
-              return parseUnits(String(parsed), decimals)
+              return parseUnits(normalized, decimals)
             } catch {
               return 0n
             }

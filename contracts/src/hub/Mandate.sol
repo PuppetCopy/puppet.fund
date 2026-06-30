@@ -12,12 +12,13 @@ import {AllocateStore} from "./store/AllocateStore.sol";
 import {RuleLib} from "../utils/RuleLib.sol";
 import {Access} from "../utils/auth/Access.sol";
 import {CallLib} from "../utils/CallLib.sol";
+import {SignLib} from "../utils/SignLib.sol";
 import {Error} from "../utils/Error.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";
 import {IntentLib} from "../utils/IntentLib.sol";
 
 bytes32 constant MANDATE_INTENT_TYPEHASH = keccak256(
-    "MandateIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 baseTokenId,FundMandateRule[] rules)AccountInitParams(address user,address signer)FundMandateRule(address fund,bytes body,bytes mandate)"
+    "MandateIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,address baseToken,FundMandateRule[] rules)AccountInitParams(address user,address signer)FundMandateRule(address fund,bytes body,bytes mandate)"
 );
 
 contract Mandate is Access {
@@ -28,7 +29,7 @@ contract Mandate is Access {
         uint acceptableRelayFee;
         uint nonce;
         uint chainId;
-        bytes32 baseTokenId;
+        address baseToken;
         RuleLib.Rule[] rules;
     }
 
@@ -39,8 +40,11 @@ contract Mandate is Access {
     function mandate(
         MandateIntent calldata _intent,
         Account _accountGate,
+        PuppetAccount _puppetAccount,
+        address _route,
+        uint _recognize,
         AllocateStore _store,
-        IERC20 _base,
+        address _base,
         bytes32 _digest,
         bytes32 _routerDomainSeparator,
         bytes calldata _userSignature,
@@ -53,12 +57,25 @@ contract Mandate is Access {
         uint _n = _intent.rules.length;
         if (_n == 0) revert Error.Mandate__EmptyRules();
 
-        PuppetAccount _puppetAccount = _accountGate.verifyPuppetAccount(_intent.params);
+        IAccount.Call[] memory _callList;
+        IAccount.SignTransfer[] memory _transferList;
+        if (_recognize > 0) {
+            IAccount.Call memory _deposit = CallLib.routeExecute(
+                _route, CallLib.compose(CallLib.transfer(_base, address(_puppetAccount), _recognize, _transferGasLimit))
+            );
+            _callList = _actualRelayFee > 0
+                ? CallLib.compose(_deposit, CallLib.fee(_base, _feeReceiver, _actualRelayFee, _transferGasLimit))
+                : CallLib.compose(_deposit);
+            _transferList = SignLib.transfer(_base,_recognize, _actualRelayFee);
+        } else {
+            _callList = CallLib.feeOnly(_base, _feeReceiver, _actualRelayFee, _transferGasLimit);
+            _transferList = SignLib.transfer(_base,0, _actualRelayFee);
+        }
 
         _accountGate.dispatch(
             IAccount(address(_puppetAccount)),
-            CallLib.feeOnly(_base, _feeReceiver, _actualRelayFee, _transferGasLimit),
-            CallLib.signTransfer(_intent.baseTokenId, _base, 0, _actualRelayFee),
+            _callList,
+            _transferList,
             _digest,
             _userSignature,
             _attestorSignature,
@@ -90,7 +107,7 @@ contract Mandate is Access {
             _logEvent(
                 "Mandate",
                 abi.encode(
-                    _puppetAccount, _fund, _intent.baseTokenId, _intent.params, _rl.body, _rl.mandate, _actualRelayFee
+                    _puppetAccount, _actualRelayFee, _fund, _intent.baseToken, _intent.params, _rl.body, _rl.mandate
                 )
             );
         }

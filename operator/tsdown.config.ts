@@ -12,8 +12,8 @@ for (const d of readdirSync('src', { withFileTypes: true })) {
 
 // `dependencies` stay external; the unpublished workspace packages live in devDependencies
 // so their JS and their types are both bundled — the published dist carries no bare
-// workspace specifiers. `eager` lets the dts emitter compile @puppet/indexer-graphql's
-// raw-.ts `./client` export, which sits outside this package's tsconfig project.
+// workspace specifiers. `eager` makes the dts emitter compile workspace sources that sit
+// outside this package's tsconfig project.
 export default defineConfig({
   entry,
   target: 'esnext',

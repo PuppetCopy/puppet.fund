@@ -1,19 +1,21 @@
-import type { IFund } from '@puppet/indexer-graphql/entities'
 import { type IPairedSession, predictPuppetAccount, sealPairingPayload } from '@puppet/sdk/account'
+import type { IFund } from '@puppet/sdk/schema'
 import { type ISubaccountState, tokenRegistryRows } from '@puppet/sdk/state'
 import { combine, constant, empty, type IStream, map, nowWith, op, switchLatest, switchPromises } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $node, $text, component, effectProp, type I$Node, type INode, nodeEvent, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $defaultButtonPrimary, text } from '@/ui-components'
 import { type Hex, isAddressEqual } from 'viem'
-import { $fundProfile } from './$AccountProfile.js'
+import { $defaultButtonPrimary, text } from '@/ui-components'
 import { $card } from '../common/elements/$common.js'
-import { getTokenRegistry } from '../io/context.js'
-import { wsUrl as matchmakerUrl } from '../io/matchmaker/index.js'
+import context from '../io/context.js'
+import { matchmakerUrl } from '../io/matchmaker/index.js'
 import { subject } from '../utils/subject.js'
 import type { IConnectedWallet } from '../wallet/index.js'
+import { $fundProfile } from './$AccountProfile.js'
+import { $EnableSession } from './$enableSession.js'
+import { $WalletConnect } from './$WalletConnect.js'
 
 interface IPairBanner {
   walletQuery: IStream<Promise<IConnectedWallet | null>>
@@ -32,7 +34,7 @@ function readPairParams(): { port: string; token: string; epk: string } | null {
 }
 
 export const $PairBanner = ({ walletQuery, walletState }: IPairBanner) =>
-  component(([selectFund, selectFundTether]: IBehavior<INode, Hex>) => {
+  component(([selectFund, selectFundTether]: IBehavior<INode, Hex>, [_connect, connectTether]: IBehavior<unknown>) => {
     const pairParams = readPairParams()
     if (!pairParams) return [empty]
 
@@ -42,19 +44,24 @@ export const $PairBanner = ({ walletQuery, walletState }: IPairBanner) =>
       map(
         p => {
           const wallet = p.wallet
-          if (!wallet?.session) {
-            return $hint('Connect your wallet and sign a session to pair your agent.')
+          if (!wallet) {
+            return $column(spacing.small)(
+              $hint('Connect your wallet to pair your agent.'),
+              $WalletConnect()({ connect: connectTether() })
+            )
+          }
+          if (!wallet.session) {
+            return $column(spacing.small)($hint('Sign a session to pair your agent.'), $EnableSession(wallet)({}))
           }
           const session = wallet.session
-          const params = { user: wallet.address, signer: session.signer }
-          const master = predictPuppetAccount(params)
+          const master = predictPuppetAccount({ user: wallet.address, signer: session.signer })
           const masteredFunds = (p.root?.funds ?? []).filter(f => isAddressEqual(f.master, master))
           if (masteredFunds.length === 0) {
             return $hint('Create and fund a trading account first, then reopen your agent’s pair link.')
           }
           const onlyFund = masteredFunds.length === 1
-          const selectedBid: Hex | null = onlyFund ? masteredFunds[0]!.baseTokenId : p.sel
-          const selectedFund = masteredFunds.find(f => f.baseTokenId === selectedBid) ?? null
+          const selectedBid: Hex | null = onlyFund ? masteredFunds[0]!.baseToken : p.sel
+          const selectedFund = masteredFunds.find(f => f.baseToken === selectedBid) ?? null
 
           const $fundRow = (f: IFund): I$Node =>
             $row(
@@ -64,10 +71,10 @@ export const $PairBanner = ({ walletQuery, walletState }: IPairBanner) =>
                 padding: '8px 10px',
                 borderRadius: '10px',
                 cursor: onlyFund ? 'default' : 'pointer',
-                border: `1px solid ${selectedFund?.baseTokenId === f.baseTokenId ? palette.primary : colorShade(palette.foreground, 18)}`
+                border: `1px solid ${selectedFund?.baseToken === f.baseToken ? palette.primary : colorShade(palette.foreground, 18)}`
               }),
-              ...(onlyFund ? [] : [selectFundTether(nodeEvent('click'), constant(f.baseTokenId))])
-            )($fundProfile({ master: f.master, baseTokenId: f.baseTokenId, name: f.name }, 36))
+              ...(onlyFund ? [] : [selectFundTether(nodeEvent('click'), constant(f.baseToken))])
+            )($fundProfile({ master: f.master, baseToken: f.baseToken, name: f.name }, 36))
 
           return $column(spacing.small)(
             $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text('Pair your agent')),
@@ -82,12 +89,14 @@ export const $PairBanner = ({ walletQuery, walletState }: IPairBanner) =>
                   effectProp(
                     'onclick',
                     nowWith(() => () => {
-                      getTokenRegistry()
+                      context
+                        .getTokenRegistry()
                         .then(registry => {
                           const payload: IPairedSession = {
                             signerKey: session.privateKey,
-                            params,
-                            share: { master, baseTokenId: selectedFund.baseTokenId, name: selectedFund.name },
+                            user: wallet.address,
+                            baseToken: selectedFund.baseToken,
+                            name: selectedFund.name,
                             matchmakerUrl,
                             tokenRegistry: tokenRegistryRows(registry)
                           }
@@ -106,7 +115,9 @@ export const $PairBanner = ({ walletQuery, walletState }: IPairBanner) =>
                               : 'Pairing failed. Make sure the agent is still running and reopen its link.'
                           )
                         )
-                        .catch(() => pairMessage.push('Pairing failed. Make sure the agent is running on this machine.'))
+                        .catch(() =>
+                          pairMessage.push('Pairing failed. Make sure the agent is running on this machine.')
+                        )
                     })
                   )
                 )($text('Send session to agent'))

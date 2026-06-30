@@ -7,14 +7,15 @@ import { VitePWA } from 'vite-plugin-pwa'
 // loading is NODE_ENV-dependent). First match per var wins.
 dotenv.config({ path: ['.env.local', '.env'], quiet: true })
 
+const WEBSITE = 'https://puppet.fund'
 const SITE_CONFIG = {
-  __WEBSITE__: 'https://puppet.fund',
+  __WEBSITE__: WEBSITE,
   __TWITTER_ID__: '@PuppetCopy',
   __APP_NAME__: 'Puppet',
-  __APP_DESC_SHORT__: 'Puppet, seamless copytrading',
-  __APP_DESC_LONG__: 'Fund top on-chain traders and share their gains. You keep your keys and set the rules.',
-  __OG_IMAGE__:
-    '/api/og{{if eq .OriginalReq.URL.Path `/leaderboard`}}/leaderboard?d={{now | date `2006-01-02-15`}}{{end}}',
+  __APP_DESC_SHORT__: 'Puppet, a fund wallet operated by humans and agents',
+  __APP_DESC_LONG__:
+    'Fund top traders and share their gains, or run your own fund and trade as you do today, on any EVM chain. Keep your keys; every funding runs under rules you sign.',
+  __OG_IMAGE__: `${WEBSITE}/api/og{{if eq .OriginalReq.URL.Path \`/leaderboard\`}}/leaderboard?d={{now | date \`2006-01-02-15\`}}{{end}}`,
   __THEME_PRIMARY__: '#870B38',
   __THEME_BACKGROUND__: '#292c37'
 }
@@ -26,13 +27,7 @@ const WC_METADATA = {
   icons: [`${SITE_CONFIG.__WEBSITE__}/assets/pwa/transparent-512x512.png`]
 }
 
-// Only the dev-server proxy needs the indexer endpoint; a production build must not.
-const INDEXER_GRAPHQL = Bun.env.INDEXER_ENDPOINT ? new URL(Bun.env.INDEXER_ENDPOINT) : null
-
-export default defineConfig(({ command }) => {
-  if (command === 'serve' && INDEXER_GRAPHQL === null) {
-    throw new Error('INDEXER_ENDPOINT env var is required')
-  }
+export default defineConfig(() => {
   return {
     resolve: { tsconfigPaths: true },
     define: {
@@ -88,17 +83,6 @@ export default defineConfig(({ command }) => {
             return `/${network}/${Bun.env.RPC_KEY}`
           }
         },
-        ...(INDEXER_GRAPHQL
-          ? {
-              '/api/indexer': {
-                target: INDEXER_GRAPHQL.origin,
-                changeOrigin: true,
-                secure: true,
-                ws: true,
-                rewrite: (path: string) => path.replace(/^\/api\/indexer/, INDEXER_GRAPHQL.pathname)
-              }
-            }
-          : {}),
         // All swap/bridge providers behind one namespace: /api/swap/<provider>/<upstream path>.
         '/api/swap/across': {
           target: 'https://app.across.to',
@@ -126,6 +110,11 @@ export default defineConfig(({ command }) => {
           // established" when it then closes the still-CONNECTING socket.
           ws: true,
           rewrite: path => path.replace(/^\/api\/matchmaker/, '')
+        },
+        '/api/journal': {
+          target: Bun.env.JOURNAL_ENDPOINT,
+          changeOrigin: true,
+          rewrite: path => path.replace(/^\/api\/journal/, '')
         },
         '^/api/og(/.*)?$': {
           target: Bun.env.OG_ENDPOINT || 'http://localhost:4100',

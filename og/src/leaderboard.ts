@@ -1,26 +1,31 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { IntervalTime } from '@puppet/sdk/const'
-import { getUnixTimestamp, readablePnl } from '@puppet/sdk/core'
-import { createIndexerClient, select } from '@puppet/sdk/state'
+import { symbolForBaseTokenId } from '@puppet/sdk/account'
+import { BYTES32_ZERO, IntervalTime } from '@puppet/sdk/const'
+import { dustToZeroUsd, getUnixTimestamp, readablePnl } from '@puppet/sdk/core'
+import { createClient } from '@puppet/sdk/datastore'
+import * as schema from '@puppet/sdk/schema'
+import { fundLatestMetricTable, fundTable } from '@puppet/sdk/schema'
 import { roboAvatarSvg } from '@puppet/sdk/ui-components'
-import { type Hex, hexToString } from 'viem'
+import { type Address, getAddress, type Hex, hexToString } from 'viem'
 
-const indexerEndpoint = Bun.env.INDEXER_ENDPOINT
-if (!indexerEndpoint) throw new Error('INDEXER_ENDPOINT is required')
+// Folded reads (/query) are served by the journal, not the attest-only matchmaker.
+const journalUrl = Bun.env.JOURNAL_URL
+if (!journalUrl) throw new Error('JOURNAL_URL is required')
 
-const indexer = createIndexerClient(indexerEndpoint)
+const client = createClient({ storageUrl: journalUrl, schema })
 
-export interface ITopMaster {
+export interface ITopFund {
   rank: number
   avatar: string
   label: string
+  token: string | null
   value: string
-  positive: boolean
+  tone: 'positive' | 'neutral' | 'negative'
 }
 
 const short = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`
 
 const decodeName = (name: Hex): string => {
+  if (!name || name === BYTES32_ZERO) return ''
   try {
     return hexToString(name, { size: 32 }).trim()
   } catch {
@@ -28,26 +33,30 @@ const decodeName = (name: Hex): string => {
   }
 }
 
-export async function fetchTopMasters(limit: number): Promise<ITopMaster[]> {
-  const since = getUnixTimestamp() - IntervalTime.WEEK
-  const metricList = await select(indexer, 'MasterLatestMetric', {
-    where: { interval: { _eq: IntervalTime.WEEK }, lastUpdatedTimestamp: { _gte: since } },
-    orderBy: { realisedPnl: 'desc' },
+export async function fetchTopFunds(limit: number): Promise<ITopFund[]> {
+  const now = getUnixTimestamp()
+  const metricList = await client.select(fundLatestMetricTable, {
+    where: { interval: IntervalTime.WEEK, lastUpdatedTimestamp: { gte: now - IntervalTime.WEEK } },
+    orderBy: { col: 'realisedPnl', dir: 'desc' },
     limit
   })
   if (metricList.length === 0) return []
 
-  const nameRows = await select(indexer, 'AccountState', {
-    where: { account: { _in: metricList.map(m => m.master) }, chainId: { _eq: BigInt(HUB_CHAIN_ID) } },
-    fields: ['account', 'name']
-  })
-  const nameByMaster = new Map(nameRows.map(r => [r.account, decodeName(r.name)]))
+  const fundRows = await client.select(fundTable, { where: { id: { in: metricList.map(m => m.fund) } } })
+  const fundById = new Map(fundRows.map(r => [getAddress(r.fund), r]))
 
-  return metricList.map((m, i) => ({
-    rank: i + 1,
-    avatar: `data:image/svg+xml;base64,${btoa(roboAvatarSvg(m.master))}`,
-    label: nameByMaster.get(m.master) || short(m.master),
-    value: readablePnl(m.realisedPnl),
-    positive: m.realisedPnl >= 0n
-  }))
+  return metricList.map((m, i) => {
+    const fund = fundById.get(getAddress(m.fund))
+    const name = fund ? decodeName(fund.name) : ''
+    const seed: Address = fund?.shareToken ?? m.fund
+    const pnl = dustToZeroUsd(m.realisedPnl)
+    return {
+      rank: i + 1,
+      avatar: `data:image/svg+xml;base64,${btoa(roboAvatarSvg(seed))}`,
+      label: name || short(m.fund),
+      token: symbolForBaseTokenId(m.baseTokenId),
+      value: readablePnl(pnl),
+      tone: pnl > 0n ? 'positive' : pnl < 0n ? 'negative' : 'neutral'
+    }
+  })
 }

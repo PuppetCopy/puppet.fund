@@ -1,81 +1,112 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { ADDRESS_ZERO } from '@puppet/sdk/const'
-import { createAdapter, periodicRun } from '@puppet/sdk/core'
+import { HUB_CHAIN_ID, TOKEN_META } from '@puppet/contracts/const'
+import DEPLOYMENTS from '@puppet/contracts/deployments'
+import type { ChainId } from '@puppet/sdk/const'
+import type { IGetRate, IPriceSource, IRate } from '@puppet/sdk/evaluate'
+import type { ITokenRegistry } from '@puppet/sdk/schema'
 import {
-  createIndexerHealthSource,
+  cachedTokenRegistry,
   createSdkContext,
+  fetchChainLiveness,
+  nativeSymbolOf,
   type RelayFeeMap,
-  SUPPORTED_FEE_TOKEN_IDS
+  staticTokenRegistry,
+  symbolByAddress,
+  ttlCached,
+  NATIVE_PRECISION
 } from '@puppet/sdk/state'
-import { type IStream, just, map, op, skipRepeats, skipRepeatsWith } from 'aelea/stream'
-import { state } from 'aelea/stream-extended'
-import type { Address, Hex } from 'viem'
+import { type Address, getAddress } from 'viem'
 import { publicClientMap } from '../wallet/wallet.js'
-import { sqlClient } from './indexer/sql.js'
+import { viewCall } from './onchain/viewRead.js'
 
-const GAS_POLL_MS = 10_000
-const RATE_POLL_MS = 60_000
+const chainIds = Object.keys(publicClientMap).map(Number) as ChainId[]
+const USD_PROXY = TOKEN_META.USDC.symbol
+const rateCache = new Map<string, IRate>()
+const RATE_FAIL_TTL_MS = 5_000
+const rateFailUntil = new Map<string, number>()
+export const getRate: IGetRate = async (asset0, asset1, freshness = 10000) => {
+  const key = `${asset0}-${asset1}`
+  const cached = rateCache.get(key)
+  if (cached && Date.now() - cached.time * 1000 < freshness) return cached
+  const failUntil = rateFailUntil.get(key)
+  if (failUntil !== undefined && Date.now() < failUntil) throw new Error(`no rate for ${asset0}/${asset1}`)
 
-const ctx = createSdkContext({
-  sqlClient,
-  publicClients: publicClientMap,
-  gasTtlMs: GAS_POLL_MS,
-  rateTtlMs: RATE_POLL_MS
-})
-
-export const getTokenRegistry = ctx.getTokenRegistry
-export const tokenRegistryQuery = just(ctx.getTokenRegistry())
-
-// Native (token 0) is a holdable balance, never a GMX collateral: keep it out of the filter.
-export const registeredCollateralListQuery: IStream<Promise<Address[]>> = map(
-  registry =>
-    registry.then(reg =>
-      [...(reg.get(HUB_CHAIN_ID)?.values() ?? [])].map(info => info.token).filter(token => token !== ADDRESS_ZERO)
-    ),
-  tokenRegistryQuery
-)
-// Indexer status polls at a slow idle heartbeat; the action drawer bumps urgency while
-// it has pending work (signing needs fresh block numbers), which also refetches instantly.
-const INDEXER_POLL_IDLE_MS = 30_000
-const INDEXER_POLL_ACTIVE_MS = 2_000
-const indexerUrgency = createAdapter<'high' | 'idle'>()
-export const setIndexerUrgency = indexerUrgency[0]
-export const indexerHealth = op(
-  createIndexerHealthSource(
-    sqlClient,
-    map(u => (u === 'high' ? INDEXER_POLL_ACTIVE_MS : INDEXER_POLL_IDLE_MS), state('idle', indexerUrgency[1]))
-  ),
-  state()
-)
-// Polling sources dedupe at the source: an unchanged gas price (or an equal fee map
-// rebuilt as a fresh object each poll) must not re-fire every downstream combine,
-// which previously respammed swap-quote requests with no input change.
-export const gasPrice = op(
-  periodicRun({ interval: GAS_POLL_MS, actionOp: map(() => ctx.getGasPrice(HUB_CHAIN_ID)) }),
-  skipRepeats,
-  state()
-)
-
-const feeMapEq = (a: RelayFeeMap, b: RelayFeeMap): boolean => {
-  for (const method of Object.keys(a) as (keyof RelayFeeMap)[]) {
-    if (a[method].relayFee !== b[method].relayFee) return false
+  try {
+    const res = await fetch(`/api/journal/rate?token0=${asset0}&token1=${asset1}&freshness=${freshness}`)
+    if (!res.ok) throw new Error(`no rate for ${asset0}/${asset1}`)
+    const data = (await res.json()) as { token0?: string | number; token1?: string | number; time?: number } | null
+    if (!data?.token0 || !data?.token1) throw new Error(`no rate for ${asset0}/${asset1}`)
+    const rate: IRate = { token0: BigInt(data.token0), token1: BigInt(data.token1), time: data.time ?? 0 }
+    rateCache.set(key, rate)
+    rateFailUntil.delete(key)
+    return rate
+  } catch (err) {
+    rateFailUntil.set(key, Date.now() + RATE_FAIL_TTL_MS)
+    throw err
   }
-  return true
 }
 
-export const relayFeeMapByToken: Map<Hex, IStream<RelayFeeMap>> = new Map(
-  SUPPORTED_FEE_TOKEN_IDS.map(token => [
-    token,
-    op(
-      periodicRun({ interval: GAS_POLL_MS, actionOp: map(() => ctx.getRelayFeeMap(token)) }),
-      skipRepeatsWith(feeMapEq),
-      state()
-    )
-  ])
+export const getPrice = async (token: Address, freshness = 10000): Promise<IPriceSource> => {
+  const rate = await getRate(symbolByAddress(token), USD_PROXY, freshness)
+  return { price: rate.token0, time: rate.time }
+}
+
+const HUB_NATIVE_SYMBOL = nativeSymbolOf(HUB_CHAIN_ID)
+const getTokenPerNativeToken = async (token: Address): Promise<bigint> => {
+  const symbol = symbolByAddress(token)
+  if (symbol === HUB_NATIVE_SYMBOL) return NATIVE_PRECISION
+  const [native, tok] = await Promise.all([getRate(HUB_NATIVE_SYMBOL, USD_PROXY), getRate(symbol, USD_PROXY)])
+  if (native.token0 === 0n || tok.token0 === 0n) throw new Error(`no price for fee token ${token}`)
+  return (native.token0 * NATIVE_PRECISION) / tok.token0
+}
+
+const context = createSdkContext(
+  publicClientMap,
+
+  {
+    getRate,
+    getTokenPerNativeToken,
+    getTokenRegistry: cachedTokenRegistry(async () => {
+      const rows: ITokenRegistry[] = []
+      await Promise.all(
+        [...staticTokenRegistry()].map(async ([chainId, candidates]) => {
+          const register = DEPLOYMENTS[`Register:${chainId as ChainId}`]
+          if (!register || Number(register.block) === 0) return
+          await Promise.all(
+            [...candidates.values()].map(async candidate => {
+              const cap = (await viewCall({
+                chainId: chainId as ChainId,
+                address: register.address,
+                abi: register.abi,
+                functionName: 'tokenCapMap',
+                args: [candidate.token],
+                global: true
+              }).catch(() => null)) as bigint | null
+              if (cap === null || cap === 0n) return
+              rows.push({ id: candidate.id, chainId: candidate.chainId, token: getAddress(candidate.token), cap })
+            })
+          )
+        })
+      )
+      return rows
+    }),
+    getChainLiveness: ttlCached(async () => {
+      const health = await fetchChainLiveness({
+        chainIds,
+        chainHead: (cid: ChainId) => publicClientMap[cid].getBlockNumber()
+      })
+      const chains = Object.fromEntries(Object.entries(health.chains).filter(([, c]) => c.block.number > 0n))
+      return { ...health, chains, reachable: Object.keys(chains).length > 0 }
+    }, 1000)
+  }
 )
 
-export function relayFeeMapForToken(baseTokenId: Hex): IStream<RelayFeeMap> {
-  const stream = relayFeeMapByToken.get(baseTokenId)
-  if (!stream) throw new Error(`no relay fee source for baseTokenId ${baseTokenId}`)
-  return stream
-}
+export default context
+
+// Fail-SOFT relay-fee map for DISPLAY streams: an unpriceable fee token yields null (-> the editor shows '-' and
+// the action is gated) instead of letting the rejection cascade through the reactive graph and flood the console.
+// The SUBMIT path must keep using context.getRelayFeeMap directly so signing fails closed on a missing price.
+export const displayRelayFeeMap = (token: Address): Promise<RelayFeeMap | null> =>
+  context.getRelayFeeMap(token).then(
+    m => m,
+    () => null
+  )

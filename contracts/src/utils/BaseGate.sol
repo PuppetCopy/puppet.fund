@@ -6,7 +6,7 @@ import {Error} from "./Error.sol";
 import {IAuthority} from "./interfaces/IAuthority.sol";
 import {IArbSys} from "./interfaces/IArbSys.sol";
 import {Account} from "../core/Account.sol";
-import {RegisterToken} from "../core/RegisterToken.sol";
+import {Register} from "../core/Register.sol";
 
 abstract contract BaseGate is Permission {
     struct Config {
@@ -20,7 +20,7 @@ abstract contract BaseGate is Permission {
     IArbSys internal constant arbSys = IArbSys(address(100));
 
     Account internal immutable accountModule;
-    RegisterToken internal immutable registerModule;
+    Register internal immutable registerModule;
 
     address internal immutable attestor;
     address internal immutable feeReceiver;
@@ -31,10 +31,13 @@ abstract contract BaseGate is Permission {
     constructor(
         IAuthority _authority,
         Account _accountModule,
-        RegisterToken _register,
+        Register _register,
         Config memory _config
     ) Permission(_authority) {
-        if (address(_accountModule) == address(0) || address(_register) == address(0)) {
+        if (
+            address(_accountModule) == address(0) || address(_register) == address(0)
+                || _config.attestor == address(0) || _config.feeReceiver == address(0)
+        ) {
             revert Error.Gate__InvalidModule();
         }
         accountModule = _accountModule;

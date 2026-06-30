@@ -26,7 +26,3 @@ export const RULE_REVOKED: IRuleBody = Object.fromEntries(RULE_SLOTS.map(name =>
 export function isRevokedRule(rule: Partial<IRuleBody>): boolean {
   return RULE_SLOTS.every(name => (rule[name] ?? 0n) === 0n)
 }
-
-export function encodeRevokedRule(): Hex {
-  return '0x'
-}

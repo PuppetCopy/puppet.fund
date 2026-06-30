@@ -16,7 +16,7 @@ export const $loadingValue = (valueSrc: IStream<string>): I$Node =>
   switchLatest(map(v => (v === '-' ? $loadingDash : $node($text(v))), valueSrc))
 
 export const intermediateText = (querySrc: IStream<Promise<string>>, hint = '-'): IStream<string> =>
-  switchMap(res => start(hint, fromPromise(res)), querySrc)
+  switchMap(res => start(hint, fromPromise(res.then(v => v, () => hint))), querySrc)
 
 export const $intermediateText = (
   querySrc: IStream<Promise<string>>,
@@ -61,7 +61,7 @@ interface ClassifiedError {
 }
 
 // Extract a display-friendly (title, detail) from an unknown throwable.
-// Title from `error.name` (e.g. "IndexerHttpError"); detail from the message
+// Title from `error.name` (e.g. "RelayHttpError"); detail from the message
 // or a trimmed HTML body. No editorializing; the throw-site phrasing wins.
 function classifyError(res: unknown): ClassifiedError {
   const err = res && typeof res === 'object' ? (res as { name?: string; message?: string }) : null

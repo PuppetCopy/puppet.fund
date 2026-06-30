@@ -18,14 +18,17 @@ export function ttlCached<T>(fetcher: () => Promise<T>, ttlMs: number): () => Pr
   }
 }
 
-export function ttlCachedByKey<K, T>(fetcher: (key: K) => Promise<T>, ttlMs: number): (key: K) => Promise<T> {
-  const byKey = new Map<K, () => Promise<T>>()
-  return (key: K) => {
+export function ttlCachedByKey<K, T>(
+  defaultTtlMs: number,
+  fetcher: (key: K) => Promise<T>
+) {
+  const byKey = new Map<K, (ttlMs?: number) => Promise<T>>()
+  return (key: K, ttlMs?: number) => {
     let getter = byKey.get(key)
     if (getter === undefined) {
-      getter = ttlCached(() => fetcher(key), ttlMs)
+      getter = ttlCached((...arg) => fetcher(key, ...arg), defaultTtlMs)
       byKey.set(key, getter)
     }
-    return getter()
+    return getter(ttlMs)
   }
 }

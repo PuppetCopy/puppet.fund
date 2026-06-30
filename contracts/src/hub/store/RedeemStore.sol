@@ -4,28 +4,25 @@ pragma solidity ^0.8.35;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {BankStore} from "../../utils/BankStore.sol";
-import {Error} from "../../utils/Error.sol";
-import {Precision} from "../../utils/Precision.sol";
 import {IAuthority} from "../../utils/interfaces/IAuthority.sol";
 
 contract RedeemStore is BankStore {
     struct Pool {
         uint epoch;
-        uint accruedPerStake;
-        uint totalStake;
+        uint accruedPerWeight;
+        uint weight;
     }
 
     struct Position {
         uint epoch;
-        uint stake;
+        uint weight;
         uint cursor;
-        uint accrued;
     }
 
     mapping(address fund => Pool) public poolMap;
     mapping(address fund => mapping(address holder => Position)) public positionMap;
     mapping(address fund => mapping(uint epoch => uint)) public closedEpochAccruedMap;
-    mapping(address fund => uint) public closeRateMap;
+    mapping(address fund => uint) public liquidationRateMap;
 
     constructor(
         IAuthority _authority
@@ -59,18 +56,11 @@ contract RedeemStore is BankStore {
         positionMap[_fund][_holder] = _position;
     }
 
-    function deletePosition(
+    function setLiquidationRate(
         address _fund,
-        address _holder
+        uint _liquidationRate
     ) external auth {
-        delete positionMap[_fund][_holder];
-    }
-
-    function closeFund(
-        address _fund,
-        uint _closeRate
-    ) external auth {
-        closeRateMap[_fund] = _closeRate;
+        liquidationRateMap[_fund] = _liquidationRate;
     }
 
     function recognize(
@@ -80,26 +70,12 @@ contract RedeemStore is BankStore {
         signedBalanceMap[_token] += _amount;
     }
 
-    function rotatePool(
-        address _fund
-    ) external auth {
-        Pool storage _pool = poolMap[_fund];
-        closedEpochAccruedMap[_fund][_pool.epoch] = _pool.accruedPerStake;
-        _pool.epoch += 1;
-        _pool.accruedPerStake = 0;
-        _pool.totalStake = 0;
-    }
-
-    function creditPool(
+    function setClosedEpochAccrued(
         address _fund,
-        uint _amount
-    ) external auth returns (uint accruedPerStake_, uint totalStake_) {
-        Pool storage _pool = poolMap[_fund];
-        if (_pool.totalStake == 0) revert Error.Share__NoStakeToCredit();
-        uint _credit = Precision.toFactor(_amount, _pool.totalStake);
-        if (_credit == 0) revert Error.Share__CreditTooSmall();
-        _pool.accruedPerStake += _credit;
-        return (_pool.accruedPerStake, _pool.totalStake);
+        uint _epoch,
+        uint _accruedPerWeight
+    ) external auth {
+        closedEpochAccruedMap[_fund][_epoch] = _accruedPerWeight;
     }
 
     function transferOut(

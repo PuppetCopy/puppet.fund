@@ -15,6 +15,6 @@
     "types": ["@types/bun"]
   },
   "references": [
-    { "path": "../contracts" }
+    { "path": "../contracts-artifacts" }
   ]
 }

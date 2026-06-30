@@ -1,5 +1,5 @@
 import { $element, $node, $text, attr, type I$Node, style } from 'aelea/ui'
-import type { ITopMaster } from './leaderboard.js'
+import type { ITopFund } from './leaderboard.js'
 
 const palette = {
   message: '#ffffff',
@@ -95,14 +95,29 @@ export const $brand: I$Node = $frame(
 
 const $brandRow = $node(style({ display: 'flex', alignItems: 'center', gap: '28px' }))($logo(96), $wordmark(48))
 
-export const $leaderboard = (rows: ITopMaster[]): I$Node =>
+const $tokenChip = (symbol: string) =>
+  $element('span')(
+    style({
+      display: 'flex',
+      fontSize: '28px',
+      fontWeight: '600',
+      letterSpacing: '0.04em',
+      color: palette.message,
+      padding: '6px 18px',
+      borderRadius: '100px',
+      border: '1px solid rgba(148, 164, 194, 0.28)',
+      background: 'rgba(148, 164, 194, 0.12)'
+    })
+  )($text(symbol))
+
+export const $leaderboard = (rows: ITopFund[]): I$Node =>
   $frame(
     $brandRow,
     $node(style({ display: 'flex', alignItems: 'baseline', gap: '28px', marginTop: '56px' }))(
       $element('h1')(style({ fontSize: '96px', fontWeight: '700', lineHeight: '1', margin: '0' }))(
         $text('Leaderboard')
       ),
-      $element('span')(style({ fontSize: '34px', color: palette.foreground }))($text('top traders · 7d'))
+      $element('span')(style({ fontSize: '34px', color: palette.foreground }))($text('top funds · 7d'))
     ),
     $node(style({ flex: '1', display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '6px' }))(
       ...rows.map(row =>
@@ -127,12 +142,29 @@ export const $leaderboard = (rows: ITopMaster[]): I$Node =>
               background: palette.middleground
             })
           )(),
-          $element('span')(style({ flex: '1', color: palette.message, fontWeight: '600', overflow: 'hidden' }))(
-            $text(row.label)
-          ),
-          $element('span')(style({ color: row.positive ? palette.positive : palette.negative, fontWeight: '700' }))(
-            $text(row.value)
-          )
+          $element('span')(
+            style({
+              flex: '1',
+              minWidth: '0',
+              color: palette.message,
+              fontWeight: '600',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis'
+            })
+          )($text(row.label)),
+          ...(row.token ? [$tokenChip(row.token)] : []),
+          $element('span')(
+            style({
+              color:
+                row.tone === 'positive'
+                  ? palette.positive
+                  : row.tone === 'negative'
+                    ? palette.negative
+                    : palette.foreground,
+              fontWeight: '700'
+            })
+          )($text(row.value))
         )
       )
     ),

@@ -3,7 +3,7 @@ import { renderToImage } from 'aelea/takumi'
 import { $brand, $leaderboard, $page } from './$views.js'
 import fontAsset from './assets/Geist-Variable.woff2' with { type: 'file' }
 import logoAsset from './assets/logo.png' with { type: 'file' }
-import { fetchTopMasters } from './leaderboard.js'
+import { fetchTopFunds } from './leaderboard.js'
 
 const port = Number(Bun.env.PORT) || 4100
 
@@ -33,13 +33,13 @@ const png = async (node: Parameters<typeof renderToImage>[0], cacheControl = STA
 
 const PAGES: Record<string, { title: string; subtitle: string }> = {
   hello: { title: 'Get Started', subtitle: 'Open a wallet, set your funding rules, start trading' },
-  leaderboard: { title: 'Leaderboard', subtitle: 'Top traders ranked by co-attested performance' },
+  leaderboard: { title: 'Leaderboard', subtitle: 'Top funds ranked by performance' },
   portfolio: { title: 'Portfolio', subtitle: 'Your accounts, balances and allocations' }
 }
 
 const leaderboardCard = async () => {
   try {
-    const rows = await fetchTopMasters(5)
+    const rows = await fetchTopFunds(5)
     if (rows.length > 0) return $leaderboard(rows)
   } catch (err) {
     console.error('leaderboard og fetch failed', err)
@@ -68,10 +68,10 @@ Bun.serve({
       return png($page('Portfolio', short(address), '/portfolio'))
     },
 
-    '/og/master/:address': req => {
+    '/og/fund/:address': req => {
       const { address } = req.params
       if (!isHexAddress(address)) return new Response('invalid address', { status: 400 })
-      return png($page('Master', short(address), '/master'))
+      return png($page('Fund', short(address), '/fund'))
     }
   },
   fetch: () => new Response('not found', { status: 404 })

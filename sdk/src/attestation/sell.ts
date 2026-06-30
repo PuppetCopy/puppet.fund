@@ -2,15 +2,15 @@ import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
-  IRedeem__SellIntent,
-  IShareLib__ShareInitParams
+  IFundAccountLib__FundAccountInitParams,
+  IRedeem__SellIntent
 } from '@puppet/contracts/types'
 import { type Address, isAddressEqual, type TypedDataDefinition } from 'viem'
 import { predictPuppetAccount, predictShareToken } from '../account/index.js'
 import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
 import * as IntentLib from './intentLib.js'
-import { HUB_DOMAIN, type IDraftContext, STAKE_RATIO_CAP } from './shared.js'
+import { HUB_DOMAIN, type IDraftContext, WEIGHT_RATIO_CAP } from './shared.js'
 
 export interface ISellInput {
   params: IAccountLib__AccountInitParams
@@ -18,17 +18,17 @@ export interface ISellInput {
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
-  share: IShareLib__ShareInitParams
+  fundParams: IFundAccountLib__FundAccountInitParams
   sharesOut: bigint
 }
 
-export interface ISellAttestContext extends IDraftContext {
+interface ISellAttestContext extends IDraftContext {
   currentBlock: bigint
   signedBalance: bigint
   claimable: bigint
   shareToken: Address | null
-  closeRate: bigint
-  poolTotalStake: bigint
+  liquidationRate: bigint
+  poolWeight: bigint
   queuedShares: bigint
 }
 
@@ -36,29 +36,26 @@ export function attestSellIntent(ctx: ISellAttestContext, input: ISellInput) {
   IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
-    baseTokenId: input.share.baseTokenId,
+    baseToken: input.fundParams.baseToken,
     lookupChain: HUB_CHAIN_ID,
     capAmount: 0n,
     acceptableRelayFee: input.acceptableRelayFee,
     relayFeeDenominator: ctx.signedBalance + ctx.claimable
   })
   if (input.sharesOut === 0n) throw new CompactContractError('Share__ZeroShares', [])
-  if (isAddressEqual(predictPuppetAccount(input.params), input.share.master)) {
+  if (isAddressEqual(predictPuppetAccount(input.params), input.fundParams.master)) {
     throw new CompactContractError('Share__MasterCannotSell', [])
   }
-  if (ctx.closeRate !== 0n) throw new CompactContractError('Share__FundClosed', [])
-  if (
-    ctx.shareToken === null ||
-    !isAddressEqual(predictShareToken(input.share.master, input.share.baseTokenId, input.share.name), ctx.shareToken)
-  ) {
+  if (ctx.liquidationRate !== 0n) throw new CompactContractError('Share__FundLiquidated', [])
+  if (ctx.shareToken === null || !isAddressEqual(predictShareToken(input.fundParams), ctx.shareToken)) {
     throw new CompactContractError('Share__NotCreated', [])
   }
-  if (ctx.poolTotalStake > ctx.queuedShares * STAKE_RATIO_CAP) {
+  if (ctx.poolWeight > ctx.queuedShares * WEIGHT_RATIO_CAP) {
     throw new CompactContractError('Share__PoolDegraded', [])
   }
-  const stakeAdded =
-    ctx.poolTotalStake === 0n ? input.sharesOut : (input.sharesOut * ctx.poolTotalStake) / ctx.queuedShares
-  if (stakeAdded === 0n) throw new CompactContractError('Share__ZeroStakeAdded', [])
+  const weightAdded =
+    ctx.poolWeight === 0n ? input.sharesOut : (input.sharesOut * ctx.poolWeight) / ctx.queuedShares
+  if (weightAdded === 0n) throw new CompactContractError('Share__ZeroWeightAdded', [])
   // Sell auto-flushes the holder's accrued claim in the same dispatch, so the flush can
   // cover the relay fee even when the signed balance alone cannot.
   if (ctx.signedBalance + ctx.claimable < input.acceptableRelayFee) {
@@ -75,7 +72,7 @@ export function attestSellIntent(ctx: ISellAttestContext, input: ISellInput) {
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: BigInt(ctx.chainId),
-    share: input.share,
+    fundParams: input.fundParams,
     sharesOut: input.sharesOut
   }
 

@@ -1,14 +1,15 @@
-import { MASTER_GATE_INTENTS } from '@puppet/contracts/intents'
+import { FUND_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
+  IFundAccountLib__FundAccountInitParams,
+  IFundGate__OperateIntent,
   IIAccount__Call,
-  IIAccount__SignTransfer,
-  IMasterGate__OperateIntent
+  IIAccount__SignTransfer
 } from '@puppet/contracts/types'
-import { encodeAbiParameters, type Hex, keccak256, type TypedDataDefinition } from 'viem'
+import { type Address, encodeAbiParameters, getAddress, type Hex, keccak256, type TypedDataDefinition } from 'viem'
 import { CompactError } from '../compact/index.js'
 import * as IntentLib from './intentLib.js'
-import { type IDraftContext, MASTER_GATE_DOMAIN_MAP } from './shared.js'
+import { FUND_GATE_DOMAIN_MAP, type IDraftContext } from './shared.js'
 
 const CALL_TUPLE_ARRAY = [
   {
@@ -26,7 +27,6 @@ const TRANSFER_TUPLE_ARRAY = [
   {
     type: 'tuple[]',
     components: [
-      { name: 'tokenId', type: 'bytes32' },
       { name: 'token', type: 'address' },
       { name: 'amountIn', type: 'uint256' },
       { name: 'amountOut', type: 'uint256' }
@@ -41,43 +41,45 @@ export interface IOperateInput {
   acceptableRelayFee: bigint
   nonce: bigint
   chainId: bigint
+  fundParams: IFundAccountLib__FundAccountInitParams
   callList: IIAccount__Call[]
   transferList: IIAccount__SignTransfer[]
 }
 
-export interface IOperateAttestContext extends IDraftContext {
+interface IOperateAttestContext extends IDraftContext {
   currentBlock: bigint
-  signedBalanceByTokenId: Record<Hex, bigint>
+  signedBalanceByToken: Record<Address, bigint>
 }
 
 export function attestOperateIntent(ctx: IOperateAttestContext, input: IOperateInput) {
   IntentLib.verifyChainId(input.chainId, BigInt(ctx.chainId))
-  IntentLib.verifyTimeBounds(input.blockNumber, input.deadline, ctx.currentBlock)
+  IntentLib.verifyTimeBounds(input.blockNumber, input.deadline, ctx.currentBlock, ctx.chainId)
 
   for (const leg of input.transferList) {
     IntentLib.assertOutflowCovered(
-      { signedBalance: ctx.signedBalanceByTokenId[leg.tokenId] ?? 0n },
+      { signedBalance: ctx.signedBalanceByToken[getAddress(leg.token)] ?? 0n },
       { amountIn: leg.amountIn, amountOut: leg.amountOut }
     )
   }
 
-  const intent: IMasterGate__OperateIntent = {
+  const intent: IFundGate__OperateIntent = {
     params: input.params,
     blockNumber: input.blockNumber,
     deadline: input.deadline,
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: input.chainId,
+    fundParams: input.fundParams,
     callList: input.callList,
     transferList: input.transferList
   }
 
-  const domain = MASTER_GATE_DOMAIN_MAP[ctx.chainId]
+  const domain = FUND_GATE_DOMAIN_MAP[ctx.chainId]
   if (!domain) throw new CompactError('BAD_REQUEST', `unsupported chain ${ctx.chainId}`)
   const { callList, transferList, ...rest } = intent
   const typedData: TypedDataDefinition = {
     domain,
-    ...MASTER_GATE_INTENTS.operate,
+    ...FUND_GATE_INTENTS.operate,
     message: {
       ...rest,
       callListHash: keccak256(encodeAbiParameters(CALL_TUPLE_ARRAY, [callList])),

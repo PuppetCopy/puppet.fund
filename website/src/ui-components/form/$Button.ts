@@ -2,11 +2,12 @@ import { empty } from 'aelea/stream'
 import type { IBehavior } from 'aelea/stream-extended'
 import { component, type I$Node, type INode, type INodeCompose, nodeEvent, style, stylePseudo } from 'aelea/ui'
 import {
-  $ButtonToggle as $aeleaButtonToggle,
+  $ButtonToggle as $AeleaButtonToggle,
   $Button,
   $ButtonIcon,
   $defaultButtonContainer,
   $defaultButtonToggleBtn,
+  $defaultButtonToggleContainer,
   type Control,
   type I$Button,
   type I$ButtonToggle
@@ -15,11 +16,29 @@ import { colorShade, palette, text } from 'aelea/ui-components-theme'
 import { $icon } from '../$common.js'
 
 const $buttonToggleBtn = $defaultButtonToggleBtn(
-  stylePseudo(':hover', { color: palette.message, backgroundColor: colorShade(palette.foreground, 12) })
+  style({
+    fontSize: text.xs,
+    fontWeight: 'bold'
+  }),
+  // Selected pill: the "border" is an inline box-shadow aelea sets to --primary; override THAT to a translucent
+  // foreground matching the surrounding container border (needs !important to beat the inline style). Text kept bright.
+  stylePseudo('[aria-pressed="true"]', {
+    boxShadow: `0px 0px 0 1px color-mix(in srgb, ${palette.foreground} 30%, transparent) inset !important`,
+    color: palette.message
+  })
+  // stylePseudo(':hover', { color: palette.message })
+)
+
+const $buttonContainer = $defaultButtonToggleContainer(
+  style({
+    backgroundColor: palette.background
+  })
+  // stylePseudo(':hover', { borderColor: palette.foreground, borderWidth: '1px' })
 )
 
 export const $ButtonToggle = <T>(config: I$ButtonToggle<T>) =>
-  $aeleaButtonToggle({ $button: $buttonToggleBtn, ...config })
+  $AeleaButtonToggle({ $button: $buttonToggleBtn, ...config, $container: $buttonContainer })
+
 export const $defaultButtonPrimary = $defaultButtonContainer(
   style({
     color: palette.message,
@@ -73,8 +92,12 @@ export const $defaultMiniButtonPrimary = $defaultButtonPrimary(
     alignSelf: 'center',
     height: '28px',
     padding: '0 10px',
-    fontSize: text.xs
-  })
+    fontSize: text.xs,
+    backgroundColor: 'transparent',
+    border: '1px solid',
+    borderColor: palette.primary
+  }),
+  stylePseudo(':hover', { backgroundColor: palette.primary })
 )
 
 export const $ButtonPrimary = (config: I$Button) => $keyboardOperableButton($Button, $defaultButtonPrimary, config)

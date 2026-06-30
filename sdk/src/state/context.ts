@@ -1,80 +1,78 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import type { Hex } from 'viem'
-import { getGasPrice as fetchGasPrice } from 'viem/actions'
-import type { ChainId } from '../const/index.js'
-import { ttlCached, ttlCachedByKey } from './cache.js'
-import {
-  type FeeClient,
-  getRelayFeeQuoteSource,
-  getTokenPerEthForId,
-  type RelayFeeMap,
-  SUPPORTED_FEE_TOKEN_IDS
-} from './fee.js'
-import type { IIndexerClient } from './shared.js'
-import { type ITokenRegistryMap, loadTokenRegistry } from './tokenRegistry.js'
+import DEPLOYMENTS from '@puppet/contracts/deployments'
+import type { Address, Hex } from 'viem'
+import { getBlockNumber as fetchBlockNumber, getGasPrice as fetchGasPrice, readContract } from 'viem/actions'
+import { ttlCachedByKey } from './cache.js'
 
-export interface ISdkContextConfig {
-  sqlClient: IIndexerClient
-  publicClients: Record<number, FeeClient>
-  homeChainId?: number
-  gasTtlMs?: number
-  rateTtlMs?: number
-  feeTokenIds?: readonly Hex[]
-}
+const ACCOUNT = DEPLOYMENTS[`Account:${HUB_CHAIN_ID}`]
 
-export interface ISdkContext {
-  getTokenRegistry: () => Promise<ITokenRegistryMap>
-  getGasPrice: (chainId: number) => Promise<bigint>
-  getGasPriceByChain: () => Promise<Record<ChainId, bigint>>
-  getTokenPerEth: (baseTokenId: Hex) => Promise<bigint>
-  getTokenPerEthByToken: () => Promise<Record<Hex, bigint>>
-  getRelayFeeMap: (baseTokenId: Hex) => Promise<RelayFeeMap>
-}
+import type { IGetRate } from '../evaluate/index.js'
+import { type FeeClient, getRelayFeeQuoteSource, } from './fee.js'
+import type { IChainLiveness } from './health.js'
+import type { ITokenRegistryMap } from './tokenRegistry.js'
 
-export function createSdkContext(config: ISdkContextConfig): ISdkContext {
-  const {
-    sqlClient,
-    publicClients,
-    homeChainId = HUB_CHAIN_ID,
-    gasTtlMs = 200,
-    rateTtlMs = 60_000,
-    feeTokenIds = SUPPORTED_FEE_TOKEN_IDS
-  } = config
+export function createSdkContext(
+  publicClients: Record<number, FeeClient>,
+  // The token registry and chain liveness are sourced per app, injected here so the context itself stays free of any
+  // data-store coupling — it only owns the on-chain/fee reads.
+  config: {
+    getRate: IGetRate
+    getTokenRegistry: () => Promise<ITokenRegistryMap>
+    // Optional: only apps that anchor against a chain head + run staleness gates need it (the website runner). The
+    // matchmaker omits it — its attestation reads the per-intent request-chain head directly, no global liveness
+    // snapshot. Defaulted to a thrower so a consumer that DOES read it without providing one fails loudly.
+    getChainLiveness?: () => Promise<IChainLiveness>
+    getTokenPerNativeToken: (tokenId: Hex) => Promise<bigint>
+  },
+  homeChainId = HUB_CHAIN_ID
+) {
+  const { getTokenRegistry, getRate, getTokenPerNativeToken: tokenPerNativeTokenProvider } = config
+  const getChainLiveness =
+    config.getChainLiveness ??
+    ((): Promise<IChainLiveness> => {
+      throw new Error('createSdkContext: getChainLiveness was not configured')
+    })
 
   const clientFor = (chainId: number): FeeClient => {
     const client = publicClients[chainId]
     if (!client) throw new Error(`createSdkContext: no public client for chain ${chainId}`)
     return client
   }
-  const homeClient = clientFor(homeChainId)
 
-  const getTokenRegistry = ttlCached(() => loadTokenRegistry(sqlClient), Number.POSITIVE_INFINITY)
-  const getGasPrice = ttlCachedByKey((chainId: number) => fetchGasPrice(clientFor(chainId)), gasTtlMs)
-  const getTokenPerEth = ttlCachedByKey((baseTokenId: Hex) => getTokenPerEthForId(baseTokenId, homeClient), rateTtlMs)
+  const getChainGasPrice = ttlCachedByKey(200, (chainId: number) => fetchGasPrice(clientFor(chainId)))
+  // On-demand live chain head per chain (lazy: a chain is only polled when an intent for it
+  // arrives, so adding chains costs nothing until they see traffic). Off-chain mirror of the
+  // contract's block.number for the maxBlockDelay / StaleSignature anchor-freshness check.
+  const getBlockNumber = ttlCachedByKey(350, (chainId: number) => fetchBlockNumber(clientFor(chainId)))
+  const getTokenPerNativeToken = ttlCachedByKey(60_000, tokenPerNativeTokenProvider)
 
-  const getGasPriceByChain = ttlCached(async (): Promise<Record<ChainId, bigint>> => {
-    const entries = await Promise.all(
-      Object.keys(publicClients).map(async chainId => [Number(chainId), await getGasPrice(Number(chainId))] as const)
-    )
-    return Object.fromEntries(entries) as Record<ChainId, bigint>
-  }, gasTtlMs)
+  // Mirrors the contract's nonce replay guard (Account.dispatch consumes the nonce keyed by the executing account;
+  // reverts NonceLib__InvalidNonceForAccount on reuse). isNonceConsumed lives on the shared Account module, keyed per
+  // account, so it answers even for not-yet-deployed accounts.
+  // NEVER cached: this gates whether the matchmaker APPROVES a dispatch, and it must not approve off a memoized answer.
+  // The read is at `latest`, so a head reorg can flip it either way — re-read fresh on every check so the decision
+  // always reflects the live tip (the on-chain NonceLib consume is the atomic backstop behind it).
+  const getNonceConsumed = (chainId: number, account: Address, nonce: bigint): Promise<boolean> =>
+    readContract(clientFor(chainId), {
+      address: ACCOUNT.address,
+      abi: ACCOUNT.abi,
+      functionName: 'isNonceConsumed',
+      args: [account, nonce]
+    })
 
-  const getTokenPerEthByToken = ttlCached(async (): Promise<Record<Hex, bigint>> => {
-    const entries = await Promise.all(feeTokenIds.map(async token => [token, await getTokenPerEth(token)] as const))
-    return Object.fromEntries(entries) as Record<Hex, bigint>
-  }, rateTtlMs)
-
-  const getRelayFeeMap = async (baseTokenId: Hex): Promise<RelayFeeMap> => {
-    const [gas, rate] = await Promise.all([getGasPrice(homeChainId), getTokenPerEth(baseTokenId)])
+  const getRelayFeeMap = async (tokenId: Hex, ttlMs = 350) => {
+    const [gas, rate] = await Promise.all([getChainGasPrice(homeChainId, ttlMs), getTokenPerNativeToken(tokenId, ttlMs)])
     return getRelayFeeQuoteSource(rate, gas)
   }
 
   return {
     getTokenRegistry,
-    getGasPrice,
-    getGasPriceByChain,
-    getTokenPerEth,
-    getTokenPerEthByToken,
-    getRelayFeeMap
+    getRate,
+    getChainGasPrice,
+    getTokenPerNativeToken,
+    getRelayFeeMap,
+    getNonceConsumed,
+    getBlockNumber,
+    getChainLiveness
   }
 }

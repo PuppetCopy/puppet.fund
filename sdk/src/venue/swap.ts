@@ -1,5 +1,6 @@
+import { HUB_CHAIN_ID, SWAP_PROVIDER } from '@puppet/contracts/const'
 import { type Address, decodeFunctionData, erc20Abi, getAddress, type Hex, isAddressEqual } from 'viem'
-import { ACROSS_SPOKE_POOL, decodeAcrossDeposit } from '../attestation/acrossDeposit.js'
+import { ACROSS_PERIPHERY, decodeAcrossDeposit } from '../attestation/acrossDeposit.js'
 import { ADDRESS_ZERO } from '../const/common.js'
 import type { IOperateCall, IOperateTransfer } from './operate.js'
 import type { IGuardReason, IGuardResult } from './types.js'
@@ -7,7 +8,10 @@ import type { IGuardReason, IGuardResult } from './types.js'
 // The focused swap venue: a same-chain swap (LI.FI) and a cross-chain swap (a bridge, via Across)
 // are one external value-transformation interface. operate (trading/investing) delegates here rather
 // than carrying this logic.
-export const LIFI_DIAMOND: Address = '0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE'
+// Sourced from @puppet/contracts/const SWAP_PROVIDER (const.toml) — the same table the deploy seeds
+// Register.providerAllowed from. Both providers are chain-invariant deterministic addresses now (the LI.FI
+// diamond and the Across periphery), so a single value each (LIFI_DIAMOND / ACROSS_PERIPHERY) screens every chain.
+export const LIFI_DIAMOND: Address = getAddress(SWAP_PROVIDER[HUB_CHAIN_ID as keyof typeof SWAP_PROVIDER].lifiDiamond)
 
 function tryDecode(callData: Hex) {
   try {
@@ -50,7 +54,7 @@ export function screenSameChainSwap(input: IScreenSwapInput): IGuardResult | nul
   }
   const swapCall = (nativeIn ? input.callList[0] : input.callList[1]) as IOperateCall
 
-  if (inLeg.tokenId === outLeg.tokenId || isAddressEqual(getAddress(inLeg.token), getAddress(outLeg.token))) {
+  if (isAddressEqual(getAddress(inLeg.token), getAddress(outLeg.token))) {
     reasons.push({ code: 'SWAP_SAME_TOKEN', detail: 'swap legs must move two distinct tokens' })
   }
   if (inLeg.amountIn !== 0n || inLeg.amountOut <= 0n) {
@@ -133,11 +137,12 @@ function screenApproveSandwich(
 // destination chain), so the value cannot leave the account's perimeter. The in/out amount
 // ratio and destination-token registry binding are the matchmaker's checks, since they need
 // a live registry.
-export function screenCrossChainSwap(
-  input: IScreenSwapInput
-): { result: IGuardResult | null; decoded: ReturnType<typeof decodeAcrossDeposit> } {
-  const spokePool = ACROSS_SPOKE_POOL[input.chainId]
-  if (!spokePool || !input.callList.some(c => isAddressEqual(getAddress(c.target), spokePool))) {
+export function screenCrossChainSwap(input: IScreenSwapInput): {
+  result: IGuardResult | null
+  decoded: ReturnType<typeof decodeAcrossDeposit>
+} {
+  const provider = ACROSS_PERIPHERY
+  if (!input.callList.some(c => isAddressEqual(getAddress(c.target), provider))) {
     return { result: null, decoded: null }
   }
 
@@ -156,10 +161,10 @@ export function screenCrossChainSwap(
   if (leg.amountIn !== 0n || leg.amountOut <= 0n) {
     reasons.push({ code: 'BRIDGE_BAD_LEG', detail: 'leg must declare a positive amountOut and no amountIn' })
   }
-  if (!isAddressEqual(getAddress(depositCall.target), spokePool)) {
+  if (!isAddressEqual(getAddress(depositCall.target), provider)) {
     reasons.push({
       code: 'BRIDGE_BAD_PROVIDER',
-      detail: `deposit call target ${depositCall.target} is not the Across SpokePool`
+      detail: `deposit call target ${depositCall.target} is not the Across periphery`
     })
   }
   if (depositCall.value !== 0n) {
@@ -206,7 +211,7 @@ export function screenCrossChainSwap(
     reasons.push({ code: 'BRIDGE_SAME_CHAIN', detail: 'cross-chain swap destination must be a different chain' })
   }
 
-  screenApproveSandwich(reasons, approveCall, resetCall, leg.token, spokePool, leg.amountOut)
+  screenApproveSandwich(reasons, approveCall, resetCall, leg.token, provider, leg.amountOut)
 
   return { result: { ok: reasons.length === 0, reasons }, decoded }
 }

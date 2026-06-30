@@ -48,6 +48,8 @@ export const WALLET_TARGET = {
 export interface IHandoffSessionRequest {
   user: string
   signerKey: string
+  baseTokenId: string
+  name: string
   // Present only on an explicit Approve — grants this dApp origin access to the fund.
   approveOrigin?: string
 }

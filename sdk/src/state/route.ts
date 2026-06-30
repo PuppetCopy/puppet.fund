@@ -1,9 +1,11 @@
-import { type Address, erc20Abi, getAddress, type PublicClient } from 'viem'
-import { readContract } from 'viem/actions'
-import { predictDepositRoute, predictRoute } from '../account/index.js'
-import { type IIndexerClient, select } from './shared.js'
+import { PROTOCOL } from '@puppet/contracts/const'
+import { type Address, erc20Abi, getAddress, isAddressEqual, type PublicClient } from 'viem'
+import { getBalance, readContract } from 'viem/actions'
+import { predictDepositRoute } from '../account/index.js'
+import { awaitWhile } from '../core/await.js'
 
 export async function fetchRouteBalance(publicClient: PublicClient, token: Address, route: Address): Promise<bigint> {
+  if (isAddressEqual(getAddress(token), PROTOCOL.nativeToken)) return getBalance(publicClient, { address: route })
   return readContract(publicClient, { address: token, abi: erc20Abi, functionName: 'balanceOf', args: [route] })
 }
 
@@ -15,44 +17,13 @@ export async function pollRouteBalance(
   timeoutMs: number,
   pollMs = 2_000
 ): Promise<bigint> {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    const balance = await fetchRouteBalance(publicClient, token, route)
-    if (balance >= minAmount) return balance
-    await new Promise(r => setTimeout(r, pollMs))
-  }
-  throw new Error(`route balance did not reach ${minAmount} for ${route} within ${timeoutMs}ms`)
-}
-
-export async function fetchAccountSurplus(sql: IIndexerClient, chainId: bigint, account: Address): Promise<bigint> {
-  const rows = await select(sql, 'AccountBalanceCheckpoint', {
-    where: { account: { _eq: getAddress(account) }, chainId: { _eq: chainId } },
-    distinctOn: ['tokenId'],
-    orderBy: [{ tokenId: 'asc' }, { blockTimestamp: 'desc' }],
-    fields: ['recordedBalance', 'signedBalance']
-  })
-  let surplus = 0n
-  for (const row of rows) surplus += row.recordedBalance - row.signedBalance
-  return surplus > 0n ? surplus : 0n
-}
-
-export async function fetchPassthroughRouteBalance(
-  publicClient: PublicClient,
-  token: Address,
-  account: Address
-): Promise<bigint> {
-  return fetchRouteBalance(publicClient, token, predictRoute(account))
-}
-
-export async function pollPassthroughRouteBalance(
-  publicClient: PublicClient,
-  token: Address,
-  account: Address,
-  minAmount: bigint,
-  timeoutMs: number,
-  pollMs = 2_000
-): Promise<bigint> {
-  return pollRouteBalance(publicClient, token, predictRoute(account), minAmount, timeoutMs, pollMs)
+  return awaitWhile(
+    async () => {
+      const balance = await fetchRouteBalance(publicClient, token, route)
+      return balance >= minAmount ? balance : undefined
+    },
+    { timeoutMs, pollMs, timeoutMessage: `route balance did not reach ${minAmount} for ${route} within ${timeoutMs}ms` }
+  )
 }
 
 export async function fetchDepositRouteBalance(

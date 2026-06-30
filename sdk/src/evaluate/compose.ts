@@ -1,4 +1,4 @@
-import { BASIS_POINTS } from '@puppet/contracts/const'
+import { PRECISION } from '@puppet/contracts/const'
 import { applyBasisPoints, max, min } from '../core/math.js'
 import type {
   IEvaluationConfig,
@@ -11,7 +11,7 @@ import type {
 } from './types.js'
 
 function haircutGain(pnlBase: bigint, gainHaircutBps: bigint): bigint {
-  return pnlBase > 0n ? applyBasisPoints(pnlBase, BASIS_POINTS - gainHaircutBps) : pnlBase
+  return pnlBase > 0n ? applyBasisPoints(pnlBase, PRECISION.basisPoints - gainHaircutBps) : pnlBase
 }
 
 export function composeBreakdown(chains: INavChainBalance[], valuations: IPlatformValuation[]): INavBreakdown {

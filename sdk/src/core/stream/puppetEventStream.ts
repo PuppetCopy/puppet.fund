@@ -1,4 +1,5 @@
-import { PUPPET_CONTRACT_MAP } from '@puppet/contracts'
+import { HUB_CHAIN_ID } from '@puppet/contracts/const'
+import DEPLOYMENTS from '@puppet/contracts/deployments'
 import { CONTRACT_EVENT_MAP } from '@puppet/contracts/events'
 import { filterNull, type IStream, map, op } from 'aelea/stream'
 import { multicast, spreadArray } from 'aelea/stream-extended'
@@ -10,6 +11,8 @@ import {
   parseAbiItem
 } from 'viem'
 import { watchContractEvent } from './web3.js'
+
+const DICTATE = DEPLOYMENTS[`Dictate:${HUB_CHAIN_ID}`].address
 
 const puppetEventLogAbi = [
   parseAbiItem('event PuppetEventLog(address indexed source, string indexed method, bytes data)')
@@ -23,7 +26,7 @@ function createFilteredStream<const T extends readonly AbiParameter[]>(
   return op(
     watchContractEvent(client, {
       abi: puppetEventLogAbi,
-      address: PUPPET_CONTRACT_MAP.Dictate.address,
+      address: DICTATE,
       eventName: 'PuppetEventLog'
     }),
     spreadArray,

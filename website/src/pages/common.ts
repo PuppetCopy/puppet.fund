@@ -2,7 +2,7 @@ import { style } from 'aelea/ui'
 import { $separator } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import type { Address } from 'viem'
-import type { IFundLatestMetric } from '../io/indexer/query.js'
+import type { IFundLatestMetric } from '../io/datastore/query.js'
 
 export const $separator2 = style(
   { backgroundColor: colorShade(palette.foreground, 40), alignSelf: 'stretch', display: 'block' },

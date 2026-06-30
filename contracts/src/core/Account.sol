@@ -5,6 +5,7 @@ import {LibClone} from "solady/utils/LibClone.sol";
 
 import {IAccount} from "../utils/interfaces/IAccount.sol";
 import {AccountLib} from "../utils/AccountLib.sol";
+import {FundAccountLib} from "../utils/FundAccountLib.sol";
 import {PuppetAccount} from "./PuppetAccount.sol";
 import {FundAccount} from "./FundAccount.sol";
 import {Attest} from "./Attest.sol";
@@ -13,22 +14,7 @@ import {Error} from "../utils/Error.sol";
 import {NonceLib} from "../utils/NonceLib.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";
 
-bytes32 constant CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH = keccak256(
-    "CreatePuppetAccountIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,bytes32 tokenId,uint256 initialDepositAmount)AccountInitParams(address user,address signer)"
-);
-
 contract Account is Permission {
-    struct CreatePuppetAccountIntent {
-        AccountLib.AccountInitParams params;
-        uint blockNumber;
-        uint deadline;
-        uint acceptableRelayFee;
-        uint nonce;
-        uint chainId;
-        bytes32 tokenId;
-        uint initialDepositAmount;
-    }
-
     uint internal constant _NONCE_SCOPE = uint32(bytes4(keccak256("PuppetAccount")));
 
     Attest public immutable attest;
@@ -68,15 +54,15 @@ contract Account is Permission {
     }
 
     function predictFundAccount(
-        address _signer
+        FundAccountLib.FundAccountInitParams calldata _fundParams
     ) external view returns (address) {
-        return AccountLib.predictFund(fundAccountImpl, address(attest), _signer);
+        return FundAccountLib.predictFund(fundAccountImpl, address(attest), _fundParams);
     }
 
     function verifyFundAccount(
-        address _signer
+        FundAccountLib.FundAccountInitParams calldata _fundParams
     ) external view returns (FundAccount) {
-        return FundAccount(payable(AccountLib.verifyFund(fundAccountImpl, address(attest), _signer)));
+        return FundAccount(payable(FundAccountLib.verifyFund(fundAccountImpl, address(attest), _fundParams)));
     }
 
     function predictRoute(
@@ -114,14 +100,17 @@ contract Account is Permission {
 
     function createFundAccount(
         address _user,
-        address _signer
+        FundAccountLib.FundAccountInitParams calldata _fundParams
     ) external auth returns (FundAccount account_, address route_) {
-        if (_signer == address(0)) revert Error.Account__InvalidUser();
-        bytes memory _args = AccountLib.fundArgs(address(attest), _signer);
+        if (_fundParams.master == address(0)) revert Error.Account__InvalidUser();
+        bytes memory _args = FundAccountLib.fundArgs(address(attest), _fundParams);
         address _account = LibClone.cloneDeterministic(fundAccountImpl, _args, keccak256(_args));
         route_ = _deployRoute(_account);
         account_ = FundAccount(payable(_account));
-        _logEvent("DeployFundAccount", abi.encode(_user, _signer, _account, route_));
+        _logEvent(
+            "DeployFundAccount",
+            abi.encode(_user, _fundParams.master, _fundParams.baseToken, _fundParams.name, _account, route_)
+        );
     }
 
     function dispatch(

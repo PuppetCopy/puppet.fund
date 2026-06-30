@@ -6,7 +6,6 @@ export type IDepositMode = 'erc20Gate' | 'native' | 'erc20Transfer'
 export interface IDepositRoute {
   chainId: number
   params: IAccountLib__AccountInitParams
-  tokenId: Hex
   mode: IDepositMode
   token: Address
   amount: bigint

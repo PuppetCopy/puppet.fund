@@ -1,3 +1,4 @@
+import { SWAP_PROVIDER } from '@puppet/contracts/const'
 import { type Address, concat, decodeFunctionData, encodeFunctionData, getAddress, type Hex, pad, slice } from 'viem'
 
 const ACROSS_DEPOSIT_ABI = [
@@ -23,16 +24,23 @@ const ACROSS_DEPOSIT_ABI = [
   }
 ] as const
 
-export const ACROSS_SPOKE_POOL: Record<number, Address> = {
-  42161: '0xe35e9842fceaCA96570B734083f4a58e8F7C5f2A',
-  8453: '0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64'
-}
+// The Across entry point is DETERMINISTIC: the SAME acrossPeriphery address on every chain (const.toml SWAP_PROVIDER —
+// the same table the deploy seeds Register.providerAllowed from, so the off-chain screen and the on-chain allowlist
+// cannot drift). No per-chain map: one constant screens every chain. Asserted uniform so a stray per-chain value can't
+// silently break the deterministic assumption. NOTE: the deposit BODY below is still the SpokePool deposit shape;
+// migrating it to Periphery.deposit (depositor=recipient=fund) is the pending piece flagged in const.toml before
+// cross-chain bridging is live on the new universe.
+export const ACROSS_PERIPHERY: Address = (() => {
+  const [periphery, ...rest] = [...new Set(Object.values(SWAP_PROVIDER).map(p => getAddress(p.acrossPeriphery)))]
+  if (!periphery || rest.length > 0) throw new Error('acrossPeriphery must be a single deterministic address across all chains')
+  return periphery
+})()
 
 const ACROSS_DOMAIN_TAG = '0x1dc0de00f973c0de' as const
 
 const asBytes32 = (addr: Address): Hex => pad(addr, { size: 32 })
 
-export interface IAcrossDepositParams {
+interface IAcrossDepositParams {
   depositor: Address
   recipient: Address
   inputToken: Address
@@ -44,12 +52,6 @@ export interface IAcrossDepositParams {
   quoteTimestamp: number
   fillDeadline: number
   exclusivityParameter: number
-}
-
-export function acrossSpokePool(chainId: number): Address {
-  const pool = ACROSS_SPOKE_POOL[chainId]
-  if (!pool) throw new Error(`no Across SpokePool configured for chain ${chainId}`)
-  return pool
 }
 
 export function buildAcrossDeposit(params: IAcrossDepositParams): Hex {
@@ -72,6 +74,45 @@ export function buildAcrossDeposit(params: IAcrossDepositParams): Hex {
     ]
   })
   return concat([body, ACROSS_DOMAIN_TAG])
+}
+
+export interface IAcrossRouteFields {
+  exclusiveRelayer: Address
+  quoteTimestamp: number
+  exclusivityParameter: number
+}
+
+export interface IRouteAcrossDepositParams {
+  depositor: Address
+  recipient: Address
+  inputToken: Address
+  outputToken: Address
+  inputAmount: bigint
+  outputAmount: bigint
+  destinationChainId: bigint
+  fillDeadline: number
+  route: IAcrossRouteFields
+}
+
+export function buildRouteAcrossDeposit(params: IRouteAcrossDepositParams): {
+  provider: Address
+  providerCallData: Hex
+} {
+  const provider = ACROSS_PERIPHERY
+  const providerCallData = buildAcrossDeposit({
+    depositor: params.depositor,
+    recipient: params.recipient,
+    inputToken: params.inputToken,
+    outputToken: params.outputToken,
+    inputAmount: params.inputAmount,
+    outputAmount: params.outputAmount,
+    destinationChainId: params.destinationChainId,
+    exclusiveRelayer: params.route.exclusiveRelayer,
+    quoteTimestamp: params.route.quoteTimestamp,
+    fillDeadline: params.fillDeadline,
+    exclusivityParameter: params.route.exclusivityParameter
+  })
+  return { provider, providerCallData }
 }
 
 // Strict inverse of buildAcrossDeposit, for SCREENING third-party-supplied calldata:

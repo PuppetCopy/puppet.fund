@@ -1,20 +1,28 @@
-import { HUB_CHAIN_ID, TOKEN_ID } from '@puppet/contracts/const'
-import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
+import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import type { IAccountLib__AccountInitParams, IFundAccountLib__FundAccountInitParams } from '@puppet/contracts/types'
 import { predictFundAccount, predictPuppetAccount, predictShareToken } from '@puppet/sdk/account'
-import { ADDRESS_ZERO, BYTES32_ZERO } from '@puppet/sdk/const'
-import { getTokenDescription } from '@puppet/sdk/gmx'
+import { BYTES32_ZERO } from '@puppet/sdk/const'
+import { getRegisteredTokenDescription } from '@puppet/sdk/core'
 import { type ISubaccountState, type ITokenRegistryMap, stubSubaccountState } from '@puppet/sdk/state'
-import { roboAvatarName } from '@puppet/sdk/ui-components'
+import {
+  encodeFundName,
+  roboAvatarName,
+  roboIndicesFromAddress,
+  roboPreviewTraits,
+  roboTraitsFromNameAndAddress
+} from '@puppet/sdk/ui-components'
 import {
   combine,
   constant,
+  debounce,
   empty,
-  filter,
+  fromPromise,
   type IStream,
   just,
   map,
   nowWith,
   op,
+  sampleMap,
   skipRepeatsWith,
   switchLatest,
   switchPromises
@@ -36,7 +44,7 @@ import {
 import { $column, $Popover, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { $defaultAnchor, $Link } from 'aelea/ui-router'
-import { type Address, getAddress, type Hex } from 'viem'
+import { type Address, getAddress, type Hex, zeroAddress } from 'viem'
 import {
   $anchor,
   $ButtonSecondary,
@@ -47,28 +55,38 @@ import {
   $FieldLabeled,
   $icon,
   $labelDisplay,
-  $navLink,
   $popoverCaret,
   $puppeteer,
   $smartContract,
   $tokenLabelFromSummary,
   text
 } from '@/ui-components'
-import { $heading1 } from '../common/$text.js'
-import { $puppetLogo } from '../common/$icons.js'
-import { $card, $card2, $defaultMockWindow, $mockWindow } from '../common/elements/$common.js'
-import { $fundProfile, accountNameToHex, readableAccountName } from '../components/$AccountProfile.js'
-import { $WalletLink } from '../components/$WalletLink.js'
-import { $enableSessionDisclaimer } from '../components/$enableSession.js'
-import { $FundEditor } from '../components/portfolio/$FundEditor.js'
-import { $WalletConnect } from '../components/$WalletConnect.js'
-import type { IAllocateDraft, IClaimDraft, IRedeemDraft, ISellDraft, ISwapDraft } from '../components/portfolio/draft.js'
 import { routeSchema } from '../app/routeSchema.js'
+import { $puppetLogo } from '../common/$icons.js'
+import { $roboAvatar } from '../common/$roboAvatar.js'
+import { $heading1 } from '../common/$text.js'
+import { $card, $card2, $defaultMockWindow, $mockWindow } from '../common/elements/$common.js'
+import { accountNameToHex, readableAccountName } from '../components/$AccountProfile.js'
+import { $enableSessionDisclaimer } from '../components/$enableSession.js'
+import { $WalletConnect } from '../components/$WalletConnect.js'
+import { $WalletLink } from '../components/$WalletLink.js'
+import { $FundEditor } from '../components/portfolio/$FundEditor.js'
+import { $RoboTraitPicker } from '../components/portfolio/$RoboTraitPicker.js'
+import type {
+  IAllocateDraft,
+  IClaimDraft,
+  IFundSwapDraft,
+  IRecognizeFundDraft,
+  IRedeemDraft,
+  ISellDraft
+} from '../components/portfolio/draft.js'
 import { DOCS_URL, GITHUB_REPO_URL, OPERATOR_GUIDE_URL } from '../const/links.js'
-import * as context from '../io/context.js'
-import { bindSession, type IConnectedWallet, refreshWallet } from '../wallet/index.js'
+import context from '../io/context.js'
 import { canInstallApp, promptInstallApp } from '../utils/pwaInstall.js'
+import { bindSession, type IConnectedWallet, refreshWallet } from '../wallet/index.js'
 import { $body, $bulletList, $callout, $linkButton, $stageHeader, $terminal } from './$onboarding.js'
+
+const BUBBLE_SEED = '0x0000000000000000000000000000000000000001' as Address
 
 type IMasterMode = 'human' | 'agent'
 type ITemplate = 'base' | 'guarded' | 'trend' | 'copy-trader' | 'llm-basic'
@@ -92,37 +110,41 @@ const TEMPLATE_DESC: Record<ITemplate, string> = {
 }
 
 export interface I$HelloPage {
+  hideBalances: IStream<boolean>
   walletQuery: IStream<Promise<IConnectedWallet | null>>
   walletState: IStream<ISubaccountState | null>
   draftAllocateList: IStream<IAllocateDraft[]>
+  draftSwapList: IStream<IFundSwapDraft[]>
   draftRedeemList: IStream<IRedeemDraft[]>
-  draftSwapList: IStream<ISwapDraft[]>
   embedded?: boolean
 }
 
 export const $HelloPage = ({
+  hideBalances,
   walletQuery,
   walletState: rootState,
   draftAllocateList,
-  draftRedeemList,
   draftSwapList,
+  draftRedeemList,
   embedded = false
 }: I$HelloPage) =>
   component(
     (
       [changeMasterDraft, changeMasterDraftTether]: IBehavior<IAllocateDraft>,
+      [changeSwapDraft, changeSwapDraftTether]: IBehavior<IFundSwapDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
-      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft>,
-      [changeSwapDraft, changeSwapDraftTether]: IBehavior<ISwapDraft>,
+      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft | IRecognizeFundDraft>,
       [selectBaseToken, selectBaseTokenTether]: IBehavior<Hex>,
       [changeName, changeNameTether]: IBehavior<string>,
+      [changeTraits, changeTraitsTether]: IBehavior<number[] | null>,
+      [openAvatar, openAvatarTether]: IBehavior<INode, PointerEvent>,
       [selectMode, selectModeTether]: IBehavior<INode, IMasterMode>,
       [selectTemplate, selectTemplateTether]: IBehavior<ITemplate>,
       [_connect, connectTether]: IBehavior<unknown>
     ) => {
       const walletState: IStream<IConnectedWallet | null> = op(walletQuery, switchPromises, state())
-      const tokenRegistryValue = switchPromises(context.tokenRegistryQuery)
-      const baseTokenId: IStream<Hex> = state(TOKEN_ID.USDC, selectBaseToken)
+      const tokenRegistryValue = fromPromise(context.getTokenRegistry())
+      const baseToken: IStream<Hex> = state(zeroAddress, selectBaseToken)
       const modeState: IStream<IMasterMode> = state('human', selectMode)
 
       const $subhead = (label: string): I$Node =>
@@ -131,13 +153,14 @@ export const $HelloPage = ({
       interface ISectionParams {
         wallet: IConnectedWallet | null
         registry: ITokenRegistryMap
-        baseTokenId: Hex
+        baseToken: Hex
         root: ISubaccountState | null
       }
 
       // Typed name survives section rebuilds (base-token switch re-keys the section,
       // but the user's input is component state, not section state). null = untouched.
       const typedName: IStream<string | null> = state(null, changeName)
+      const traitsState: IStream<number[] | null> = state(null, changeTraits)
 
       const $createMasterStep: I$Node = switchLatest(
         map(
@@ -148,27 +171,30 @@ export const $HelloPage = ({
                 $node(style({ fontSize: text.sm, color: palette.foreground, lineHeight: '1.6', maxWidth: '420px' }))(
                   $text('It secures a new smart wallet, recoverable any time. No seed phrase to manage.')
                 ),
-                $row(spacing.default, style({ justifyContent: 'center', width: '100%', flexWrap: 'wrap' }))(
-                  $WalletConnect()({ connect: connectTether() })
-                )
+                $row(
+                  spacing.default,
+                  style({ justifyContent: 'center', width: '100%', flexWrap: 'wrap' })
+                )($WalletConnect()({ connect: connectTether() }))
               )
             const wallet = p.wallet
-            const signer: Address | null = wallet.session?.signer ?? p.root?.signer ?? null
+            // Gate on a session actually signed in this browser, not the signer of a PA merely
+            // fetched from the datastore (re-signing is deterministic, so it resolves to the same fund).
+            const signer: Address | null = wallet.session?.signer ?? null
             const homeTokens = p.registry.get(HUB_CHAIN_ID)
             // A fund's base token must be an ERC20: deposit routes, allocate sweeps and
             // redeem drains all move it with token transfers. Native (token 0) is a
             // holdable balance, not a base.
             const registeredIds = [...(homeTokens?.entries() ?? [])]
-              .filter(([, info]) => info.token !== ADDRESS_ZERO)
+              .filter(([, info]) => info.token !== PROTOCOL.nativeToken)
               .map(([id]) => id)
             if (registeredIds.length === 0) return $callout('No tokens are registered yet. Check back shortly.')
-            const effectiveBid = homeTokens?.has(p.baseTokenId) ? p.baseTokenId : registeredIds[0]!
+            const effectiveBid = homeTokens?.has(p.baseToken) ? p.baseToken : registeredIds[0]!
             const $tokenSelector = $ButtonToggle({
               value: just(effectiveBid),
               optionList: registeredIds,
               $$option: map((id: Hex) => {
                 const info = homeTokens?.get(id)
-                return $node(info ? $tokenLabelFromSummary(getTokenDescription(info.token)) : $text(id))
+                return $node(info ? $tokenLabelFromSummary(getRegisteredTokenDescription(info.token)) : $text(id))
               })
             })({ select: selectBaseTokenTether() })
             const $baseTokenField = $defaultTextFieldContainer(
@@ -184,19 +210,59 @@ export const $HelloPage = ({
             const $signSession = $EnableSession(wallet)({})
 
             if (signer === null) {
+              const baseInfo = homeTokens?.get(effectiveBid)
+              const $stubProfile = $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
+                $node(
+                  style({
+                    width: '48px',
+                    height: '48px',
+                    borderRadius: '50%',
+                    flexShrink: '0',
+                    backgroundColor: colorShade(palette.foreground, 15),
+                    border: `1px dashed ${colorShade(palette.foreground, 40)}`
+                  })
+                )(),
+                $column(style({ minWidth: '0', gap: '2px' }))(
+                  $node(style({ fontWeight: '600', fontSize: text.lg, color: palette.foreground }))($text('Your fund')),
+                  baseInfo ? $node($tokenLabelFromSummary(getRegisteredTokenDescription(baseInfo.token))) : empty
+                )
+              )
               return $column(spacing.big)(
                 $column(spacing.big)(
                   $baseTokenField,
-                  $column(
-                    spacing.small,
-                    style({ width: '100%', alignItems: 'flex-start', color: palette.foreground })
-                  )(
+                  $column(spacing.small, style({ width: '100%', alignItems: 'flex-start', color: palette.foreground }))(
                     $row(spacing.small, style({ width: '100%', alignItems: 'center' }))(
                       $labelDisplay(style({ width: '92px' }))($text('Session')),
                       $signSession
                     ),
                     $node(style({ color: palette.foreground, fontSize: text.xs, lineHeight: '1.5' }))(
                       $text('Sign a session to preview and create your fund.')
+                    )
+                  ),
+                  $column(spacing.small, style({ width: '100%', maxWidth: '520px', alignSelf: 'center' }))(
+                    $node(style({ color: palette.foreground, fontSize: text.xs, alignSelf: 'center' }))(
+                      $text('Your fund is your public identity')
+                    ),
+                    $card2(
+                      style({
+                        borderRadius: '30px',
+                        padding: '12px 24px',
+                        border: `1px solid ${colorShade(palette.foreground, 25)}`
+                      })
+                    )(
+                      $row(
+                        style({ alignItems: 'center', justifyContent: 'space-between', gap: '16px', width: '100%' })
+                      )(
+                        $node(style({ opacity: '0.6' }))($stubProfile),
+                        $node(
+                          style({
+                            color: palette.indeterminate,
+                            fontSize: text.xs,
+                            textAlign: 'right',
+                            flexShrink: '0'
+                          })
+                        )($text('Sign a session to see your fund'))
+                      )
                     )
                   )
                 )
@@ -205,27 +271,24 @@ export const $HelloPage = ({
 
             const fundParams: IAccountLib__AccountInitParams = { user: wallet.address, signer }
             const fundMaster = predictPuppetAccount(fundParams)
-            const fundStub: ISubaccountState = {
-              ...stubSubaccountState(fundParams),
-              account: predictFundAccount(fundMaster),
-              signer: fundMaster,
-              isFund: true
-            }
+            // The preview fund's CREATE2 identity: this puppet masters it, scoped to the
+            // selected base token, with the default (empty) name until the user names it.
+            const previewFundParams = { master: fundMaster, baseToken: effectiveBid, name: BYTES32_ZERO }
             // An empty name resolves to the EXISTING fund for this base token when one
             // exists (the card shows it, no fresh preview); only without one does it
             // generate the token-scoped default, so a token switch regenerates name and
             // avatar together.
             const existingFund = p.root?.funds.find(
-              f => f.baseTokenId === effectiveBid && getAddress(f.master as Address) === fundMaster
+              f => f.baseToken === effectiveBid && getAddress(f.master as Address) === fundMaster
             )
             const defaultName =
               readableAccountName(existingFund?.name as Hex | undefined) ??
-              roboAvatarName(predictShareToken(fundMaster, effectiveBid, BYTES32_ZERO))
+              roboAvatarName(predictShareToken(previewFundParams))
             const fundName: IStream<string> = map(n => (n?.trim() ? n : defaultName), typedName)
             const $nameField = $FieldLabeled({
               label: 'Name',
               labelWidth: 92,
-              hint: 'Shown to backers on the leaderboard and your profile. Leave blank to keep the generated name.',
+              hint: 'Shown on the leaderboard and your profile, auto-generated if left blank.',
               placeholder: defaultName,
               maxLength: 32,
               value: map(n => n ?? '', typedName)
@@ -233,75 +296,149 @@ export const $HelloPage = ({
               change: changeNameTether()
             })
 
-            // FA lens off the root: the fund-shaped state derives from the PA (account =
-            // predicted FA, signer = PA), carrying the root's funds/positions.
-            const account: IStream<ISubaccountState> = op(
-              rootState,
-              map(root =>
-                root
-                  ? {
-                      ...fundStub,
-                      funds: root.funds,
-                      positions: root.positions,
-                      chains: root.chains,
-                      lastTransactionHash: root.lastTransactionHash
-                    }
-                  : fundStub
+            // The reactive fund identity: master + selected base token + the RESOLVED name
+            // (the same name the allocate creates it with). Base token, name, profile and the
+            // CREATE2 address all derive from this one stream, so nothing can drift.
+            const fund: IStream<IFundAccountLib__FundAccountInitParams> = map(
+              ({ name, traits }) => {
+                const display = name.trim() || defaultName
+                return {
+                  master: fundMaster,
+                  baseToken: effectiveBid,
+                  name: accountNameToHex(traits ? encodeFundName(display, traits) : display)
+                }
+              },
+              combine({ name: fundName, traits: traitsState })
+            )
+            const seedIndices: IStream<number[]> = op(
+              fundName,
+              map(name =>
+                roboIndicesFromAddress(
+                  predictShareToken({ master: fundMaster, baseToken: effectiveBid, name: accountNameToHex(name.trim() || defaultName) })
+                )
+              ),
+              skipRepeatsWith((a, b) => a.join() === b.join())
+            )
+            const editorModel = combine({ applied: traitsState, seed: seedIndices })
+            const isCreated = existingFund != null
+            const revealSeed: IStream<Address> = map(share => predictShareToken(share), fund)
+            const $avatarBubble = $row(style({ position: 'relative', width: '52px', height: '52px', flexShrink: '0' }))(
+              $node(
+                style({
+                  width: '52px',
+                  height: '52px',
+                  borderRadius: '50%',
+                  overflow: 'hidden',
+                  border: `1px solid ${colorShade(palette.foreground, 35)}`
+                })
+              )(
+                switchLatest(
+                  map(({ m, seed }) => {
+                    const idx = m.applied ?? m.seed
+                    return isCreated
+                      ? $roboAvatar(seed, undefined, roboTraitsFromNameAndAddress(idx, seed))
+                      : $roboAvatar(BUBBLE_SEED, undefined, roboPreviewTraits(idx))
+                  }, combine({ m: editorModel, seed: revealSeed }))
+                )
+              ),
+              $node(
+                style({
+                  position: 'absolute',
+                  bottom: '-2px',
+                  right: '-2px',
+                  width: '20px',
+                  height: '20px',
+                  borderRadius: '50%',
+                  backgroundColor: palette.primary,
+                  color: palette.message,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '11px',
+                  lineHeight: '1',
+                  border: `2px solid ${palette.background}`,
+                  pointerEvents: 'none'
+                })
+              )($text('✎'))
+            )
+            const $avatarTrigger = $column(
+              spacing.small,
+              style({ flexShrink: '0', maxWidth: '160px', cursor: 'pointer' }),
+              stylePseudo(':hover', { color: palette.message }),
+              attr({ title: 'Customize avatar', role: 'button' }),
+              openAvatarTether(nodeEvent('click'))
+            )(
+              $row(spacing.small, style({ alignItems: 'center' }))($labelDisplay($text('Avatar')), $avatarBubble),
+              $node(style({ color: palette.foreground, fontSize: text.xs, whiteSpace: 'nowrap', lineHeight: '1.5' }))(
+                $text('Click to pick your robot traits.')
               )
             )
+            const $avatarEditor = $Popover({
+              $open: op(
+                openAvatar,
+                sampleMap(
+                  m =>
+                    $RoboTraitPicker({
+                      initial: m.applied ?? m.seed,
+                      auto: m.seed,
+                      initialTouched: m.applied != null
+                    })({ changeTraits: changeTraitsTether() }),
+                  editorModel
+                )
+              ),
+              dismiss: changeTraits,
+              $target: $avatarTrigger
+            })({})
+            const fundAccountAddr: IStream<Address> = debounce(250, map(predictFundAccount, fund))
+            const account: IStream<ISubaccountState> = op(
+              combine({ root: rootState, fundAddr: fundAccountAddr }),
+              map(({ root, fundAddr }) => {
+                const base: ISubaccountState = {
+                  ...stubSubaccountState(fundParams),
+                  account: fundAddr,
+                  signer: fundMaster,
+                  isFund: true
+                }
+                if (!root) return base
+                const deployedFund = root.funds.some(f => getAddress(f.fund as Address) === getAddress(fundAddr))
+                return {
+                  ...base,
+                  funds: root.funds,
+                  positions: root.positions,
+                  chains: deployedFund ? root.chains : base.chains,
+                  lastTransactionHash: root.lastTransactionHash
+                }
+              })
+            )
             const $accountSection = $FundEditor({
+              hideBalances,
               account,
               walletAccount: wallet,
               tokenRegistry: p.registry,
-              initialBaseTokenId: just(effectiveBid),
-              fundName,
-              draft: map(list => list.find(d => d.account === fundStub.account) ?? null, draftAllocateList),
-              redeemDraft: map(list => list.find(d => d.masterAccount === fundStub.account) ?? null, draftRedeemList),
-              swapDraftList: draftSwapList,
-              $stubAnchor: ($aumDisplay, $depositButton, $withdrawButton) =>
-                $row(spacing.big, style({ alignItems: 'center', width: '100%' }))(
-                  $column(
-                    spacing.small,
-                    style({ alignItems: 'flex-start', minWidth: '0' })
-                  )(
-                    $navLink({
-                      route: routeSchema.fund.detail,
-                      params: { address: predictFundAccount(fundMaster) },
-                      $content: switchLatest(
-                        map(
-                          name =>
-                            $fundProfile(
-                              {
-                                master: fundMaster,
-                                baseTokenId: effectiveBid,
-                                name: accountNameToHex(name.trim() || defaultName)
-                              },
-                              48
-                            ),
-                          fundName
-                        )
-                      )
-                    })
-                  ),
-                  $row(spacing.small, style({ alignItems: 'center', justifyContent: 'flex-end', flex: '1' }))(
-                    $column(spacing.small, style({ alignItems: 'flex-end' }))($depositButton, $withdrawButton),
-                    $column(style({ gap: '2px', alignItems: 'flex-end' }))(
-                      $node(style({ color: palette.foreground, fontSize: text.xs }))($text('AUM')),
-                      $aumDisplay
-                    )
-                  )
-                )
+              fund,
+              draft: map(
+                p => p.list.find(d => d.account === p.fund) ?? null,
+                combine({ list: draftAllocateList, fund: fundAccountAddr })
+              ),
+              redeemDraft: map(
+                p => p.list.find(d => d.masterAccount === p.fund) ?? null,
+                combine({ list: draftRedeemList, fund: fundAccountAddr })
+              ),
+              swapDraftList: draftSwapList
             })({
               changeDraft: changeMasterDraftTether(),
+              changeSwapDraft: changeSwapDraftTether(),
               changeRedeemDraft: changeRedeemDraftTether(),
-              changeFulfillDraft: changeFulfillDraftTether(),
-              changeSwapDraft: changeSwapDraftTether()
+              changeFulfillDraft: changeFulfillDraftTether()
             })
 
             return $column(spacing.big)(
               $column(spacing.big)(
                 $baseTokenField,
-                $nameField,
+                $row(spacing.big, style({ alignItems: 'flex-start', width: '100%' }))(
+                  $avatarEditor,
+                  $node(style({ flex: '1', minWidth: '0' }))($nameField)
+                ),
                 $column(spacing.small, style({ width: '100%', maxWidth: '520px', alignSelf: 'center' }))(
                   $node(style({ color: palette.foreground, fontSize: text.xs, alignSelf: 'center' }))(
                     $text('Your fund is your public identity')
@@ -325,10 +462,10 @@ export const $HelloPage = ({
               a.wallet?.address === b.wallet?.address &&
               a.wallet?.session?.signer === b.wallet?.session?.signer &&
               a.registry === b.registry &&
-              a.baseTokenId === b.baseTokenId &&
+              a.baseToken === b.baseToken &&
               !!a.root === !!b.root &&
               a.root?.signer === b.root?.signer,
-            combine({ wallet: walletState, registry: tokenRegistryValue, baseTokenId, root: rootState })
+            combine({ wallet: walletState, registry: tokenRegistryValue, baseToken, root: rootState })
           )
         )
       )
@@ -413,10 +550,7 @@ export const $HelloPage = ({
       // Setup comes first (fund creation inputs, then the wallet card); the path choice
       // follows as step 2 so it reads as part of the same flow, not an orthogonal pick.
 
-      const $separator = (): I$Node =>
-        $node(
-          style({ height: '1px', width: '100%', backgroundColor: colorShade(palette.foreground, 14), margin: '4px 0' })
-        )()
+      const $separator = (): I$Node => $node(style({ height: '48px', width: '100%' }))()
 
       const $flow: I$Node = switchLatest(
         map(mode => {
@@ -424,7 +558,7 @@ export const $HelloPage = ({
             $separator(),
             $column(spacing.default)(
               $stageHeader(3, mode === 'agent' ? 'Spin up your agent' : 'Trade'),
-              mode === 'agent' ? $spinUpStep(templateState, $templatePicker) : $tradeStep({ walletState })
+              mode === 'agent' ? $spinUpStep(templateState, $templatePicker) : $tradeStep({ walletState, rootState })
             ),
             $separator(),
             $column(spacing.default)(
@@ -435,7 +569,7 @@ export const $HelloPage = ({
         }, modeState)
       )
 
-      const $card1 = $card(spacing.big, style({ width: '100%', padding: isDesktopScreen ? '32px' : '16px' }))(
+      const $card1 = $card(spacing.big, style({ width: '100%', padding: isDesktopScreen ? '62px' : '16px' }))(
         $stageHeader(1, 'Create your fund'),
         $createMasterStep,
         $separator(),
@@ -449,9 +583,9 @@ export const $HelloPage = ({
           : $column(spacing.big, style({ maxWidth: '860px', margin: '0 auto', padding: '32px 24px' }))($hero(), $card1),
         {
           changeAllocateDraft: changeMasterDraft,
+          changeSwapDraft,
           changeRedeemDraft,
-          changeFulfillDraft,
-          changeSwapDraft
+          changeFulfillDraft
         }
       ]
     }
@@ -462,7 +596,7 @@ const $hero = (): I$Node =>
     $heading1($text('Trade exactly as you do today, and earn more.')),
     $node(style({ fontSize: text.lg, lineHeight: '1.5', color: palette.message }))(
       $text(
-        'Backer capital rides your trades and pays you performance fees. You keep your keys, and every action runs under rules you sign.'
+        'Puppet capital rides your trades and pays you performance fees. You keep your keys, and every action runs under rules you sign.'
       )
     )
   )
@@ -547,7 +681,13 @@ const $installWindow: I$Node = $mockWindow(
   $defaultMockWindow(style({ width: '160px', border: `1px solid ${colorShade(palette.foreground, 20)}` }))
 )
 
-const $tradeStep = ({ walletState }: { walletState: IStream<IConnectedWallet | null> }): I$Node =>
+const $tradeStep = ({
+  walletState,
+  rootState
+}: {
+  walletState: IStream<IConnectedWallet | null>
+  rootState: IStream<ISubaccountState | null>
+}): I$Node =>
   $column(spacing.big)(
     $body('Link this fund to GMX (or any dApp) over WalletConnect.'),
     $callout(
@@ -578,7 +718,7 @@ const $tradeStep = ({ walletState }: { walletState: IStream<IConnectedWallet | n
         'Link a dApp',
         'On the dApp choose WalletConnect, copy its connection link, then open this panel to paste it. Every trade executes under the rules you signed.'
       ),
-      $WalletLink({ walletState, size: 56 })({})
+      $WalletLink({ walletState, rootState, size: 56 })({})
     )
   )
 
@@ -596,7 +736,7 @@ const $humanNextStep = (): I$Node =>
       ],
       [
         'Attract outside capital',
-        'Once your record is worth following, backers fund you under rules they set, and you trade for the pool.'
+        'Once your record stands out, puppets fund you under rules they set, and you trade for the pool.'
       ]
     ]),
     $row(spacing.default, style({ paddingTop: '8px' }))(
@@ -617,69 +757,97 @@ const $step = (n: number, label: string | I$Node, $extra?: I$Node): I$Node =>
   )
 
 const $spinUpStep = (templateState: IStream<ITemplate>, $picker: I$Node): I$Node =>
-  $column(spacing.default)(
+  $column(spacing.big)(
     $body(
       'The agent trades the base token of the fund you create above, any registered token works. A non-WETH base (USDC or ETH) also needs a little ETH in the fund to cover GMX execution fees; WETH is simplest because the keeper fee comes straight out of the collateral.'
     ),
-    $step(
-      1,
-      'Install Bun (the templates run on Bun):',
-      $column(spacing.small)(
-        $terminal(['curl -fsSL https://bun.com/install | bash'], 'install bun'),
-        $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.5' }))(
-          $text('or get it from '),
-          $anchor(attr({ href: 'https://bun.com', target: '_blank' }), style({ textDecoration: 'underline' }))(
-            $text('bun.com')
+    $column(
+      spacing.default,
+      style({
+        padding: isDesktopScreen ? '18px 22px' : '14px 16px',
+        borderRadius: '14px',
+        backgroundColor: colorShade(palette.foreground, 6),
+        border: `1px solid ${colorShade(palette.foreground, 13)}`
+      })
+    )(
+      $node(style({ fontSize: text.sm, fontWeight: '600', color: palette.message }))($text('Before you run it')),
+      $bulletList([
+        [
+          'It can’t take your funds',
+          'the agent opens and manages positions within the rules you signed; your money can only ever leave to your own wallet, never to the trader, the agent, or us.'
+        ],
+        [
+          'Your key stays on your machine',
+          'pairing hands the agent a session key kept in memory, never written to disk and never sent to us; the relay and this site only ever see signatures, never the key.'
+        ],
+        [
+          'You stay in control',
+          'every action is co-signed on-chain against your rules or it never executes, and you can stop the agent any time with Ctrl-C.'
+        ]
+      ])
+    ),
+    $column(spacing.big)(
+      $step(
+        1,
+        'Install Bun (the templates run on Bun):',
+        $column(spacing.small)(
+          $terminal(['curl -fsSL https://bun.com/install | bash'], 'install bun'),
+          $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.5' }))(
+            $text('or get it from '),
+            $anchor(
+              attr({ href: 'https://bun.com', target: '_blank' }),
+              style({ textDecoration: 'underline' })
+            )($text('bun.com'))
           )
         )
-      )
-    ),
-    $step(
-      2,
-      'Pick a template and scaffold it on your machine:',
-      $column(spacing.default)(
-        $picker,
-        switchLatest(
-          map((t: ITemplate) => {
-            const env =
-              t === 'llm-basic'
-                ? ['cp .env.example .env   # set ANTHROPIC_API_KEY']
-                : t === 'copy-trader'
-                  ? ['cp .env.example .env   # set TRADER_ACCOUNT']
-                  : t === 'guarded'
-                    ? ['cp .env.example .env   # dry-run is the default; DRY_RUN=0 goes live']
-                    : []
-            return $column(spacing.default)(
-              $terminal([`bunx @puppet.fund/templates my-operator gmx ${t}`], TEMPLATE_DESC[t]),
-              $node(style({ color: palette.foreground, fontSize: text.sm, lineHeight: '1.6' }))($text('Then:')),
-              $terminal(['cd my-operator', 'bun install', ...env, 'bun run dev'])
-            )
-          }, templateState)
-        ),
-        $node(style({ color: palette.foreground, fontSize: text.xs, lineHeight: '1.5' }))(
-          $text('The scaffolder only writes files locally, no keys, no network, and it is fully open source.')
-        ),
-        $row(spacing.default)(
-          $linkButton('Read the source on GitHub', `${GITHUB_REPO_URL}/tree/main/operator/templates`, false)
+      ),
+      $step(
+        2,
+        'Pick a template and scaffold it on your machine:',
+        $column(spacing.default)(
+          $picker,
+          switchLatest(
+            map((t: ITemplate) => {
+              const env =
+                t === 'llm-basic'
+                  ? ['cp .env.example .env   # set ANTHROPIC_API_KEY']
+                  : t === 'copy-trader'
+                    ? ['cp .env.example .env   # set TRADER_ACCOUNT']
+                    : t === 'guarded'
+                      ? ['cp .env.example .env   # dry-run is the default; DRY_RUN=0 goes live']
+                      : []
+              return $column(spacing.default)(
+                $terminal([`bunx @puppet.fund/templates my-operator gmx ${t}`], TEMPLATE_DESC[t]),
+                $node(style({ color: palette.foreground, fontSize: text.sm, lineHeight: '1.6' }))($text('Then:')),
+                $terminal(['cd my-operator', 'bun install', ...env, 'bun run dev'])
+              )
+            }, templateState)
+          ),
+          $node(style({ color: palette.foreground, fontSize: text.xs, lineHeight: '1.5' }))(
+            $text('The scaffolder only writes files locally, no keys, no network, and it is fully open source.')
+          ),
+          $row(spacing.default)(
+            $linkButton('Read the source on GitHub', `${GITHUB_REPO_URL}/tree/main/operator/templates`, false)
+          )
         )
-      )
-    ),
-    $step(3, 'It prints a pair link. Open that link here, on this site.'),
-    $step(4, 'Click “Send session to agent” in the banner at the top.'),
-    $step(
-      5,
-      $node(style({ display: 'inline' }))(
-        $text('Done. The agent opens and maintains positions; you fund and redeem '),
-        $Link({
-          route: routeSchema.portfolio,
-          $content: $text('here'),
-          $anchor: $defaultAnchor(style({ textDecoration: 'underline' }))
-        })({}),
-        $text('.')
+      ),
+      $step(3, 'It prints a pair link. Open that link here, on this site.'),
+      $step(4, 'Click “Send session to agent” in the banner at the top.'),
+      $step(
+        5,
+        $node(style({ display: 'inline' }))(
+          $text('Done. The agent opens and maintains positions; you fund and redeem '),
+          $Link({
+            route: routeSchema.portfolio,
+            $content: $text('here'),
+            $anchor: $defaultAnchor(style({ textDecoration: 'underline' }))
+          })({}),
+          $text('.')
+        )
       )
     ),
     $callout(
-      'Shape the strategy in src/index.ts. The agent only acts within the rules you signed, and it can never move funds out of your account.'
+      'Shape the strategy in src/index.ts. No matter what you write there, the agent stays bound by the rules you signed: it can never send your funds anywhere but your own wallet.'
     )
   )
 
@@ -699,7 +867,7 @@ const $agentNextStep = (): I$Node =>
       ],
       [
         'Attract outside capital',
-        'Once your record is worth following, others subscribe. Their funds flow under rules they set, and your strategy trades for the pool.'
+        'Once your record stands out, others fund you. Their capital flows under rules they set, and your strategy trades for the pool.'
       ]
     ]),
     $row(spacing.default, style({ paddingTop: '8px' }))(

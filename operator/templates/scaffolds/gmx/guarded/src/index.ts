@@ -1,13 +1,5 @@
 import { createOperatorCore, pairOverBrowser, runOperator } from '@puppet.fund/operator'
-import {
-  acceptablePrice,
-  dominantPosition,
-  gmxOperator,
-  gmxPrice,
-  positionMetrics,
-  usd,
-  weth
-} from '@puppet.fund/operator/gmx'
+import { acceptablePrice, dominantPosition, GMX_V2_CHAIN_ID, gmxOperator, gmxPrice, gmxTokenPerNativeToken, positionMetrics, usd, weth } from '@puppet.fund/operator/gmx'
 import { type Address, isAddressEqual } from 'viem'
 
 // GUARDED — the reference risk-managed operator. The guards are the product; the signal is
@@ -56,7 +48,7 @@ const PARAMS = {
 const INTENT_DEADLINE_MS = 5 * 60_000
 
 const session = await pairOverBrowser(Bun.env.PAIR_URL)
-const core = await createOperatorCore(session, { rpcUrl: Bun.env.ARBITRUM_RPC_URL, dryRun: DRY })
+const core = await createOperatorCore(session, { chainId: GMX_V2_CHAIN_ID, getTokenPerNativeToken: gmxTokenPerNativeToken, rpcUrl: Bun.env.ARBITRUM_RPC_URL, dryRun: DRY })
 const gmx = gmxOperator(core)
 const market = gmx.getMarket(ETH)
 const marketInfo = gmx.markets.find(m => isAddressEqual(m.marketToken as Address, market))
@@ -207,7 +199,6 @@ await runOperator(core, async signal => {
 })
 
 async function tick(): Promise<void> {
-  if (!core.isOpen()) return
   if (Date.now() < state.limboUntil) {
     console.log('[guarded] holding: a failed dispatch may still land until its intent deadline')
     return

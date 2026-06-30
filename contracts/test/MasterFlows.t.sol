@@ -4,7 +4,8 @@ pragma solidity ^0.8.35;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {V2Base} from "./Base.t.sol";
-import {MasterGate, OPERATE_INTENT_TYPEHASH, CREATE_FUND_ACCOUNT_INTENT_TYPEHASH} from "src/MasterGate.sol";
+import {FundGate, OPERATE_INTENT_TYPEHASH} from "src/FundGate.sol";
+import {Allocate, ALLOCATE_INTENT_TYPEHASH} from "src/hub/Allocate.sol";
 import {IAccount} from "src/utils/interfaces/IAccount.sol";
 
 contract MasterFlowsTest is V2Base {
@@ -14,84 +15,58 @@ contract MasterFlowsTest is V2Base {
         uint nonce;
     }
 
-    // Cross-chain entry: stage capital at the fund's deterministic route, then
-    // MasterGate.createFundAccount deploys account+route and sweeps the passthrough in.
+    function _allocateDigest(
+        Allocate.AllocateIntent memory _i
+    ) internal view returns (bytes32) {
+        return _digest(
+            hubGateDomain,
+            keccak256(
+                abi.encode(
+                    ALLOCATE_INTENT_TYPEHASH,
+                    _hashAccount(_i.params.user, address(0)),
+                    _i.blockNumber,
+                    _i.deadline,
+                    _i.acceptableRelayFee,
+                    _i.nonce,
+                    _i.chainId,
+                    _hashFundParams(_i.fundParams),
+                    _i.acceptableNetAssetValue,
+                    _i.totalShareSupply,
+                    _i.masterAmount,
+                    keccak256(abi.encodePacked(_i.puppetList)),
+                    keccak256(abi.encodePacked(_i.allocatedAmountList))
+                )
+            )
+        );
+    }
+
+    // A fund is created lazily by allocate; the master stakes from its route and the
+    // fund ends holding the stake minus the socialized relay fee.
     function _makeFund(
         string memory _label,
-        uint _sweep
+        uint _masterAmount
     ) internal returns (Fund memory f) {
         f.master = _makePuppet(_label);
-        f.fund = accountModule.predictFundAccount(address(f.master.acct));
-        usdc.mint(accountModule.predictRoute(f.fund), _sweep);
+        f.fund = _fundOf(address(f.master.acct));
+        usdc.mint(accountModule.predictRoute(address(f.master.acct)), _masterAmount);
 
-        MasterGate.CreateFundAccountIntent memory intent = MasterGate.CreateFundAccountIntent({
+        Allocate.AllocateIntent memory a = Allocate.AllocateIntent({
             params: _params(f.master.user),
-            tokenId: USDC_ID,
+            fundParams: _fundParams(address(f.master.acct)),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
-            acceptableRelayFee: 0,
-            nonce: 0,
+            acceptableRelayFee: 2e6,
+            nonce: f.master.nonce,
             chainId: block.chainid,
-            sweepAmount: _sweep
+            acceptableNetAssetValue: 100e6,
+            totalShareSupply: 0,
+            masterAmount: _masterAmount,
+            puppetList: new address[](0),
+            allocatedAmountList: new uint[](0)
         });
-        bytes32 structHash = keccak256(
-            abi.encode(
-                CREATE_FUND_ACCOUNT_INTENT_TYPEHASH,
-                _hashAccount(intent.params.user, address(0)),
-                intent.blockNumber,
-                intent.deadline,
-                intent.acceptableRelayFee,
-                intent.nonce,
-                intent.chainId,
-                intent.tokenId,
-                intent.sweepAmount
-            )
-        );
-        bytes32 digest = _digest(masterGateDomain, structHash);
-        masterGate.createFundAccount(intent, _sign(f.master.key, digest), _sign(attestorKey, digest), 0);
-        f.nonce = 1;
-    }
-
-    function test_createFundAccount_deploys_and_sweeps_passthrough() public {
-        Fund memory f = _makeFund("M", 100e6);
-        assertGt(f.fund.code.length, 0, "fund deployed");
-        assertEq(usdc.balanceOf(f.fund), 100e6, "swept to account");
-        assertEq(usdc.balanceOf(accountModule.predictRoute(f.fund)), 0, "route drained");
-    }
-
-    function test_createFundAccount_charges_fee_from_swept_base() public {
-        Puppet memory master = _makePuppet("M2");
-        address fund = accountModule.predictFundAccount(address(master.acct));
-        usdc.mint(accountModule.predictRoute(fund), 100e6);
-
-        MasterGate.CreateFundAccountIntent memory intent = MasterGate.CreateFundAccountIntent({
-            params: _params(master.user),
-            tokenId: USDC_ID,
-            blockNumber: block.number,
-            deadline: block.timestamp + 60,
-            acceptableRelayFee: 3e6,
-            nonce: 0,
-            chainId: block.chainid,
-            sweepAmount: 100e6
-        });
-        bytes32 structHash = keccak256(
-            abi.encode(
-                CREATE_FUND_ACCOUNT_INTENT_TYPEHASH,
-                _hashAccount(intent.params.user, address(0)),
-                intent.blockNumber,
-                intent.deadline,
-                intent.acceptableRelayFee,
-                intent.nonce,
-                intent.chainId,
-                intent.tokenId,
-                intent.sweepAmount
-            )
-        );
-        bytes32 digest = _digest(masterGateDomain, structHash);
-        masterGate.createFundAccount(intent, _sign(master.key, digest), _sign(attestorKey, digest), 3e6);
-
-        assertEq(usdc.balanceOf(fund), 97e6, "fund holds swept minus fee");
-        assertEq(usdc.balanceOf(feeReceiver), 3e6, "fee from swept base");
+        bytes32 ad = _allocateDigest(a);
+        hubGate.allocate(a, new bytes[](0), new bytes[](0), _sign(f.master.key, ad), _sign(attestorKey, ad), 2e6);
+        f.nonce = 2;
     }
 
     function _operate(
@@ -99,13 +74,14 @@ contract MasterFlowsTest is V2Base {
         IAccount.Call[] memory calls,
         IAccount.SignTransfer[] memory transfers
     ) internal {
-        MasterGate.OperateIntent memory intent = MasterGate.OperateIntent({
+        FundGate.OperateIntent memory intent = FundGate.OperateIntent({
             params: _params(f.master.user),
             blockNumber: block.number,
             deadline: block.timestamp + 60,
             acceptableRelayFee: 0,
             nonce: f.nonce,
             chainId: block.chainid,
+            fundParams: _fundParams(address(f.master.acct)),
             callList: calls,
             transferList: transfers
         });
@@ -118,12 +94,13 @@ contract MasterFlowsTest is V2Base {
                 intent.acceptableRelayFee,
                 intent.nonce,
                 intent.chainId,
+                _hashFundParams(intent.fundParams),
                 keccak256(abi.encode(intent.callList)),
                 keccak256(abi.encode(intent.transferList))
             )
         );
-        bytes32 digest = _digest(masterGateDomain, structHash);
-        masterGate.operate(intent, _sign(f.master.key, digest), _sign(attestorKey, digest), 0);
+        bytes32 digest = _digest(fundGateDomain, structHash);
+        fundGate.operate(intent, _sign(f.master.key, digest), _sign(attestorKey, digest), 0);
     }
 
     function test_operate_fans_out_on_fund_account() public {
@@ -137,7 +114,7 @@ contract MasterFlowsTest is V2Base {
         _operate(f, calls, new IAccount.SignTransfer[](0));
 
         assertEq(usdc.balanceOf(venue), 30e6, "venue received");
-        assertEq(usdc.balanceOf(f.fund), 70e6, "fund unsigned base spent");
+        assertEq(usdc.balanceOf(f.fund), 68e6, "fund base spent (98 staked minus 30)");
     }
 
     function test_operate_nonce_reuse_reverts() public {

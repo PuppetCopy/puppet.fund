@@ -6,32 +6,24 @@ export type IRoboCategory = { name: string; traits: Record<string, ITraitArt> }
 
 export const INK = '@ink'
 
-const shade = (hex: string, factor: number): string => {
+export const shade = (hex: string, factor: number): string => {
   const n = Number.parseInt(hex.slice(1), 16)
   const ch = (s: number) => Math.max(0, Math.min(255, Math.round(((n >> s) & 255) * factor)))
   return `#${((ch(16) << 16) | (ch(8) << 8) | ch(0)).toString(16).padStart(6, '0')}`
 }
 
-const headBlock = (skin: string): IRoboArt => ({
+const lighten = (hex: string, amount: number): string => {
+  const n = Number.parseInt(hex.slice(1), 16)
+  const ch = (s: number) => Math.max(0, Math.min(255, ((n >> s) & 255) + amount))
+  return `#${((ch(16) << 16) | (ch(8) << 8) | ch(0)).toString(16).padStart(6, '0')}`
+}
+
+const skinBlock = (skin: string): IRoboArt => ({
   x: 4,
   y: 4,
-  palette: [skin, shade(skin, 1.2), shade(skin, 0.72)],
+  palette: [skin, lighten(skin, 28), shade(skin, 0.72)],
   rows: ['1111111111111111', ...Array.from({ length: 14 }, () => '0000000000000000'), '2222222222222222']
 })
-
-const headBands = (colorList: string[]): IRoboArt => {
-  const rowsPerBand = 16 / colorList.length
-  return {
-    x: 4,
-    y: 4,
-    palette: colorList,
-    rows: Array.from({ length: 16 }, (_, r) =>
-      Math.floor(r / rowsPerBand)
-        .toString(36)
-        .repeat(16)
-    )
-  }
-}
 
 const background: IRoboCategory = {
   name: 'background',
@@ -54,29 +46,25 @@ const background: IRoboCategory = {
   }
 }
 
-const head: IRoboCategory = {
-  name: 'head',
+const skin: IRoboCategory = {
+  name: 'skin',
   traits: {
-    black: { ...headBlock('#131418'), weight: 75 },
-    zombie: { ...headBlock('#5b934d'), weight: 9 },
-    robot: { ...headBlock('#405576'), weight: 6 },
-    monkey: { ...headBlock('#714a31'), weight: 3 },
-    alien: { ...headBlock('#3daf9d'), weight: 2.5 },
-    skeleton: { ...headBlock('#bfbbaf'), weight: 1.8 },
-    vampire: { ...headBlock('#aaa0b8'), weight: 1.2 },
-    gold: { ...headBlock('#c8a236'), weight: 0.9 },
-    ice: { ...headBlock('#9dbfd1'), weight: 0.4 },
-    demon: { ...headBlock('#d14a31'), weight: 0.2 },
-    rainbow: {
-      ...headBands(['#d14a4a', '#d17e31', '#d1ac30', '#4ea957', '#34abb8', '#3d65d1', '#644bd1', '#9d58d1']),
-      weight: 0.02
-    },
+    black: { ...skinBlock('#131418'), weight: 75 },
+    zombie: { ...skinBlock('#5b934d'), weight: 9 },
+    robot: { ...skinBlock('#405576'), weight: 6 },
+    monkey: { ...skinBlock('#714a31'), weight: 3 },
+    alien: { ...skinBlock('#3daf9d'), weight: 2.5 },
+    skeleton: { ...skinBlock('#bfbbaf'), weight: 1.8 },
+    vampire: { ...skinBlock('#c79ab0'), weight: 1.2 },
+    gold: { ...skinBlock('#c8a236'), weight: 0.9 },
+    ice: { ...skinBlock('#9dbfd1'), weight: 0.4 },
+    demon: { ...skinBlock('#d14a31'), weight: 0.2 },
     invisible: {
       x: 4,
       y: 4,
       palette: ['#ffffff26'],
       rows: Array.from({ length: 16 }, () => '0000000000000000'),
-      weight: 0.05
+      weight: 0.02
     }
   }
 }
@@ -194,71 +182,70 @@ const face: IRoboCategory = {
 const headwear: IRoboCategory = {
   name: 'headwear',
   traits: {
-    none: { palette: [], rows: [], weight: 2.5 },
-    horns: { x: 4, y: 1, palette: ['#e0263f'], rows: ['..0..........0..', '.00..........00.', '000..........000'] },
-    halo: { x: 6, y: 1, palette: ['#ffd54a'], rows: ['.0000000000.', '0..........0'], weight: 0.4 },
-    crown: { x: 5, y: 1, palette: ['#ffd23a'], rows: ['0.0.0.0.0.0.0.', '00000000000000'], weight: 0.4 },
-    cap: { x: 4, y: 2, palette: ['#2b6cff'], rows: ['.00000000000000.', '0000000000000000'] },
-    beanie: { x: 4, y: 2, palette: ['#e0263f', '#ffffff'], rows: ['.00000000000000.', '1111111111111111'] },
-    tophat: { x: 7, y: 1, palette: ['#15161a', '#e0263f'], rows: ['..000000..', '..111111..', '0000000000'] },
-    mohawk: { x: 9, y: 1, palette: ['#ff3b54'], rows: ['0.0.0.', '000000', '000000'] },
-    bow: { x: 9, y: 2, palette: ['#ff6bb0'], rows: ['00..00', '.0000.', '00..00'] },
-    antenna: { x: 11, y: 1, palette: ['#ffd23a', '#15161a'], rows: ['0', '1', '1'], weight: 0.4 },
-    durag: { x: 4, y: 3, palette: ['#3a3f5a'], rows: ['0000000000000000', '0..............0'] },
-    party: { x: 8, y: 0, palette: ['#ff5a7a'], rows: ['...0...', '..000..', '.00000.', '0000000'], weight: 0.4 },
-    cowboy: { x: 4, y: 2, palette: ['#a06a3c'], rows: ['....000000....', '0000000000000000'], weight: 0.5 },
-    headphones: {
-      x: 3,
-      y: 8,
-      palette: ['#15161a'],
-      rows: ['00..............00', '00..............00', '00..............00'],
-      weight: 0.5
-    },
-    flower: { x: 6, y: 2, palette: ['#ff6bb0', '#ffd23a'], rows: ['.0.', '010', '.0.'], weight: 0.5 },
-    sprout: { x: 11, y: 1, palette: ['#4aa84a'], rows: ['0.0', '000', '.0.'], weight: 0.5 },
-    grad: {
-      x: 3,
-      y: 2,
-      palette: ['#15161a', '#ffd23a'],
-      rows: ['000000000000000000', '.....00000000...1.'],
-      weight: 0.5
-    },
-    santa: {
-      x: 5,
-      y: 0,
-      palette: ['#e0263f', '#ffffff'],
-      rows: ['....0000....', '..00000000..', '000000000000', '111111111111'],
-      weight: 0.4
-    },
-    headband: {
-      x: 4,
-      y: 3,
-      palette: ['#5ac8ff', '#2b6cff'],
-      rows: ['0000000000000000', '1111111111111111'],
-      weight: 0.7
-    },
-    flames: {
+    none: { palette: [], rows: [], weight: 100 },
+    horns: { x: 4, y: 1, palette: ['#e0263f', '#ff6b5a'], rows: ['0..............0', '00............00', '.00..........00.'], weight: 8.9 },
+    halo: {
       x: 4,
       y: 1,
-      palette: ['#e0301a', '#ff8a2b', '#ffd23a'],
-      rows: ['..2...2...2...2.', '.11..11..11..11.', '0000000000000000'],
-      weight: 0.3
+      palette: ['#ffe14d', '#fff3a0'],
+      rows: ['...1111111111...', '..0..........0..', '...0000000000...'],
+      weight: 0.48
     },
-    kingcrown: {
+    crown: { x: 4, y: 1, palette: ['#ffd23a', '#ff3b54'], rows: ['..1.....1.....1.', '.000...000...000', '0000000000000000'], weight: 0.53 },
+    cap: { x: 3, y: 1, palette: ['#2b6cff', '#1b4fcf'], rows: ['.......00.......', '....00000000....', '...00000000.1111', '..0000000000....'], weight: 35 },
+    beanie: { x: 4, y: 0, palette: ['#e0263f', '#ffffff'], rows: ['......11........', '...0000000000...', '..000000000000..', '0000000000000000', '1111111111111111'], weight: 19 },
+    tophat: { x: 6, y: 0, palette: ['#15161a', '#e0263f'], rows: ['..00000000..', '..00000000..', '..00000000..', '..11111111..', '000000000000'], weight: 0.91 },
+    purpletophat: { x: 6, y: 0, palette: ['#7b4fd6', '#ffd23a'], rows: ['..00000000..', '..00000000..', '..00000000..', '..11111111..', '000000000000'], weight: 0.85 },
+    mohawk: { x: 8, y: 0, palette: ['#ff8a2b', '#ff3b54'], rows: ['1..1..1.', '11.11.11', '11111111', '.000000.'], weight: 3.7 },
+    bow: { x: 9, y: 2, palette: ['#ff6bb0'], rows: ['00..00', '.0000.', '00..00'], weight: 4.4 },
+    antenna: { x: 10, y: 1, palette: ['#ffd23a', '#1b1d24'], rows: ['.00.', '0000', '.00.', '.11.'], weight: 6.8 },
+    durag: { x: 4, y: 2, palette: ['#3a3f5a', '#23263a'], rows: ['.00000000000000.', '0000000000000000', '..............00', '...............0'], weight: 5.4 },
+    party: { x: 7, y: 0, palette: ['#ff5a7a', '#ffd23a'], rows: ['...1...', '..000..', '.00100.', '0000000'], weight: 1.9 },
+    cowboy: { x: 2, y: 0, palette: ['#c08850', '#8a5a30', '#46280f'], rows: ['.......000000.......', '......00000000......', '.....0000000000.....', '.....2222222222.....', '11111111111111111111', '.111111111111111111.'], weight: 2.1 },
+    headphones: { x: 3, y: 8, palette: ['#15161a', '#5ac8ff'], rows: ['00..............00', '00..............00', '00..............00'], weight: 3.2 },
+    flower: { x: 8, y: 1, palette: ['#ff6bb0', '#ffd23a'], rows: ['.0.0.', '00100', '.0.0.'], weight: 2.7 },
+    sprout: { x: 11, y: 1, palette: ['#4aa84a'], rows: ['0.0', '000', '.0.'], weight: 2.4 },
+    grad: { x: 3, y: 1, palette: ['#15161a', '#ffd23a'], rows: ['000000000000000000', '...0011110000..1..', '.....00000.....1..', '...............1..'], weight: 1.6 },
+    santa: { x: 5, y: 0, palette: ['#e0263f', '#ffffff'], rows: ['.........11.', '....0000011.', '..00000000..', '000000000000', '111111111111'], weight: 1 },
+    headband: { x: 4, y: 3, palette: ['#5ac8ff', '#2b6cff'], rows: ['0000000000000000', '1111111111111111'], weight: 13 },
+    flames: { x: 4, y: 0, palette: ['#e0301a', '#ff8a2b', '#ffd23a'], rows: ['..2...2...2...2.', '.121.121.121.12.', '0000000000000000'], weight: 0.58 },
+    kingcrown: { x: 4, y: 0, palette: ['#ffd23a', '#e0263f', '#5ac8ff'], rows: ['1..2..1..2..1..2', '0..0..0..0..0..0', '0010010010010010', '0000000000000000'], weight: 0.46 },
+    wizard: { x: 6, y: 0, palette: ['#5a3c9c', '#ffd23a'], rows: ['...1....', '..001...', '.00010..', '0001000.', '00000000'], weight: 0.5 },
+    propeller: { x: 4, y: 0, palette: ['#2b6cff', '#ffd23a', '#ff3b54'], rows: ['..1111....1111..', '.......22.......', '...0000000000...', '..000000000000..'], weight: 1.1 },
+    catears: { x: 4, y: 1, palette: ['#3a3f5a', '#ff9bb0'], rows: ['00..........00', '011........110', '011........110'], weight: 1.7 },
+    bunny: { x: 7, y: 1, palette: ['#f0f0f0', '#ff9bb0'], rows: ['00...00', '01...10', '01...10', '00...00'], weight: 1.3 },
+    afro: { x: 3, y: 0, palette: ['#2a2a2e'], rows: ['...000000000...', '.0000000000000.', '000000000000000', '000000000000000'], weight: 1.4 },
+    chef: { x: 4, y: 0, palette: ['#ffffff', '#e8e8e8'], rows: ['.00..00..00.', '000000000000', '.0000000000.', '.0000000000.', '011111111110'], weight: 1.2 },
+    jester: { x: 4, y: 0, palette: ['#9b2bff', '#3fd070', '#ffd23a'], rows: ['1............2', '00..........00', '.00........00.', '..0000000000..', '..1100001100..'], weight: 0.55 },
+    antlers: { x: 2, y: 0, palette: ['#9a6630', '#6f4520'], rows: ['0.0.0........0.0.0', '.0.0.0......0.0.0.', '..000........000..', '...0..........0...', '...0..........0...', '..11..........11..'], weight: 0.75 },
+    viking: { x: 2, y: 0, palette: ['#cdd4dd', '#8a93a3', '#f0ead8'], rows: ['22..............22', '.22............22.', '..2200000000.0022.', '...00000000000....', '..001111111100....'], weight: 0.61 },
+    pirate: { x: 3, y: 0, palette: ['#15161a', '#ffffff'], rows: ['00..............00', '.000..........000.', '..00000000000000..', '..00001000010000..', '..00000011000000..', '000000000000000000'], weight: 0.64 },
+    unicorn: {
       x: 4,
       y: 0,
-      palette: ['#ffd23a', '#e0263f'],
-      rows: ['0..0..0..0..0..0', '0010010010010010'],
-      weight: 0.3
+      palette: ['#ffd23a', '#e8a81e', '#fff0b0'],
+      rows: ['.......00.......', '......0210......', '......0120......', '.....012210.....', '.....100001.....'],
+      weight: 0.41
     },
-    wizard: {
-      x: 7,
-      y: 0,
-      palette: ['#5a3c9c', '#ffd23a'],
-      rows: ['...00...', '..0000..', '.001100.', '00000000'],
-      weight: 0.3
-    }
+    arrow: { x: 2, y: 7, palette: ['#a06a3c', '#e0263f', '#f0f0f0'], rows: ['11..............22', '110............022', '11..............22'], weight: 0.67 },
+    raincloud: { x: 3, y: 0, palette: ['#b8c0cc', '#8a93a3', '#5ac8ff'], rows: ['...000000000...', '..00000000000..', '.0000000000000.', '..2..2..2..2...'], weight: 0.71 },
+    cone: { x: 8, y: 0, palette: ['#ff7a1a', '#ffffff'], rows: ['..00..', '.0000.', '011110', '000000', '000000'], weight: 0.97 },
+    mushroom: { x: 3, y: 0, palette: ['#e0263f', '#ffffff', '#f3e9d8'], rows: ['......000000......', '....0010010000....', '..001000000100100.', '.000100010000010.0', '000000000000000000', '.2222222222222222.'], weight: 0.8 },
+    helmet: { x: 4, y: 0, palette: ['#bfe8ff', '#ffffff', '#8aa6c0'], rows: ['....00000000....', '..010000000000..', '.001000000000000', '0000000000000000', '0000000000000000', '2222222222222222'], weight: 0.43 },
+    brain: { x: 4, y: 0, palette: ['#ff9bb0', '#e07a96'], rows: ['..010..010..0.', '.01101101101.0', '0110110110110.', '.000000000000.'], weight: 0.44 }
   }
 }
 
-export const ROBO_LAYERS: IRoboCategory[] = [background, head, neck, mouth, eyes, face, headwear]
+export const ROBO_LAYERS: IRoboCategory[] = [background, skin, neck, mouth, eyes, face, headwear]
+
+export const ROLLED_CATEGORIES: ReadonlySet<string> = new Set(['skin', 'headwear'])
+
+export const ROLLED_LAYERS: number[] = ROBO_LAYERS.map((_, i) => i).filter(i => ROLLED_CATEGORIES.has(ROBO_LAYERS[i].name))
+
+export const PICKABLE_LAYERS: number[] = ROBO_LAYERS.map((_, i) => i).filter(
+  i => !ROLLED_CATEGORIES.has(ROBO_LAYERS[i].name)
+)
+
+export const MYSTERY = '@mystery'
+
+export const MYSTERY_SKIN: IRoboArt = skinBlock('#454b5a')

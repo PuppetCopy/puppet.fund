@@ -1,11 +1,12 @@
-import { PUPPET_CONTRACT_MAP } from '@puppet/contracts'
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
+import DEPLOYMENTS from '@puppet/contracts/deployments'
 import { IntervalTime } from '@puppet/sdk/const'
+import type { Address } from 'viem'
 import { uiStorage } from '@/ui-storage'
 import type { IStreamStoreKey } from '../app/storage/storage.js'
-import type { ILeaderboardView, IPerformanceMetric } from '../io/indexer/query.js'
+import type { ILeaderboardView, IPerformanceMetric } from '../io/datastore/query.js'
 
-const DB_NAME = `root:${PUPPET_CONTRACT_MAP.Dictate.address}`
+const DB_NAME = `root:${DEPLOYMENTS[`Dictate:${HUB_CHAIN_ID}`].address}`
 
 export const localStoreSchema = uiStorage.createStoreDefinition(DB_NAME, 1, {
   global: {
@@ -13,7 +14,8 @@ export const localStoreSchema = uiStorage.createStoreDefinition(DB_NAME, 1, {
     wallet: null as null | string,
     activityTimeframe: IntervalTime.WEEK,
     collateralTokenList: [] as string[],
-    firstVisitSeen: false
+    firstVisitSeen: false,
+    hideBalances: false
   },
   ruleEditor: {
     advancedRouteEditorEnabled: false
@@ -21,8 +23,7 @@ export const localStoreSchema = uiStorage.createStoreDefinition(DB_NAME, 1, {
   leaderboard: {
     view: 'masters' as ILeaderboardView,
     performanceMetric: 'realisedPnl' as IPerformanceMetric,
-    account: undefined as string | undefined,
-    shadowSort: { direction: 'desc', selector: 'size' } as { direction: 'asc' | 'desc'; selector: 'size' | 'pnlroi' }
+    account: undefined as string | undefined
   },
   wallet: {}
 })
@@ -50,11 +51,11 @@ export function depositSourceKey(wallet: string): IStreamStoreKey<IDepositSource
   }
 }
 
-export function swapTargetKey(tokenInId: string): IStreamStoreKey<`0x${string}` | null> {
+export function swapTargetKey(tokenIn: Address): IStreamStoreKey<`0x${string}` | null> {
   return {
     dbName: DB_NAME,
     storeName: 'global',
-    key: `swapTarget:${tokenInId.toLowerCase()}`,
+    key: `swapTarget:${tokenIn.toLowerCase()}`,
     initialValue: null
   }
 }

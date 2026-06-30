@@ -124,6 +124,13 @@ export const $WalletConnect = () =>
       )
     )
 
+    // Only one wallet can connect at a time; disable every connector while any is pending so a second click can't
+    // pre-empt the first attempt (switchMap would otherwise drop the in-flight connector's spinner/status).
+    const anyPending: IStream<boolean> = map(
+      byId => Object.values(byId).some(s => s.kind === 'pending'),
+      statusById
+    )
+
     return [
       $column(spacing.small)(
         switchMap(
@@ -137,11 +144,10 @@ export const $WalletConnect = () =>
                     byId => byId[connector.id] ?? { kind: 'idle' },
                     statusById
                   )
-                  const isPending: IStream<boolean> = map(s => s.kind === 'pending', connectorStatus)
 
                   return $column(spacing.small)(
                     $ButtonSecondary({
-                      disabled: isPending,
+                      disabled: anyPending,
                       $container: $defaultButtonContainer(
                         style({
                           color: palette.message,

@@ -7,10 +7,11 @@ import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
 
 import {Error} from "../utils/Error.sol";
+import {NATIVE_TOKEN} from "../utils/Native.sol";
 import {IAccount} from "../utils/interfaces/IAccount.sol";
 
 abstract contract BaseAccount is IAccount, IERC165 {
-    mapping(bytes32 tokenId => uint signed) internal _signedBalanceMap;
+    mapping(address token => uint signed) internal _signedBalanceMap;
 
     function getAttestContract() public view returns (address _attest) {
         bytes memory _b = LibClone.argsOnClone(address(this), 0, 20);
@@ -27,9 +28,9 @@ abstract contract BaseAccount is IAccount, IERC165 {
     }
 
     function signedBalanceOf(
-        bytes32 _tokenId
+        address _token
     ) external view returns (uint) {
-        return _signedBalanceMap[_tokenId];
+        return _signedBalanceMap[_token];
     }
 
     function supportsInterface(
@@ -74,13 +75,13 @@ abstract contract BaseAccount is IAccount, IERC165 {
         postBalanceList_ = new uint[](_len);
         for (uint _i; _i < _len; ++_i) {
             SignTransfer calldata _t = _transferList[_i];
-            uint _signedSum = _signedBalanceMap[_t.tokenId] + _t.amountIn;
+            uint _signedSum = _signedBalanceMap[_t.token] + _t.amountIn;
             if (_t.amountOut > _signedSum) revert Error.Account__OutflowExceedsSigned(_t.amountOut, _signedSum);
 
             uint _signedPost = _signedSum - _t.amountOut;
-            _signedBalanceMap[_t.tokenId] = _signedPost;
-            uint _post = address(_t.token) == address(0) ? address(this).balance : _t.token.balanceOf(address(this));
-            if (_post < _signedPost) revert Error.Account__Shortfall(address(_t.token), _post, _signedPost);
+            _signedBalanceMap[_t.token] = _signedPost;
+            uint _post = _t.token == NATIVE_TOKEN ? address(this).balance : IERC20(_t.token).balanceOf(address(this));
+            if (_post < _signedPost) revert Error.Account__Shortfall(_t.token, _post, _signedPost);
             signedPostBalanceList_[_i] = _signedPost;
             postBalanceList_[_i] = _post;
         }

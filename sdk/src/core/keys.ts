@@ -1,6 +1,8 @@
-import { PUPPET_CONTRACT_MAP } from '@puppet/contracts'
+import { hub } from '@puppet/contracts/deployments'
 import type { Address } from 'viem'
 import { concat, encodePacked, getAddress, type Hex, keccak256, slice, toBytes } from 'viem'
+
+const ALLOCATE = hub.Allocate.address
 
 // OpenZeppelin Clones creation code components (55 bytes total)
 const CLONE_CREATION_PREFIX = '0x3d602d80600a3d3981f3' as const // 10 bytes
@@ -49,7 +51,7 @@ export function getAllocationAdderess(allocationStoreImplementationHash: Hex, al
       keccak256(
         concat([
           CREATE2_PREFIX, //
-          PUPPET_CONTRACT_MAP.Allocate.address,
+          ALLOCATE,
           allocationKey,
           allocationStoreImplementationHash
         ])

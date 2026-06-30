@@ -17,19 +17,17 @@
   "dependencies": {
     "@puppet/contracts": "workspace:*",
     "@puppet/sdk": "workspace:*",
-    "@wagmi/core": "3.5.0",
-    "@walletconnect/sign-client": "2.23.9",
-    "@walletconnect/utils": "2.23.9",
+    "@wagmi/core": "3.5.5",
+    "@walletconnect/sign-client": "2.23.10",
+    "@walletconnect/utils": "2.23.10",
     "abitype": "catalog:",
     "aelea": "catalog:",
     "color": "5.0.3",
-    "graphql-ws": "catalog:",
     "lightweight-charts": "catalog:",
     "mersenne-twister": "1.1.0",
     "viem": "catalog:"
   },
   "devDependencies": {
-    "@puppet/indexer-graphql": "workspace:*",
     "@rollup/plugin-replace": "6.0.3",
     "@types/bun": "catalog:",
     "@vite-pwa/assets-generator": "1.0.2",

@@ -25,9 +25,7 @@
     "@noble/curves": "2.2.0",
     "@noble/hashes": "2.2.0",
     "@puppet/contracts": "workspace:*",
-    "@puppet/indexer-graphql": "workspace:*",
     "aelea": "catalog:",
-    "graphql-ws": "catalog:",
     "viem": "catalog:"
   },
   "devDependencies": {

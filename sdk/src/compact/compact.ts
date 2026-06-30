@@ -1,13 +1,11 @@
-import { type Address, getAddress, type Hex, isAddress } from 'viem'
-import { predictFundAccount, predictPuppetAccount } from '../account/index.js'
+import { type Address, type Hex, isAddress } from 'viem'
 import type { IActionKind, IInputByKind, IIntentByKind } from '../attestation/index.js'
+import { AUTH_HEADER, AUTH_MAX_TTL_SEC, buildAuthAssertion } from './auth.js'
 import { CompactError } from './error.js'
 import { decode, encode } from './frame.js'
 
 export const DISPATCH_TIMEOUT_MS = 5_000
 export const SETTLEMENT_TIMEOUT_MS = 30_000
-const RECONNECT_MIN_MS = 1_000
-const RECONNECT_MAX_MS = 15_000
 
 export type IRelayRequest<K extends IActionKind = IActionKind> = K extends IActionKind
   ? {
@@ -24,249 +22,143 @@ export interface IDispatchedFrame {
   nonce: bigint
   txHash: Hex
   actualRelayFee: bigint
+  // The net asset value the relay PRICED and co-signed against, for NAV-bearing intents (allocate / redeem / liquidate),
+  // taken from the journal's oracle. The client set its acceptableNetAssetValue band from that SAME oracle pre-attest, so
+  // this is the exact figure the co-sign landed on — for display ("valued at $X") and to audit it fell inside the band.
+  // Absent for intents that carry no NAV.
+  signedNav?: bigint
 }
-
-// Broadcast by the matchmaker (on connect + heartbeat), never per-request: the relay's
-// own indexed head per network. This is THE anchor for intent blockNumbers — an intent
-// anchored to the live RPC head is ahead of the relay's view and silently rejected.
-export interface IHeadFrame {
-  kind: 'head'
-  blocks: Record<string, bigint>
-}
-
-const FUND_ROUTED_KINDS: ReadonlySet<IActionKind> = new Set([
-  'operate',
-  'allocate',
-  'redeem',
-  'liquidate',
-  'createFundAccount'
-])
-
-function accountForRequest(request: IRelayRequest): Address {
-  const params = (request.input as { params: Parameters<typeof predictPuppetAccount>[0] }).params
-  const account = predictPuppetAccount(params)
-  return FUND_ROUTED_KINDS.has(request.kind) ? predictFundAccount(account) : account
-}
-
-export type IMatchmakerStatus = 'open' | 'connecting' | 'closed'
 
 export interface ICompactOpts {
+  // HTTP(S) base of the relay; the client POSTs intents to `${matchmakerUrl}/attest`. The relay is attest-only — there is
+  // no head stream and no reads here. The block anchor and settlement are the caller's concern (read from your own RPC);
+  // aggregation reads come from the journal service.
   matchmakerUrl: string
   defaultTimeoutMs?: number
+  // Optional session auth: when set, the client signs a short-lived assertion (refreshed automatically) with `sign` and
+  // attaches it PER-REQUEST to /attest. The relay recovers the signer as the reputation identity, keying that account's
+  // admission lane by it and granting tx priority. Omit for anonymous best-effort.
+  auth?: { sign: (message: string) => Promise<Hex>; ttlSec?: number }
 }
 
-// A pure relay client: attest() resolves at the relay's dispatch ACK. Settlement is the
-// caller's concern — the ack carries (account, chainId, nonce), exactly the key
-// awaitAccountCall / awaitAccountDeployed (@puppet/sdk/state) take.
+// A pure relay client: attest() POSTs the intent and resolves at the relay's dispatch ACK (the HTTP response). The ack
+// carries (account, chainId, nonce) — exactly the key the caller settles on (its own RPC / the journal fold). No head
+// stream, no status, no reads: the relay is fire-and-ACK.
 export interface ICompact {
   attest(request: IRelayRequest, timeoutMs?: number): Promise<IDispatchedFrame>
-  // Invokes cb immediately with the current status, then on every transition; returns
-  // an unsubscribe. Stream consumers wrap it (aelea: fromCallback(cb => onStatus(cb))).
-  onStatus(cb: (status: IMatchmakerStatus) => void): () => void
-  // Synchronous connection check for callers that want to gate a trade without
-  // subscribing to status transitions (e.g. an operator tick loop). True only while the
-  // socket is OPEN; false during connecting/backoff/closed.
-  isOpen(): boolean
-  head(network: string): bigint | undefined
-  awaitHead(network: string, timeoutMs?: number): Promise<bigint>
   close(): void
 }
 
-type Pending = {
-  resolve: (result: IDispatchedFrame) => void
-  reject: (err: Error) => void
-  timer: ReturnType<typeof setTimeout>
-  request: IRelayRequest
+// A relay ack must carry the FULL dispatch key — chainId + nonce (the caller settles on these), txHash, account, fee —
+// each well-typed (decode restores the bigints from their tagged form). THROWS naming the offending field(s) rather than
+// returning a bool: a malformed body arrives ONLY on a 200 (the relay accepted + broadcast, then botched the response),
+// which is a protocol/version mismatch the CLIENT should see at its callsite — NOT the matchmaker's opaque rejection (a
+// non-200, still mapped to timeout()). The message also steers the caller away from a blind retry: the tx likely
+// dispatched, so it must be verified on-chain by nonce, not re-sent (a re-send double-dispatches, reverting on the nonce).
+function assertDispatchedFrame(f: unknown): asserts f is IDispatchedFrame {
+  if (!f || typeof f !== 'object') {
+    throw new CompactError('BAD_ACK', `relay ack was not an object (got ${f === null ? 'null' : typeof f})`, 'server')
+  }
+  const x = f as Record<string, unknown>
+  const invalid: string[] = []
+  if (typeof x.chainId !== 'bigint') invalid.push('chainId')
+  if (typeof x.nonce !== 'bigint') invalid.push('nonce')
+  if (typeof x.actualRelayFee !== 'bigint') invalid.push('actualRelayFee')
+  if (typeof x.txHash !== 'string') invalid.push('txHash')
+  if (typeof x.account !== 'string' || !isAddress(x.account)) invalid.push('account')
+  // Optional: present only for NAV-bearing intents. Validate the type when present, never require it.
+  if (x.signedNav !== undefined && typeof x.signedNav !== 'bigint') invalid.push('signedNav')
+  if (invalid.length > 0) {
+    throw new CompactError(
+      'BAD_ACK',
+      `relay ack malformed (missing/invalid: ${invalid.join(', ')}) — the intent was likely dispatched; verify on-chain by nonce rather than retrying`,
+      'server'
+    )
+  }
 }
-
-const keyOf = (account: Address, chainId: bigint, nonce: bigint): string =>
-  `${getAddress(account).toLowerCase()}:${chainId}:${nonce}`
 
 export function createCompact(opts: ICompactOpts): ICompact {
   const { matchmakerUrl, defaultTimeoutMs = DISPATCH_TIMEOUT_MS } = opts
+  const attestUrl = `${matchmakerUrl}/attest`
 
-  let currentStatus: IMatchmakerStatus = 'closed'
-  const statusListeners = new Set<(status: IMatchmakerStatus) => void>()
-  const pushStatus = (next: IMatchmakerStatus): void => {
-    if (next === currentStatus) return
-    currentStatus = next
-    for (const cb of statusListeners) cb(next)
-  }
-
-  const pending = new Map<string, Pending>()
-  const outbox: IRelayRequest[] = []
-  let heads: Record<string, bigint> = {}
-  const headWaiters = new Set<() => void>()
-
-  let ws: WebSocket | null = null
+  const inflight = new Set<AbortController>() // in-flight attest POSTs, aborted on close()
   let disposed = false
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-  let reconnectDelay = RECONNECT_MIN_MS
 
-  // A dropped connection abandons in-flight requests (their dispatch ack will never
-  // arrive on the dead socket); callers re-submit once the connection is back. The
-  // socket itself reconnects with backoff, so `status` recovers to 'open' on its own.
-  const abandon = (err: Error): void => {
-    for (const slot of pending.values()) {
-      clearTimeout(slot.timer)
-      slot.reject(err)
-    }
-    pending.clear()
-    outbox.length = 0
-  }
-  const resolvePending = (key: string, result: IDispatchedFrame): void => {
-    const slot = pending.get(key)
-    if (!slot) return
-    clearTimeout(slot.timer)
-    pending.delete(key)
-    slot.resolve(result)
-  }
-
-  const drain = (): void => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
-    while (outbox.length > 0) {
-      const req = outbox.shift()!
+  // Cached auth header, rebuilt a fraction before expiry. Anonymous (no opts.auth) => no header.
+  let authCache: { header: string; refreshAt: number } | null = null
+  let authWarned = false
+  async function authHeaders(): Promise<Record<string, string>> {
+    const auth = opts.auth
+    if (!auth) return {}
+    const nowSec = Math.floor(Date.now() / 1000)
+    if (!authCache || nowSec >= authCache.refreshAt) {
+      const ttlSec = Math.min(auth.ttlSec ?? AUTH_MAX_TTL_SEC, AUTH_MAX_TTL_SEC)
       try {
-        ws.send(encode(req))
-      } catch {
-        outbox.unshift(req)
-        return
+        const header = await buildAuthAssertion(ttlSec, auth.sign)
+        // Refresh BEFORE expiry: 30s of slack, but never more than half the TTL — so a short TTL still caches between
+        // calls instead of re-signing every request (a flat 30s buffer would no-op the cache for any ttlSec <= 30).
+        const slackSec = Math.min(30, Math.floor(ttlSec / 2))
+        authCache = { header, refreshAt: nowSec + ttlSec - slackSec }
+        authWarned = false
+      } catch (err) {
+        // Signing failed: dispatch anonymously rather than block the request (it still lands, just without the funded
+        // lane / priority). Warn ONCE per failure streak so a persistent misconfiguration is visible, not silent.
+        if (!authWarned) {
+          authWarned = true
+          console.warn('[compact] auth signing failed; dispatching anonymously (no funded-lane priority):', err)
+        }
+        return {}
       }
     }
+    return { [AUTH_HEADER]: authCache.header }
   }
-
-  const scheduleReconnect = (): void => {
-    if (disposed || reconnectTimer !== null) return
-    // The socket auto-reconnects with backoff, so signal a transient 'connecting'
-    // state rather than leaving status at 'closed' (which reads as a permanent outage).
-    pushStatus('connecting')
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null
-      reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS)
-      connect()
-    }, reconnectDelay)
-  }
-
-  function connect(): void {
-    if (disposed) return
-    const socket = new WebSocket(matchmakerUrl)
-    ws = socket
-    pushStatus('connecting')
-
-    socket.addEventListener(
-      'open',
-      () => {
-        reconnectDelay = RECONNECT_MIN_MS
-        pushStatus('open')
-        drain()
-      },
-      { once: true }
-    )
-
-    const onDown = (): void => {
-      if (ws !== socket) return
-      abandon(new Error('matchmaker connection lost'))
-      // scheduleReconnect() pushes 'connecting' so a transient drop self-heals as a
-      // 'reconnecting' state instead of flashing a permanent-looking 'closed'.
-      if (disposed) pushStatus('closed')
-      else scheduleReconnect()
-    }
-    socket.addEventListener('error', onDown, { once: true })
-    socket.addEventListener('close', onDown, { once: true })
-
-    socket.addEventListener('message', e => {
-      const raw = typeof e.data === 'string' ? e.data : new TextDecoder().decode(e.data as ArrayBuffer)
-      const frame = decode(raw) as IDispatchedFrame | IHeadFrame | null
-      if (!frame || typeof frame !== 'object') return
-      if ('kind' in frame && frame.kind === 'head') {
-        heads = { ...heads, ...frame.blocks }
-        const waiters = Array.from(headWaiters)
-        headWaiters.clear()
-        for (const wake of waiters) wake()
-        return
-      }
-      if (!('txHash' in frame) || !isAddress(frame.account, { strict: false })) return
-      const key = keyOf(frame.account, frame.chainId, frame.nonce)
-      resolvePending(key, frame)
-    })
-  }
-
-  connect()
 
   return {
-    onStatus(cb: (status: IMatchmakerStatus) => void): () => void {
-      statusListeners.add(cb)
-      cb(currentStatus)
-      return () => {
-        statusListeners.delete(cb)
+    async attest(request: IRelayRequest, timeoutMs = defaultTimeoutMs): Promise<IDispatchedFrame> {
+      if (disposed) throw new Error('compact closed')
+      // No agreement on the intent, a busy relay, or any non-2xx is indistinguishable by design (the relay never says WHY
+      // it rejected). The dispatch can still land until its deadline; wait it out then retry on fresh state — the on-chain
+      // nonce guard makes a retry safe.
+      const timeout = (): CompactError =>
+        new CompactError(
+          'DISPATCH_TIMEOUT',
+          `${request.kind} was not acknowledged in ${timeoutMs}ms: no agreement on the intent, or a busy relay. It can still dispatch until its deadline passes; wait it out, then retry on fresh state.`,
+          'server'
+        )
+      const controller = new AbortController()
+      inflight.add(controller)
+      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      try {
+        let res: Response
+        try {
+          res = await fetch(attestUrl, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', ...(await authHeaders()) },
+            body: encode(request),
+            signal: controller.signal
+          })
+        } catch {
+          throw timeout()
+        }
+        if (res.status !== 200) throw timeout()
+        let body: string
+        try {
+          body = await res.text()
+        } catch {
+          throw timeout() // aborted mid-body, or a truncated / errored body — keep EVERY failure opaque (fire-and-ACK)
+        }
+        const frame = decode(body)
+        assertDispatchedFrame(frame) // 200 + bad body = relay protocol bug, not a rejection — surface it (see above)
+        return frame
+      } finally {
+        clearTimeout(timer)
+        inflight.delete(controller)
       }
     },
-    isOpen(): boolean {
-      return ws?.readyState === WebSocket.OPEN
-    },
-    head(network: string): bigint | undefined {
-      return heads[network]
-    },
-    awaitHead(network: string, timeoutMs = DISPATCH_TIMEOUT_MS): Promise<bigint> {
-      const known = heads[network]
-      if (known !== undefined) return Promise.resolve(known)
-      return new Promise<bigint>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          headWaiters.delete(wake)
-          reject(
-            new Error(
-              `relay announced no indexed head for ${network} within ${timeoutMs}ms; not connected, or the relay predates head broadcasting`
-            )
-          )
-        }, timeoutMs)
-        const wake = (): void => {
-          const block = heads[network]
-          if (block === undefined) {
-            headWaiters.add(wake)
-            return
-          }
-          clearTimeout(timer)
-          resolve(block)
-        }
-        headWaiters.add(wake)
-      })
-    },
-    attest(request: IRelayRequest, timeoutMs = defaultTimeoutMs): Promise<IDispatchedFrame> {
-      const account = accountForRequest(request)
-      const intent = request.intent as IIntentByKind[IActionKind] & { chainId: bigint; nonce: bigint }
-      const key = keyOf(account, intent.chainId, intent.nonce)
-
-      return new Promise<IDispatchedFrame>((resolve, reject) => {
-        if (disposed) {
-          reject(new Error('compact closed'))
-          return
-        }
-        const timer = setTimeout(() => {
-          pending.delete(key)
-          const idx = outbox.indexOf(request)
-          if (idx !== -1) outbox.splice(idx, 1)
-          reject(
-            new CompactError(
-              'DISPATCH_TIMEOUT',
-              `${request.kind} was not acknowledged in ${timeoutMs}ms: no agreement on the intent, or a busy relay. It can still dispatch until its deadline passes; wait it out, then retry on fresh state.`,
-              'server'
-            )
-          )
-        }, timeoutMs)
-        pending.set(key, { resolve, reject, timer, request })
-        outbox.push(request)
-        drain()
-      })
-    },
-
     close(): void {
       disposed = true
-      if (reconnectTimer !== null) {
-        clearTimeout(reconnectTimer)
-        reconnectTimer = null
-      }
-      abandon(new Error('compact closed'))
-      ws?.close()
+      for (const controller of inflight) controller.abort()
+      inflight.clear()
     }
   }
 }

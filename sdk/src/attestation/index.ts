@@ -1,22 +1,17 @@
 import type { IAllocateInput } from './allocate.js'
-import type { IBridgeInput } from './bridge.js'
 import type { IClaimInput } from './claim.js'
-import type { ICreatePuppetAccountInput } from './createAccount.js'
-import type { ICreateFundAccountInput } from './createFundAccount.js'
 import type { IDepositRoute } from './depositRoute.js'
 import type { ILiquidateInput } from './liquidate.js'
+import type { IMandateInput } from './mandate.js'
 import type { IOperateInput } from './operate.js'
-import type { IRecognizeBalanceInput } from './recognizeBalance.js'
+import type { IFundRecognizeInput, IRecognizeBalanceInput } from './recognizeBalance.js'
 import type { IRedeemInput } from './redeem.js'
 import type { ISellInput } from './sell.js'
-import type { ISubscribeInput } from './subscribe.js'
-import type { IWithdrawToBridgeInput } from './withdrawToBridge.js'
-import type { IWithdrawToWalletInput } from './withdrawToWallet.js'
+import type { IFundSwapInput, ISwapInput } from './swap.js'
+import type { IWithdrawInput } from './withdraw.js'
 
 export type IInputByKind = {
-  subscribe: ISubscribeInput
-  createPuppetAccount: ICreatePuppetAccountInput
-  createFundAccount: ICreateFundAccountInput
+  mandate: IMandateInput
   allocate: IAllocateInput
   operate: IOperateInput
   sell: ISellInput
@@ -24,68 +19,52 @@ export type IInputByKind = {
   redeem: IRedeemInput
   liquidate: ILiquidateInput
   recognize: IRecognizeBalanceInput
-  withdrawToWallet: IWithdrawToWalletInput
-  bridge: IBridgeInput
-  withdrawToBridge: IWithdrawToBridgeInput
+  fundRecognize: IFundRecognizeInput
+  swap: ISwapInput
+  fundSwap: IFundSwapInput
+  withdraw: IWithdrawInput
   walletDeposit: IDepositRoute
   walletDepositWnt: IDepositRoute
 }
 
-export {
-  ACROSS_SPOKE_POOL,
-  acrossSpokePool,
-  buildAcrossDeposit,
-  decodeAcrossDeposit,
-  type IAcrossDepositParams
-} from './acrossDeposit.js'
-export {
-  attestAllocateIntent,
-  type IAllocateAttestContext,
-  type IAllocateInput,
-  type IAllocateRulePosition
-} from './allocate.js'
-export { attestBridgeIntent, type IBridgeAttestContext, type IBridgeInput } from './bridge.js'
-export { BRIDGE_MAX_SLIPPAGE_BPS, verifyBridgeQuoteRatio } from './bridgeGuard.js'
-export { attestClaimIntent, type IClaimAttestContext, type IClaimInput } from './claim.js'
+export { ACROSS_PERIPHERY, buildAcrossDeposit, decodeAcrossDeposit } from './acrossDeposit.js'
+export { attestAllocateIntent, type IAllocateInput, type IAllocateRulePosition } from './allocate.js'
+export { attestClaimIntent, type IClaimInput } from './claim.js'
 export {
   computeAllocation,
   type IAllocationPuppet,
   type IAllocationResult,
   type IComputeAllocationContext
 } from './computeAllocation.js'
-export {
-  attestCreatePuppetAccountIntent,
-  type ICreatePuppetAccountAttestContext,
-  type ICreatePuppetAccountInput
-} from './createAccount.js'
-export {
-  attestCreateFundAccountIntent,
-  type ICreateFundAccountAttestContext,
-  type ICreateFundAccountInput
-} from './createFundAccount.js'
 export type { IDepositMode, IDepositRoute } from './depositRoute.js'
-export { resolveDispatchChainId, resolveDispatchNetwork } from './dispatch.js'
+export { resolveDispatchChainId } from './dispatch.js'
 export * as IntentLib from './intentLib.js'
-export { attestLiquidateIntent, type ILiquidateAttestContext, type ILiquidateInput } from './liquidate.js'
-export { attestOperateIntent, type IOperateAttestContext, type IOperateInput } from './operate.js'
+export { attestLiquidateIntent, type ILiquidateInput } from './liquidate.js'
 export {
+  attestMandateIntent,
+  type IMandateInput,
+  type IMandateRule,
+  signMandate,
+  verifyMandateRuleSignatures
+} from './mandate.js'
+export { attestOperateIntent, type IOperateInput } from './operate.js'
+export {
+  attestFundRecognizeIntent,
   attestRecognizeBalanceIntent,
-  type IRecognizeBalanceAttestContext,
+  type IFundRecognizeInput,
   type IRecognizeBalanceInput
 } from './recognizeBalance.js'
-export { attestRedeemIntent, type IRedeemAttestContext, type IRedeemInput } from './redeem.js'
+export { attestRedeemIntent, type IRedeemInput } from './redeem.js'
 export * from './rule.js'
-export { attestSellIntent, type ISellAttestContext, type ISellInput } from './sell.js'
+export { attestSellIntent, type ISellInput } from './sell.js'
 export type { IActionKind, IDraftContext, IIntentByKind } from './shared.js'
-export { STAKE_RATIO_CAP } from './shared.js'
-export { attestSubscribeIntent, type ISubscribeAttestContext, type ISubscribeInput, signMandate } from './subscribe.js'
+export { WEIGHT_RATIO_CAP } from './shared.js'
 export {
-  attestWithdrawToBridgeIntent,
-  type IWithdrawToBridgeAttestContext,
-  type IWithdrawToBridgeInput
-} from './withdrawToBridge.js'
-export {
-  attestWithdrawToWalletIntent,
-  type IWithdrawToWalletAttestContext,
-  type IWithdrawToWalletInput
-} from './withdrawToWallet.js'
+  attestFundSwapIntent,
+  attestSwapIntent,
+  type IFundSwapInput,
+  type ISwapInput,
+  type ISwapRoute
+} from './swap.js'
+export { SWAP_MAX_SLIPPAGE_BPS, verifyOutputFloor, verifyQuoteFreshness, verifySwapQuoteRatio } from './swapGuard.js'
+export { attestWithdrawIntent, type IWithdrawInput, type IWithdrawRoute } from './withdraw.js'

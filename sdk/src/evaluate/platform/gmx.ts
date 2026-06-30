@@ -1,12 +1,27 @@
-import { type Address, getAddress, type Hex } from 'viem'
+import { TOKEN_META } from '@puppet/contracts/const'
+import { type Address, getAddress } from 'viem'
 import { max } from '../../core/math.js'
 import { MARKET_ADDRESS_DESCRIPTION_MAP } from '../../gmx/market.js'
 import { getLeverageFactor, getPositionPnlUsd } from '../../gmx/position.js'
-import { type IIndexerClient, select } from '../../state/shared.js'
+import { tokenMetaByAddress } from '../../state/tokenRegistry.js'
 import { usdToBase } from '../precision.js'
-import type { INavPosition, IPlatformEvalParams, IPlatformEvaluator, IPlatformValuation } from '../types.js'
+import type {
+  IGmxPositionRow,
+  INavPosition,
+  IPlatformEvalParams,
+  IPlatformEvaluator,
+  IPlatformValuation,
+  IPriceSource
+} from '../types.js'
+
+export type { IGmxPositionRow } from '../types.js'
 
 const PLATFORM = 'gmx'
+
+// GMX denominates positions in USD; USDC is the dollar-proxy market we price every token against to convert
+// those USD figures into base-token wei (see usdToBase). A token with no <token>/USDC market simply has no
+// entry and degrades to its stored pnl.
+const USD_PROXY = TOKEN_META.USDC.symbol
 
 const MARKET_INDEX_MAP = MARKET_ADDRESS_DESCRIPTION_MAP as Record<string, { indexToken?: Address } | undefined>
 
@@ -14,32 +29,7 @@ export function resolveIndexToken(market: Address): Address | undefined {
   return MARKET_INDEX_MAP[getAddress(market)]?.indexToken
 }
 
-export interface IGmxPositionRow {
-  positionKey: Hex
-  market: Address
-  collateralToken: Address
-  isLong: boolean
-  sizeInUsd: bigint
-  sizeInTokens: bigint
-  collateralUsd: bigint
-  storedPnlUsd: bigint
-}
-
-export type IGmxPriceMap = Map<Address, { price: bigint; updateTimestamp: number }>
-
-// The single in-domain price read: indexed GMX oracle prices for the given tokens, keyed
-// checksummed. Shared by position valuation and the swap/bridge transfer evaluation so all
-// attestation valuation flows through one source.
-export async function readOraclePrices(sql: IIndexerClient, tokens: readonly Address[]): Promise<IGmxPriceMap> {
-  const ids = [...new Set(tokens.map(t => getAddress(t)))]
-  const rows = await select(sql, 'GmxOraclePrice', {
-    where: { id: { _in: ids } },
-    fields: ['id', 'price', 'updateTimestamp']
-  })
-  const prices: IGmxPriceMap = new Map()
-  for (const r of rows) prices.set(getAddress(r.id), { price: r.price, updateTimestamp: r.updateTimestamp })
-  return prices
-}
+export type IGmxPriceMap = Map<Address, IPriceSource>
 
 export function gmxTokensToPrice(rows: IGmxPositionRow[], baseToken: Address): Address[] {
   const tokens = new Set<Address>([getAddress(baseToken)])
@@ -70,14 +60,16 @@ export function valueGmxPositions(
     }
   }
   const basePrice = baseEntry.price
-  const baseAgeSec = Math.max(0, nowSec - baseEntry.updateTimestamp)
+  const baseAgeSec = Math.max(0, nowSec - baseEntry.time)
 
   const positions: INavPosition[] = rows.map(row => {
     const indexToken = resolveIndexToken(row.market)
     const indexEntry = indexToken ? priceByToken.get(indexToken) : undefined
-    const canRevalue = indexEntry !== undefined && indexEntry.price > 0n && indexToken !== undefined
+    const indexPrice = indexEntry ? indexEntry.price : 0n
+    const indexAgeSec = indexEntry ? nowSec - indexEntry.time : 0
+    const canRevalue = indexEntry !== undefined && indexPrice > 0n && indexToken !== undefined
     const pnlUsd = canRevalue
-      ? getPositionPnlUsd(row.isLong, row.sizeInUsd, row.sizeInTokens, indexEntry.price)
+      ? getPositionPnlUsd(row.isLong, row.sizeInUsd, row.sizeInTokens, indexPrice)
       : row.storedPnlUsd
     const collateralBase = usdToBase(row.collateralUsd, basePrice)
     const pnlBase = usdToBase(pnlUsd, basePrice)
@@ -88,7 +80,7 @@ export function valueGmxPositions(
       collateralBase,
       pnlBase,
       netBase: max(0n, collateralBase + pnlBase),
-      priceAgeSec: canRevalue ? Math.max(baseAgeSec, nowSec - indexEntry.updateTimestamp) : undefined,
+      priceAgeSec: canRevalue ? Math.max(baseAgeSec, indexAgeSec) : undefined,
       facets: {
         side: row.isLong ? 'long' : 'short',
         sizeUsd: row.sizeInUsd,
@@ -101,36 +93,25 @@ export function valueGmxPositions(
 
 export const gmxEvaluator: IPlatformEvaluator = {
   platform: PLATFORM,
-  async evaluate({ sql, account, baseToken, nowSec, priceProvider }: IPlatformEvalParams): Promise<IPlatformValuation> {
-    const positionRows = await select(sql, 'Position', {
-      where: { account: { _eq: getAddress(account) }, venueId: { _eq: 'gmx' }, status: { _eq: 'open' } },
-      fields: [
-        'id',
-        'account',
-        'collateralToken',
-        'market',
-        'isLong',
-        'sizeInUsd',
-        'sizeInTokens',
-        'collateralInUsd',
-        'pnl'
-      ]
-    })
-    const rows: IGmxPositionRow[] = positionRows.map(r => ({
-      positionKey: r.id as Hex,
-      market: getAddress(r.market),
-      collateralToken: getAddress(r.collateralToken),
-      isLong: r.isLong,
-      sizeInUsd: r.sizeInUsd,
-      sizeInTokens: r.sizeInTokens,
-      collateralUsd: r.collateralInUsd,
-      storedPnlUsd: r.pnl
-    }))
-    if (rows.length === 0) return { platform: PLATFORM, positions: [], inFlight: [], available: true }
+  async evaluate({ baseToken, nowSec, getRate, positions }: IPlatformEvalParams): Promise<IPlatformValuation> {
+    if (positions.length === 0) return { platform: PLATFORM, positions: [], inFlight: [], available: true }
 
-    const tokens = gmxTokensToPrice(rows, baseToken)
-    const priceByToken = priceProvider ? await priceProvider(tokens) : await readOraclePrices(sql, tokens)
+    // Price every distinct token (base + per-market index + collateral) against the USD-proxy market in
+    // parallel; token0 is that token's per-wei price in USD-scale. A token with no direct <token>/USDC market
+    // fails closed in getRate and is simply omitted, so valueGmxPositions sees no entry and degrades it (the
+    // base token missing => the platform reports unavailable; an index token missing => stored pnl).
+    const priceByToken: IGmxPriceMap = new Map()
+    await Promise.all(
+      gmxTokensToPrice(positions, baseToken).map(async token => {
+        // Resolve the token ADDRESS to its asset symbol for the rate API; a GMX index token that isn't a registered
+        // base (e.g. a synthetic market) has no entry, so it's simply omitted (same as the unpriceable-pair degrade).
+        const asset = tokenMetaByAddress.get(getAddress(token))?.symbol
+        if (!asset) return
+        const rate = await getRate(asset, USD_PROXY).catch(() => null)
+        if (rate) priceByToken.set(getAddress(token), { price: rate.token0, time: rate.time })
+      })
+    )
 
-    return valueGmxPositions(rows, priceByToken, getAddress(baseToken), nowSec)
+    return valueGmxPositions(positions, priceByToken, getAddress(baseToken), nowSec)
   }
 }

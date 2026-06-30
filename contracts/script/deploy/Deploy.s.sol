@@ -9,7 +9,8 @@ import {stdToml} from "forge-std/src/StdToml.sol";
 import {BaseScript} from "./shared/BaseScript.s.sol";
 
 import {Dictate} from "src/core/Dictate.sol";
-import {RegisterToken} from "src/core/RegisterToken.sol";
+import {Register} from "src/core/Register.sol";
+import {NATIVE_TOKEN} from "src/utils/Native.sol";
 import {Account as AccountContract} from "src/core/Account.sol";
 import {Attest} from "src/core/Attest.sol";
 import {PuppetAccount} from "src/core/PuppetAccount.sol";
@@ -19,14 +20,14 @@ import {Deposit} from "src/core/Deposit.sol";
 import {BaseGate} from "src/utils/BaseGate.sol";
 import {Access} from "src/utils/auth/Access.sol";
 import {Permission} from "src/utils/auth/Permission.sol";
-import {AccountGate} from "src/AccountGate.sol";
-import {MasterGate} from "src/MasterGate.sol";
+import {PuppetGate} from "src/PuppetGate.sol";
+import {FundGate} from "src/FundGate.sol";
 import {HubGate} from "src/HubGate.sol";
 import {ShareToken} from "src/hub/ShareToken.sol";
 import {Issue} from "src/hub/Issue.sol";
 import {Redeem} from "src/hub/Redeem.sol";
 import {RedeemStore} from "src/hub/store/RedeemStore.sol";
-import {Subscribe} from "src/hub/Subscribe.sol";
+import {Mandate} from "src/hub/Mandate.sol";
 import {Allocate} from "src/hub/Allocate.sol";
 import {AllocateStore} from "src/hub/store/AllocateStore.sol";
 
@@ -36,36 +37,45 @@ contract Deploy is BaseScript {
     function _requireDeployConfig() internal view {
         require(ATTESTOR_ADDRESS != address(0), "Deploy: ATTESTOR_ADDRESS is zero");
         require(RELAYER_ADDRESS != address(0), "Deploy: RELAYER_ADDRESS is zero");
+        uint _baseFeeCap = vm.envOr("MAX_BASE_FEE_WEI", uint(0));
+        if (_baseFeeCap != 0) {
+            require(
+                block.basefee <= _baseFeeCap,
+                string.concat(
+                    "Deploy: base fee ",
+                    vm.toString(block.basefee),
+                    " wei exceeds cap ",
+                    vm.toString(_baseFeeCap),
+                    " wei (override with MAX_BASE_FEE_WEI)"
+                )
+            );
+        }
     }
 
-    function deployHub() public {
-        require(block.chainid == _getHubChainId(), "Deploy: deployHub must run on the hub chain");
+    function deploy() public {
         _requireDeployConfig();
+        bool isHub = block.chainid == _getHubChainId();
+        _universe = _isUniverseMigration(_getVersion());
+        if (isHub) _resetBroadcastForUniverse();
+
         string[] memory core = _coreContracts();
-        string[] memory hub = _hubContracts();
-        string[] memory names = new string[](core.length + hub.length);
-        for (uint i; i < core.length; ++i) {
-            names[i] = core[i];
+        string[] memory names = core;
+        if (isHub) {
+            string[] memory hub = _hubContracts();
+            names = new string[](core.length + hub.length);
+            for (uint i; i < core.length; ++i) {
+                names[i] = core[i];
+            }
+            for (uint i; i < hub.length; ++i) {
+                names[core.length + i] = hub[i];
+            }
         }
-        for (uint i; i < hub.length; ++i) {
-            names[core.length + i] = hub[i];
-        }
+
         _planAndGate(names);
         vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
         _executePlan();
         _wireCore();
-        _wireHub();
-        _registerTokens();
-        vm.stopBroadcast();
-    }
-
-    function deploySpoke() public {
-        require(block.chainid != _getHubChainId(), "Deploy: deploySpoke must run on a non-hub chain");
-        _requireDeployConfig();
-        _planAndGate(_coreContracts());
-        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
-        _executePlan();
-        _wireCore();
+        if (isHub) _wireHub();
         _registerTokens();
         vm.stopBroadcast();
     }
@@ -155,19 +165,8 @@ contract Deploy is BaseScript {
                 FACTORY.safeCreate2(salt, bytes.concat(m.creationCode, m.ctorArgs));
             }
             if (_isRouter(p.name)) continue;
-            if (p.universal) _setCoreAddress(p.name, p.predicted, p.deployNeeded);
-            else _setChainAddress(p.name, p.predicted);
+            _setChainAddress(p.name, p.predicted);
         }
-    }
-
-    function _prevOf(
-        string memory name
-    ) internal view returns (address) {
-        bytes32 k = keccak256(bytes(name));
-        for (uint i; i < _plan.length; ++i) {
-            if (keccak256(bytes(_plan[i].name)) == k) return _plan[i].prev;
-        }
-        return address(0);
     }
 
     function _grantAccess(
@@ -175,13 +174,7 @@ contract Deploy is BaseScript {
         string memory targetName,
         string memory granteeName
     ) internal {
-        address target = _specAddr(targetName);
-        address grantee = _specAddr(granteeName);
-        address prevGrantee = _prevOf(granteeName);
-        if (prevGrantee != address(0) && prevGrantee != grantee && _prevOf(targetName) == target) {
-            dictate.removeAccess(Access(target), prevGrantee);
-        }
-        dictate.setAccess(Access(target), grantee);
+        dictate.setAccess(Access(_specAddr(targetName)), _specAddr(granteeName));
     }
 
     function _grantPermission(
@@ -190,13 +183,7 @@ contract Deploy is BaseScript {
         bytes4 selector,
         string memory granteeName
     ) internal {
-        address target = _specAddr(targetName);
-        address grantee = _specAddr(granteeName);
-        address prevGrantee = _prevOf(granteeName);
-        if (prevGrantee != address(0) && prevGrantee != grantee && _prevOf(targetName) == target) {
-            dictate.removePermission(Permission(target), selector, prevGrantee);
-        }
-        dictate.setPermission(Permission(target), selector, grantee);
+        dictate.setPermission(Permission(_specAddr(targetName)), selector, _specAddr(granteeName));
     }
 
     function _classLabel(
@@ -232,7 +219,7 @@ contract Deploy is BaseScript {
     ) public {
         require(bytes(name).length <= 32, "Deploy: gate name exceeds bytes32");
         vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
-        Dictate dictate = Dictate(_getCoreAddress("Dictate"));
+        Dictate dictate = Dictate(_specAddr("Dictate"));
         Meta memory m = _meta(name);
         bytes memory initCode = bytes.concat(m.creationCode, m.ctorArgs);
         bytes32 salt = bytes32(_getVersion());
@@ -258,38 +245,61 @@ contract Deploy is BaseScript {
 
     function _registerTokens() internal {
         Dictate dictate = Dictate(_specAddr("Dictate"));
-        RegisterToken register = RegisterToken(_specAddr("RegisterToken"));
-        string[] memory symbols = vm.parseTomlKeys(_const, string.concat(".", _chainKey(), ".token"));
+        Register register = Register(_specAddr("Register"));
+        string[] memory symbols = vm.parseTomlKeys(_const, string.concat(".TOKEN_ADDRESS.", _chainKey()));
         dictate.setAccess(register, DEPLOYER_ADDRESS);
         for (uint i; i < symbols.length; ++i) {
-            address raw = _const.readAddress(string.concat(".", _chainKey(), ".token.", symbols[i]));
-            IERC20 token;
-            address hubToken;
-            if (raw == address(0)) {
-                hubToken = _const.readAddress(string.concat(".", _hubChainKey(), ".token.WETH"));
-            } else {
-                token = _getChainToken(symbols[i]);
-                hubToken = _const.readAddress(string.concat(".", _hubChainKey(), ".token.", symbols[i]));
-            }
-            register.registerToken(keccak256(bytes(symbols[i])), token, 0, hubToken);
+            address raw = _const.readAddress(string.concat(".TOKEN_ADDRESS.", _chainKey(), ".", symbols[i]));
+            IERC20 token = raw == NATIVE_TOKEN ? IERC20(NATIVE_TOKEN) : _getChainToken(symbols[i]);
+            register.registerToken(address(token), type(uint).max);
         }
-        register.setWnt(keccak256("WETH"));
-        dictate.removeAccess(register, DEPLOYER_ADDRESS);
+        register.setWnt(address(_getChainToken(_wntSymbol())));
+        string memory _providerPath = string.concat(".SWAP_PROVIDER.", _chainKey());
+        if (vm.keyExistsToml(_const, _providerPath)) {
+            string[] memory providers = vm.parseTomlKeys(_const, _providerPath);
+            for (uint i; i < providers.length; ++i) {
+                register.setProvider(_const.readAddress(string.concat(_providerPath, ".", providers[i])), type(uint).max);
+            }
+        }
+    }
+
+    function setSwapProvider(
+        address provider,
+        uint cap
+    ) public {
+        Dictate dictate = Dictate(_specAddr("Dictate"));
+        Register register = Register(_specAddr("Register"));
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
+        dictate.setAccess(register, DEPLOYER_ADDRESS);
+        register.setProvider(provider, cap);
+        vm.stopBroadcast();
+    }
+
+    function registerToken(
+        string calldata symbol
+    ) public {
+        Dictate dictate = Dictate(_specAddr("Dictate"));
+        Register register = Register(_specAddr("Register"));
+        IERC20 token = _getChainToken(symbol);
+        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
+        dictate.setAccess(register, DEPLOYER_ADDRESS);
+        register.registerToken(address(token), type(uint).max);
+        vm.stopBroadcast();
     }
 
     function cleanup() public {
         require(vm.envOr("ALLOW_DECOMMISSION", false), "Deploy: set ALLOW_DECOMMISSION=true to decommission gates");
-        Dictate dictate = Dictate(_getCoreAddress("Dictate"));
+        Dictate dictate = Dictate(_specAddr("Dictate"));
         bytes32[] memory targets;
         if (block.chainid == _getHubChainId()) {
             targets = new bytes32[](3);
-            targets[0] = "AccountGate";
-            targets[1] = "MasterGate";
+            targets[0] = "PuppetGate";
+            targets[1] = "FundGate";
             targets[2] = "HubGate";
         } else {
             targets = new bytes32[](2);
-            targets[0] = "AccountGate";
-            targets[1] = "MasterGate";
+            targets[0] = "PuppetGate";
+            targets[1] = "FundGate";
         }
 
         vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
@@ -319,15 +329,15 @@ contract Deploy is BaseScript {
     function _coreContracts() internal pure returns (string[] memory names) {
         names = new string[](10);
         names[0] = "Dictate";
-        names[1] = "RegisterToken";
+        names[1] = "Register";
         names[2] = "PuppetAccount";
         names[3] = "FundAccount";
         names[4] = "Route";
         names[5] = "Attest";
         names[6] = "Account";
         names[7] = "Deposit";
-        names[8] = "AccountGate";
-        names[9] = "MasterGate";
+        names[8] = "PuppetGate";
+        names[9] = "FundGate";
     }
 
     function _hubContracts() internal pure returns (string[] memory names) {
@@ -337,7 +347,7 @@ contract Deploy is BaseScript {
         names[2] = "RedeemStore";
         names[3] = "Redeem";
         names[4] = "AllocateStore";
-        names[5] = "Subscribe";
+        names[5] = "Mandate";
         names[6] = "Allocate";
         names[7] = "HubGate";
     }
@@ -350,28 +360,29 @@ contract Deploy is BaseScript {
         // Account is the ONLY authorized caller of Attest.execute/executeMandate (the account's gate).
         _grantAccess(dictate, "Attest", "Account");
 
-        address accountGateImpl = _specAddr("AccountGate");
-        address accountGateProxy = dictate.setGate("AccountGate", accountGateImpl);
-        _setChainAddress("AccountGateImpl", accountGateImpl);
-        _setChainAddress("AccountGate", accountGateProxy);
+        address puppetGateImpl = _specAddr("PuppetGate");
+        address puppetGateProxy = dictate.setGate("PuppetGate", puppetGateImpl);
+        _setChainAddress("PuppetGateImpl", puppetGateImpl);
+        _setChainAddress("PuppetGate", puppetGateProxy);
 
-        dictate.setPermission(accountModule, AccountContract.dispatch.selector, accountGateProxy);
-        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, accountGateProxy);
-        dictate.setAccess(walletDeposit, accountGateProxy);
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, puppetGateProxy);
+        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, puppetGateProxy);
+        dictate.setAccess(walletDeposit, puppetGateProxy);
 
-        address masterGateImpl = _specAddr("MasterGate");
-        address masterGateProxy = dictate.setGate("MasterGate", masterGateImpl);
-        _setChainAddress("MasterGateImpl", masterGateImpl);
-        _setChainAddress("MasterGate", masterGateProxy);
+        address fundGateImpl = _specAddr("FundGate");
+        address fundGateProxy = dictate.setGate("FundGate", fundGateImpl);
+        _setChainAddress("FundGateImpl", fundGateImpl);
+        _setChainAddress("FundGate", fundGateProxy);
 
-        dictate.setPermission(accountModule, AccountContract.dispatch.selector, masterGateProxy);
-        dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, masterGateProxy);
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, fundGateProxy);
+        dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, fundGateProxy);
+        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, fundGateProxy);
     }
 
     function _wireHub() internal {
         Dictate dictate = Dictate(_specAddr("Dictate"));
         AccountContract accountModule = AccountContract(_specAddr("Account"));
-        Access subscribe = Access(_specAddr("Subscribe"));
+        Access mandate = Access(_specAddr("Mandate"));
         Access allocate = Access(_specAddr("Allocate"));
         Access redeem = Access(_specAddr("Redeem"));
 
@@ -380,18 +391,19 @@ contract Deploy is BaseScript {
         _setChainAddress("HubGateImpl", hubImpl);
         _setChainAddress("HubGate", hubProxy);
 
-        _grantAccess(dictate, "AllocateStore", "Subscribe");
+        _grantAccess(dictate, "AllocateStore", "Mandate");
         _grantAccess(dictate, "AllocateStore", "Allocate");
         _grantAccess(dictate, "RedeemStore", "Redeem");
         _grantAccess(dictate, "Issue", "Allocate");
         _grantAccess(dictate, "Issue", "Redeem");
-        dictate.setAccess(subscribe, hubProxy);
+        dictate.setAccess(mandate, hubProxy);
         dictate.setAccess(allocate, hubProxy);
         dictate.setAccess(redeem, hubProxy);
 
         dictate.setPermission(accountModule, AccountContract.dispatch.selector, hubProxy);
+        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, hubProxy);
         _grantPermission(dictate, "Account", AccountContract.createFundAccount.selector, "Allocate");
-        _grantPermission(dictate, "Account", AccountContract.dispatch.selector, "Subscribe");
+        _grantPermission(dictate, "Account", AccountContract.dispatch.selector, "Mandate");
         _grantPermission(dictate, "Account", AccountContract.dispatch.selector, "Allocate");
         _grantPermission(dictate, "Account", AccountContract.dispatchMandate.selector, "Allocate");
         _grantPermission(dictate, "Account", AccountContract.dispatch.selector, "Redeem");
@@ -447,10 +459,10 @@ contract Deploy is BaseScript {
             return
                 Meta({creationCode: type(Dictate).creationCode, ctorArgs: abi.encode(GOVERNOR_ADDRESS), class: Class.Root, universal: true});
         }
-        if (k == keccak256("RegisterToken")) {
+        if (k == keccak256("Register")) {
             return Meta({
-                creationCode: type(RegisterToken).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate"), _getHubChainId()),
+                creationCode: type(Register).creationCode,
+                ctorArgs: abi.encode(_specAddr("Dictate")),
                 class: Class.Store,
                 universal: true
             });
@@ -496,33 +508,40 @@ contract Deploy is BaseScript {
                     universal: true
                 });
         }
-        if (k == keccak256("AccountGate")) {
+        if (k == keccak256("PuppetGate")) {
             return Meta({
-                creationCode: type(AccountGate).creationCode,
+                creationCode: type(PuppetGate).creationCode,
                 ctorArgs: abi.encode(
                     _specAddr("Dictate"),
                     _specAddr("Account"),
                     _specAddr("Deposit"),
-                    _specAddr("RegisterToken"),
-                    _getHubChainId(),
+                    _specAddr("Register"),
                     _gateConfig()
                 ),
                 class: Class.Logic,
                 universal: false
             });
         }
-        if (k == keccak256("MasterGate")) {
+        if (k == keccak256("FundGate")) {
             return Meta({
-                creationCode: type(MasterGate).creationCode,
+                creationCode: type(FundGate).creationCode,
                 ctorArgs: abi.encode(
-                    _specAddr("Dictate"), _specAddr("Account"), _specAddr("RegisterToken"), _gateConfig()
+                    _specAddr("Dictate"),
+                    _specAddr("Account"),
+                    _specAddr("Register"),
+                    _gateConfig()
                 ),
                 class: Class.Logic,
                 universal: false
             });
         }
         if (k == keccak256("ShareToken")) {
-            return Meta({creationCode: type(ShareToken).creationCode, ctorArgs: "", class: Class.Root, universal: false});
+            return Meta({
+                creationCode: type(ShareToken).creationCode,
+                ctorArgs: abi.encode(_getHubChainId()),
+                class: Class.Root,
+                universal: false
+            });
         }
         if (k == keccak256("Issue")) {
             return Meta({
@@ -557,9 +576,9 @@ contract Deploy is BaseScript {
                 universal: false
             });
         }
-        if (k == keccak256("Subscribe")) {
+        if (k == keccak256("Mandate")) {
             return Meta({
-                creationCode: type(Subscribe).creationCode,
+                creationCode: type(Mandate).creationCode,
                 ctorArgs: abi.encode(_specAddr("Dictate")),
                 class: Class.Logic,
                 universal: false
@@ -582,10 +601,10 @@ contract Deploy is BaseScript {
                     _specAddr("Issue"),
                     _specAddr("Allocate"),
                     _specAddr("AllocateStore"),
-                    _specAddr("Subscribe"),
+                    _specAddr("Mandate"),
                     _specAddr("Redeem"),
                     _specAddr("RedeemStore"),
-                    _specAddr("RegisterToken"),
+                    _specAddr("Register"),
                     _gateConfig()
                 ),
                 class: Class.Logic,
@@ -622,16 +641,24 @@ contract Deploy is BaseScript {
             console2.log("skip (not on chain):", artifact);
             return;
         }
-        string[] memory cmd = new string[](9);
+        string memory verifierPath = string.concat(".VERIFIER.", _chainKey());
+        bool custom = vm.keyExistsToml(_const, verifierPath);
+        string[] memory cmd = new string[](custom ? 13 : 9);
         cmd[0] = "forge";
         cmd[1] = "verify-contract";
         cmd[2] = vm.toString(addr);
         cmd[3] = artifact;
         cmd[4] = "--chain";
-        cmd[5] = _chainKey();
+        cmd[5] = custom ? vm.toString(block.chainid) : _chainKey();
         cmd[6] = "--constructor-args";
         cmd[7] = vm.toString(ctorArgs);
         cmd[8] = "--watch";
+        if (custom) {
+            cmd[9] = "--verifier";
+            cmd[10] = _const.readString(string.concat(verifierPath, ".verifier"));
+            cmd[11] = "--verifier-url";
+            cmd[12] = _const.readString(string.concat(verifierPath, ".url"));
+        }
         Vm.FfiResult memory r = vm.tryFfi(cmd);
         if (r.exitCode == 0) {
             console2.log("verified:", artifact, vm.toString(addr));
@@ -645,12 +672,6 @@ contract Deploy is BaseScript {
         string memory name
     ) internal returns (address) {
         string memory fresh = vm.readFile(_deploymentsPath());
-        string memory coreKey = string.concat(".core.", name, ".address");
-        if (vm.keyExistsToml(fresh, coreKey)) {
-            address a = fresh.readAddress(coreKey);
-            string memory cbm = string.concat(".core.", name, ".chainBlockMap.", vm.toString(block.chainid));
-            if (a != address(0) && vm.keyExistsToml(fresh, cbm)) return a;
-        }
         string memory chainKey = string.concat(".chain.", _chainKey(), ".", name);
         if (vm.keyExistsToml(fresh, chainKey)) return fresh.readAddress(chainKey);
         return address(0);

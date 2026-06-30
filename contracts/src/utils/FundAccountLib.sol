@@ -6,26 +6,26 @@ import {LibClone} from "solady/utils/LibClone.sol";
 import {Error} from "./Error.sol";
 
 bytes32 constant FUND_ACCOUNT_INIT_TYPEHASH =
-    keccak256("FundAccountInitParams(address master,bytes32 baseTokenId,bytes32 name)");
+    keccak256("FundAccountInitParams(address master,address baseToken,bytes32 name)");
 
 library FundAccountLib {
     struct FundAccountInitParams {
         address master;
-        bytes32 baseTokenId;
+        address baseToken;
         bytes32 name;
     }
 
     function hashFundAccount(
         FundAccountInitParams calldata _p
     ) internal pure returns (bytes32) {
-        return keccak256(abi.encode(FUND_ACCOUNT_INIT_TYPEHASH, _p.master, _p.baseTokenId, _p.name));
+        return keccak256(abi.encode(FUND_ACCOUNT_INIT_TYPEHASH, _p.master, _p.baseToken, _p.name));
     }
 
     function fundArgs(
         address _attest,
         FundAccountInitParams calldata _p
     ) internal pure returns (bytes memory) {
-        return abi.encodePacked(_attest, _p.master, _p.baseTokenId, _p.name);
+        return abi.encodePacked(_attest, _p.master, _p.baseToken, _p.name);
     }
 
     function predictFund(

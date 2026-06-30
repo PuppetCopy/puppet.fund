@@ -2,8 +2,8 @@ import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
-  IRedeem__ClaimIntent,
-  IShareLib__ShareInitParams
+  IFundAccountLib__FundAccountInitParams,
+  IRedeem__ClaimIntent
 } from '@puppet/contracts/types'
 import type { TypedDataDefinition } from 'viem'
 import { CompactContractError } from '../compact/error.js'
@@ -16,11 +16,10 @@ export interface IClaimInput {
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
-  share: IShareLib__ShareInitParams
-  amount: bigint
+  fundParams: IFundAccountLib__FundAccountInitParams
 }
 
-export interface IClaimAttestContext extends IDraftContext {
+interface IClaimAttestContext extends IDraftContext {
   currentBlock: bigint
   claimable?: bigint
 }
@@ -29,17 +28,12 @@ export function attestClaimIntent(ctx: IClaimAttestContext, input: IClaimInput) 
   IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
-    baseTokenId: input.share.baseTokenId,
+    baseToken: input.fundParams.baseToken,
     lookupChain: HUB_CHAIN_ID,
     capAmount: 0n,
-    acceptableRelayFee: input.acceptableRelayFee,
-    relayFeeDenominator: input.amount
+    acceptableRelayFee: input.acceptableRelayFee
   })
-  if (input.amount === 0n) throw new CompactContractError('Share__Empty', [])
-  if (input.acceptableRelayFee >= input.amount) throw new CompactContractError('Share__RelayFeeTooHigh', [])
-  if (ctx.claimable !== undefined && input.amount > ctx.claimable) {
-    throw new CompactContractError('Share__InsufficientClaimable', [])
-  }
+  if (ctx.claimable !== undefined && ctx.claimable === 0n) throw new CompactContractError('Share__Empty', [])
 
   const intent: IRedeem__ClaimIntent = {
     params: input.params,
@@ -48,8 +42,7 @@ export function attestClaimIntent(ctx: IClaimAttestContext, input: IClaimInput) 
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: BigInt(ctx.chainId),
-    share: input.share,
-    amount: input.amount
+    fundParams: input.fundParams
   }
 
   const typedData: TypedDataDefinition = {

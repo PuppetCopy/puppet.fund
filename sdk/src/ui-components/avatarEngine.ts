@@ -98,14 +98,6 @@ const weightedPick = (kind: IKind, layer: ILayer, seed: string): ILayerOption =>
   return opts[opts.length - 1]
 }
 
-/** Probability the chosen option had, used for rarity scoring. */
-const probabilityOf = (layer: ILayer, chosenName: string): number => {
-  const opts = optionsOf(layer)
-  const total = opts.reduce((sum, o) => sum + (o.weight ?? 1), 0)
-  const chosen = opts.find(o => o.name === chosenName)
-  return chosen ? (chosen.weight ?? 1) / total : 1
-}
-
 // ── deterministic hue-jitter (adapted from robo conventions) ────────────────
 
 const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v)
@@ -232,26 +224,4 @@ export const renderAvatarSvg = (kind: IKind, seed: Address): string => {
     body += artToSvg(option.art, ink, jitter)
   }
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${kind.canvas} ${kind.canvas}" shape-rendering="crispEdges" width="100%" height="100%">${body}</svg>`
-}
-
-/** Shared TIER ladder: rarity score = Σ −log2(prob) across layers, then bucketed.
- *  Reuses robo's power-law rarity idea — rarer option-combos score higher. */
-const TIERS: { tier: string; min: number }[] = [
-  { tier: 'mythic', min: 22 },
-  { tier: 'legendary', min: 16 },
-  { tier: 'epic', min: 11 },
-  { tier: 'rare', min: 7 },
-  { tier: 'uncommon', min: 4 },
-  { tier: 'common', min: 0 }
-]
-
-export const avatarRarity = (kind: IKind, seed: Address): { score: number; tier: string } => {
-  const chosen = pickLayers(kind, seed)
-  let score = 0
-  for (const layer of kind.layers) {
-    const p = probabilityOf(layer, chosen[layer.name])
-    if (p > 0) score += -Math.log2(p)
-  }
-  const bucket = TIERS.find(t => score >= t.min) ?? TIERS[TIERS.length - 1]
-  return { score, tier: bucket.tier }
 }

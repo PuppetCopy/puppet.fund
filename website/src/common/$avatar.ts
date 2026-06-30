@@ -96,5 +96,7 @@ export function $jazzicon(address: Address, size?: number) {
   const $svg = $wrapNativeElement(createJazziconSvg(address))()
   return size === undefined
     ? $svg
-    : $row(style({ width: `${size}px`, height: `${size}px`, borderRadius: '50%', overflow: 'hidden' }))($svg)
+    : $row(
+        style({ width: `${size}px`, height: `${size}px`, borderRadius: '50%', overflow: 'hidden', flexShrink: '0' })
+      )($svg)
 }

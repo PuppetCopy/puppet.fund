@@ -1,22 +1,44 @@
-import type { IShareLib__ShareInitParams } from '@puppet/contracts/types'
+import type { IFundAccountLib__FundAccountInitParams } from '@puppet/contracts/types'
 import { predictFundAccount, predictShareToken, symbolForBaseTokenId } from '@puppet/sdk/account'
 import { BYTES32_ZERO } from '@puppet/sdk/const'
-import { roboAvatarName } from '@puppet/sdk/ui-components'
-import { empty } from 'aelea/stream'
+import {
+  decodeFundName,
+  type IFundRank,
+  roboAvatarNameFromTraits,
+  roboTraitsFromNameAndAddress,
+  roboTraitsFromRank
+} from '@puppet/sdk/ui-components'
+import { combine, empty, map, switchLatest } from 'aelea/stream'
 import { $node, $text, type I$Node, type INodeCompose, style } from 'aelea/ui'
-import { $column, $row, spacing } from 'aelea/ui-components'
+import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { type Hex, hexToString, toHex } from 'viem'
 import type { Address } from 'viem/accounts'
 import { text } from '@/ui-components'
 import { $jazzicon } from '../common/$avatar.js'
 import { $roboAvatar } from '../common/$roboAvatar.js'
+import { livePlatformScale, liveFundPool } from '../io/live.js'
+import { fundRank } from '../io/matchmaker/reads.js'
 import { $tokenIconBySymbol } from './portfolio/$tokenOption.js'
 
 export const readableAccountName = (name?: Hex | null): string | undefined => {
   if (!name || name === BYTES32_ZERO) return undefined
-  const decoded = hexToString(name, { size: 32 }).trim()
+  const decoded = decodeFundName(hexToString(name, { size: 32 })).displayName.trim()
   return decoded.length > 0 ? decoded : undefined
+}
+
+export const fundNameTraits = (name: Hex | null | undefined, seed: Address): Record<string, string> => {
+  const indices = name && name !== BYTES32_ZERO ? decodeFundName(hexToString(name, { size: 32 })).indices : null
+  return roboTraitsFromNameAndAddress(indices, seed)
+}
+
+export const fundRankTraits = (
+  name: Hex | null | undefined,
+  seed: Address,
+  rank: IFundRank
+): Record<string, string> => {
+  const indices = name && name !== BYTES32_ZERO ? decodeFundName(hexToString(name, { size: 32 })).indices : null
+  return roboTraitsFromRank(indices, seed, rank)
 }
 
 export const accountNameToHex = (name: string): Hex => {
@@ -55,8 +77,19 @@ export const $profileDisplay = ({
   $avatar?: I$Node
   $labelContainer?: INodeCompose
 }) => {
+  const $fundAvatar = switchLatest(
+    map(
+      ({ scale, pool }) =>
+        $roboAvatar(
+          address,
+          profileSize,
+          fundRankTraits(name, address, fundRank(pool ? { navPerShare: pool.navPerShare, realisedPnlUsd: 0n } : null, scale))
+        ),
+      combine({ scale: livePlatformScale, pool: liveFundPool(address) })
+    )
+  )
   return $container(spacing.small, style({ alignItems: 'center', textDecoration: 'none' }))(
-    $avatar ?? (isFund ? $roboAvatar(address, profileSize) : $jazzicon(user ?? address, profileSize)),
+    $avatar ?? (isFund ? $fundAvatar : $jazzicon(user ?? address, profileSize)),
     showAddress
       ? $accountLabel({
           address: isFund ? address : (user ?? address),
@@ -70,33 +103,50 @@ export const $profileDisplay = ({
 // THE fund identity display: rounded robo avatar seeded by the predicted ShareToken,
 // the base-token icon floated into its corner, and the fund name as the label. A fund's
 // identity IS its ShareToken (master + base token + name), so this takes the init params.
-export const $fundProfile = (share: IShareLib__ShareInitParams, size = 36): I$Node => {
-  const shareToken = predictShareToken(share.master, share.baseTokenId, share.name)
-  const symbol = symbolForBaseTokenId(share.baseTokenId)
+export const $fundProfile = (share: IFundAccountLib__FundAccountInitParams, size = 36): I$Node => {
+  const shareToken = predictShareToken(share)
+  const traits = fundNameTraits(share.name, shareToken)
+  const symbol = symbolForBaseTokenId(share.baseToken)
+  const px = isDesktopScreen ? size : Math.round(size * 0.78)
+  const $avatar = switchLatest(
+    map(
+      ({ scale, pool }) =>
+        $roboAvatar(
+          shareToken,
+          px,
+          fundRankTraits(
+            share.name,
+            shareToken,
+            fundRank(pool ? { navPerShare: pool.navPerShare, realisedPnlUsd: 0n } : null, scale)
+          )
+        ),
+      combine({ scale: livePlatformScale, pool: liveFundPool(predictFundAccount(share)) })
+    )
+  )
   return $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
     $node(
       style({
-        width: `${size}px`,
-        height: `${size}px`,
+        width: `${px}px`,
+        height: `${px}px`,
         borderRadius: '50%',
         overflow: 'hidden',
         flexShrink: '0'
       })
-    )($roboAvatar(shareToken, size)),
+    )($avatar),
     $column(style({ minWidth: '0', gap: '2px' }))(
       $node(
         style({
           fontWeight: '600',
-          fontSize: text.lg,
+          fontSize: isDesktopScreen ? text.lg : text.base,
           color: palette.message,
           overflow: 'hidden',
           textOverflow: 'ellipsis',
           whiteSpace: 'nowrap'
         })
-      )($text(readableAccountName(share.name) ?? roboAvatarName(shareToken))),
+      )($text(readableAccountName(share.name) ?? roboAvatarNameFromTraits(traits))),
       $row(style({ alignItems: 'center', gap: '4px' }))(
         symbol ? $tokenIconBySymbol(symbol, '16px') : empty,
-        $accountLabel({ address: predictFundAccount(share.master), primarySize: 1 })
+        $accountLabel({ address: predictFundAccount(share), primarySize: 1 })
       )
     )
   )
@@ -131,7 +181,7 @@ export const $accountLabel = ({
   }
 
   return $container(style({ alignItems: 'baseline', flexDirection: 'row' }))(
-    $node(style({ fontSize: `${secondarySize}rem`, color: palette.foreground }))($text(`${address.slice(0, 6)}..`)),
+    $node(style({ fontSize: `${secondarySize}rem`, color: palette.foreground }))($text(`${address.slice(0, 6)}…`)),
     $node(style({ fontSize: `${primarySize}rem` }))($text(address.slice(-4)))
   )
 }

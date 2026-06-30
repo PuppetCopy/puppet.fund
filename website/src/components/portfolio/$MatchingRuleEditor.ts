@@ -1,7 +1,6 @@
 import { type IRuleBody, RULE_REVOKED } from '@puppet/sdk/attestation'
 import { IntervalTime } from '@puppet/sdk/const'
-import { formatFixed, getDuration, getMasterMatchingKey, parseBps, parseFixed } from '@puppet/sdk/core'
-import { getTokenDescription } from '@puppet/sdk/gmx'
+import { formatFixed, getDuration, getMasterMatchingKey, getRegisteredTokenDescription, parseBps, parseFixed } from '@puppet/sdk/core'
 import {
   combine,
   combineMap,
@@ -21,11 +20,10 @@ import { $node, $text, component, type I$Node, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import type { Address, Hex } from 'viem'
-import { $ButtonSecondary, $Checkbox, $Dropdown, $FieldLabeled, $infoTooltip, text } from '@/ui-components'
+import { $ButtonSecondary, $Checkbox, $Dropdown, $FieldLabeled, $infoTooltip, $labeledDivider, text } from '@/ui-components'
 import { uiStorage } from '@/ui-storage'
 import { localStoreSchema } from '../../app/localStoreSchema.js'
-import { $labeledDivider } from '../../common/elements/$common.js'
-import type { ISubscribeRule } from '../../io/indexer/query.js'
+import type { ISubscribeRule } from '../../io/datastore/query.js'
 
 export type { ISubscribeRule }
 
@@ -33,8 +31,10 @@ export type I$MatchingRuleEditor = {
   model?: ISubscribeRule
   masterMatchingKey: Hex
   baseToken: Address
-  baseTokenId: Hex
   master: Address
+  // The fund's pinned name completes its {master, baseToken, name} CREATE2 identity, which
+  // the mandate rule needs to derive the on-chain fund address under multi-key addressing.
+  name: Hex
   draftMatchingRuleList: IStream<ISubscribeRule[]>
 }
 
@@ -72,8 +72,8 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
         changeAdvanced
       )
 
-      const { model, masterMatchingKey, draftMatchingRuleList, baseToken, baseTokenId, master } = config
-      const tokenDesc = getTokenDescription(baseToken)
+      const { model, masterMatchingKey, draftMatchingRuleList, baseToken, master, name } = config
+      const tokenDesc = getRegisteredTokenDescription(baseToken)
       const { decimals, symbol } = tokenDesc
 
       const $hint = (short: string, detail: string): I$Node =>
@@ -85,7 +85,7 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
       const defaultDraft: IRuleBody = {
         throttlePeriod: BigInt(IntervalTime.HR),
         rateLimit: 0n,
-        exitFreeze: 0n,
+        exitFreeze: parseBps(1),
         allocationRate: 1000n,
         symmetry: 1n
       }
@@ -94,7 +94,7 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
       const rateLimit = model ? start(model.rateLimit, inputRateLimit) : inputRateLimit
       const throttlePeriod = model ? start(model.throttlePeriod, changeThrottlePeriod) : changeThrottlePeriod
       const symmetry = start(model ? model.symmetry : defaultDraft.symmetry, changeSymmetry)
-      const exitFreeze = model ? start(model.exitFreeze, inputExitFreeze) : inputExitFreeze
+      const exitFreeze = start(model ? model.exitFreeze : defaultDraft.exitFreeze, inputExitFreeze)
 
       const draft = combineForm({ throttlePeriod, rateLimit, exitFreeze, allocationRate, symmetry }, defaultDraft)
 
@@ -110,9 +110,9 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
       return [
         $column(spacing.default, style({ maxWidth: '350px' }))(
           $row(spacing.small, style({ alignItems: 'center' }))(
-            $node(style({ fontWeight: '500', color: palette.message }))($text(`Copy this trader with your ${symbol}`)),
+            $node(style({ fontWeight: '500', color: palette.message }))($text(`Fund this trader with your ${symbol}`)),
             $infoTooltip(
-              `Whenever they open or add to a position, a share of your deposited ${symbol} is committed alongside them, by the rules below. Funds move only at that moment, never before.`,
+              `Each time this trader funds their fund (a funding request), a share of your deposited ${symbol} is committed alongside them, by the rules below. Funds move only at that moment, never before.`,
               palette.foreground,
               '15px'
             )
@@ -125,8 +125,8 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
             labelWidth: 150,
             validation: allocationValidation,
             hint: $hint(
-              `Share of your ${symbol} per trade`,
-              `The portion of your deposited ${symbol} committed each time this trader opens or adds to a position, recomputed live from your balance. Lower means smaller copies and more headroom; it never locks funds.`
+              `Share of your ${symbol} per funding request`,
+              `The portion of your deposited ${symbol} committed each time this trader funds their fund, recomputed live from your balance. Lower means smaller allocations and more headroom; it never locks funds.`
             )
           })({
             change: inputAllocationRateTether(
@@ -143,6 +143,24 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
             value: map(x => x > 0n, symmetry),
             label: 'Never commit more than the trader does'
           })({ check: changeSymmetryTether(map(checked => (checked ? 1n : 0n))) }),
+
+          switchMap(
+            adv =>
+              adv
+                ? empty
+                : $row(spacing.small, style({ alignItems: 'center' }))(
+                    $node(style({ fontSize: text.xs, color: palette.foreground }))($text('Throttle')),
+                    $node(style({ fontSize: text.xs, color: palette.message }))(
+                      $text(map(tp => getDuration(Number(tp)), throttlePeriod))
+                    ),
+                    $infoTooltip(
+                      'Minimum time between allocations; allocations sooner than this are skipped. Adjust in Advanced Rules.',
+                      palette.foreground,
+                      '13px'
+                    )
+                  ),
+            advancedEnabled
+          ),
 
           style({ margin: '10px 0' })(
             $labeledDivider(
@@ -163,8 +181,8 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
                   value: map(x => (x > 0n ? `${formatFixed(decimals, x)}` : ''), rateLimit),
                   placeholder: 'no cap',
                   hint: $hint(
-                    `Max ${symbol} per match`,
-                    `A hard ceiling on the amount committed in any single match, in ${symbol}, regardless of your allocate %. Leave empty for no cap. Enforced on-chain.`
+                    `Max ${symbol} per allocation`,
+                    `A hard ceiling on the amount committed in any single allocation, in ${symbol}, regardless of your allocate %. Leave empty for no cap. Enforced on-chain.`
                   )
                 })({
                   change: inputRateLimitTether(
@@ -182,8 +200,8 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
                     placeholder: getDuration(Number(defaultDraft.throttlePeriod)),
                     labelWidth: 150,
                     hint: $hint(
-                      'Minimum time between matches',
-                      "Matches that arrive sooner than this after your last one are skipped, so you don't follow every rapid adjustment. Enforced on-chain."
+                      'Minimum time between allocations',
+                      "Allocations that arrive sooner than this after your last one are skipped, so you don't allocate on every rapid adjustment. Enforced on-chain."
                     )
                   })({}),
                   $container: $row(style({ right: '0', position: 'relative' })),
@@ -197,8 +215,8 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
                   value: map(x => (x > 0n ? `${formatFixed(4, x) * 100}` : ''), exitFreeze),
                   placeholder: 'off',
                   hint: $hint(
-                    'Ease off when backers are exiting',
-                    "Scales down, then stops, new matches as this trader's redeem queue grows past this share of the pool, so you don't pile into a fund people are leaving. Empty disables it."
+                    'Ease off when puppets are exiting',
+                    "Scales down, then stops, new allocations as this trader's redeem queue grows toward this share of the pool, so you don't pile into a fund people are leaving. Defaults to 100% — your allocation eases off in proportion to the queue (50% queued → 50% smaller). Lower it to freeze sooner; clear to disable."
                   )
                 })({
                   change: inputExitFreezeTether(
@@ -213,7 +231,14 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
           ),
 
           $row(style({ placeContent: 'space-between', alignItems: 'center' }))(
-            $ButtonSecondary({ $content: $text('Remove'), disabled: just(!isSubscribed) })({
+            $ButtonSecondary({
+              $content: $text('Remove'),
+              disabled: map(
+                list =>
+                  !isSubscribed && !list.some(x => getMasterMatchingKey(x.baseToken, x.master) === masterMatchingKey),
+                draftMatchingRuleList
+              )
+            })({
               click: clickRemoveTether()
             }),
             $ButtonSecondary({
@@ -242,7 +267,7 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
                 }
                 return [
                   ...params.draftMatchingRuleList,
-                  { masterMatchingKey, baseToken, baseTokenId, master, ...params.draft } as ISubscribeRule
+                  { masterMatchingKey, baseToken, master, name, ...params.draft } as ISubscribeRule
                 ]
               },
               combine({ draftMatchingRuleList, draft }),
@@ -250,6 +275,11 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
             ),
             sampleMap(
               params => {
+                if (!isSubscribed) {
+                  return params.draftMatchingRuleList.filter(
+                    x => getMasterMatchingKey(x.baseToken, x.master) !== masterMatchingKey
+                  )
+                }
                 const modelIndex = params.draftMatchingRuleList.findIndex(
                   x => getMasterMatchingKey(x.baseToken, x.master) === masterMatchingKey
                 )
@@ -262,7 +292,7 @@ export const $MatchingRuleEditor = (config: I$MatchingRuleEditor) =>
                 }
                 return [
                   ...params.draftMatchingRuleList,
-                  { masterMatchingKey, baseToken, baseTokenId, master, ...RULE_REVOKED } as ISubscribeRule
+                  { masterMatchingKey, baseToken, master, name, ...RULE_REVOKED } as ISubscribeRule
                 ]
               },
               combine({ draftMatchingRuleList, draft }),

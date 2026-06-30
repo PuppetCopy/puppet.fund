@@ -7,6 +7,7 @@ import {
   attr,
   attrBehavior,
   component,
+  effectRun,
   type I$Node,
   type INode,
   type INodeCompose,
@@ -30,8 +31,10 @@ export const $defaultTextFieldContainer = $element('label')(
 
 export const $labelDisplay = $node(
   style({
+    color: palette.foreground,
     paddingRight: '4px',
     alignSelf: 'flex-end',
+    minWidth: '92px',
     cursor: 'pointer',
     lineHeight: '48px',
     borderBottom: `2px solid ${colorShade(palette.message, 10)}`
@@ -77,21 +80,52 @@ export const $FieldLabeled = ({
   component(([change, sampleValue]: IBehavior<string, string>) => {
     const validationStream: IStream<string | null> = start(null, validation ?? just(null))
 
-    const $hintText = $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.5' }))
+    // Hints and validation render on a single line, ellipsized, with the full text in a native
+    // tooltip ONLY when it overflows the available width (measured on render and on resize).
+    const $clampLine = (color: string, value: string): I$Node =>
+      $node(
+        style({
+          fontSize: text.xs,
+          color,
+          lineHeight: '1.5',
+          maxWidth: '100%',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis'
+        }),
+        effectRun(el => {
+          const node = el as HTMLElement
+          const sync = (): void => {
+            node.title = node.scrollWidth > node.clientWidth ? value : ''
+          }
+          sync()
+          const observer = new ResizeObserver(sync)
+          observer.observe(node)
+          return {
+            [Symbol.dispose]() {
+              observer.disconnect()
+            }
+          }
+        })
+      )($text(value))
+
     const $hintDisplay: I$Node =
       hint === undefined
         ? empty
         : typeof hint === 'string'
-          ? $hintText($text(hint))
-          : switchMap(v => (typeof v === 'string' ? $hintText($text(v)) : just(v)), hint as IStream<string | INode>)
+          ? $clampLine(palette.foreground, hint)
+          : switchMap(
+              v => (typeof v === 'string' ? $clampLine(palette.foreground, v) : just(v)),
+              hint as IStream<string | INode>
+            )
 
     // One shared slot below the input: a validation message REPLACES the hint while
     // present (and restores it when cleared), so the field never jumps in height.
     const $below: I$Node =
       hint === undefined && validation === undefined
         ? empty
-        : $row(style({ fontSize: text.sm, minHeight: '1rem', width: '100%', whiteSpace: 'pre-wrap' }))(
-            switchMap(v => (v ? $node(style({ color: palette.negative }))($text(v)) : $hintDisplay), validationStream)
+        : $node(style({ minHeight: '1rem', width: '100%' }))(
+            switchMap(v => (v ? $clampLine(palette.negative, v) : $hintDisplay), validationStream)
           )
 
     const placeholderStream: IStream<string> = placeholder === undefined ? just('') : toStream(placeholder)

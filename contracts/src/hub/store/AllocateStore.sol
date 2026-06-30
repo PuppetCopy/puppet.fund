@@ -35,7 +35,6 @@ contract AllocateStore is Access {
         bytes32 _bodyHash
     ) external auth {
         mandateMap[_puppet][_fund] = _bodyHash;
-        if (lastAllocatedAtMap[_puppet][_fund] == 0) lastAllocatedAtMap[_puppet][_fund] = 1;
     }
 
     function setLastAllocatedAtMany(

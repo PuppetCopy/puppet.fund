@@ -1,22 +1,6 @@
 import { IntervalTime } from '../const/common.js'
 import { getUnixTimestamp } from './utils.js'
 
-export declare type Nominal<T, Name extends string> = T & {
-  [Symbol.species]: Name
-}
-
-export type UTCTimestamp = Nominal<number, 'UTCTimestamp'>
-
-export const tzOffset = new Date().getTimezoneOffset() * 60000
-
-export function timeTzOffset(ms: number): UTCTimestamp {
-  return Math.floor(ms - tzOffset) as UTCTimestamp
-}
-
-export function unixTimeTzOffset(ms: number): UTCTimestamp {
-  return ms as UTCTimestamp
-}
-
 export const readableDate = (timestamp: number, intlOptions: Intl.DateTimeFormatOptions = { dateStyle: 'short' }) =>
   new Date(timestamp * 1000).toLocaleDateString(undefined, intlOptions)
 

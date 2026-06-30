@@ -6,14 +6,14 @@ import {LibClone} from "solady/utils/LibClone.sol";
 
 import {Error} from "../utils/Error.sol";
 
-uint constant HUB_CHAIN_ID = 42_161;
-
 contract ShareToken is ERC20 {
     address private immutable _self;
 
-    constructor() {
-        if (block.chainid != HUB_CHAIN_ID) {
-            revert Error.ShareToken__NotHubChain(HUB_CHAIN_ID, block.chainid);
+    constructor(
+        uint _hubChainId
+    ) {
+        if (block.chainid != _hubChainId) {
+            revert Error.ShareToken__NotHubChain(_hubChainId, block.chainid);
         }
         _self = address(this);
     }
@@ -41,15 +41,15 @@ contract ShareToken is ERC20 {
         }
     }
 
-    function getBaseTokenId() public view returns (bytes32 _id) {
-        bytes memory _b = LibClone.argsOnClone(address(this), 40, 72);
+    function getBaseToken() public view returns (address _token) {
+        bytes memory _b = LibClone.argsOnClone(address(this), 40, 60);
         assembly ("memory-safe") {
-            _id := mload(add(_b, 0x20))
+            _token := shr(96, mload(add(_b, 0x20)))
         }
     }
 
     function getName() public view returns (bytes32 _name) {
-        bytes memory _b = LibClone.argsOnClone(address(this), 72, 104);
+        bytes memory _b = LibClone.argsOnClone(address(this), 60, 92);
         assembly ("memory-safe") {
             _name := mload(add(_b, 0x20))
         }
@@ -66,18 +66,19 @@ contract ShareToken is ERC20 {
     function mint(
         address _to,
         uint _amount
-    ) external onlyIssuer {
+    ) external onlyIssuer returns (uint) {
         _mint(_to, _amount);
+        return balanceOf(_to);
     }
 
     function mintMany(
         address[] calldata _toList,
         uint[] calldata _amountList
-    ) external onlyIssuer {
+    ) external onlyIssuer returns (uint[] memory _postList) {
+        _postList = new uint[](_toList.length);
         for (uint _i; _i < _toList.length; ++_i) {
-            uint _amount = _amountList[_i];
-            if (_amount == 0) continue;
-            _mint(_toList[_i], _amount);
+            if (_amountList[_i] > 0) _mint(_toList[_i], _amountList[_i]);
+            _postList[_i] = balanceOf(_toList[_i]);
         }
     }
 

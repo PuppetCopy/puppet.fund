@@ -37,9 +37,7 @@ export class CompactContractError<N extends ICompactContractErrorName = ICompact
   readonly severity: IStrikeSeverity = 'soft'
   constructor(code: N, args: ICompactContractErrorArgs<N>) {
     super(
-      `${code}(${(args as readonly unknown[])
-        .map(v => (typeof v === 'bigint' ? v.toString() : typeof v === 'string' ? v : String(v)))
-        .join(', ')})`
+      `${code}(${(args as readonly unknown[]).map(v => (typeof v === 'bigint' ? v.toString() : typeof v === 'string' ? v : String(v))).join(', ')})`
     )
     this.name = 'CompactContractError'
     this.code = code

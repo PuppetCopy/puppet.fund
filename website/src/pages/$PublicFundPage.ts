@@ -1,13 +1,13 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
+import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
 import { symbolForBaseTokenId } from '@puppet/sdk/account'
-import { ACROSS_SPOKE_POOL } from '@puppet/sdk/attestation'
+import { ACROSS_PERIPHERY } from '@puppet/sdk/attestation'
 import { type IntervalTime, USD_DECIMALS } from '@puppet/sdk/const'
 import {
   dustToZeroUsd,
   formatFixed,
+  getAccountExplorerUrl,
   getDuration,
-  getEtherscanMultichainUrl,
-  getMappedValueFallback,
+  getRegisteredTokenDescription,
   getUnixTimestamp,
   readableAddress,
   readablePercentage,
@@ -16,22 +16,27 @@ import {
   readableUsd,
   toBasisPoints
 } from '@puppet/sdk/core'
-import { evaluateAccountNav } from '@puppet/sdk/evaluate'
+import { composeCashLeg, evaluateAccountNav } from '@puppet/sdk/evaluate'
 import { getMarketDescription, getPositionPnlUsd, getTokenDescription } from '@puppet/sdk/gmx'
-import { getSubaccountState } from '@puppet/sdk/state'
+import { GMX_ROUTER, GMX_TOKEN_SPENDER, type IAccountPosition, LIFI_DIAMOND } from '@puppet/sdk/venue'
 import {
-  fetchPositions,
-  GMX_ROUTER,
-  GMX_TOKEN_SPENDER,
-  type IAccountPosition,
-  LIFI_DIAMOND,
-  summarizePerformance
-} from '@puppet/sdk/venue'
-import { combine, empty, type IStream, just, map, nowWith, op, start, switchPromises } from 'aelea/stream'
+  combine,
+  combineMap,
+  empty,
+  fromPromise,
+  type IStream,
+  just,
+  map,
+  nowWith,
+  op,
+  start,
+  switchMap,
+  switchPromises
+} from 'aelea/stream'
 import { type IBehavior, multicast, state } from 'aelea/stream-extended'
 import { $element, $node, $text, attr, component, effectProp, type I$Node, style, stylePseudo } from 'aelea/ui'
 
-import { $column, $row, $Tooltip, isDesktopScreen, spacing } from 'aelea/ui-components'
+import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { pushUrl } from 'aelea/ui-router'
 import { getAddress } from 'viem'
@@ -46,37 +51,38 @@ import {
   $infoLabel,
   $infoTooltip,
   $intermediatePromise,
-  $puppeteer,
-  $tooltipDropContainer,
   $unknown,
   text
 } from '@/ui-components'
-import { $jazzicon } from '../common/$avatar.js'
 import { $tokenWithChainBadge, chainExplorerAddressUrl } from '../common/$chain.js'
 import { $drawdownDisplay, $pnlDisplay, $size } from '../common/$common.js'
 import { $roboAvatar } from '../common/$roboAvatar.js'
 import { $heading3 } from '../common/$text.js'
 import { $card, $responsiveFlex } from '../common/elements/$common.js'
 import { $accountLabel, $fundProfile, readableAccountName } from '../components/$AccountProfile.js'
-import { $MasterRouteTimeline } from '../components/participant/$ProfilePeformanceTimeline.js'
+import { $FundAccountTimeline } from '../components/participant/$ProfilePeformanceTimeline.js'
+import { $allocationDistribution } from '../components/portfolio/$fundHoldings.js'
 import type { ISubscribeRule } from '../components/portfolio/$MatchingRuleEditor.js'
 import { $defaultSubscribeEditorContainer, $SubscribeEditor } from '../components/portfolio/$SubscribeEditor.js'
 import { $tokenIconBySymbol } from '../components/portfolio/$tokenOption.js'
-import * as context from '../io/context.js'
-import { formatUsd, latestPriceMap, priceFor } from '../io/gmx/priceFeed.js'
+import context, { getRate } from '../io/context.js'
 import {
   fetchFundActivity,
   fetchFundAllocationDistribution,
   fetchMasterPoolState,
-  fetchMasterRouteMetricList,
+  fetchFundAccountMetricList,
   fetchMasterSubscribers,
   type IFundAction
-} from '../io/indexer/query.js'
-import { sqlClient } from '../io/indexer/sql.js'
+} from '../io/datastore/query.js'
+import { gmxPositionProvider } from '../io/gmx/navProviders.js'
+import { formatUsd, priceFor } from '../io/gmx/priceFeed.js'
+import { fetchOpenPositions } from '../io/matchmaker/reads.js'
+import { readSubaccountState } from '../io/matchmaker/walletState.js'
 import { $separator2, accountSettledPositionListSummary } from './common'
 import type { IPageFilterParams } from './types.js'
 
 interface I$PublicFundPage extends IPageFilterParams {
+  hideBalances: IStream<boolean>
   userMatchingRuleQuery: IStream<Promise<ISubscribeRule[]>>
   draftMatchingRuleList: IStream<ISubscribeRule[]>
 }
@@ -93,7 +99,7 @@ const TARGET_VENUE_BY_ADDRESS: Record<string, string> = {
   [GMX_ROUTER.toLowerCase()]: 'gmx',
   [GMX_TOKEN_SPENDER.toLowerCase()]: 'gmx',
   [LIFI_DIAMOND.toLowerCase()]: 'swap',
-  ...Object.fromEntries(Object.values(ACROSS_SPOKE_POOL).map(a => [a.toLowerCase(), 'bridge']))
+  [ACROSS_PERIPHERY.toLowerCase()]: 'bridge'
 }
 const ERC20_APPROVE_SELECTOR = '0x095ea7b3'
 const venueForAddress = (addr: Address | undefined): string | undefined =>
@@ -121,6 +127,7 @@ const operateVenue = (
 }
 
 export const $PublicFundPage = ({
+  hideBalances,
   activityTimeframe,
   collateralTokenList,
   userMatchingRuleQuery,
@@ -135,10 +142,10 @@ export const $PublicFundPage = ({
       const urlFragments = document.location.pathname.split('/')
       const fund = urlFragments[urlFragments.length - 1].toLowerCase() as Address
 
-      const routeMetricListQuery = op(
+      const fundAccountMetricQuery = op(
         combine({ activityTimeframe, collateralTokenList }),
         map(async params =>
-          fetchMasterRouteMetricList({
+          fetchFundAccountMetricList({
             fund,
             activityTimeframe: params.activityTimeframe,
             collateralTokenList: params.collateralTokenList
@@ -148,38 +155,69 @@ export const $PublicFundPage = ({
       )
 
       const metricsQuery = op(
-        routeMetricListQuery,
+        fundAccountMetricQuery,
         map(async metricList => accountSettledPositionListSummary(fund, await metricList)),
         multicast
       )
 
       const poolStatePromise = fetchMasterPoolState(fund)
       const fundStateQuery = just(poolStatePromise)
-      const openPositionsQuery = just(fetchPositions(sqlClient, fund, 'open'))
-      const positionPerfQuery = just(fetchPositions(sqlClient, fund).then(summarizePerformance))
+      const openPositionsQuery = just(fetchOpenPositions(getAddress(fund)).catch(() => []))
       const subscribersQuery = just(
-        poolStatePromise.then(f => (f ? fetchMasterSubscribers(fund, f.baseTokenId) : []))
+        poolStatePromise
+          .then(async f => (f ? fetchMasterSubscribers(await context.getTokenRegistry(), fund, f.baseToken) : []))
+          .catch(() => [])
       )
       const distributionQuery = just(
         poolStatePromise.then(f => (f ? fetchFundAllocationDistribution(fund, f.master) : []))
       )
       const activityQuery = just(fetchFundActivity(fund))
 
-      const tokenRegistryValue = switchPromises(context.tokenRegistryQuery)
+      const tokenRegistryValue = fromPromise(context.getTokenRegistry())
 
+      // Capital trusted by puppets (cumulative, time-decayed): the "Allocated" figure, the ROI/drawdown denominator,
+      // and the timeline autoscale floor. NOT current AUM — see navUsdQuery.
       const aumUsdQuery = op(
-        combine({ routes: routeMetricListQuery, registry: tokenRegistryValue, priceMap: latestPriceMap }),
+        combine({ metrics: fundAccountMetricQuery, registry: tokenRegistryValue }),
         map(async p => {
-          const routes = await p.routes
-          let usd = 0
-          for (const route of routes) {
-            const info = p.registry.get(HUB_CHAIN_ID)?.get(route.baseTokenId)
-            if (!info) continue
-            const price = getMappedValueFallback(p.priceMap, info.token, null)?.price ?? null
-            if (price === null) continue
-            usd += formatFixed(USD_DECIMALS, route.allocated * price)
-          }
-          return usd
+          const metrics = await p.metrics
+          return metrics.flatMap(metric => {
+            const info = p.registry.get(HUB_CHAIN_ID)?.get(metric.baseToken)
+            return info ? [{ allocated: metric.allocated, token: getAddress(info.token) }] : []
+          })
+        }),
+        switchPromises,
+        switchMap((legs): IStream<number | null> => {
+          if (legs.length === 0) return just(0)
+          return combineMap(
+            (...prices: (bigint | null)[]) => {
+              // Any unresolved/unpriceable leg makes the total indeterminate: emit null (shown as '-') rather than
+              // skipping the leg and presenting a partial/zero figure as real.
+              if (prices.some(price => price === null)) return null
+              return legs.reduce((usd, leg, i) => usd + formatFixed(USD_DECIMALS, leg.allocated * prices[i]!), 0)
+            },
+            ...legs.map(leg => priceFor(leg.token))
+          )
+        }),
+        multicast
+      )
+
+      // AUM = the fund's CURRENT NAV (supply x navPerShare), folded as post-state on allocate/redeem/liquidate, so a
+      // liquidation drops it to the outstanding-claims value (0 once fully claimed). The stale-after-liquidation bug
+      // was the AUM display reading `allocated` (above) instead of this.
+      const navUsdQuery = op(
+        combine({ fund: fundStateQuery, registry: tokenRegistryValue }),
+        map(async p => {
+          const f = await p.fund
+          const info = f ? p.registry.get(HUB_CHAIN_ID)?.get(f.baseToken) : undefined
+          if (!f || !info) return null
+          return { aumBase: (f.totalShareSupply * f.navPerShare) / PRECISION.floatPrecisionExp, token: getAddress(info.token) }
+        }),
+        switchPromises,
+        switchMap((leg): IStream<number | null> => {
+          if (leg === null) return just(null)
+          if (leg.aumBase === 0n) return just(0)
+          return map(price => (price === null ? null : formatFixed(USD_DECIMALS, leg.aumBase * price)), priceFor(leg.token))
         }),
         multicast
       )
@@ -188,20 +226,23 @@ export const $PublicFundPage = ({
         combine({
           fund: fundStateQuery,
           registry: tokenRegistryValue,
-          health: context.indexerHealth,
+          health: fromPromise(context.getChainLiveness()),
           tf: activityTimeframe
         }),
         map(async p => {
           const f = await p.fund
           if (!f) return null
-          const info = p.registry.get(HUB_CHAIN_ID)?.get(f.baseTokenId)
+          const info = p.registry.get(HUB_CHAIN_ID)?.get(f.baseToken)
           if (!info) return null
-          const nav = await evaluateAccountNav(sqlClient, {
+          const subaccount = await readSubaccountState(p.registry, fund)
+          if (!subaccount) return null
+          const nav = await evaluateAccountNav({
             master: fund,
             baseToken: info.token,
-            baseTokenId: f.baseTokenId,
-            health: p.health,
-            kind: 'view'
+            kind: 'view',
+            cashLeg: composeCashLeg(subaccount, p.health, f.baseToken),
+            getRate,
+            positions: await gmxPositionProvider(getAddress(fund), info.token)
           })
           const pnlBase = nav.breakdown.positions.reduce((acc, position) => acc + position.pnlBase, 0n)
           return { pnlBase, baseToken: info.token }
@@ -211,14 +252,13 @@ export const $PublicFundPage = ({
       )
       const livePnlUsd: IStream<number> = start(
         0,
-        map(
-          p => {
-            if (p.base === null) return 0
-            const price = getMappedValueFallback(p.priceMap, p.base.baseToken, null)?.price ?? null
-            return price === null ? 0 : formatFixed(USD_DECIMALS, p.base.pnlBase * price)
-          },
-          combine({ base: livePnlBaseQuery, priceMap: latestPriceMap })
-        )
+        switchMap(base => {
+          if (base === null) return just(0)
+          return map(
+            price => (price === null ? 0 : formatFixed(USD_DECIMALS, base.pnlBase * price)),
+            priceFor(getAddress(base.baseToken))
+          )
+        }, livePnlBaseQuery)
       )
 
       const $sectionLabel = (label: string): I$Node =>
@@ -233,18 +273,13 @@ export const $PublicFundPage = ({
         $display: map(
           async p => {
             const aum = await p.aum
-            const perf = await p.perf
             const openAllocation = (await p.open).reduce((acc, pos) => acc + pos.collateralInUsd, 0n)
             return $row(isDesktopScreen ? spacing.big : spacing.default, style({ alignItems: 'flex-start' }))(
               $metric(
-                'Win / Loss',
-                $node(style({ fontWeight: '700', color: palette.message }))(
-                  $text(`${perf.winCount} / ${perf.lossCount}`)
-                )
-              ),
-              $metric(
                 'Allocated',
-                $node(style({ fontWeight: '700', color: palette.message }))($text(`$${readableUnitAmount(aum)}`))
+                $node(style({ fontWeight: '700', color: palette.message }))(
+                  $text(aum === null ? '-' : `$${readableUnitAmount(aum)}`)
+                )
               ),
               $metric(
                 'Open allocation',
@@ -254,7 +289,7 @@ export const $PublicFundPage = ({
               )
             )
           },
-          combine({ aum: aumUsdQuery, perf: positionPerfQuery, open: openPositionsQuery })
+          combine({ aum: aumUsdQuery, open: openPositionsQuery })
         )
       })
 
@@ -264,11 +299,9 @@ export const $PublicFundPage = ({
             const summary = await p.metrics
             const subs = await p.subs
             const aum = await p.aum
-            const perf = await p.perf
+            const nav = await p.nav
             const realisedUsd = formatFixed(USD_DECIMALS, dustToZeroUsd(summary.realisedPnl))
-            const roi = aum > 0 ? (realisedUsd / aum) * 100 : 0
-            const totalTrades = perf.winCount + perf.lossCount
-            const winRate = totalTrades > 0 ? (perf.winCount / totalTrades) * 100 : 0
+            const roi = aum !== null && aum > 0 ? (realisedUsd / aum) * 100 : 0
 
             let cumulative = 0n
             let peak = 0n
@@ -283,7 +316,7 @@ export const $PublicFundPage = ({
               if (decline > maxDrawdown) maxDrawdown = decline
             }
             const maxDrawdownUsd = formatFixed(USD_DECIMALS, maxDrawdown)
-            const drawdownBps = aum > 0 ? BigInt(Math.round((maxDrawdownUsd / aum) * 10000)) : 0n
+            const drawdownBps = aum !== null && aum > 0 ? BigInt(Math.round((maxDrawdownUsd / aum) * 10000)) : 0n
 
             const $value = (label: string, $v: I$Node, tooltip?: string) =>
               $column(spacing.tiny)(
@@ -296,17 +329,20 @@ export const $PublicFundPage = ({
                 $node(style({ fontWeight: '700' }))($v)
               )
             return $row(spacing.big, style({ flexWrap: 'wrap', rowGap: '12px' }))(
-              $value('AUM', $node(style({ color: palette.message }))($text(`$${readableUnitAmount(aum)}`))),
+              $value(
+                'AUM',
+                $node(style({ color: palette.message }))($text(nav === null ? '-' : `$${readableUnitAmount(nav)}`))
+              ),
               $value(
                 'ROI',
                 $node(style({ color: roi > 0 ? palette.positive : roi < 0 ? palette.negative : palette.foreground }))(
-                  $text(`${roi.toFixed(1)}%`)
+                  $text(aum === null ? '-' : `${roi.toFixed(1)}%`)
                 ),
-                'ROI = realised PnL / AUM. Total return over the selected timeframe relative to capital trusted by backers.'
+                'ROI = realised PnL / AUM. Total return over the selected timeframe relative to capital trusted by puppets.'
               ),
               $value(
                 'Max drawdown',
-                $drawdownDisplay(drawdownBps),
+                aum === null ? $node(style({ color: palette.foreground }))($text('-')) : $drawdownDisplay(drawdownBps),
                 'Max drawdown = the largest peak-to-trough decline of cumulative PnL over the timeframe, as a share of AUM. Lower is better.'
               ),
               $value(
@@ -315,11 +351,10 @@ export const $PublicFundPage = ({
                   $text(readableUsd(worstTrade))
                 )
               ),
-              $value('Win rate', $node(style({ color: palette.message }))($text(`${winRate.toFixed(0)}%`))),
-              $value('Subscribers', $node(style({ color: palette.message }))($text(`${subs.length}`)))
+              $value('Puppets', $node(style({ color: palette.message }))($text(`${subs.length}`)))
             )
           },
-          combine({ metrics: metricsQuery, subs: subscribersQuery, aum: aumUsdQuery, perf: positionPerfQuery })
+          combine({ metrics: metricsQuery, subs: subscribersQuery, aum: aumUsdQuery, nav: navUsdQuery })
         )
       })
 
@@ -331,7 +366,7 @@ export const $PublicFundPage = ({
               ? $node(style({ color: palette.foreground, fontSize: text.sm }))($text(readableAddress(fund)))
               : empty,
             $anchor(
-              attr({ href: getEtherscanMultichainUrl(fund), target: '_blank' }),
+              attr({ href: getAccountExplorerUrl(fund), target: '_blank' }),
               style({ color: palette.foreground, fontSize: text.sm })
             )($text('View on explorer'), $icon({ $content: $external, width: '11px' }))
           )
@@ -345,14 +380,14 @@ export const $PublicFundPage = ({
               const fundState = await fundStateFuture
               return fundState
                 ? $fundProfile(
-                    { master: fundState.master, baseTokenId: fundState.baseTokenId, name: fundState.name },
+                    { master: fundState.master, baseToken: fundState.baseToken, name: fundState.name },
                     56
                   )
                 : $row(spacing.default, style({ alignItems: 'center' }))($roboAvatar(fund, 56), $identityHeader())
             }, fundStateQuery)
           }),
           $anchor(
-            attr({ href: getEtherscanMultichainUrl(fund), target: '_blank' }),
+            attr({ href: getAccountExplorerUrl(fund), target: '_blank' }),
             style({ color: palette.foreground, fontSize: text.sm })
           )($text('View fund account on explorer'), $icon({ $content: $external, width: '11px' }))
         ),
@@ -362,14 +397,15 @@ export const $PublicFundPage = ({
             async p => {
               const fundState = await p.fund
               if (!fundState) return $infoLabel($text('Fund not found'))
-              const info = p.registry.get(HUB_CHAIN_ID)?.get(fundState.baseTokenId)
+              const info = p.registry.get(HUB_CHAIN_ID)?.get(fundState.baseToken)
               if (!info) return $infoLabel($text('Unsupported collateral'))
               return $SubscribeEditor({
                 collateralToken: info.token,
-                baseTokenId: fundState.baseTokenId,
+                baseToken: fundState.baseToken,
                 userMatchingRuleQuery,
                 draftMatchingRuleList,
                 master: fundState.master as Address,
+                name: fundState.name,
                 prominent: true,
                 $container: $defaultSubscribeEditorContainer(style({ marginLeft: '-12px' }))
               })({
@@ -385,26 +421,27 @@ export const $PublicFundPage = ({
         spacing.default,
         style({ backgroundColor: palette.middleground, borderRadius: '8px', padding: '20px' })
       )(
-        $sectionLabel('Fund balances'),
+        $sectionLabel('Liquid balances'),
         $intermediatePromise({
           $display: map(
             async p => {
-              const state = await getSubaccountState(sqlClient, fund)
+              const state = await readSubaccountState(p.registry, getAddress(fund))
               const rows = [...(state?.balances.values() ?? [])].filter(b => b.signedBalance > 0n)
               if (rows.length === 0) {
                 return $node(style({ color: palette.foreground, fontSize: text.sm }))($text('No balances yet'))
               }
               return $column(spacing.default)(
                 ...rows.map(b => {
-                  const info = p.registry.get(HUB_CHAIN_ID)?.get(b.tokenId)
+                  const info = p.registry.get(HUB_CHAIN_ID)?.get(b.token)
                   if (!info) return empty
-                  const desc = getTokenDescription(info.token)
-                  const symbol = symbolForBaseTokenId(b.tokenId) ?? desc.symbol
+                  const desc = getRegisteredTokenDescription(info.token)
+                  const symbol = symbolForBaseTokenId(b.token) ?? desc.symbol
                   return $row(spacing.small, style({ alignItems: 'center' }))(
                     $tokenWithChainBadge($tokenIconBySymbol(symbol, '32px'), Number(b.chainId), 32, 14),
                     $node(style({ fontSize: text.sm, color: palette.message }))($text(symbol)),
                     $node(style({ flex: 1 }))(),
                     $amountDisplay({
+                      hideBalances,
                       usd: map(price => formatUsd(b.signedBalance, price), priceFor(info.token)),
                       amount: readableTokenAmountLabel(desc, b.signedBalance),
                       align: 'flex-end',
@@ -425,56 +462,10 @@ export const $PublicFundPage = ({
       )(
         $sectionLabel('Puppet distribution'),
         $intermediatePromise({
-          $display: map(async distributionFuture => {
-            const holders = await distributionFuture
-            if (holders.length === 0) {
-              return $node(style({ color: palette.foreground, fontSize: text.sm }))($text('No allocations yet'))
-            }
-            const total = holders.reduce((acc, s) => acc + s.sharesHeld, 0n)
-            const ranked = [...holders].sort((a, b) => (b.sharesHeld > a.sharesHeld ? 1 : -1))
-            return $column(spacing.default)(
-              ...ranked.map(s => {
-                const share = total > 0n ? Number((s.sharesHeld * 10000n) / total) / 100 : 0
-                return $column(spacing.tiny)(
-                  $row(spacing.small, style({ alignItems: 'center' }))(
-                    $jazzicon(s.user, 26),
-                    $accountLabel({ address: s.user }),
-                    s.isMaster
-                      ? $Tooltip({
-                          $dropContainer: $tooltipDropContainer,
-                          $content: $node(
-                            $text(
-                              'Fund master. This puppet account manages the fund; subscribers mirror its trades, and its own allocation is shown alongside theirs.'
-                            )
-                          ),
-                          $anchor: $icon({
-                            $content: $puppeteer,
-                            width: '13px',
-                            viewBox: '0 0 32 32',
-                            fill: palette.foreground,
-                            svgOps: style({ display: 'block', cursor: 'help' })
-                          })
-                        })({})
-                      : $node(),
-                    $node(style({ flex: 1 }))(),
-                    $node(style({ fontSize: text.sm, color: palette.foreground }))($text(`${share.toFixed(1)}%`))
-                  ),
-                  $node(
-                    style({ height: '4px', borderRadius: '4px', backgroundColor: colorShade(palette.foreground, 20) })
-                  )(
-                    $node(
-                      style({
-                        height: '4px',
-                        borderRadius: '4px',
-                        width: `${share}%`,
-                        backgroundColor: palette.primary
-                      })
-                    )()
-                  )
-                )
-              })
-            )
-          }, distributionQuery)
+          $display: map(
+            async p => $allocationDistribution(hideBalances, await p.dist, await p.pool, p.registry),
+            combine({ dist: distributionQuery, pool: fundStateQuery, registry: tokenRegistryValue })
+          )
         })
       )
 
@@ -494,12 +485,13 @@ export const $PublicFundPage = ({
         }
       }
       const positionPnl = (pos: IAccountPosition, indexToken: Address | null): IStream<bigint> =>
-        map(pm => {
-          const price = indexToken ? (getMappedValueFallback(pm, indexToken, null)?.price ?? null) : null
-          const marked =
-            price === null ? pos.pnl : getPositionPnlUsd(pos.isLong, pos.sizeInUsd, pos.sizeInTokens, price)
-          return pos.realizedPnlUsd + marked
-        }, latestPriceMap)
+        indexToken === null
+          ? just(pos.realizedPnlUsd + pos.pnl)
+          : map(price => {
+              const marked =
+                price === null ? pos.pnl : getPositionPnlUsd(pos.isLong, pos.sizeInUsd, pos.sizeInTokens, price)
+              return pos.realizedPnlUsd + marked
+            }, priceFor(indexToken))
 
       const $directionPill = (isLong: boolean): I$Node => {
         const color = isLong ? palette.positive : palette.negative
@@ -561,15 +553,15 @@ export const $PublicFundPage = ({
             const enriched = positions
               .map(pos => ({ pos, indexToken: marketIndexToken(pos.market) }))
               .sort((a, b) => (b.pos.sizeInUsd > a.pos.sizeInUsd ? 1 : -1))
-            const netPnl: IStream<bigint> = map(
-              pm =>
-                enriched.reduce((acc, { pos, indexToken }) => {
-                  const price = indexToken ? (getMappedValueFallback(pm, indexToken, null)?.price ?? null) : null
+            const netPnl: IStream<bigint> = combineMap(
+              (...prices: (bigint | null)[]) =>
+                enriched.reduce((acc, { pos }, i) => {
+                  const price = prices[i] ?? null
                   const marked =
                     price === null ? pos.pnl : getPositionPnlUsd(pos.isLong, pos.sizeInUsd, pos.sizeInTokens, price)
                   return acc + pos.realizedPnlUsd + marked
                 }, 0n),
-              latestPriceMap
+              ...enriched.map(e => (e.indexToken ? priceFor(getAddress(e.indexToken)) : just<bigint | null>(null)))
             )
             const byVenue = new Map<string, typeof enriched>()
             for (const e of enriched) {
@@ -644,7 +636,8 @@ export const $PublicFundPage = ({
             ...(isDesktopScreen ? { height: '100%' } : {})
           })
         )(
-          $MasterRouteTimeline({
+          $FundAccountTimeline({
+            hideBalances,
             activityTimeframe,
             collateralTokenList,
             metricsQuery,
@@ -681,6 +674,7 @@ export const $PublicFundPage = ({
       )
 
       const $actionDetail = (a: IFundAction, baseDesc: ReturnType<typeof getTokenDescription> | undefined): I$Node => {
+        if (a.kind === 'event') return empty
         if (a.kind === 'allocate') {
           const allocatedLabel = baseDesc ? readableTokenAmountLabel(baseDesc, a.allocated) : `${a.puppetCount} matched`
           return $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm, color: palette.foreground }))(
@@ -699,7 +693,6 @@ export const $PublicFundPage = ({
           style({ alignItems: 'center', flexWrap: 'wrap', fontSize: text.sm, color: palette.foreground })
         )(
           $icon({ $content: venue.$glyph, width: '16px', viewBox: '0 0 32 32', fill: palette.message }),
-          $node(style({ color: palette.message, fontWeight: '600' }))($text(venue.name)),
           ...a.transferList
             .filter(leg => leg.amountIn > 0n || leg.amountOut > 0n)
             .map(leg => {
@@ -727,7 +720,7 @@ export const $PublicFundPage = ({
         map(async p => {
           const actions = await p.actions
           const fundState = await p.fund
-          const info = fundState ? p.registry.get(HUB_CHAIN_ID)?.get(fundState.baseTokenId) : undefined
+          const info = fundState ? p.registry.get(HUB_CHAIN_ID)?.get(fundState.baseToken) : undefined
           const baseDesc = info ? indexTokenDescription(info.token) : undefined
           return { actions, baseDesc }
         })
@@ -754,9 +747,22 @@ export const $PublicFundPage = ({
                       minWidth: '76px',
                       color: a.kind === 'allocate' ? palette.primary : palette.message
                     })
-                  )($text(a.kind === 'allocate' ? 'Allocate' : 'Operate')),
+                  )(
+                    $text(
+                      a.kind === 'allocate'
+                        ? 'Allocate'
+                        : a.kind === 'event'
+                          ? (a.label ?? 'Event')
+                          : venueDisplay(operateVenue(a.callList).venueId).name
+                    )
+                  ),
                   $actionDetail(a, baseDesc),
                   $node(style({ flex: 1 }))(),
+                  a.relayFee > 0n && baseDesc
+                    ? $node(
+                        style({ fontSize: text.xs, color: colorShade(palette.foreground, 70), whiteSpace: 'nowrap' })
+                      )($text(`fee ${readableTokenAmountLabel(baseDesc, a.relayFee)}`))
+                    : empty,
                   $node(style({ fontSize: text.sm, color: palette.foreground, whiteSpace: 'nowrap' }))(
                     $text(`${getDuration(now - a.blockTimestamp)} ago`)
                   )

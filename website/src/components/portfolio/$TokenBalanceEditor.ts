@@ -1,9 +1,7 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
-import { readableTokenAmountLabel } from '@puppet/sdk/core'
-import { getTokenDescription } from '@puppet/sdk/gmx'
+import { getRegisteredTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { type ISubaccountState, type ITokenRegistryMap, tokenInfoFor } from '@puppet/sdk/state'
-import { combine, constant, type IStream, just, map, op, skipRepeatsWith, switchLatest } from 'aelea/stream'
+import { combine, constant, empty, type IStream, just, map, merge, op, skipRepeatsWith, switchLatest } from 'aelea/stream'
 import { type IBehavior, multicast } from 'aelea/stream-extended'
 import { $node, $text, component, style } from 'aelea/ui'
 import { $Popover, $row, spacing } from 'aelea/ui-components'
@@ -30,23 +28,27 @@ import type { IDepositDraft, IWithdrawDraft } from './draft.js'
 export type IEditorDraft = IDepositDraft | IWithdrawDraft
 
 export interface I$TokenBalanceEditor {
+  hideBalances: IStream<boolean>
   accountState: IStream<ISubaccountState>
-  baseTokenId: Hex
+  token: Hex
   tokenRegistry: ITokenRegistryMap
   walletAccount: IConnectedWallet
-  lateBindDerivation?: Omit<IAccountLib__AccountInitParams, 'signer'>
   draft: IStream<IEditorDraft | null>
   inlineNote?: string
+  // Deep-link trigger: emits 'deposit'/'withdraw' to open that editor's popover without a click (e.g. arriving from a
+  // ?action=deposit-<symbol> link), merged with the button-driven popEditor.
+  autoOpen?: IStream<'deposit' | 'withdraw'>
 }
 
 export const $TokenBalanceEditor = ({
+  hideBalances,
   accountState,
-  baseTokenId,
+  token,
   tokenRegistry,
   walletAccount,
-  lateBindDerivation,
   draft,
-  inlineNote
+  inlineNote,
+  autoOpen
 }: I$TokenBalanceEditor) =>
   component(
     (
@@ -58,12 +60,11 @@ export const $TokenBalanceEditor = ({
         skipRepeatsWith(
           (a, b) =>
             a.account === b.account &&
-            (a.balances.get(baseTokenId)?.signedBalance ?? 0n) === (b.balances.get(baseTokenId)?.signedBalance ?? 0n)
+            (a.balances.get(token)?.signedBalance ?? 0n) === (b.balances.get(token)?.signedBalance ?? 0n)
         ),
         map(metric => {
-          const token = tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseTokenId).token
-          const tokenDescription = getTokenDescription(token)
-          const balance = metric.balances.get(baseTokenId)?.signedBalance ?? 0n
+          const tokenDescription = getRegisteredTokenDescription(token)
+          const balance = metric.balances.get(token)?.signedBalance ?? 0n
           const usdValue: IStream<string> = map(price => formatUsd(balance, price), priceFor(token))
 
           const pendingAmount: IStream<bigint> = op(
@@ -89,6 +90,7 @@ export const $TokenBalanceEditor = ({
           )
 
           const $balanceDisplay = $amountDisplay({
+            hideBalances,
             usd: usdValue,
             amount: readableTokenAmountLabel(tokenDescription, balance),
             change: adjustmentChange,
@@ -100,17 +102,17 @@ export const $TokenBalanceEditor = ({
           const withdrawDraft: IStream<IWithdrawDraft | null> = map(d => (d?.kind === 'withdraw' ? d : null), draft)
 
           const $depositEditor = $DepositEditor({
+            hideBalances,
             accountState: metric,
-            baseTokenId,
+            token,
             tokenRegistry,
             walletAccount,
-            lateBindDerivation,
             existingDraft: depositDraft
           })({ changeDraft: changeDraftTether() })
 
           const $withdrawEditor = $WithdrawEditor({
             accountState: metric,
-            baseTokenId,
+            token,
             tokenRegistry,
             walletAccount,
             existingDraft: withdrawDraft
@@ -152,7 +154,10 @@ export const $TokenBalanceEditor = ({
                 : $node(style({ flex: 1 }))(),
               $balanceDisplay
             ),
-            $open: map(action => (action === 'deposit' ? $depositEditor : $withdrawEditor), popEditor),
+            $open: map(
+              action => (action === 'deposit' ? $depositEditor : $withdrawEditor),
+              merge(popEditor, autoOpen ?? empty)
+            ),
             dismiss: changeDraft
           })({})
         }),

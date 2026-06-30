@@ -1,4 +1,5 @@
-import { deriveSessionKey, SIGNER_DERIVATION_MESSAGE, signerProofDigest } from '@puppet/sdk/account'
+import { PROTOCOL } from '@puppet/contracts'
+import { deriveSessionKey, signerProofDigest } from '@puppet/sdk/account'
 import { type Address, getAddress, type Hex, serializeSignature, type WalletClient } from 'viem'
 import { sign as ecdsaSign, type PrivateKeyAccount, privateKeyToAccount } from 'viem/accounts'
 
@@ -101,7 +102,7 @@ export async function ensureSessionKey(user: Address, walletClient: WalletClient
   const existing = getStoredSessionKey(user)
   if (existing) return existing
 
-  const sig = await walletClient.signMessage({ account: user, message: SIGNER_DERIVATION_MESSAGE })
+  const sig = await walletClient.signMessage({ account: user, message: PROTOCOL.signerDerivationMessage })
   const key = await buildSessionKey(user, sig)
   write(user, sig, key.signerProof)
   cache.set(user, key)

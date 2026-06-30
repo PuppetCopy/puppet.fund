@@ -1,22 +1,90 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import type { getSubaccountState, IndexerHealth, ISubaccountState, ITokenRegistryMap } from '@puppet/sdk/state'
-import { getPublicClient, getWalletClient } from '@wagmi/core'
-import type { IStream } from 'aelea/stream'
+
+import type { IAccountLib__AccountInitParams, IFundAccountLib__FundAccountInitParams } from '@puppet/contracts/types'
+import { resolveDispatchChainId } from '@puppet/sdk/attestation'
+import { awaitWhile } from '@puppet/sdk/core'
+import {
+  chainHeadBlock,
+  getAcceptableRelayFee,
+  type IChainLiveness,
+  type ISubaccountState,
+  type ITokenRegistryMap,
+  randomNonce
+} from '@puppet/sdk/state'
+import { getWalletClient } from '@wagmi/core'
+import { getAddress, type Hex } from 'viem'
 import type { Address } from 'viem/accounts'
-import { getCallsStatus, getCapabilities, getCode } from 'viem/actions'
-import { homePublicClient, type IConnectedWallet, type ISessionKey, wagmi } from '../../../wallet/index.js'
+import { getCallsStatus, getCapabilities } from 'viem/actions'
+import context from '../../../io/context.js'
+import { fetchMasterPoolState } from '../../../io/datastore/query.js'
+import { readSubaccountState } from '../../../io/matchmaker/walletState.js'
+import { type IConnectedWallet, type ISessionKey, wagmi } from '../../../wallet/index.js'
 
 export const DEFAULT_DEADLINE_SEC = 5 * 60
 export const SESSION_BIND_KEY = 'session-bind'
 
 export interface ExecContext {
-  sql: Parameters<typeof getSubaccountState>[0]
   tokenRegistry: ITokenRegistryMap
   wallet: IConnectedWallet
   session: ISessionKey
   gasPrice: bigint
-  indexerHealth: IndexerHealth
-  walletState: IStream<ISubaccountState | null>
+  chainLiveness: IChainLiveness
+}
+
+type IRelayRouter = Parameters<typeof getAcceptableRelayFee>[1]
+type IRelayMethod = Parameters<typeof getAcceptableRelayFee>[2]
+
+export function stepMetadata(
+  ctx: ExecContext,
+  chainId?: number
+): { blockNumber: bigint; deadline: bigint; nonce: bigint } {
+  return {
+    blockNumber: chainHeadBlock(ctx.chainLiveness, resolveDispatchChainId(chainId)),
+    deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
+    nonce: randomNonce()
+  }
+}
+
+export async function resolveRelayFee(
+  ctx: ExecContext,
+  router: IRelayRouter,
+  method: IRelayMethod,
+  token: Address,
+  unitCount?: bigint,
+  gasPrice: bigint = ctx.gasPrice
+): Promise<bigint> {
+  const tokenPerNativeToken = await context.getTokenPerNativeToken(token)
+  return getAcceptableRelayFee(gasPrice, router, method, tokenPerNativeToken, unitCount)
+}
+
+export interface IFundIntentEnvelope {
+  params: IAccountLib__AccountInitParams
+  fundParams: IFundAccountLib__FundAccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  nonce: bigint
+  acceptableRelayFee: bigint
+}
+
+export async function buildFundIntentEnvelope(
+  ctx: ExecContext,
+  opts: { masterAccount: Address; baseToken: Hex; method: IRelayMethod; unitCount?: bigint }
+): Promise<{ envelope: IFundIntentEnvelope; fund: ISubaccountState }> {
+  const [fund, pool, acceptableRelayFee] = await Promise.all([
+    readSubaccountState(ctx.tokenRegistry, getAddress(opts.masterAccount)),
+    fetchMasterPoolState(opts.masterAccount),
+    resolveRelayFee(ctx, 'HubGate', opts.method, opts.baseToken, opts.unitCount)
+  ])
+  if (!fund) throw new Error(`fund ${opts.masterAccount} not in datastore`)
+  if (!pool) throw new Error(`fund ${opts.masterAccount} pool state not in datastore`)
+  return {
+    fund,
+    envelope: {
+      params: { user: ctx.wallet.address, signer: ctx.session.signer },
+      fundParams: { master: fund.signer, baseToken: opts.baseToken, name: pool.name as Hex },
+      ...stepMetadata(ctx),
+      acceptableRelayFee
+    }
+  }
 }
 
 export async function walletClientForChain(
@@ -37,14 +105,6 @@ export async function walletClientForChain(
   throw new Error(`wallet did not switch to chain ${chainId}; switch in your wallet and retry`)
 }
 
-export async function isDeployed(puppet: Address, chainId?: number): Promise<boolean> {
-  const client =
-    chainId === undefined || chainId === HUB_CHAIN_ID ? homePublicClient : getPublicClient(wagmi, { chainId })
-  if (!client) throw new Error(`No public client for chain ${chainId}`)
-  const code = await getCode(client, { address: puppet })
-  return !!code && code !== '0x'
-}
-
 export async function supportsAtomicBatch(
   walletClient: IConnectedWallet['walletClient'],
   chainId: number
@@ -63,11 +123,11 @@ export async function pollCallsStatus(
   pollMs = 1_000,
   timeoutMs = 90_000
 ): Promise<Awaited<ReturnType<typeof getCallsStatus>>> {
-  const start = Date.now()
-  while (Date.now() - start < timeoutMs) {
-    const status = await getCallsStatus(walletClient, { id })
-    if (status.status && status.status !== 'pending') return status
-    await new Promise(r => setTimeout(r, pollMs))
-  }
-  throw new Error(`getCallsStatus did not settle for id ${id} within ${timeoutMs}ms`)
+  return awaitWhile(
+    async () => {
+      const status = await getCallsStatus(walletClient, { id })
+      return status.status && status.status !== 'pending' ? status : undefined
+    },
+    { timeoutMs, pollMs, timeoutMessage: `getCallsStatus did not settle for id ${id} within ${timeoutMs}ms` }
+  )
 }

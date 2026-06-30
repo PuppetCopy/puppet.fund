@@ -39,6 +39,24 @@ export const $copy = $path(
   })
 )()
 
+export const $eye = $path(
+  attr({
+    d: 'M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17a5 5 0 110-10 5 5 0 010 10zm0-8a3 3 0 100 6 3 3 0 000-6z'
+  })
+)()
+
+export const $eyeOff = $path(
+  attr({
+    d: 'M12 7c2.76 0 5 2.24 5 5 0 .65-.13 1.26-.36 1.83l2.92 2.92c1.51-1.26 2.7-2.89 3.43-4.75-1.73-4.39-6-7.5-11-7.5-1.4 0-2.74.25-3.98.7l2.16 2.16C10.74 7.13 11.35 7 12 7zM2 4.27l2.28 2.28.46.46C3.08 8.3 1.78 10.02 1 12c1.73 4.39 6 7.5 11 7.5 1.55 0 3.03-.3 4.38-.84l.42.42L19.73 22 21 20.73 3.27 3 2 4.27zM7.53 9.8l1.55 1.55c-.05.21-.08.43-.08.65a3 3 0 003 3c.22 0 .44-.03.65-.08l1.55 1.55c-.67.33-1.41.53-2.2.53a5 5 0 01-5-5c0-.79.2-1.53.53-2.2zm4.31-.78l3.15 3.15.02-.16a3 3 0 00-3-3l-.17.01z'
+  })
+)()
+
+export const $logout = $path(
+  attr({
+    d: 'M17 7l-1.41 1.41L18.17 11H8v2h10.17l-2.58 2.58L17 17l5-5zM4 5h8V3H4c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h8v-2H4V5z'
+  })
+)()
+
 // Ring drawn 2.5 units thick (not a hairline): at 16-20px display that is still a
 // crisp >1px stroke instead of sub-pixel shimmer. Centered at (16,16).
 export const $info = $svg('g')(
@@ -329,6 +347,15 @@ export const $sol = $svg('g')(
     })
   )()
 )
+export const $monad = $svg('g')(
+  $path(
+    attr({
+      'fill-rule': 'evenodd',
+      'clip-rule': 'evenodd',
+      d: 'M16 32C7.163 32 0 24.837 0 16S7.163 0 16 0s16 7.163 16 16-7.163 16-16 16zM14.23 7.77Q16 6 17.77 7.77L24.23 14.23Q26 16 24.23 17.77L17.77 24.23Q16 26 14.23 24.23L7.77 17.77Q6 16 7.77 14.23Z'
+    })
+  )()
+)
 
 export const $tokenIconMap: Record<string, I$Node<SVGPathElement>> = {
   PUPPET: $puppet,
@@ -345,6 +372,8 @@ export const $tokenIconMap: Record<string, I$Node<SVGPathElement>> = {
   BTCB: $btc,
   ETH: $eth,
   WETH: $eth,
+  MON: $monad,
+  WMON: $monad,
   UNI: $uni,
   LINK: $link,
   AVAX: $avax,

@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { createOperatorCore, pairOverBrowser, runOperator } from '@puppet.fund/operator'
-import { acceptablePrice, formatWeth, gmxOperator, usd, weth } from '@puppet.fund/operator/gmx'
+import { acceptablePrice, formatWeth, GMX_V2_CHAIN_ID, gmxOperator, gmxTokenPerNativeToken, usd, weth } from '@puppet.fund/operator/gmx'
 import { type Address, isAddressEqual } from 'viem'
 
 // A basic LLM (Claude) agent: same perceive / size / execute as a deterministic bot, but the
@@ -24,7 +24,7 @@ if (!Bun.env.ANTHROPIC_API_KEY) {
 }
 const anthropic = new Anthropic() // reads ANTHROPIC_API_KEY
 const session = await pairOverBrowser(Bun.env.PAIR_URL)
-const core = await createOperatorCore(session, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
+const core = await createOperatorCore(session, { chainId: GMX_V2_CHAIN_ID, getTokenPerNativeToken: gmxTokenPerNativeToken, rpcUrl: Bun.env.ARBITRUM_RPC_URL })
 const gmx = gmxOperator(core)
 const market = gmx.getMarket(ETH)
 let lastTradeAt = 0
@@ -87,7 +87,6 @@ await runOperator(core, async signal => {
 })
 
 async function tick(): Promise<void> {
-  if (!core.isOpen()) return
 
   const closes = (await fetchCandles('ETHUSDT', '5m', 200)).map(c => c.close)
   const price = closes[closes.length - 1]

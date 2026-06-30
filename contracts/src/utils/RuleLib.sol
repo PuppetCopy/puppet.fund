@@ -9,8 +9,8 @@ bytes32 constant MANDATE_TYPEHASH =
     keccak256("Mandate(address puppet,address fund,address baseToken,bytes32 bodyHash)");
 
 library RuleLib {
-    bytes32 internal constant SUBSCRIBE_RULE_TYPEHASH =
-        keccak256("SubscribeRule(address fund,bytes body,bytes mandate)");
+    bytes32 internal constant FUND_MANDATE_RULE_TYPEHASH =
+        keccak256("FundMandateRule(address fund,bytes body,bytes mandate)");
 
     struct Rule {
         address fund;
@@ -22,7 +22,7 @@ library RuleLib {
         Rule calldata _rule
     ) internal pure returns (bytes32) {
         return
-            keccak256(abi.encode(SUBSCRIBE_RULE_TYPEHASH, _rule.fund, keccak256(_rule.body), keccak256(_rule.mandate)));
+            keccak256(abi.encode(FUND_MANDATE_RULE_TYPEHASH, _rule.fund, keccak256(_rule.body), keccak256(_rule.mandate)));
     }
 
     function hashRules(
@@ -40,7 +40,7 @@ library RuleLib {
         bytes32 _routerDomainSeparator,
         address _puppet,
         address _fund,
-        IERC20 _baseToken,
+        address _baseToken,
         bytes calldata _body
     ) internal pure returns (bytes32 bodyHash_, bytes32 digest_) {
         bodyHash_ = keccak256(_body);
@@ -48,7 +48,7 @@ library RuleLib {
             abi.encodePacked(
                 "\x19\x01",
                 _routerDomainSeparator,
-                keccak256(abi.encode(MANDATE_TYPEHASH, _puppet, _fund, address(_baseToken), bodyHash_))
+                keccak256(abi.encode(MANDATE_TYPEHASH, _puppet, _fund, _baseToken, bodyHash_))
             )
         );
     }

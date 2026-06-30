@@ -4,90 +4,61 @@ pragma solidity ^0.8.35;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {IAccount} from "./interfaces/IAccount.sol";
+import {NATIVE_TOKEN} from "./Native.sol";
 import {Route} from "../core/Route.sol";
 
 library CallLib {
-    function wrap(
-        IAccount.Call memory _call
-    ) internal pure returns (IAccount.Call[] memory _callList) {
-        _callList = new IAccount.Call[](1);
-        _callList[0] = _call;
-    }
-
-    function signTransfer(
-        bytes32 _tokenId,
-        IERC20 _token,
-        uint _amountIn,
-        uint _amountOut
-    ) internal pure returns (IAccount.SignTransfer[] memory _transferList) {
-        _transferList = new IAccount.SignTransfer[](1);
-        _transferList[0] =
-            IAccount.SignTransfer({tokenId: _tokenId, token: _token, amountIn: _amountIn, amountOut: _amountOut});
-    }
-
-    function noTransfers() internal pure returns (IAccount.SignTransfer[] memory) {
-        return new IAccount.SignTransfer[](0);
-    }
-
-    function withFee(
-        IAccount.Call memory _call,
-        IERC20 _feeToken,
-        address _feeReceiver,
-        uint _fee,
-        uint _gasLimit
-    ) internal pure returns (IAccount.Call[] memory _callList) {
-        _callList = new IAccount.Call[](_fee > 0 ? 2 : 1);
-        _callList[0] = _call;
-        if (_fee > 0) _callList[1] = feeCall(_feeToken, _feeReceiver, _fee, _gasLimit);
-    }
-
-    function feeOnly(
-        IERC20 _feeToken,
-        address _feeReceiver,
-        uint _fee,
-        uint _gasLimit
-    ) internal pure returns (IAccount.Call[] memory _callList) {
-        _callList = new IAccount.Call[](_fee > 0 ? 1 : 0);
-        if (_fee > 0) _callList[0] = feeCall(_feeToken, _feeReceiver, _fee, _gasLimit);
-    }
-
-    function feeCall(
-        IERC20 _feeToken,
-        address _feeReceiver,
-        uint _fee,
-        uint _gasLimit
-    ) internal pure returns (IAccount.Call memory) {
-        return address(_feeToken) == address(0)
-            ? IAccount.Call({target: _feeReceiver, value: _fee, gasLimit: _gasLimit, callData: ""})
-            : transferCall(_feeToken, _feeReceiver, _fee, _gasLimit);
-    }
-
-    function transferCall(
-        IERC20 _token,
+    function transfer(
+        address _token,
         address _to,
         uint _amount,
         uint _gasLimit
     ) internal pure returns (IAccount.Call memory) {
         return IAccount.Call({
-            target: address(_token),
+            target: _token,
             value: 0,
             gasLimit: _gasLimit,
             callData: abi.encodeCall(IERC20.transfer, (_to, _amount))
         });
     }
 
-    function approveCall(
-        IERC20 _token,
+    // an empty call with value set, vs an ERC20.transfer encoding.
+    function transferValue(address _to, uint _amount, uint _gasLimit) internal pure returns (IAccount.Call memory) {
+        return IAccount.Call({target: _to, value: _amount, gasLimit: _gasLimit, callData: ""});
+    }
+
+    function payout(
+        address _token,
+        address _to,
+        uint _amount,
+        uint _gasLimit
+    ) internal pure returns (IAccount.Call memory) {
+        return _token == NATIVE_TOKEN
+            ? transferValue(_to, _amount, _gasLimit)
+            : transfer(_token, _to, _amount, _gasLimit);
+    }
+
+    function approve(
+        address _token,
         address _spender,
         uint _amount,
         uint _gasLimit
     ) internal pure returns (IAccount.Call memory) {
         return IAccount.Call({
-            target: address(_token),
+            target: _token,
             value: 0,
             gasLimit: _gasLimit,
             callData: abi.encodeCall(IERC20.approve, (_spender, _amount))
         });
+    }
+
+    function fee(
+        address _feeToken,
+        address _feeReceiver,
+        uint _amount,
+        uint _gasLimit
+    ) internal pure returns (IAccount.Call memory) {
+        return payout(_feeToken, _feeReceiver, _amount, _gasLimit);
     }
 
     function routeExecute(
@@ -97,13 +68,71 @@ library CallLib {
         return IAccount.Call({target: _route, value: 0, gasLimit: 0, callData: abi.encodeCall(Route.execute, (_legs))});
     }
 
-    function routeDeposit(
-        address _route,
-        IERC20 _token,
-        address _recipient,
+    function compose(
+        IAccount.Call memory _a
+    ) internal pure returns (IAccount.Call[] memory _list) {
+        _list = new IAccount.Call[](1);
+        _list[0] = _a;
+    }
+
+    function compose(
+        IAccount.Call memory _a,
+        IAccount.Call memory _b
+    ) internal pure returns (IAccount.Call[] memory _list) {
+        _list = new IAccount.Call[](2);
+        _list[0] = _a;
+        _list[1] = _b;
+    }
+
+    function compose(
+        IAccount.Call memory _a,
+        IAccount.Call memory _b,
+        IAccount.Call memory _c
+    ) internal pure returns (IAccount.Call[] memory _list) {
+        _list = new IAccount.Call[](3);
+        _list[0] = _a;
+        _list[1] = _b;
+        _list[2] = _c;
+    }
+
+    function compose(
+        IAccount.Call memory _a,
+        IAccount.Call memory _b,
+        IAccount.Call memory _c,
+        IAccount.Call memory _d
+    ) internal pure returns (IAccount.Call[] memory _list) {
+        _list = new IAccount.Call[](4);
+        _list[0] = _a;
+        _list[1] = _b;
+        _list[2] = _c;
+        _list[3] = _d;
+    }
+
+    function compose(
+        IAccount.Call memory _a,
+        IAccount.Call memory _b,
+        IAccount.Call memory _c,
+        IAccount.Call memory _d,
+        IAccount.Call memory _e
+    ) internal pure returns (IAccount.Call[] memory _list) {
+        _list = new IAccount.Call[](5);
+        _list[0] = _a;
+        _list[1] = _b;
+        _list[2] = _c;
+        _list[3] = _d;
+        _list[4] = _e;
+    }
+
+    function empty() internal pure returns (IAccount.Call[] memory) {
+        return new IAccount.Call[](0);
+    }
+
+    function feeOnly(
+        address _feeToken,
+        address _feeReceiver,
         uint _amount,
         uint _gasLimit
-    ) internal pure returns (IAccount.Call memory) {
-        return routeExecute(_route, wrap(transferCall(_token, _recipient, _amount, _gasLimit)));
+    ) internal pure returns (IAccount.Call[] memory) {
+        return _amount > 0 ? compose(fee(_feeToken, _feeReceiver, _amount, _gasLimit)) : empty();
     }
 }

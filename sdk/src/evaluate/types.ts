@@ -1,22 +1,47 @@
 import type { Address, Hex, PublicClient } from 'viem'
 import type { ChainId } from '../const/index.js'
-import type { IndexerHealth, LagSeverity } from '../state/health.js'
-import type { ISubaccountState } from '../state/metric.js'
-import type { IIndexerClient } from '../state/shared.js'
 
 export type INavKind = 'allocate' | 'redeem' | 'liquidate' | 'view'
 
 export interface INavChainBalance {
   chainId: ChainId
-  recordedBalance: bigint
   signedBalance: bigint
   unrecognized: bigint
-  ageSec: number
-  severity: LagSeverity
+  reachable: boolean
 }
 
-export type IPriceMap = Map<Address, { price: bigint; updateTimestamp: number }>
-export type IPriceProvider = (tokens: readonly Address[]) => Promise<IPriceMap>
+
+export type IPriceSource = { readonly price: bigint; readonly time: number }
+
+// A pair exchange rate: two non-directional per-wei legs scaled to the protocol precision. The oracle sources
+// it from a directly observed market; `quoteAmount(fromWei, token0, token1)` converts a token0 amount to token1
+// wei (reverse the args for the other direction). Defined here (not in @puppet/oracle) so the consensus
+// evaluation layer owns the contract; the oracle imports it back (it already depends on this module).
+export interface IRate {
+  token0: bigint
+  token1: bigint
+  time: number
+}
+
+// The sole injected pricing primitive: an explicit pair rate keyed by canonical asset SYMBOL ('ETH', 'USDC', …). The
+// caller names both legs by symbol (swap = the two legs; NAV/position = token vs the dollar-proxy 'USDC'), resolving any
+// token ADDRESS it holds to its symbol via symbolByAddress at the call site. Symbol, not the keccak tokenId, is the rate
+// key end to end: the oracle prices markets by symbol, so a hash would only get mapped back to a symbol at the wire.
+export type IGetRate = (asset0: string, asset1: string, freshness?: number) => Promise<IRate>
+
+// An open venue position, valuation-ready. Sourced from an injected reader: the matchmaker's
+// GmxReaderV2.getAccountPositions over RPC, or the browser's relay /positions client.
+export interface IGmxPositionRow {
+  positionKey: Hex
+  market: Address
+  collateralToken: Address
+  isLong: boolean
+  sizeInUsd: bigint
+  sizeInTokens: bigint
+  collateralUsd: bigint
+  storedPnlUsd: bigint
+}
+export type IGmxPositionProvider = (account: Address, baseToken: Address) => Promise<IGmxPositionRow[]>
 
 export type IVenueFacets = Record<string, string | number | bigint | boolean | undefined>
 
@@ -47,12 +72,12 @@ export interface IPlatformValuation {
 }
 
 export interface IPlatformEvalParams {
-  sql: IIndexerClient
   account: Address
   baseToken: Address
   nowSec: number
   publicClient?: PublicClient
-  priceProvider?: IPriceProvider
+  getRate: IGetRate
+  positions: IGmxPositionRow[]
 }
 
 export interface IPlatformEvaluator {
@@ -81,7 +106,7 @@ export interface INavGate {
 }
 
 export type INavGateCode =
-  | 'INDEXER_STALE'
+  | 'CHAIN_UNREACHABLE'
   | 'STALE_ORACLE'
   | 'NAV_MISMATCH'
   | 'PENDING_ORDER'
@@ -96,7 +121,6 @@ export type INavGateCode =
   | 'VENUE_BAD_INPUT'
 
 export interface IEvaluationConfig {
-  maxIndexerAgeSec: number
   maxPriceAgeSec: number
   allocateGainHaircutBps: bigint
   driftToleranceBps: bigint
@@ -106,7 +130,6 @@ export interface IEvaluationConfig {
 }
 
 export const DEFAULT_EVALUATION_CONFIG: IEvaluationConfig = {
-  maxIndexerAgeSec: 60,
   maxPriceAgeSec: 120,
   allocateGainHaircutBps: 2000n,
   driftToleranceBps: 50n,
@@ -118,16 +141,17 @@ export const DEFAULT_EVALUATION_CONFIG: IEvaluationConfig = {
 export interface IEvaluateAccountParams {
   master: Address
   baseToken: Address
-  baseTokenId: Hex
-  health: IndexerHealth
   kind: INavKind
   platforms?: IPlatformEvaluator[]
   publicClient?: PublicClient
-  priceProvider?: IPriceProvider
+  getRate: IGetRate
+  positions: IGmxPositionRow[]
   nowSec?: number
   config?: Partial<IEvaluationConfig>
   clientNav?: bigint
-  subaccount?: ISubaccountState
+  // The base-token cash leg per chain (signedBalance, unrecognized = held − signed, reachable). The CALLER builds it — the
+  // website via composeCashLeg() from its fold subaccount; the relay directly from its on-chain reads (no synthetic fold).
+  cashLeg: INavChainBalance[]
 }
 
 export interface INavResult {

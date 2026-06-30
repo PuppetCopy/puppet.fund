@@ -1,108 +1,40 @@
-interface IGmxOraclePrice {
-  updateTimestamp: number
-  token: Address
-  price: bigint
-}
-
-import { CHAIN_TOKEN_MAP, HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { ADDRESS_ZERO } from '@puppet/sdk/const'
-import { getMappedValueFallback, periodicRun } from '@puppet/sdk/core'
+import { periodicRun } from '@puppet/sdk/core'
+import { USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
 import { type IStream, map, op, skipRepeats } from 'aelea/stream'
-import { state } from 'aelea/stream-extended'
-import { type Address, formatUnits } from 'viem'
+import { recover, state } from 'aelea/stream-extended'
+import { type Address, formatUnits, getAddress } from 'viem'
+import { getPrice } from '../context.js'
 
-// Configuration
-const PRICE_FEED_CONFIG = {
-  UPDATE_INTERVAL_MS: 10_000,
-  API_URL: 'https://arbitrum-api.gmxinfra.io/signed_prices/latest'
-} as const
+const PRICE_REFRESH_MS = 10_000
 
-// Arbitrum URL: https://arbitrum-api.gmxinfra.io/signed_prices/latest
-// Avalanche URL: https://avalanche-api.gmxinfra.io/signed_prices/latest
-interface IGmxSignedPriceData {
-  id: string // "4003688959"
-  minBlockNumber: number // null
-  minBlockHash: string | null // null
-  oracleDecimals: number | null // null
-  tokenSymbol: string // "ETH"
-  tokenAddress: Address // "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
-  minPrice: number | null // null
-  maxPrice: number | null // null
-  signer: string | null // null
-  signature: string | null // null
-  signatureWithoutBlockHash: string | null // null
-  createdAt: string // "2025-07-28T19:30:24.419Z"
-  minBlockTimestamp: number | null // 1753731023 (seconds - Unix timestamp)
-  oracleKeeperKey: string // "realtimeFeed"
-  maxBlockTimestamp: number // 1753731023 (seconds - Unix timestamp)
-  maxBlockNumber: number // null
-  maxBlockHash: string // null
-  maxPriceFull: string // "3791200513446191" (price with full precision)
-  minPriceFull: string // "3791014710710536" (price with full precision)
-  oracleKeeperRecordId: string | null // null
-  oracleKeeperFetchType: string // "ws"
-  oracleType: string // "realtimeFeed2"
-  blob: string // "0x00094baebfda9b87..." (binary data)
-}
-
-async function querySignedPrices(): Promise<IGmxSignedPriceData[]> {
-  try {
-    const response = await fetch(PRICE_FEED_CONFIG.API_URL)
-
-    if (!response.ok) {
-      throw new Error(`GMX signed prices API error! status: ${response.status}`)
-    }
-
-    const data = (await response.json()) as { signedPrices: IGmxSignedPriceData[] }
-    return data.signedPrices || []
-  } catch (error) {
-    console.error('Error fetching GMX signed prices:', error)
-    return []
-  }
-}
-
-export const latestPriceMap = op(
-  periodicRun({
-    startImmediate: true,
-    interval: PRICE_FEED_CONFIG.UPDATE_INTERVAL_MS,
-    actionOp: map(async () => {
-      const signedPrices = await querySignedPrices()
-      const out: Record<Address, IGmxOraclePrice> = {}
-      for (const item of signedPrices) {
-        const timestampMs = (item.minBlockTimestamp || item.maxBlockTimestamp) * 1000
-        const existing = out[item.tokenAddress]
-        if (existing && existing.updateTimestamp >= timestampMs) continue
-        out[item.tokenAddress] = {
-          updateTimestamp: timestampMs,
-          token: item.tokenAddress,
-          price: (BigInt(item.minPriceFull) + BigInt(item.maxPriceFull)) / 2n
-        }
-      }
-      return out
-    })
-  }),
-  state()
-)
-
-const priceForCache = new Map<Address, IStream<bigint | null>>()
-export function priceFor(address: Address): IStream<bigint | null> {
-  const lookup = address === ADDRESS_ZERO ? (CHAIN_TOKEN_MAP[HUB_CHAIN_ID].WETH as Address) : address
-  const existing = priceForCache.get(lookup)
+// Reactive per-token price stream for DISPLAY: base-1e30 bigint, or null while it loads / when the oracle can't price
+// it. Polls the shared getPrice (so display and NAV read one source), de-duped per token; getPrice resolves native and
+// hub-wrapped variants itself.
+const priceStreamCache = new Map<Address, IStream<bigint | null>>()
+export function priceFor(token: Address): IStream<bigint | null> {
+  const key = getAddress(token)
+  const existing = priceStreamCache.get(key)
   if (existing) return existing
   const stream = op(
-    latestPriceMap,
-    map(pm => getMappedValueFallback(pm, lookup, null)?.price ?? null),
+    periodicRun({
+      startImmediate: true,
+      interval: PRICE_REFRESH_MS,
+      // Display fails SOFT: an unpriceable token (oracle has no market yet, e.g. a thin new listing) yields null -> '-'
+      // rather than throwing a render error. NAV/attestation still reads getRate directly and fails closed.
+      actionOp: map(() => getPrice(key, PRICE_REFRESH_MS).then(source => source.price).catch(() => null))
+    }),
     skipRepeats,
+    recover({}),
     state(null)
   )
-  priceForCache.set(lookup, stream)
+  priceStreamCache.set(key, stream)
   return stream
 }
 
 export function formatUsd(amount: bigint, price: bigint | null): string {
   if (price === null) return '-'
   if (amount === 0n) return '$0.00'
-  const num = Number(formatUnits(amount * price, 30))
+  const num = Number(formatUnits(amount * price, USD_PRICE_DECIMALS))
   if (num > 0 && num < 0.01) return '< $0.01'
   return `$${num.toFixed(2)}`
 }

@@ -110,9 +110,13 @@ export const $terminal = (lines: string[], label = 'terminal'): I$Node => {
         effectProp(
           'onclick',
           nowWith(() => () => {
-            navigator.clipboard?.writeText(lines.join('\n'))
-            copied.push(true)
-            setTimeout(() => copied.push(false), 5_000)
+            navigator.clipboard
+              ?.writeText(lines.join('\n'))
+              .then(() => {
+                copied.push(true)
+                setTimeout(() => copied.push(false), 5_000)
+              })
+              .catch(() => {})
           })
         )
       )(

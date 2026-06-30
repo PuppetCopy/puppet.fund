@@ -10,7 +10,6 @@
   ignored_warnings_from = ["test", "lib"]  # Silence solc warnings from test fixtures and vendored libs; src/ + script/ stay verbose
   fs_permissions = [
     { access = "read-write", path = "./deployments.toml" },
-    { access = "read-write", path = "./deployments.local.toml" },
     { access = "read", path = "./const.toml" },
     { access = "read-write", path = "./broadcast" }
   ]
@@ -26,8 +25,8 @@
   optimizer = true
   optimizer_runs = 200
   gas_reports = [
-    "AccountGate",
-    "MasterGate",
+    "PuppetGate",
+    "FundGate",
     "HubGate"
   ]
 
@@ -45,6 +44,21 @@
   out = "forge-artifacts-prod"
   cache_path = "forge-cache-prod"
   optimizer_runs = 100_000
+
+# HubGate and Redeem are EIP-170 size-bound and can't take prod's 100k runs
+# (they overrun the 24576 B limit). Bind them to a low-runs sub-profile; the rest
+# of the codebase keeps prod-level runtime optimization.
+[[profile.prod.additional_compiler_profiles]]
+  name = "capped"
+  optimizer_runs = 200
+
+[[profile.prod.compilation_restrictions]]
+  paths = "src/HubGate.sol"
+  max_optimizer_runs = 200
+
+[[profile.prod.compilation_restrictions]]
+  paths = "src/hub/Redeem.sol"
+  max_optimizer_runs = 200
 
 [profile.ci.fuzz]
   runs = 1000
@@ -99,7 +113,12 @@
   mainnet = { url = "https://lb.drpc.live/ethereum/${RPC_KEY}", chain_id = 1 }
   arbitrum = { url = "https://lb.drpc.live/arbitrum/${RPC_KEY}", chain_id = 42161 }
   base = { url = "https://lb.drpc.live/base/${RPC_KEY}", chain_id = 8453 }
+  polygon = { url = "https://lb.drpc.live/polygon/${RPC_KEY}", chain_id = 137 }
+  megaeth = { url = "https://lb.drpc.live/megaeth/${RPC_KEY}", chain_id = 4326 }
+  monad = { url = "https://lb.drpc.live/monad-mainnet/${RPC_KEY}", chain_id = 143 }
 
 [etherscan]
+  mainnet = { key = "${ETHERSCAN_API_KEY}" }
   arbitrum = { key = "${ETHERSCAN_API_KEY}" }
   base = { key = "${ETHERSCAN_API_KEY}" }
+  polygon = { key = "${ETHERSCAN_API_KEY}" }

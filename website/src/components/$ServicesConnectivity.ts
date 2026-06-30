@@ -1,27 +1,23 @@
-import type { IMatchmakerStatus } from '@puppet/sdk/compact'
-import { HUB_CHAIN_NETWORK } from '@puppet/sdk/const'
-import { getTimeAgo, readableUnitAmount } from '@puppet/sdk/core'
-import type { IndexerHealth, LagSeverity } from '@puppet/sdk/state'
+import { HUB_CHAIN_ID } from '@puppet/contracts/const'
+import type { IChainLiveness } from '@puppet/sdk/state'
 import {
   combine,
   empty,
+  fromPromise,
   type IStream,
   map,
   merge,
   op,
-  periodic,
   start,
   switchLatest,
-  switchMap,
-  take
+  switchMap
 } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, type I$Slottable, style, styleBehavior } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { $Tooltip, text } from '@/ui-components'
-import * as context from '../io/context.js'
-import { puppetConnectedOrigins, puppetExtensionInstalled, puppetExtensionOutdated } from '../wallet/index.js'
+import context from '../io/context.js'
 
 type ServiceHealth = 'ok' | 'degraded' | 'down'
 
@@ -51,34 +47,22 @@ const $serviceLine = (label: string, $desc: I$Slottable, health: ServiceHealth) 
     $servicePill(health)
   )
 
-const indexerHealthToService: Record<LagSeverity, ServiceHealth> = {
-  healthy: 'ok',
-  lagging: 'degraded',
-  stale: 'down',
-  unreachable: 'down'
+// The liveness read and an independent live-RPC head read should agree (both hit the chain's RPC). If the second read
+// has moved this far past the liveness head, the snapshot is stale, so flag the chain as out of sync.
+const FROZEN_AHEAD = 1000n
+
+type ILivenessView = { detail: string; service: ServiceHealth }
+
+const livenessView = (liveness: IChainLiveness | null, rpcHead: bigint | null | undefined): ILivenessView => {
+  if (!liveness?.reachable) return { detail: 'Unavailable · account state may be out of date', service: 'down' }
+  const home = liveness.chains[HUB_CHAIN_ID]
+  if (!home?.reachable) return { detail: 'Unavailable · hub status missing', service: 'down' }
+  const frozen = typeof rpcHead === 'bigint' && rpcHead - home.block.number > FROZEN_AHEAD
+  if (frozen) return { detail: 'Out of sync · recent activity may be missing', service: 'down' }
+  return { detail: 'Reachable · account state is current', service: 'ok' }
 }
 
-const $indexerServiceLine = (health: IndexerHealth | null) => {
-  if (!health?.reachable) return $serviceLine('Indexer', $text('Not reachable: queries may fail'), 'down')
-  const home = health.chains[HUB_CHAIN_NETWORK]
-  if (!home) return $serviceLine('Indexer', $text('Home chain missing from status'), 'down')
-  const liveText: IStream<string> = map(
-    () => `Block ${readableUnitAmount(home.block.number)} · ${getTimeAgo(home.block.timestamp)}`,
-    start(0, periodic(1000))
-  )
-  return $serviceLine('Indexer', $text(liveText), indexerHealthToService[home.severity])
-}
-
-const isIndexerHealthy = (health: IndexerHealth | null): boolean => {
-  if (!health?.reachable) return false
-  const home = health.chains[HUB_CHAIN_NETWORK]
-  return !!home && home.severity === 'healthy'
-}
-
-const $matchmakerServiceLine = (status: IMatchmakerStatus) => {
-  if (status === 'open') return $serviceLine('Attestor', $text('Connected · ready to relay'), 'ok')
-  return $serviceLine('Attestor', $text('Disconnected · submissions paused'), 'down')
-}
+const $chainServiceLine = (view: ILivenessView) => $serviceLine('Chain', $text(view.detail), view.service)
 
 function originHost(origin: string): string {
   try {
@@ -104,21 +88,33 @@ const $extensionServiceLine = (installed: boolean, outdated: boolean, origins: s
   return $serviceLine('Puppet Wallet', $text('Extension not installed · optional'), 'down')
 }
 
-interface I$ServicesConnectivity {
-  matchmaker: IStream<IMatchmakerStatus>
-}
-
-export const $ServicesConnectivity = ({ matchmaker }: I$ServicesConnectivity) =>
+export const $ServicesConnectivity = () =>
   component(([hover, hoverTether]: IBehavior<boolean>) => {
     const hoverState: IStream<boolean> = state(false, hover)
-    const oneShot: IStream<IndexerHealth> = take(1, context.indexerHealth)
-    const onHover: IStream<IndexerHealth> = switchMap(h => (h ? context.indexerHealth : empty), hoverState)
-    const indexer: IStream<IndexerHealth> = state()(merge(oneShot, onHover))
+    // Fetch chain liveness ONCE on mount so the pill reflects real status on initial page load, then refetch on each
+    // tooltip open for freshness. The mount read is merged in unconditionally (not via hoverState) because hoverState
+    // emits false right after mount, which would switch away from and cancel an in-flight initial fetch.
+    const liveness: IStream<IChainLiveness> = state()(
+      merge(
+        fromPromise(context.getChainLiveness()),
+        switchMap(h => (h ? fromPromise(context.getChainLiveness()) : empty), hoverState)
+      )
+    )
+    // Cross-check the liveness head against a SECOND, independent live-RPC read: a single read that lags or stalls
+    // would hide the real gap. Refetch on each liveness emission; `start` seeds the pending state ONCE so a re-poll
+    // holds the last head (no placeholder flash) until the new one lands.
+    const rpcHead: IStream<bigint | null | undefined> = op(
+      liveness,
+      switchMap(() => fromPromise(context.getBlockNumber(HUB_CHAIN_ID).catch(() => null))),
+      start(undefined as bigint | null | undefined),
+      state()
+    )
+
+    const view: IStream<ILivenessView> = map(p => livenessView(p.liveness, p.rpcHead), combine({ liveness, rpcHead }))
 
     const $tooltip: I$Node = op(
       combine({
-        indexer,
-        matchmaker
+        view
         // Browser extension status sunset for now; revive with the $extensionServiceLine below.
         // extensionInstalled: puppetExtensionInstalled,
         // extensionOutdated: puppetExtensionOutdated,
@@ -133,8 +129,7 @@ export const $ServicesConnectivity = ({ matchmaker }: I$ServicesConnectivity) =>
             )
           ),
           $column(spacing.default, style({ paddingTop: '8px', borderTop: `1px solid ${palette.horizon}` }))(
-            $indexerServiceLine(p.indexer),
-            $matchmakerServiceLine(p.matchmaker)
+            $chainServiceLine(p.view)
             // $extensionServiceLine(p.extensionInstalled, p.extensionOutdated, p.origins)
           )
         )
@@ -155,14 +150,11 @@ export const $ServicesConnectivity = ({ matchmaker }: I$ServicesConnectivity) =>
 
     const color: IStream<string> = start(
       palette.foreground,
-      map(p => {
-        if (isIndexerHealthy(p.indexer) && p.matchmaker === 'open') return palette.positive
-        return palette.negative
-      }, combine({ indexer, matchmaker }))
+      map(v => (v.service === 'ok' ? palette.positive : palette.negative), view)
     )
     const pulsing: IStream<boolean> = start(
       true,
-      map(p => !isIndexerHealthy(p.indexer) || p.matchmaker !== 'open', combine({ indexer, matchmaker }))
+      map(v => v.service !== 'ok', view)
     )
 
     return [

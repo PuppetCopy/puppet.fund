@@ -1,8 +1,9 @@
-import { empty, isStream } from 'aelea/stream'
-import { $node, $text, type I$Node, style } from 'aelea/ui'
-import { $column, $icon, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
+import { nowWith } from 'aelea/stream'
+import { $element, $node, $text, attr, effectProp, type I$Node, style, stylePseudo } from 'aelea/ui'
+import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $caretDblDown, text } from '@/ui-components'
+import { pushUrl } from 'aelea/ui-router'
+import { text } from '@/ui-components'
 
 export const $card = $column(
   spacing.default,
@@ -44,18 +45,22 @@ export const $mockWindow = ($content: I$Node, $container = $defaultMockWindow): 
     $content
   )
 
+export const $navText = (href: string, label: string, onNavigate?: () => void, fontSize: string = text.sm): I$Node =>
+  $element('a')(
+    attr({ href }),
+    style({ color: colorShade(palette.message, 85), fontSize, cursor: 'pointer' }),
+    stylePseudo(':hover', { color: palette.primary }),
+    effectProp(
+      'onclick',
+      nowWith(() => (ev: MouseEvent) => {
+        if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return
+        ev.preventDefault()
+        pushUrl(href)
+        onNavigate?.()
+      })
+    )
+  )($text(label))
+
 export const $separator = $node(style({ color: palette.foreground, pointerEvents: 'none' }))($text('|'))
 export const $responsiveFlex = isDesktopScreen ? $row(spacing.default) : $column(spacing.small, style({ flex: 1 }))
 
-export const $labeledDivider = (label: string | I$Node, displayIcon = true) => {
-  return $row(spacing.default, style({ placeContent: 'center', alignItems: 'center' }))(
-    $column(style({ flex: 1, borderBottom: `1px solid ${colorShade(palette.foreground, 40)}` }))(),
-    $row(spacing.small, style({ alignItems: 'center' }))(
-      isStream(label) ? label : $node(style({ fontSize: text.sm }))($text(label)),
-      displayIcon
-        ? $icon({ $content: $caretDblDown, width: '10px', viewBox: '0 0 32 32', fill: palette.foreground })
-        : empty
-    ),
-    $column(style({ flex: 1, borderBottom: `1px solid ${colorShade(palette.foreground, 40)}` }))()
-  )
-}

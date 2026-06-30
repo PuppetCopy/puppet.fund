@@ -48,32 +48,6 @@ library AccountLib {
         return _predicted;
     }
 
-    function fundArgs(
-        address _attest,
-        address _signer
-    ) internal pure returns (bytes memory) {
-        return abi.encodePacked(_attest, _signer);
-    }
-
-    function predictFund(
-        address _impl,
-        address _attest,
-        address _signer
-    ) internal view returns (address) {
-        bytes memory _args = fundArgs(_attest, _signer);
-        return LibClone.predictDeterministicAddress(_impl, _args, keccak256(_args), address(this));
-    }
-
-    function verifyFund(
-        address _impl,
-        address _attest,
-        address _signer
-    ) internal view returns (address) {
-        address _predicted = predictFund(_impl, _attest, _signer);
-        if (_predicted.code.length == 0) revert Error.Account__NotDeployed(_predicted);
-        return _predicted;
-    }
-
     function verifyDeployAuth(
         address _user,
         address _signer,

@@ -1,5 +1,6 @@
 import { CHAIN_NETWORK_MAP, HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { type ChainId, VIEM_CHAINS } from '@puppet/sdk/const'
+import { rpcTransport } from '@puppet/sdk/state'
 import {
   type Config,
   type Connector,
@@ -18,21 +19,26 @@ import {
 } from '@wagmi/core'
 import type { IStream } from 'aelea/stream'
 import { fromCallback } from 'aelea/stream-extended'
-import { type Chain, fallback, http, type PublicClient } from 'viem'
+import type { PublicClient, Transport } from 'viem'
 
 export const WALLETCONNECT_PROJECT_ID = '37a9b5a1299a3d3d2ddecf4f022030f5'
 
-const proxyTransport = (slug: string, chain: Chain) =>
-  fallback([http(`/api/rpc?network=${slug}`, { batch: true }), http(chain.rpcUrls.default.http[0], { batch: true })])
+// Per-chain public transport: the same-origin /api/rpc proxy (resolved absolute against the page origin, since viem's
+// http transport rejects a bare relative path) handed to the shared rpcTransport, which trails the chain's viem default.
+// Exported so plain viem clients (io/chain/balances) reuse the exact transport wagmi uses.
+export const publicTransports = Object.fromEntries(
+  VIEM_CHAINS.map(chain => [
+    chain.id,
+    rpcTransport(new URL(`/api/rpc?network=${CHAIN_NETWORK_MAP[chain.id]}`, location.origin).href, chain.id)
+  ])
+) as Record<ChainId, Transport>
 
 export const wagmi: Config = createConfig({
   chains: VIEM_CHAINS,
   connectors: [],
   storage: createStorage({ storage: localStorage }),
   syncConnectedChain: true,
-  transports: Object.fromEntries(
-    VIEM_CHAINS.map(chain => [chain.id, proxyTransport(CHAIN_NETWORK_MAP[chain.id], chain)])
-  ) as Record<ChainId, ReturnType<typeof proxyTransport>>
+  transports: publicTransports
 })
 
 // wagmi persists connection state to storage but drops `status` on rehydrate (it "messes
@@ -70,6 +76,8 @@ export async function connectWallet(preferredConnectorId?: string): Promise<Conn
 }
 
 export async function disconnect() {
+  const { hasActiveWcSession } = await import('./walletLinkState.js')
+  if (hasActiveWcSession()) await import('./walletKitConnect.js').then(m => m.teardownAllWc()).catch(() => {})
   const current = getConnection(wagmi)
   if (current.connector) await wagmiDisconnect(wagmi, { connector: current.connector })
 }

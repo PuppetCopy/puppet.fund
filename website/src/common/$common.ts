@@ -1,6 +1,7 @@
 import {
   dustToZeroUsd,
   getMappedValueFallback,
+  getRegisteredTokenDescription,
   type ITokenDescription,
   readableDate,
   readableLeverage,
@@ -13,6 +14,7 @@ import type { IBehavior, IComposeBehavior } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, type INode, nodeEvent, style, styleInline } from 'aelea/ui'
 import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
+import { getAddress } from 'viem'
 import type { Address } from 'viem/accounts'
 import {
   $errorCard,
@@ -28,7 +30,7 @@ import {
 } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
 import { $accountLabel } from '../components/$AccountProfile.js'
-import { latestPriceMap } from '../io/gmx/priceFeed.js'
+import { priceFor } from '../io/gmx/priceFeed.js'
 import { $separator2 } from '../pages/common.js'
 import type { IPosition } from '../pages/types.js'
 import { isPositionSettled } from '../utils/utils.js'
@@ -129,7 +131,7 @@ export const $tokenIcon = (tokenDesc: ITokenDescription, size = '32px', color = 
 }
 
 export const $tokenIconByAddress = (tokenAddress: Address, size = '24px') => {
-  const tokenDesc = getTokenDescription(tokenAddress)
+  const tokenDesc = getRegisteredTokenDescription(tokenAddress)
 
   if (!tokenDesc) {
     // Fallback to unknown icon if token not found
@@ -217,10 +219,7 @@ export const $winRateDisplay = (wins: number, losses: number) => {
 
 export const $openPositionBreakdown = (pos: IPosition) => {
   const indexToken = pos.indexToken
-  const latestPrice = map((pm: any) => {
-    const price = pm[indexToken]
-    return price && typeof price === 'object' && 'max' in price ? price.max : 0n
-  }, latestPriceMap)
+  const latestPrice = priceFor(getAddress(indexToken))
 
   const totalPositionFeeAmount = 0n
   const totalBorrowingFeeAmount = 0n
@@ -239,7 +238,7 @@ export const $openPositionBreakdown = (pos: IPosition) => {
       $node(style({ color: palette.foreground, flex: 1 }))($text('Open Pnl')),
       $pnlDisplay(
         map(markPrice => {
-          return getPositionPnlUsd(pos.isLong, pos.lastUpdate.sizeInUsd, pos.lastUpdate.sizeInTokens, markPrice)
+          return getPositionPnlUsd(pos.isLong, pos.lastUpdate.sizeInUsd, pos.lastUpdate.sizeInTokens, markPrice ?? 0n)
         }, latestPrice)
       )
     ),
@@ -269,18 +268,19 @@ interface I$MasterDisplay {
   ensName?: string | null
   ensNameStream?: IStream<string | null>
   avatarSeed?: Address
+  traits?: Record<string, string>
   puppetList: Address[]
   labelSize?: number
   profileSize?: number
 }
 export const $MasterDisplay = (config: I$MasterDisplay) =>
   component(([click, clickTether]: IBehavior<any, Address>) => {
-    const { address, ensName, ensNameStream, avatarSeed, puppetList, labelSize, profileSize = 50 } = config
+    const { address, ensName, ensNameStream, avatarSeed, traits, puppetList, labelSize, profileSize = 50 } = config
 
     return [
       $Link({
         $content: $row(spacing.small, style({ alignItems: 'center', textDecoration: 'none', minWidth: '0' }))(
-          $roboAvatar(avatarSeed ?? address, profileSize),
+          $roboAvatar(avatarSeed ?? address, profileSize, traits),
           labelSize === undefined || labelSize > 0
             ? $column(style({ gap: '3px', minWidth: '0' }))(
                 $accountLabel({

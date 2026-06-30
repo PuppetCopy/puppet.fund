@@ -2,8 +2,8 @@ import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
-  IRedeem__LiquidateIntent,
-  IShareLib__ShareInitParams
+  IFundAccountLib__FundAccountInitParams,
+  IRedeem__LiquidateIntent
 } from '@puppet/contracts/types'
 import { type Address, isAddressEqual, type TypedDataDefinition } from 'viem'
 import { predictPuppetAccount, predictShareToken } from '../account/index.js'
@@ -18,17 +18,17 @@ export interface ILiquidateInput {
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
-  share: IShareLib__ShareInitParams
+  fundParams: IFundAccountLib__FundAccountInitParams
   acceptableNetAssetValue: bigint
 }
 
-export interface ILiquidateAttestContext extends IDraftContext {
+interface ILiquidateAttestContext extends IDraftContext {
   currentBlock: bigint
   shareToken: Address | null
-  closeRate: bigint
+  liquidationRate: bigint
   totalShareSupply: bigint
   queuedShares: bigint
-  poolTotalStake: bigint
+  poolWeight: bigint
   signedBalance: bigint
 }
 
@@ -36,7 +36,7 @@ export function attestLiquidateIntent(ctx: ILiquidateAttestContext, input: ILiqu
   IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
-    baseTokenId: input.share.baseTokenId,
+    baseToken: input.fundParams.baseToken,
     lookupChain: HUB_CHAIN_ID,
     capAmount: 0n,
     acceptableRelayFee: input.acceptableRelayFee,
@@ -44,16 +44,13 @@ export function attestLiquidateIntent(ctx: ILiquidateAttestContext, input: ILiqu
   })
 
   if (input.acceptableNetAssetValue === 0n) throw new CompactContractError('Redeem__ZeroAcceptableNav', [])
-  if (ctx.closeRate !== 0n) throw new CompactContractError('Share__FundClosed', [])
+  if (ctx.liquidationRate !== 0n) throw new CompactContractError('Share__FundLiquidated', [])
 
   const master = predictPuppetAccount(input.params)
-  if (!isAddressEqual(master, input.share.master)) {
-    throw new CompactContractError('Share__MasterMismatch', [master, input.share.master])
+  if (!isAddressEqual(master, input.fundParams.master)) {
+    throw new CompactContractError('Share__MasterMismatch', [master, input.fundParams.master])
   }
-  if (
-    ctx.shareToken === null ||
-    !isAddressEqual(predictShareToken(input.share.master, input.share.baseTokenId, input.share.name), ctx.shareToken)
-  ) {
+  if (ctx.shareToken === null || !isAddressEqual(predictShareToken(input.fundParams), ctx.shareToken)) {
     throw new CompactContractError('Share__NotCreated', [])
   }
   if (ctx.totalShareSupply === 0n) throw new CompactContractError('Redeem__NothingToRetire', [])
@@ -62,11 +59,11 @@ export function attestLiquidateIntent(ctx: ILiquidateAttestContext, input: ILiqu
   }
   const netDrained = input.acceptableNetAssetValue - input.acceptableRelayFee
   if (factor(netDrained, ctx.totalShareSupply) === 0n) {
-    throw new CompactContractError('Share__CreditTooSmall', [])
+    throw new CompactContractError('Redeem__LiquidationRateTooSmall', [])
   }
   if (ctx.queuedShares > 0n) {
     const queueSlice = (ctx.queuedShares * netDrained) / ctx.totalShareSupply
-    if (queueSlice > 0n && factor(queueSlice, ctx.poolTotalStake) === 0n) {
+    if (queueSlice > 0n && factor(queueSlice, ctx.poolWeight) === 0n) {
       throw new CompactContractError('Share__CreditTooSmall', [])
     }
   }
@@ -79,7 +76,7 @@ export function attestLiquidateIntent(ctx: ILiquidateAttestContext, input: ILiqu
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: BigInt(ctx.chainId),
-    share: input.share,
+    fundParams: input.fundParams,
     acceptableNetAssetValue: input.acceptableNetAssetValue
   }
 

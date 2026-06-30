@@ -3,14 +3,14 @@ import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
   IAllocate__AllocateIntent,
-  IShareLib__ShareInitParams
+  IFundAccountLib__FundAccountInitParams
 } from '@puppet/contracts/types'
 import { type Address, encodePacked, type Hex, isAddressEqual, keccak256, type TypedDataDefinition } from 'viem'
 import { predictPuppetAccount } from '../account/index.js'
 import { CompactContractError } from '../compact/error.js'
 import { sharesFor } from '../core/math.js'
 import * as IntentLib from './intentLib.js'
-import { HUB_DOMAIN, type IDraftContext } from './shared.js'
+import { HUB_DOMAIN, type IDeployProof, type IDraftContext } from './shared.js'
 
 export interface IAllocateRulePosition {
   puppet: Hex
@@ -18,9 +18,9 @@ export interface IAllocateRulePosition {
   mandate: Hex
 }
 
-export interface IAllocateInput {
+export interface IAllocateInput extends IDeployProof {
   params: IAccountLib__AccountInitParams
-  share: IShareLib__ShareInitParams
+  fundParams: IFundAccountLib__FundAccountInitParams
   blockNumber: bigint
   deadline: bigint
   acceptableRelayFee: bigint
@@ -29,38 +29,41 @@ export interface IAllocateInput {
   totalShareSupply: bigint
   masterAmount: bigint
   puppetList: Address[]
-  matchedAmountList: bigint[]
+  allocatedAmountList: bigint[]
 }
 
-export interface IAllocateAttestContext extends IDraftContext {
+interface IAllocateAttestContext extends IDraftContext {
   currentBlock: bigint
   totalShareSupply: bigint
   seeded: boolean
-  poolTotalStake: bigint
+  liquidationRate: bigint
+  poolWeight: bigint
   positions: readonly IAllocateRulePosition[]
 }
 
 export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAllocateInput) {
+  const totalAllocated = input.allocatedAmountList.reduce((sum, a) => sum + a, 0n)
   IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
-    baseTokenId: input.share.baseTokenId,
+    baseToken: input.fundParams.baseToken,
     lookupChain: HUB_CHAIN_ID,
-    capAmount: input.masterAmount,
+    capAmount: input.masterAmount + totalAllocated,
     acceptableRelayFee: input.acceptableRelayFee
   })
 
   if (input.acceptableNetAssetValue === 0n) throw new CompactContractError('Allocate__ZeroAcceptableNav', [])
+  if (ctx.liquidationRate !== 0n) throw new CompactContractError('Share__FundLiquidated', [])
   const derivedMaster = predictPuppetAccount(input.params)
-  if (!isAddressEqual(derivedMaster, input.share.master)) {
-    throw new CompactContractError('Share__MasterMismatch', [derivedMaster, input.share.master])
+  if (!isAddressEqual(derivedMaster, input.fundParams.master)) {
+    throw new CompactContractError('Share__MasterMismatch', [derivedMaster, input.fundParams.master])
   }
   const n = input.puppetList.length
-  if (input.matchedAmountList.length !== n) {
+  if (input.allocatedAmountList.length !== n) {
     throw new CompactContractError('Allocate__ListLengthMismatch', [BigInt(n), BigInt(n), BigInt(n)])
   }
 
-  if (ctx.totalShareSupply === 0n && ctx.seeded && ctx.poolTotalStake > 0n)
+  if (ctx.totalShareSupply === 0n && ctx.seeded && ctx.poolWeight > 0n)
     throw new CompactContractError('Share__Empty', [])
 
   if (ctx.totalShareSupply !== input.totalShareSupply) {
@@ -79,11 +82,10 @@ export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAlloca
     if (ownerNewShares === 0n) effectiveMasterAmount = 0n
   }
 
-  const totalMatched = input.matchedAmountList.reduce((sum, a) => sum + a, 0n)
-  if (effectiveMasterAmount === 0n && totalMatched === 0n) {
+  if (effectiveMasterAmount === 0n && totalAllocated === 0n) {
     throw new CompactContractError('Allocate__ZeroAmount', [])
   }
-  IntentLib.verifyRelayFee(input.acceptableRelayFee, effectiveMasterAmount + totalMatched)
+  IntentLib.verifyRelayFee(input.acceptableRelayFee, effectiveMasterAmount + totalAllocated)
 
   const byPuppet = new Map<string, { body: Hex; mandate: Hex }>()
   for (const row of ctx.positions) {
@@ -104,22 +106,22 @@ export function attestAllocateIntent(ctx: IAllocateAttestContext, input: IAlloca
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: BigInt(ctx.chainId),
-    share: input.share,
+    fundParams: input.fundParams,
     acceptableNetAssetValue: input.acceptableNetAssetValue,
     totalShareSupply: input.totalShareSupply,
     masterAmount: input.masterAmount,
     puppetList: input.puppetList,
-    matchedAmountList: input.matchedAmountList
+    allocatedAmountList: input.allocatedAmountList
   }
 
-  const { puppetList, matchedAmountList, ...rest } = intent
+  const { puppetList, allocatedAmountList, ...rest } = intent
   const typedData: TypedDataDefinition = {
     domain: HUB_DOMAIN,
     ...HUB_GATE_INTENTS.allocate,
     message: {
       ...rest,
       puppetListHash: keccak256(encodePacked(['address[]'], [puppetList])),
-      matchedAmountListHash: keccak256(encodePacked(['uint256[]'], [matchedAmountList]))
+      allocatedAmountListHash: keccak256(encodePacked(['uint256[]'], [allocatedAmountList]))
     }
   }
   return { intent, typedData, args: [intent, bodyList, mandateList] }

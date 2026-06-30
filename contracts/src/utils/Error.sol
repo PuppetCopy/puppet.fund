@@ -12,7 +12,6 @@ library Error {
     error Account__NotDeployed(address predicted);
     error Share__InvalidImpl();
     error Account__InvalidUser();
-    error Account__InvalidBaseTokenId();
     error Account__InvalidSignature();
     error Account__Shortfall(address token, uint actual, uint expected);
     error Account__OutflowExceedsSigned(uint amountOut, uint signedSum);
@@ -20,7 +19,7 @@ library Error {
 
     error Route__Unauthorized();
 
-    error Deposit__ZeroAmount();
+    error Balance__ZeroAmount();
 
     error Module__InvalidAuthority();
     error Module__CallerNotAuthority();
@@ -35,19 +34,18 @@ library Error {
     error Dictate__Unauthorized();
 
     error Register__InvalidImpl();
-    error Register__InvalidHubToken();
-    error Register__SelfHubTokenOnSpoke(uint chainId, address token);
-    error Register__TokenSwapForbidden(bytes32 tokenId, address registered, address attempted);
-    error Register__UnknownBaseTokenId(bytes32 baseTokenId);
+    error Register__InvalidToken();
+    error Register__UnknownToken(address token);
     error Register__WntNotSet();
+    error Register__InvalidProvider();
 
     error Gate__InvalidModule();
 
     error Intent__InvalidChainId(uint signed, uint expected);
     error Intent__StaleSignature(uint signedBlock, uint currentBlock, uint maxBlockDelay);
     error Intent__ExpiredDeadline(uint deadline, uint currentTimestamp);
-    error Intent__TokenNotRegistered(bytes32 baseTokenId);
-    error Intent__TokenMismatch(bytes32 baseTokenId, address expected, address actual);
+    error Intent__TokenNotRegistered(address token);
+    error Intent__ProviderNotAllowed(address provider);
     error Intent__AmountExceedsCap(uint amount, uint cap);
     error Intent__RelayFeeExceedsCap(uint actual, uint cap);
     error Intent__RelayFeeRatioExceeded(uint actual, uint amount, uint maxBps);
@@ -58,40 +56,40 @@ library Error {
     error Allocate__PuppetListNotSorted(address prev, address curr);
     error Allocate__ListLengthMismatch(uint puppetsLen, uint bodiesLen, uint sigsLen);
 
-    error Subscribe__EmptyRules();
-    error Subscribe__FundListNotSorted(address prev, address curr);
-    error Subscribe__SelfSubscribe(address user);
+    error Mandate__EmptyRules();
+    error Mandate__FundListNotSorted(address prev, address curr);
+    error Mandate__SelfFund(address user);
 
     error Share__ZeroShares();
-    error Share__ZeroStakeAdded();
+    error Share__ZeroWeightAdded();
     error Share__MasterCannotSell();
     error Share__Empty();
-    error Share__InsufficientClaimable();
     error Share__RelayFeeTooHigh();
-    error Share__NoStakeToCredit();
+    error Share__NoWeightToCredit();
     error Share__CreditTooSmall();
     error Share__PoolDegraded();
-    error Share__FundClosed();
+    error Share__FundLiquidated();
     error Share__NotCreated();
     error Share__MasterMismatch(address derived, address declared);
 
     error Redeem__ZeroAcceptableNav();
     error Redeem__NothingToRetire();
     error Redeem__RelayFeeTooHigh();
-    error Redeem__MasterFractionDecreased();
+    error Redeem__MasterSkinTooLow();
     error Redeem__DrainExceedsQueue();
+    error Redeem__LiquidationRateTooSmall();
 
     error ShareToken__NotIssuer();
     error ShareToken__NotHubChain(uint expected, uint current);
 
-    error Deposit__NothingToWithdraw();
-    error Deposit__NothingToRecord();
-    error Deposit__NothingToBridge();
-    error Deposit__InsufficientBalance(uint balance, uint required);
-    error Deposit__RelayFeeTooHigh();
-    error Deposit__ZeroBridgeOutput();
-    error Deposit__SameChainBridge(uint destinationChainId);
-    error Deposit__InvalidDestinationChain(uint expected, uint provided);
+    error Balance__NothingToWithdraw();
+    error Balance__InvalidWithdraw();
+    error Balance__NothingToRecord();
+    error Balance__NothingToSwap();
+    error Balance__InsufficientBalance(uint balance, uint required);
+    error Balance__RelayFeeTooHigh();
+    error Balance__ZeroSwapOutput();
+    error Balance__InvalidDestinationChain(uint expected, uint provided);
 
     error TransferUtils__TokenTransferError(IERC20 token, address receiver, uint amount);
     error TransferUtils__TokenTransferFromError(IERC20 token, address from, address to, uint amount);

@@ -1,10 +1,13 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { predictFundAccount, predictPuppetAccount } from '@puppet/sdk/account'
-import type { IntervalTime } from '@puppet/sdk/const'
-import { ignoreAll } from '@puppet/sdk/core'
-import { getWalletState, type IAccountBalanceRow, type ISubaccountState, selectOne } from '@puppet/sdk/state'
+import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
+import type { IFundAccountLib__FundAccountInitParams } from '@puppet/contracts/types'
+import { predictFundAccount, predictPuppetAccount, predictShareToken } from '@puppet/sdk/account'
+import type { ChainId, IntervalTime } from '@puppet/sdk/const'
+import { ignoreAll, sharesFor } from '@puppet/sdk/core'
+import { accountIdentityTable, type IFund } from '@puppet/sdk/schema'
+import type { IAccountBalanceRow, ISubaccountState } from '@puppet/sdk/state'
 import {
   awaitPromises,
+  combine,
   filter,
   type IStream,
   just,
@@ -21,11 +24,11 @@ import {
   tap
 } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
-import { $node, $text, $wrapNativeElement, component, style } from 'aelea/ui'
-import { $column, designSheet, isMobileScreen, spacing } from 'aelea/ui-components'
+import { $node, $text, $wrapNativeElement, component, effectRun, style, styleBehavior } from 'aelea/ui'
+import { $column, designSheet, isMobileScreen, observer, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { contains, locationChange, match } from 'aelea/ui-router'
-import { getAddress, type Hex } from 'viem'
+import { getAddress, type Hex, isAddressEqual } from 'viem'
 import type { Address } from 'viem/accounts'
 import { $alertPositiveContainer, $ButtonSecondary, $defaultMiniButtonSecondary, fadeIn } from '@/ui-components'
 import { uiStorage } from '@/ui-storage'
@@ -43,16 +46,22 @@ import type {
   IAllocateDraft,
   IClaimDraft,
   IDepositDraft,
+  IFundSwapDraft,
+  IRecognizeFundDraft,
   IRedeemDraft,
   ISellDraft,
   ISubscribeDraft,
-  ISwapDraft,
   IWithdrawDraft
 } from '../components/portfolio/draft.js'
 import { computeSignedDelta, type IAttestation } from '../components/portfolio/runner/steps.js'
-import { fetchUserSubscriptions } from '../io/indexer/query.js'
-import { sqlClient } from '../io/indexer/sql.js'
-import { type IConnectedWallet, walletQuery } from '../wallet/index.js'
+import context from '../io/context.js'
+import { fetchUserSubscriptions } from '../io/datastore/query.js'
+import { client } from '../io/matchmaker/reads.js'
+import { readWalletState } from '../io/matchmaker/walletState.js'
+import { readSignedBalance } from '../io/onchain/account.js'
+import { setViewCacheOwner } from '../io/onchain/viewRead.js'
+import { enableSmoothScroll } from '../utils/smoothScroll.js'
+import { walletQuery } from '../wallet/index.js'
 import { $Home } from './$Home.js'
 import { $Leaderboard } from './$Leaderboard.js'
 import { $Portfolio } from './$Portfolio.js'
@@ -60,27 +69,49 @@ import { $PublicFundPage } from './$PublicFundPage.js'
 
 interface IApp {}
 
-const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'redeem', 'liquidate', 'createFundAccount'])
-
-const PA_CREDIT_REFRESH: ReadonlySet<string> = new Set(['sell', 'claim', 'redeem', 'liquidate'])
+const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'redeem', 'liquidate'])
 
 const ZERO_TOKEN = '0x0000000000000000000000000000000000000000' as Address
 
+// Fund-routed requests settle against the fund account, derived from input.fundParams under
+// multi-key CREATE2; everything else settles on the puppet account.
 function accountForRequest(req: IAttestation['request']): Address {
-  const account = predictPuppetAccount((req.input as { params: { user: Address; signer: Address } }).params)
-  return FUND_ROUTED.has(req.kind) ? predictFundAccount(account) : account
+  const input = req.input as {
+    params: { user: Address; signer: Address }
+    fundParams?: IFundAccountLib__FundAccountInitParams
+  }
+  if (FUND_ROUTED.has(req.kind)) {
+    if (!input.fundParams) throw new Error(`fund-routed ${req.kind} missing fundParams`)
+    return predictFundAccount(input.fundParams)
+  }
+  return predictPuppetAccount(input.params)
 }
 
-function stubBalanceRow(account: Address, chainId: bigint, tokenId: Hex, signedBalance: bigint): IAccountBalanceRow {
+function stubBalanceRow(account: Address, chainId: bigint, token: Address, signedBalance: bigint): IAccountBalanceRow {
   return {
-    id: `${chainId}-${account}-${tokenId}:0`,
+    id: `${chainId}-${account}-${token}:0`,
     account,
     chainId,
-    tokenId,
+    token,
     blockNumber: 0n,
     blockTimestamp: 0,
-    signedBalance,
-    recordedBalance: signedBalance
+    signedBalance
+  }
+}
+
+// The AUM a fund-routed action optimistically moves: allocate adds the base in, redeem/liquidate drain it out, operate is
+// NAV-neutral. Supply is then scaled to hold NAV, mirroring the contract's allocate/redeem math (reload reconciles exact).
+function fundAumDelta(request: IAttestation['request'], actualRelayFee: bigint, aum: bigint): bigint {
+  const intent = request.intent as unknown as { assetsOut?: bigint }
+  switch (request.kind) {
+    case 'allocate':
+      return computeSignedDelta(request, actualRelayFee)
+    case 'redeem':
+      return -(intent.assetsOut ?? 0n)
+    case 'liquidate':
+      return -aum
+    default:
+      return 0n
   }
 }
 
@@ -88,28 +119,80 @@ function applyWalletAttest(state: ISubaccountState | null, settled: IAttestation
   if (state === null) return null
   const { request, result } = settled
   const target = accountForRequest(request)
-  if (target !== state.account) return { ...state, lastTransactionHash: result.txHash }
+  if (target !== state.account) {
+    // Fund-routed op (allocate/operate/redeem/liquidate). All run on the hub, so a successful one means the PA is now
+    // deployed there — mark it so the FA card flips off "Fund will be created" at $0.00 on the ACK (a reload reconciles
+    // exactly against the fold). The optimistic AUM nudge below keeps the card honest until then.
+    const chains = state.chains.has(HUB_CHAIN_ID)
+      ? state.chains
+      : new Map(state.chains).set(HUB_CHAIN_ID, {
+          account: state.account,
+          chainId: BigInt(HUB_CHAIN_ID),
+          isFund: state.isFund,
+          user: state.user,
+          signer: state.signer
+        })
+    const seedNav = PRECISION.floatPrecisionExp / PRECISION.sharePrecisionExp
+    const fund = state.funds.find(f => isAddressEqual(f.fund as Address, target))
+    if (!fund) {
+      // First allocation creates the fund — it is not in the root yet. Seed it (AUM = the allocated base, first-mint
+      // supply) so the card shows a real AUM. Only allocate can target a fund that does not exist yet.
+      const fundParams = (request.input as { fundParams?: IFundAccountLib__FundAccountInitParams }).fundParams
+      const seedAum = fundAumDelta(request, result.actualRelayFee, 0n)
+      if (request.kind !== 'allocate' || !fundParams || seedAum <= 0n)
+        return { ...state, chains, lastTransactionHash: result.txHash }
+      const newFund: IFund = {
+        id: getAddress(target),
+        fund: getAddress(target),
+        shareToken: predictShareToken(fundParams),
+        baseToken: fundParams.baseToken,
+        name: fundParams.name,
+        master: getAddress(state.account),
+        totalAllocated: seedAum,
+        totalShareSupply: sharesFor(0n, 0n, seedAum),
+        queuedShares: 0n,
+        epoch: 0n,
+        accruedPerWeight: 0n,
+        weight: 0n,
+        liquidationRate: 0n,
+        navPerShare: seedNav,
+        seeded: true
+      }
+      return { ...state, funds: [...state.funds, newFund], chains, lastTransactionHash: result.txHash }
+    }
+    // Existing fund (incl. one already in the root but not yet seeded): nudge supply to hold NAV across the action. Seed
+    // navPerShare when the row is unseeded (nav 0) so the AUM is non-zero and sharesFor never divides by a zero NAV.
+    const nav = fund.navPerShare > 0n ? fund.navPerShare : seedNav
+    const aum = (fund.totalShareSupply * nav) / PRECISION.floatPrecisionExp
+    if (aum === 0n && fund.totalShareSupply > 0n) return { ...state, chains, lastTransactionHash: result.txHash }
+    const minted = sharesFor(fund.totalShareSupply, aum, fundAumDelta(request, result.actualRelayFee, aum))
+    const supply = fund.totalShareSupply + minted > 0n ? fund.totalShareSupply + minted : 0n
+    const funds = state.funds.map(f =>
+      isAddressEqual(f.fund as Address, target) ? { ...f, totalShareSupply: supply, navPerShare: nav } : f
+    )
+    return { ...state, funds, chains, lastTransactionHash: result.txHash }
+  }
   const chainId = (request.intent as { chainId: bigint }).chainId
   const nonce = (request.intent as { nonce: bigint }).nonce
-  const tokenId = settled.tokenId
+  const token = settled.token
   const delta = computeSignedDelta(request, result.actualRelayFee)
-  const existing = state.balances.get(tokenId)
+  const existing = state.balances.get(token)
   const nextBalance: IAccountBalanceRow = existing
     ? { ...existing, signedBalance: existing.signedBalance + delta }
-    : stubBalanceRow(state.account, chainId, tokenId, delta)
+    : stubBalanceRow(state.account, chainId, token, delta)
   const balances = new Map(state.balances)
-  balances.set(tokenId, nextBalance)
+  balances.set(token, nextBalance)
   return { ...state, balances, lastNonce: nonce, lastTransactionHash: result.txHash }
 }
 
-type IBalanceRefresh = { refresh: true; tokenId: Hex; row: IAccountBalanceRow }
+type IBalanceRefresh = { refresh: true; token: Hex; row: IAccountBalanceRow }
 type IRootFold = IAttestation | IBalanceRefresh
 
 function applyRootFold(state: ISubaccountState | null, fold: IRootFold): ISubaccountState | null {
   if (!('refresh' in fold)) return applyWalletAttest(state, fold)
   if (state === null) return null
   const balances = new Map(state.balances)
-  balances.set(fold.tokenId, fold.row)
+  balances.set(fold.token, fold.row)
   return { ...state, balances }
 }
 
@@ -120,16 +203,18 @@ export const $Main = (_config: IApp = {}) =>
 
       [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<IntervalTime>,
       [selectCollateralTokenList, selectCollateralTokenListTether]: IBehavior<Address[]>,
+      [changeHideBalances, changeHideBalancesTether]: IBehavior<boolean>,
 
       [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>,
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
       [changeAllocateDraft, changeAllocateDraftTether]: IBehavior<IAllocateDraft>,
+      [changeSwapDraft, changeSwapDraftTether]: IBehavior<IFundSwapDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
-      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft>,
-      [changeSwapDraft, changeSwapDraftTether]: IBehavior<ISwapDraft>,
+      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft | IRecognizeFundDraft>,
       [clearDrafts, clearDraftsTether]: IBehavior<null>,
       [releaseDraft, releaseDraftTether]: IBehavior<string>,
-      [changeAttest, changeAttestTether]: IBehavior<IAttestation>
+      [changeAttest, changeAttestTether]: IBehavior<IAttestation>,
+      [drawerSize, drawerSizeTether]: IBehavior<any, number>
     ) => {
       const activityTimeframe = uiStorage.replayWrite(
         localStoreSchema.global.activityTimeframe,
@@ -139,39 +224,58 @@ export const $Main = (_config: IApp = {}) =>
         localStoreSchema.global.collateralTokenList,
         selectCollateralTokenList
       )
-
-      const loadWalletState = async (wallet: IConnectedWallet | null): Promise<ISubaccountState | null> => {
-        if (!wallet) return null
-        const signer = wallet.session?.signer ?? (await recoverDeployedSigner(wallet.address))
-        if (!signer) return null
-        return getWalletState(sqlClient, { user: wallet.address, signer })
-      }
+      const hideBalances = state(false, uiStorage.replayWrite(localStoreSchema.global.hideBalances, changeHideBalances))
 
       const recoverDeployedSigner = async (user: Address): Promise<Address | undefined> => {
-        const row = await selectOne(sqlClient, 'Account__DeployPuppetAccount', {
-          where: { user: { _eq: getAddress(user) } },
-          fields: ['signer']
-        })
-        return row?.signer as Address | undefined
+        const rows = await client.select(accountIdentityTable, { where: { user: getAddress(user) } })
+        return rows[0]?.signer as Address | undefined
       }
 
       const walletState: IStream<ISubaccountState | null> = op(
         walletQuery,
         switchMap(async walletPromise => {
-          const initial = await loadWalletState(await walletPromise)
+          const wallet = await walletPromise
+          setViewCacheOwner(wallet?.address ?? null)
+          const signer = wallet ? (wallet.session?.signer ?? (await recoverDeployedSigner(wallet.address))) : undefined
+          const initial =
+            wallet && signer
+              ? await readWalletState(await context.getTokenRegistry(), { user: wallet.address, signer })
+              : null
           const refreshFolds: IStream<IRootFold> = op(
             changeAttest,
             map(async (settled): Promise<IBalanceRefresh | null> => {
-              if (initial === null || !PA_CREDIT_REFRESH.has(settled.request.kind)) return null
-              const row = await selectOne(sqlClient, 'AccountBalanceCheckpoint', {
-                where: {
-                  account: { _eq: initial.account },
-                  chainId: { _eq: BigInt(HUB_CHAIN_ID) },
-                  tokenId: { _eq: settled.tokenId }
-                },
-                orderBy: { blockTimestamp: 'desc' }
-              })
-              return row ? { refresh: true, tokenId: settled.tokenId, row } : null
+              if (initial === null) return null
+              // Reconcile the SETTLED account's token after the tx mines: re-read signedBalanceOf with the SW view-cache
+              // busted (refresh), which re-warms it to the confirmed on-chain value (incl. 0 on a full drain). The settled
+              // account is the PA for wallet actions, or the master's FUND account for fund-routed ops (operate/allocate/
+              // redeem/liquidate) — so a master operating his fund busts the FA cache too, even when the fund view isn't
+              // mounted. A failed read just skips this cycle (the optimistic overlay already applied).
+              const target = accountForRequest(settled.request)
+              const chainId = Number((settled.request.intent as { chainId: bigint }).chainId) as ChainId
+              // Bust the settled account's view cache (fund view freshness on fund-routed ops).
+              const targetSigned = await readSignedBalance(target, chainId, settled.token, true).catch(() => null)
+              // Only the PA's own balances live in the root state. Most actions settle on the PA (target === account).
+              // redeem/liquidate are fund-routed (target = the fund) yet PAY the master PA its claim, so the balance to
+              // fold into the root is the PA's, not the fund's — re-read it fresh too, else the received funds never
+              // surface until reload.
+              const creditsPuppetAccount = settled.request.kind === 'redeem' || settled.request.kind === 'liquidate'
+              const foldAccount = target === initial.account ? target : creditsPuppetAccount ? initial.account : null
+              if (foldAccount === null) return null
+              const signed =
+                foldAccount === target
+                  ? targetSigned
+                  : await readSignedBalance(foldAccount, chainId, settled.token, true).catch(() => null)
+              if (signed === null) return null
+              const row: IAccountBalanceRow = {
+                id: `${chainId}-${foldAccount}-${settled.token}`,
+                chainId: BigInt(chainId),
+                account: foldAccount,
+                token: settled.token,
+                blockNumber: 0n,
+                blockTimestamp: 0,
+                signedBalance: signed
+              }
+              return { refresh: true, token: settled.token, row }
             }),
             awaitPromises,
             filter((r): r is IBalanceRefresh => r !== null)
@@ -190,8 +294,12 @@ export const $Main = (_config: IApp = {}) =>
 
       const userMatchingRuleQuery = op(
         sampleMap(
-          (root: ISubaccountState | null) => (root ? fetchUserSubscriptions(root.account) : Promise.resolve([])),
-          walletState,
+          async (account: Address | null) =>
+            account ? fetchUserSubscriptions(await context.getTokenRegistry(), account) : [],
+          op(
+            walletState,
+            map(root => root?.account ?? null)
+          ),
           merge(
             op(
               walletState,
@@ -200,7 +308,7 @@ export const $Main = (_config: IApp = {}) =>
             ),
             op(
               changeAttest,
-              filter(settled => settled.request.kind === 'subscribe')
+              filter(settled => settled.request.kind === 'mandate')
             )
           )
         ),
@@ -211,9 +319,10 @@ export const $Main = (_config: IApp = {}) =>
         | { type: 'set-subscribes'; list: ISubscribeRule[] }
         | { type: 'upsert'; draft: IDepositDraft | IWithdrawDraft }
         | { type: 'allocate'; draft: IAllocateDraft }
-        | { type: 'swap'; draft: ISwapDraft }
+        | { type: 'fundSwap'; draft: IFundSwapDraft }
         | { type: 'sell-claim'; draft: ISellDraft | IClaimDraft }
         | { type: 'redeem'; draft: IRedeemDraft }
+        | { type: 'recognizeFund'; draft: IRecognizeFundDraft }
         | { type: 'release'; key: string }
         | { type: 'clear' }
 
@@ -221,13 +330,14 @@ export const $Main = (_config: IApp = {}) =>
       // any fund step (which depends on puppet existing + having balance to cover fees).
       const DRAFT_SORT_KEY: Record<IDraft['kind'], number> = {
         deposit: 0,
-        subscribe: 1,
-        allocate: 2,
-        swap: 3,
-        sell: 4,
-        redeem: 5,
-        claim: 6,
-        withdraw: 7
+        recognizeFund: 1,
+        mandate: 2,
+        allocate: 3,
+        fundSwap: 4,
+        sell: 5,
+        redeem: 6,
+        claim: 7,
+        withdraw: 8
       }
       const normalizeDraftList = (list: IDraft[]): IDraft[] =>
         [...list]
@@ -249,14 +359,15 @@ export const $Main = (_config: IApp = {}) =>
                 const idx = list.findIndex(d => d.id === event.draft.id)
                 return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
               }
-              if (event.type === 'swap') {
+              if (event.type === 'fundSwap') {
                 if (event.draft.amountIn === 0n) return list.filter(d => d.id !== event.draft.id)
                 const idx = list.findIndex(d => d.id === event.draft.id)
                 return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
               }
               if (event.type === 'sell-claim') {
-                const amount = event.draft.kind === 'sell' ? event.draft.sharesOut : event.draft.amount
-                if (amount === 0n) return list.filter(d => d.id !== event.draft.id)
+                if (event.draft.kind === 'sell' && event.draft.sharesOut === 0n) {
+                  return list.filter(d => d.id !== event.draft.id)
+                }
                 const idx = list.findIndex(d => d.id === event.draft.id)
                 return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
               }
@@ -266,18 +377,23 @@ export const $Main = (_config: IApp = {}) =>
                 const idx = list.findIndex(d => d.id === event.draft.id)
                 return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
               }
+              if (event.type === 'recognizeFund') {
+                if (event.draft.surplus === 0n) return list.filter(d => d.id !== event.draft.id)
+                const idx = list.findIndex(d => d.id === event.draft.id)
+                return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
+              }
               if (event.type === 'set-subscribes') {
                 const incomingMap = new Map<string, ISubscribeDraft>(
                   event.list.map(d => {
-                    const id = `subscribe:${d.master}`
+                    const id = `mandate:${d.master}`
                     return [
                       id,
                       {
                         ...d,
-                        kind: 'subscribe' as const,
+                        kind: 'mandate' as const,
                         id,
                         account: d.master,
-                        title: d.allocationRate === 0n ? 'Unsubscribe' : 'Subscribe',
+                        title: d.allocationRate === 0n ? 'Stop funding' : 'Fund',
                         alert: null
                       }
                     ]
@@ -285,7 +401,7 @@ export const $Main = (_config: IApp = {}) =>
                 )
                 const kept: IDraft[] = []
                 for (const d of list) {
-                  if (d.kind !== 'subscribe') {
+                  if (d.kind !== 'mandate') {
                     kept.push(d)
                     continue
                   }
@@ -320,9 +436,13 @@ export const $Main = (_config: IApp = {}) =>
             map((list): DraftEvent => ({ type: 'set-subscribes', list }), changeMatchRuleList),
             map((draft): DraftEvent => ({ type: 'upsert', draft }), changeDraft),
             map((draft): DraftEvent => ({ type: 'allocate', draft }), changeAllocateDraft),
-            map((draft): DraftEvent => ({ type: 'swap', draft }), changeSwapDraft),
+            map((draft): DraftEvent => ({ type: 'fundSwap', draft }), changeSwapDraft),
             map((draft): DraftEvent => ({ type: 'sell-claim', draft }), changeRedeemDraft),
-            map((draft): DraftEvent => ({ type: 'redeem', draft }), changeFulfillDraft),
+            map(
+              (draft): DraftEvent =>
+                draft.kind === 'recognizeFund' ? { type: 'recognizeFund', draft } : { type: 'redeem', draft },
+              changeFulfillDraft
+            ),
             map((key): DraftEvent => ({ type: 'release', key }), releaseDraft),
             map((): DraftEvent => ({ type: 'clear' }), clearDrafts),
             op(
@@ -338,7 +458,7 @@ export const $Main = (_config: IApp = {}) =>
       const draftMatchingRuleList: IStream<ISubscribeRule[]> = map(
         list =>
           list
-            .filter((d): d is ISubscribeDraft => d.kind === 'subscribe')
+            .filter((d): d is ISubscribeDraft => d.kind === 'mandate')
             .map(({ kind: _kind, ...rest }) => rest as ISubscribeRule),
         draftList
       )
@@ -354,13 +474,22 @@ export const $Main = (_config: IApp = {}) =>
         list => list.filter((d): d is IAllocateDraft => d.kind === 'allocate'),
         draftList
       )
+      const draftSwapList: IStream<IFundSwapDraft[]> = map(
+        list => list.filter((d): d is IFundSwapDraft => d.kind === 'fundSwap'),
+        draftList
+      )
       const draftRedeemList: IStream<IRedeemDraft[]> = map(
         list => list.filter((d): d is IRedeemDraft => d.kind === 'redeem'),
         draftList
       )
-      const draftSwapList: IStream<ISwapDraft[]> = map(
-        list => list.filter((d): d is ISwapDraft => d.kind === 'swap'),
-        draftList
+
+      // The action drawer is fixed at the bottom and OVERLAYS the page, so it covers the tail of the scroll content.
+      // Reserve scroll space equal to its measured height (only while there are drafts) as body padding, so the user
+      // can scroll the hidden content above it; smoothScroll's content observer picks up the taller body.
+      const drawerReserve = op(
+        combine({ h: op(drawerSize, state(0)), list: draftList }),
+        map(p => (p.list.length > 0 ? Math.ceil(p.h) : 0)),
+        skipRepeats
       )
 
       return [
@@ -374,7 +503,20 @@ export const $Main = (_config: IApp = {}) =>
             display: 'flex',
             flexDirection: 'column'
           }),
-          isMobileScreen ? style({ userSelect: 'none' }) : style({})
+          isMobileScreen ? style({ userSelect: 'none' }) : style({}),
+          styleBehavior(map(px => ({ paddingBottom: `${px}px` }), drawerReserve)),
+          ...(isMobileScreen
+            ? []
+            : [
+                effectRun(() => {
+                  const dispose = enableSmoothScroll()
+                  return {
+                    [Symbol.dispose]() {
+                      dispose()
+                    }
+                  }
+                })
+              ])
         )(
           switchMap(cb => {
             return fadeIn(
@@ -415,16 +557,17 @@ export const $Main = (_config: IApp = {}) =>
             $midContainer(
               fadeIn(
                 $Home({
+                  hideBalances,
                   walletQuery,
                   walletState,
                   draftAllocateList,
-                  draftRedeemList,
-                  draftSwapList
+                  draftSwapList,
+                  draftRedeemList
                 })({
                   changeAllocateDraft: changeAllocateDraftTether(),
+                  changeSwapDraft: changeSwapDraftTether(),
                   changeRedeemDraft: changeRedeemDraftTether(),
-                  changeFulfillDraft: changeFulfillDraftTether(),
-                  changeSwapDraft: changeSwapDraftTether()
+                  changeFulfillDraft: changeFulfillDraftTether()
                 })
               )
             )
@@ -451,6 +594,7 @@ export const $Main = (_config: IApp = {}) =>
                 () =>
                   fadeIn(
                     $PublicFundPage({
+                      hideBalances,
                       userMatchingRuleQuery,
                       activityTimeframe,
                       collateralTokenList,
@@ -473,11 +617,12 @@ export const $Main = (_config: IApp = {}) =>
             $midContainer(
               fadeIn(
                 $Portfolio({
+                  hideBalances,
                   draftDepositList,
                   draftWithdrawList,
                   draftAllocateList,
-                  draftRedeemList,
                   draftSwapList,
+                  draftRedeemList,
                   draftMatchingRuleList,
                   userMatchingRuleQuery,
                   walletQuery,
@@ -487,11 +632,12 @@ export const $Main = (_config: IApp = {}) =>
                 })({
                   selectCollateralTokenList: selectCollateralTokenListTether(),
                   changeActivityTimeframe: changeActivityTimeframeTether(),
+                  changeHideBalances: changeHideBalancesTether(),
                   changeDraft: changeDraftTether(),
                   changeRedeemDraft: changeRedeemDraftTether(),
                   changeAllocateDraft: changeAllocateDraftTether(),
-                  changeFulfillDraft: changeFulfillDraftTether(),
                   changeSwapDraft: changeSwapDraftTether(),
+                  changeFulfillDraft: changeFulfillDraftTether(),
                   changeMatchRuleList: changeMatchRuleListTether()
                 })
               )
@@ -508,7 +654,11 @@ export const $Main = (_config: IApp = {}) =>
                 margin: '0 auto',
                 width: '100%',
                 zIndex: 10
-              })
+              }),
+              drawerSizeTether(
+                observer.resize(),
+                map(entries => entries[0]?.borderBoxSize?.[0]?.blockSize ?? entries[0]?.contentRect.height ?? 0)
+              )
             )(
               $ActionDrawer({ draftList, walletState })({
                 clearDrafts: clearDraftsTether(),

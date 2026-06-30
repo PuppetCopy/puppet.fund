@@ -1,9 +1,12 @@
+import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
 import { getMappedValueFallback, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
+import { wrappedNativeAddressOf } from '@puppet/sdk/state'
 import type { IStream } from 'aelea/stream'
 import { $node, $text, type I$Node, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
-import type { Address, Hex } from 'viem'
+import { type Address, formatUnits, type Hex, isAddressEqual } from 'viem'
 import { $amountDisplay, $icon, $labeledDivider, $tokenIconMap, $unknown, text } from '@/ui-components'
 import { $tokenWithChainBadge, chainName } from '../../common/$chain.js'
 
@@ -11,7 +14,7 @@ export interface ITokenInputOption {
   symbol: string
   chainId: number
   address: Address
-  tokenId: Hex
+  token: Hex
   balance: bigint | null
   decimals: number
   usdValue?: IStream<string>
@@ -29,7 +32,7 @@ export const $tokenIconBySymbol = (sym: string, size = '28px'): I$Node =>
     viewBox: '0 0 32 32'
   })
 
-export const $optionRow = (opt: ITokenInputOption): I$Node => {
+export const $optionRow = (hideBalances: IStream<boolean>, opt: ITokenInputOption): I$Node => {
   const hasBalance = opt.balance !== null && opt.balance > 0n
   const balanceText =
     opt.balance === null ? '-' : readableTokenAmountLabel({ decimals: opt.decimals, symbol: opt.symbol }, opt.balance)
@@ -55,7 +58,13 @@ export const $optionRow = (opt: ITokenInputOption): I$Node => {
       )
     ),
     opt.balance !== null && opt.usdValue
-      ? $amountDisplay({ usd: opt.usdValue, amount: balanceText, align: 'flex-end', usdFontSize: text.sm })
+      ? $amountDisplay({
+          hideBalances,
+          usd: opt.usdValue,
+          amount: balanceText,
+          align: 'flex-end',
+          usdFontSize: text.sm
+        })
       : $node(style({ fontSize: text.sm, color: palette.foreground }))($text(balanceText))
   )
   return opt.swapGroupStart
@@ -75,15 +84,25 @@ export const decorateOptionList = (
   options: ITokenInputOption[],
   selected: { chainId: number; address: Address },
   priceOf: (opt: ITokenInputOption) => bigint | null,
-  baseTokenId: Hex
+  baseToken: Address
 ): ITokenInputOption[] => {
+  // Rank on a single consistent USD scale: the relay price is decimals-adjusted (scale 30 - decimals), so
+  // balance * price is uniformly usd * 1e30 across tokens. An unpriceable token has no comparable USD value, so it
+  // sorts last (0) rather than on a different (token-amount) magnitude that would jumble the order.
   const usdOf = (opt: ITokenInputOption): number => {
     if (opt.balance === null || opt.balance === 0n) return 0
     const price = priceOf(opt)
-    if (price === null) return Number(opt.balance) / 10 ** opt.decimals
-    return Number(opt.balance * price)
+    if (price === null) return 0
+    return Number(formatUnits(opt.balance * price, USD_PRICE_DECIMALS))
   }
-  const isSwap = (opt: ITokenInputOption): number => Number(opt.tokenId !== baseTokenId)
+  // A native source on the hub whose base IS the hub wrapped-native deposits DIRECTLY (wrap via depositWnt), so it
+  // belongs in the base group, not under "Swap & Deposit" — same condition the editors use to skip the swap route.
+  const hubWnt = wrappedNativeAddressOf(HUB_CHAIN_ID)
+  const isSwap = (opt: ITokenInputOption): number =>
+    Number(
+      opt.token !== baseToken &&
+        !(opt.token === PROTOCOL.nativeToken && opt.chainId === HUB_CHAIN_ID && isAddressEqual(baseToken, hubWnt))
+    )
   options.sort(
     (a, b) => isSwap(a) - isSwap(b) || usdOf(b) - usdOf(a) || Number(a.disabled ?? false) - Number(b.disabled ?? false)
   )

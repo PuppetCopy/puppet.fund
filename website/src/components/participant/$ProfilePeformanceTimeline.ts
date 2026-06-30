@@ -8,7 +8,18 @@ import {
   readableUnitAmount,
   resampleTimeSeries
 } from '@puppet/sdk/core'
-import { combine, empty, type IStream, just, map, skipRepeatsWith, start, switchLatest, switchMap } from 'aelea/stream'
+import {
+  combine,
+  empty,
+  type IStream,
+  just,
+  map,
+  op,
+  skipRepeatsWith,
+  start,
+  switchLatest,
+  switchPromises
+} from 'aelea/stream'
 import { type IBehavior, multicast } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, motion, style } from 'aelea/ui'
 import { $column, $defaultNumberTickerSlot, $NumberTicker, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
@@ -33,6 +44,7 @@ export interface ITimelinePoint {
 }
 
 interface I$UsdTimeline {
+  hideBalances: IStream<boolean>
   timelineQuery: IStream<Promise<ITimelinePoint[]>>
   label: string
   tooltip: string
@@ -40,16 +52,19 @@ interface I$UsdTimeline {
   chartHeight?: string
   $lead?: I$Node
   $empty?: I$Node
-  aumUsd?: IStream<Promise<number>>
+  aumUsd?: IStream<number>
+  liveUsd?: IStream<number | null>
 }
 
 export const $usdTimeline = ({
+  hideBalances,
   timelineQuery,
   label,
   tooltip,
   activityTimeframe,
   chartHeight = '200px',
   aumUsd,
+  liveUsd,
   $lead = $node(style({ flex: 1 }))(),
   $empty = $row(
     spacing.tiny,
@@ -61,6 +76,88 @@ export const $usdTimeline = ({
       [crosshairMove, crosshairMoveTether]: IBehavior<MouseEventParams>,
       [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<any, IntervalTime>
     ) => {
+      // The headline value is mounted ONCE and fed by a persistent stream, so an update (e.g. a settled withdraw moving
+      // the live total) tweens old→new through motion instead of remounting the ticker on every query swap.
+      const resolvedTimeline: IStream<ITimelinePoint[]> = op(
+        map(q => q.catch(() => [] as ITimelinePoint[]), timelineQuery),
+        switchPromises,
+        start([] as ITimelinePoint[]),
+        multicast
+      )
+      const seriesLastValue = map(tl => (tl.length ? (tl[tl.length - 1].value ?? 0) : 0), resolvedTimeline)
+      // Prefer the live total when supplied (optimistic, base-token-priced) and fall back to the series' last point
+      // while it is still loading; the series alone catches up only when the timeline re-fetches.
+      const baseValue: IStream<number> = liveUsd
+        ? map(p => p.live ?? p.series, combine({ live: liveUsd, series: seriesLastValue }))
+        : seriesLastValue
+
+      const crossTimeChange = multicast(skipRepeatsWith((xsx, xsy) => xsx.time === xsy.time, crosshairMove))
+      const hovered: IStream<number | null> = start(
+        null as number | null,
+        map(cross => {
+          if (cross?.point) {
+            const seriesData = cross.seriesData.values().next().value as any
+            return (seriesData?.value || 0) as number
+          }
+          return null
+        }, crossTimeChange)
+      )
+      const hoverValue = map(p => p.hovered ?? p.base, combine({ base: baseValue, hovered }))
+      const hoverDate = start(
+        null as string | null,
+        map(cross => (cross?.point && cross.time != null ? readableDate(Number(cross.time)) : null), crossTimeChange)
+      )
+
+      const $headerValue = $column(style({ flex: 1, alignItems: 'flex-end' }))(
+        switchLatest(
+          map(
+            hide =>
+              hide
+                ? $node(style({ fontSize: text.xxl, fontWeight: '900', color: palette.message }))($text('••••'))
+                : $row(style({ alignItems: 'flex-end' }))(
+                    $node(
+                      style({
+                        fontSize: text.base,
+                        fontWeight: '900',
+                        color: palette.foreground,
+                        lineHeight: '1.6',
+                        marginRight: '2px'
+                      })
+                    )($text('$')),
+                    $NumberTicker({
+                      $slot: $defaultNumberTickerSlot(style({ fontSize: text.xxl, fontWeight: '900' })),
+                      value: map(
+                        v => parseReadableNumber(readableUnitAmount(v)),
+                        motion({ damping: 26, precision: 15, stiffness: 210 }, hoverValue)
+                      ),
+                      incrementColor: palette.positive,
+                      decrementColor: palette.negative
+                    })
+                  ),
+            hideBalances
+          )
+        ),
+        switchLatest(
+          map(
+            date =>
+              date === null
+                ? $row(style({ alignItems: 'center', fontSize: text.xs }))(
+                    $infoLabel($text(label)),
+                    $infoTooltip(tooltip, palette.foreground, '16px')
+                  )
+                : $infoLabel(style({ fontSize: text.xs }))($text(date)),
+            hoverDate
+          )
+        )
+      )
+      // Hide the headline until there is something to show (no live override and an empty series); the wallet page always
+      // passes liveUsd, so it mounts immediately and never re-mounts on value changes.
+      const $header = liveUsd
+        ? $headerValue
+        : switchLatest(
+            map(has => (has ? $headerValue : empty), skipRepeatsWith((a, b) => a === b, map(tl => tl.length > 0, resolvedTimeline)))
+          )
+
       return [
         $column(style({ width: '100%', padding: 0, height: chartHeight, placeContent: 'center' }))(
           $row(
@@ -81,115 +178,55 @@ export const $usdTimeline = ({
                 changeActivityTimeframe: changeActivityTimeframeTether()
               })
             ),
-            switchLatest(
-              switchMap(async query => {
-                const timeline = await query
-
-                if (timeline.length === 0) {
-                  return empty
-                }
-
-                const lastValue = timeline[timeline.length - 1].value ?? 0
-                const crossTimeChange = multicast(skipRepeatsWith((xsx, xsy) => xsx.time === xsy.time, crosshairMove))
-                const hoverValue = start(
-                  lastValue,
-                  map(cross => {
-                    if (cross?.point) {
-                      const seriesData = cross.seriesData.values().next().value as any
-                      return (seriesData?.value || 0) as number
-                    }
-                    return lastValue
-                  }, crossTimeChange)
-                )
-                const hoverDate = start(
-                  null,
-                  map(
-                    cross => (cross?.point && cross.time != null ? readableDate(Number(cross.time)) : null),
-                    crossTimeChange
-                  )
-                )
-
-                return $column(style({ flex: 1, alignItems: 'flex-end' }))(
-                  $row(style({ alignItems: 'flex-end' }))(
-                    $node(
-                      style({
-                        fontSize: text.base,
-                        fontWeight: '900',
-                        color: palette.foreground,
-                        lineHeight: '1.6',
-                        marginRight: '2px'
-                      })
-                    )($text('$')),
-                    $NumberTicker({
-                      $slot: $defaultNumberTickerSlot(style({ fontSize: text.xxl, fontWeight: '900' })),
-                      value: map(
-                        hoverValue => parseReadableNumber(readableUnitAmount(hoverValue)),
-                        motion({ damping: 26, precision: 15, stiffness: 210 }, hoverValue)
-                      ),
-                      incrementColor: palette.positive,
-                      decrementColor: palette.negative
-                    })
-                  ),
-                  switchLatest(
-                    map(
-                      date =>
-                        date === null
-                          ? $row(style({ alignItems: 'center', fontSize: text.xs }))(
-                              $infoLabel($text(label)),
-                              $infoTooltip(tooltip, palette.foreground, '16px')
-                            )
-                          : $infoLabel(style({ fontSize: text.xs }))($text(date)),
-                      hoverDate
-                    )
-                  )
-                )
-              }, timelineQuery)
-            )
+            $header
           ),
           $intermediatePromise({
-            $display: map(async p => {
-              const timeline = await p.query
+            $display: map(
+              async p => {
+                const timeline = await p.query
 
-              if (timeline.length === 0) {
-                return $empty
-              }
+                if (timeline.length === 0) {
+                  return $empty
+                }
 
-              return $Baseline({
-                chartConfig: {
-                  rightPriceScale: {
-                    visible: false,
-                    scaleMargins: {
-                      top: 0.41
+                return $Baseline({
+                  chartConfig: {
+                    rightPriceScale: {
+                      visible: false,
+                      scaleMargins: {
+                        top: 0.41
+                      }
+                    },
+                    leftPriceScale: {
+                      autoScale: true,
+                      ticksVisible: true,
+                      scaleMargins: {
+                        top: 0.61,
+                        bottom: 0.1
+                      }
+                    },
+                    timeScale: {
+                      visible: true
                     }
                   },
-                  leftPriceScale: {
-                    autoScale: true,
-                    ticksVisible: true,
-                    scaleMargins: {
-                      top: 0.61,
-                      bottom: 0.1
-                    }
+                  baselineOptions: {
+                    baseLineColor: palette.message,
+                    baseLineVisible: true,
+                    lineWidth: 2,
+                    lineType: LineType.Simple,
+                    baseValue: {
+                      price: 0,
+                      type: 'price'
+                    },
+                    autoscaleInfoProvider: floorAutoscaleByAum(p.aum)
                   },
-                  timeScale: {
-                    visible: true
-                  }
-                },
-                baselineOptions: {
-                  baseLineColor: palette.message,
-                  baseLineVisible: true,
-                  lineWidth: 2,
-                  lineType: LineType.Simple,
-                  baseValue: {
-                    price: 0,
-                    type: 'price'
-                  },
-                  autoscaleInfoProvider: floorAutoscaleByAum(await p.aum)
-                },
-                data: timeline as any as BaselineData<ISeriesTime>[]
-              })({
-                crosshairMove: crosshairMoveTether()
-              })
-            }, combine({ query: timelineQuery, aum: aumUsd ?? just(Promise.resolve(0)) }))
+                  data: timeline as any as BaselineData<ISeriesTime>[]
+                })({
+                  crosshairMove: crosshairMoveTether()
+                })
+              },
+              combine({ query: timelineQuery, aum: aumUsd ?? just(0) })
+            )
           })
         ),
 
@@ -198,15 +235,17 @@ export const $usdTimeline = ({
     }
   )
 
-interface I$MasterRouteTimeline extends IPageFilterParams {
+interface I$FundAccountTimeline extends IPageFilterParams {
+  hideBalances: IStream<boolean>
   metricsQuery: IStream<Promise<IMasterMetricSummary>>
   chartHeight?: string
   $lead?: I$Node
   livePnlUsd?: IStream<number>
-  aumUsd?: IStream<Promise<number>>
+  aumUsd?: IStream<number>
 }
 
-export const $MasterRouteTimeline = ({
+export const $FundAccountTimeline = ({
+  hideBalances,
   activityTimeframe,
   collateralTokenList,
   metricsQuery,
@@ -214,7 +253,7 @@ export const $MasterRouteTimeline = ({
   $lead,
   livePnlUsd,
   aumUsd
-}: I$MasterRouteTimeline) =>
+}: I$FundAccountTimeline) =>
   component(
     (
       [selectCollateralTokenList, _selectCollateralTokenListTether]: IBehavior<Address[]>,
@@ -260,6 +299,7 @@ export const $MasterRouteTimeline = ({
 
       return [
         $usdTimeline({
+          hideBalances,
           timelineQuery,
           label: 'PnL',
           tooltip: 'The total combined settled and open trades',

@@ -6,7 +6,7 @@ import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
 
 import {Error} from "./Error.sol";
-import {RegisterToken} from "../core/RegisterToken.sol";
+import {Register} from "../core/Register.sol";
 
 library IntentLib {
     uint internal constant BASIS_POINTS = 10_000;
@@ -57,22 +57,17 @@ library IntentLib {
     }
 
     function verifyTokenAndCap(
-        RegisterToken _register,
-        bytes32 _baseTokenId,
+        Register _register,
         address _token,
         uint _amount
-    ) internal view returns (IERC20) {
-        RegisterToken.TokenInfo memory _info = _register.getTokenInfo(_baseTokenId);
-        if (address(_info.token) == address(0)) {
-            revert Error.Intent__TokenNotRegistered(_baseTokenId);
+    ) internal view {
+        uint _cap = _register.tokenCapMap(_token);
+        if (_cap == 0) {
+            revert Error.Intent__TokenNotRegistered(_token);
         }
-        if (_token != address(0) && address(_info.token) != _token) {
-            revert Error.Intent__TokenMismatch(_baseTokenId, address(_info.token), _token);
+        if (_amount > _cap) {
+            revert Error.Intent__AmountExceedsCap(_amount, _cap);
         }
-        if (_info.cap > 0 && _amount > _info.cap) {
-            revert Error.Intent__AmountExceedsCap(_amount, _info.cap);
-        }
-        return _info.token;
     }
 
     function verifyRelayFee(

@@ -26,8 +26,8 @@ export interface IAllocationResult {
   puppetList: Address[]
   bodyList: Hex[]
   mandateList: Hex[]
-  matchedAmountList: bigint[]
-  totalMatched: bigint
+  allocatedAmountList: bigint[]
+  totalAllocated: bigint
 }
 
 function resolveAmount(ctx: IComputeAllocationContext, puppet: IAllocationPuppet): bigint {
@@ -58,12 +58,12 @@ export function computeAllocation(ctx: IComputeAllocationContext): IAllocationRe
     .filter(entry => entry.amount > 0n)
     .sort((a, b) => (BigInt(a.puppet.puppet) < BigInt(b.puppet.puppet) ? -1 : 1))
 
-  const matchedAmountList = matched.map(entry => entry.amount)
+  const allocatedAmountList = matched.map(entry => entry.amount)
   return {
     puppetList: matched.map(entry => entry.puppet.puppet),
     bodyList: matched.map(entry => entry.puppet.body),
     mandateList: matched.map(entry => entry.puppet.mandate),
-    matchedAmountList,
-    totalMatched: matchedAmountList.reduce((sum, amount) => sum + amount, 0n)
+    allocatedAmountList,
+    totalAllocated: allocatedAmountList.reduce((sum, amount) => sum + amount, 0n)
   }
 }

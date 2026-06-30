@@ -3,7 +3,8 @@ import type { Address } from 'viem'
 import { getAddress } from 'viem'
 import { ADDRESS_ZERO } from '../const/common.js'
 import type { IMarketDescription, ITokenDescription } from '../core/types.js'
-import { getMappedValue, groupList } from '../core/utils.js'
+import { getRegisteredTokenDescription } from '../core/token.js'
+import { getMappedValue, getMappedValueFallback, groupList } from '../core/utils.js'
 
 const SUPPLEMENTAL_ARBITRUM_TOKENS: readonly ITokenDescription[] = [
   { symbol: 'GMX', name: 'GMX', decimals: 18, address: getAddress('0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a') }
@@ -25,7 +26,11 @@ const NATIVE_DESCRIPTION: ITokenDescription = {
 export function getTokenDescription(token: Address): ITokenDescription {
   const normalizedToken = getAddress(token)
   if (normalizedToken === ADDRESS_ZERO) return NATIVE_DESCRIPTION
-  return getMappedValue(TOKEN_ADDRESS_DESCRIPTION_MAP, normalizedToken)
+  return getMappedValueFallback(
+    TOKEN_ADDRESS_DESCRIPTION_MAP,
+    normalizedToken,
+    getRegisteredTokenDescription(normalizedToken)
+  )
 }
 
 export function getMarketDescription(market: Address): IMarketDescription {

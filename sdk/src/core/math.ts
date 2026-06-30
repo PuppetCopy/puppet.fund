@@ -1,4 +1,4 @@
-import { BASIS_POINTS, FLOAT_PRECISION, SHARE_PRECISION } from '@puppet/contracts/const'
+import { PRECISION } from '@puppet/contracts/const'
 
 export function safeDiv(a: bigint, b: bigint): bigint {
   if (b === 0n) {
@@ -11,15 +11,15 @@ export function safeDiv(a: bigint, b: bigint): bigint {
 export function div(a: bigint, b: bigint): bigint {
   if (b === 0n) return 0n
 
-  return (a * BASIS_POINTS) / b
+  return (a * PRECISION.basisPoints) / b
 }
 
 export function factor(a: bigint, b: bigint): bigint {
-  return a ? (a * FLOAT_PRECISION) / b : 0n
+  return a ? (a * PRECISION.floatPrecisionExp) / b : 0n
 }
 
 export function applyFactor(factor: bigint, value: bigint): bigint {
-  return (value * factor) / FLOAT_PRECISION
+  return (value * factor) / PRECISION.floatPrecisionExp
 }
 
 export function toBasisPoints(numerator: bigint, denominator: bigint) {
@@ -27,11 +27,11 @@ export function toBasisPoints(numerator: bigint, denominator: bigint) {
     return 0n
   }
 
-  return (numerator * BASIS_POINTS) / denominator
+  return (numerator * PRECISION.basisPoints) / denominator
 }
 
 export function applyBasisPoints(value: bigint, bps: bigint): bigint {
-  return (value * bps) / BASIS_POINTS
+  return (value * bps) / PRECISION.basisPoints
 }
 
 export function min(a: bigint, b: bigint): bigint {
@@ -58,8 +58,6 @@ export function delta(a: bigint, b: bigint): bigint {
 // SHARE_PRECISION (so the first share unit is worth 1e-12 base), later mints price at
 // the pre-mint supply over attested NAV.
 export function sharesFor(totalShareSupply: bigint, netAssetValue: bigint, amount: bigint): bigint {
-  if (totalShareSupply === 0n) return amount * SHARE_PRECISION
+  if (totalShareSupply === 0n) return amount * PRECISION.sharePrecisionExp
   return (amount * totalShareSupply) / netAssetValue
 }
-
-export { SHARE_PRECISION }

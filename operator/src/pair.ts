@@ -2,32 +2,39 @@ import {
   generatePairingKeypair,
   type IPairedSession,
   type ISealedPayload,
-  openPairingPayload,
-  predictPuppetAccount
+  openPairingPayload
 } from '@puppet/sdk/account'
 import { DEFAULT_MATCHMAKER_URL } from '@puppet/sdk/const'
-import type { ITokenInfo } from '@puppet/sdk/state'
+import type { ITokenRegistry } from '@puppet/sdk/state'
 import type { Address, Hex } from 'viem'
-import { privateKeyToAccount } from 'viem/accounts'
 
 const PAIR_CALLBACK_PORT = 42071
+
+function hideSignerKey(session: IPairedSession): IPairedSession {
+  Object.defineProperty(session, 'signerKey', { value: session.signerKey, enumerable: false })
+  Object.defineProperty(session, Symbol.for('nodejs.util.inspect.custom'), {
+    value: () => ({ ...session, signerKey: '[redacted]' }),
+    enumerable: false
+  })
+  return session
+}
 
 export function buildSession(input: {
   signerKey: Hex
   user: Address
-  baseTokenId: Hex
+  baseToken: Address
   name: Hex
   matchmakerUrl?: string
-  tokenRegistry?: ITokenInfo[]
+  tokenRegistry?: ITokenRegistry[]
 }): IPairedSession {
-  const params = { user: input.user, signer: privateKeyToAccount(input.signerKey).address }
-  return {
+  return hideSignerKey({
     signerKey: input.signerKey,
-    params,
-    share: { master: predictPuppetAccount(params), baseTokenId: input.baseTokenId, name: input.name },
+    user: input.user,
+    baseToken: input.baseToken,
+    name: input.name,
     matchmakerUrl: input.matchmakerUrl ?? DEFAULT_MATCHMAKER_URL,
     tokenRegistry: input.tokenRegistry
-  }
+  })
 }
 
 export async function pairOverBrowser(pairUrl: string | URL = 'https://puppet.fund'): Promise<IPairedSession> {
@@ -54,7 +61,7 @@ export async function pairOverBrowser(pairUrl: string | URL = 'https://puppet.fu
         const session = await openPairingPayload<IPairedSession>(privateKey, sealed)
         queueMicrotask(() => {
           server.stop(true)
-          resolve(session)
+          resolve(hideSignerKey(session))
         })
         return new Response('ok', { headers: cors })
       }

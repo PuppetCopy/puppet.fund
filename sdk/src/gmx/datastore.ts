@@ -1,12 +1,14 @@
 import { GMX_V2_CONTRACT_MAP } from '@puppet/contracts/gmx'
-import type { Address, Hex, PublicClient } from 'viem'
-import { encodeAbiParameters, keccak256 } from 'viem'
+import type { Hex, PublicClient } from 'viem'
+import { encodeAbiParameters, keccak256, parseAbiParameters } from 'viem/utils'
 import { applyFactor } from '../core/math.js'
-import { hashData, hashString } from './gmxUtils.js'
 
 const datastoreAddress = GMX_V2_CONTRACT_MAP.GmxDatastore.address
 const datastoreAbi = GMX_V2_CONTRACT_MAP.GmxDatastore.abi
-const positionKeyTypes = [{ type: 'bytes32' }, { type: 'string' }] as const
+
+function hashData(types: string[], values: (string | number | bigint | boolean)[]) {
+  return keccak256(encodeAbiParameters(parseAbiParameters(types) as any, values))
+}
 
 export function getDatastoreUint(client: PublicClient, key: Hex) {
   return client.readContract({
@@ -19,26 +21,6 @@ export function getDatastoreUint(client: PublicClient, key: Hex) {
 
 export function getDatastoreUintByName(client: PublicClient, key: string) {
   return getDatastoreUint(client, hashData(['string'], [key]))
-}
-
-export function getPositionSizeInUsd(client: PublicClient, positionKey: Hex) {
-  return getDatastoreUint(client, keccak256(encodeAbiParameters(positionKeyTypes, [positionKey, 'SIZE_IN_USD'])))
-}
-
-export function getPositionSizeInTokens(client: PublicClient, positionKey: Hex) {
-  return getDatastoreUint(client, keccak256(encodeAbiParameters(positionKeyTypes, [positionKey, 'SIZE_IN_TOKENS'])))
-}
-
-export function getPositionCollateralAmount(client: PublicClient, positionKey: Hex) {
-  return getDatastoreUint(client, keccak256(encodeAbiParameters(positionKeyTypes, [positionKey, 'COLLATERAL_AMOUNT'])))
-}
-
-export function getPriceFeedMultiplier(client: PublicClient, token: Address) {
-  return getDatastoreUint(client, hashData(['bytes32', 'address'], [hashString('PRICE_FEED_MULTIPLIER'), token]))
-}
-
-export function getMinCollateralFactor(client: PublicClient, market: Address) {
-  return getDatastoreUint(client, hashData(['bytes32', 'address'], [hashString('MIN_COLLATERAL_FACTOR'), market]))
 }
 
 export interface IGasLimitsConfig {

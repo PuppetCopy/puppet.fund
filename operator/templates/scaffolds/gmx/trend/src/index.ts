@@ -1,12 +1,5 @@
 import { createOperatorCore, pairOverBrowser, runOperator } from '@puppet.fund/operator'
-import {
-  acceptablePrice,
-  formatUsd,
-  formatWeth,
-  gmxOperator,
-  usd,
-  weth
-} from '@puppet.fund/operator/gmx'
+import { acceptablePrice, formatUsd, formatWeth, GMX_V2_CHAIN_ID, gmxOperator, gmxTokenPerNativeToken, usd, weth } from '@puppet.fund/operator/gmx'
 import { type Address, isAddressEqual } from 'viem'
 
 // A complete autonomous, long/flat trend-following agent on ETH (no LLM). Perceive (price +
@@ -30,7 +23,7 @@ const TICK_MS = 60_000
 const COOLDOWN_MS = 5 * 60_000
 
 const session = await pairOverBrowser(Bun.env.PAIR_URL)
-const core = await createOperatorCore(session, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
+const core = await createOperatorCore(session, { chainId: GMX_V2_CHAIN_ID, getTokenPerNativeToken: gmxTokenPerNativeToken, rpcUrl: Bun.env.ARBITRUM_RPC_URL })
 const gmx = gmxOperator(core)
 const market = gmx.getMarket(ETH)
 let lastTradeAt = 0
@@ -50,7 +43,6 @@ await runOperator(core, async signal => {
 })
 
 async function tick(): Promise<void> {
-  if (!core.isOpen()) return
 
   // perceive (fund balance = deployable base; collateral GMX frees on a close returns
   // to the fund on its own and shows up here next tick)

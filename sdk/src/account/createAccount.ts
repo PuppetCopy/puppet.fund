@@ -1,8 +1,16 @@
-import { PUPPET_CONTRACT_MAP } from '@puppet/contracts'
-import { PROTOCOL_CONFIG, TOKEN_ID } from '@puppet/contracts/const'
-import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
+import { HUB_CHAIN_ID, PROTOCOL, TOKEN_ID } from '@puppet/contracts/const'
+import DEPLOYMENTS, { hub } from '@puppet/contracts/deployments'
+import type { IAccountLib__AccountInitParams, IFundAccountLib__FundAccountInitParams } from '@puppet/contracts/types'
 import type { Address, Hex } from 'viem'
 import { encodeAbiParameters, encodePacked, getCreate2Address, hashMessage, keccak256, pad, toBytes } from 'viem'
+
+const ATTEST = DEPLOYMENTS[`Attest:${HUB_CHAIN_ID}`].address
+const ACCOUNT = DEPLOYMENTS[`Account:${HUB_CHAIN_ID}`].address
+const PUPPET_ACCOUNT = DEPLOYMENTS[`PuppetAccount:${HUB_CHAIN_ID}`].address
+const ROUTE = DEPLOYMENTS[`Route:${HUB_CHAIN_ID}`].address
+const FUND_ACCOUNT = DEPLOYMENTS[`FundAccount:${HUB_CHAIN_ID}`].address
+const ISSUE = hub.Issue.address
+const SHARE_TOKEN = hub.ShareToken.address
 
 function cloneInitCodeHashWithArgs(impl: Address, args: Hex): Hex {
   const argBytes = (args.length - 2) / 2
@@ -18,27 +26,24 @@ function cloneInitCodeHashWithArgs(impl: Address, args: Hex): Hex {
 }
 
 function packAccountArgs(params: IAccountLib__AccountInitParams): Hex {
-  return encodePacked(
-    ['address', 'address', 'address'],
-    [PUPPET_CONTRACT_MAP.Attest.address, params.signer, params.user]
-  )
+  return encodePacked(['address', 'address', 'address'], [ATTEST, params.signer, params.user])
 }
 
 export function predictPuppetAccount(params: IAccountLib__AccountInitParams): Address {
   const args = packAccountArgs(params)
   return getCreate2Address({
-    from: PUPPET_CONTRACT_MAP.Account.address,
+    from: ACCOUNT,
     salt: keccak256(args),
-    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.PuppetAccount.address, args)
+    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_ACCOUNT, args)
   })
 }
 
 export function predictRoute(account: Address): Address {
   const args = encodePacked(['address'], [account])
   return getCreate2Address({
-    from: PUPPET_CONTRACT_MAP.Account.address,
+    from: ACCOUNT,
     salt: pad(account, { size: 32 }),
-    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.Route.address, args)
+    bytecodeHash: cloneInitCodeHashWithArgs(ROUTE, args)
   })
 }
 
@@ -46,31 +51,32 @@ export function predictDepositRoute(account: Address): Address {
   return predictRoute(account)
 }
 
-export function predictFundAccount(signer: Address): Address {
-  const args = encodePacked(['address', 'address'], [PUPPET_CONTRACT_MAP.Attest.address, signer])
-  return getCreate2Address({
-    from: PUPPET_CONTRACT_MAP.Account.address,
-    salt: keccak256(args),
-    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.FundAccount.address, args)
-  })
-}
-
-export function predictShareToken(master: Address, baseTokenId: Hex, name: Hex): Address {
-  const fund = predictFundAccount(master)
+export function predictFundAccount(fundParams: IFundAccountLib__FundAccountInitParams): Address {
   const args = encodePacked(
-    ['address', 'address', 'bytes32', 'bytes32'],
-    [fund, PUPPET_CONTRACT_MAP.Issue.address, baseTokenId, name]
+    ['address', 'address', 'address', 'bytes32'],
+    [ATTEST, fundParams.master, fundParams.baseToken, fundParams.name]
   )
   return getCreate2Address({
-    from: PUPPET_CONTRACT_MAP.Issue.address,
-    salt: pad(fund, { size: 32 }),
-    bytecodeHash: cloneInitCodeHashWithArgs(PUPPET_CONTRACT_MAP.ShareToken.address, args)
+    from: ACCOUNT,
+    salt: keccak256(args),
+    bytecodeHash: cloneInitCodeHashWithArgs(FUND_ACCOUNT, args)
   })
 }
 
-export const SIGNER_DERIVATION_MESSAGE = PROTOCOL_CONFIG.signerDerivationMessage
+export function predictShareToken(fundParams: IFundAccountLib__FundAccountInitParams): Address {
+  const fund = predictFundAccount(fundParams)
+  const args = encodePacked(
+    ['address', 'address', 'address', 'bytes32'],
+    [fund, ISSUE, fundParams.baseToken, fundParams.name]
+  )
+  return getCreate2Address({
+    from: ISSUE,
+    salt: pad(fund, { size: 32 }),
+    bytecodeHash: cloneInitCodeHashWithArgs(SHARE_TOKEN, args)
+  })
+}
 
-export const DEPLOY_AUTH_DIGEST: Hex = hashMessage(SIGNER_DERIVATION_MESSAGE)
+export const DEPLOY_AUTH_DIGEST: Hex = hashMessage(PROTOCOL.signerDerivationMessage)
 
 export function deriveSessionKey(signature: Hex): Hex {
   return keccak256(toBytes(signature))
@@ -84,6 +90,6 @@ const SYMBOL_BY_TOKEN_ID: Record<string, keyof typeof TOKEN_ID> = Object.fromEnt
   (Object.keys(TOKEN_ID) as (keyof typeof TOKEN_ID)[]).map(sym => [TOKEN_ID[sym].toLowerCase(), sym])
 )
 
-export function symbolForBaseTokenId(baseTokenId: Hex): keyof typeof TOKEN_ID | null {
-  return SYMBOL_BY_TOKEN_ID[baseTokenId.toLowerCase()] ?? null
+export function symbolForBaseTokenId(baseToken: Hex): keyof typeof TOKEN_ID | null {
+  return SYMBOL_BY_TOKEN_ID[baseToken.toLowerCase()] ?? null
 }

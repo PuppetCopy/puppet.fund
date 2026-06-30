@@ -30,13 +30,14 @@ and hands you the `runOperator(core, …)` body. Call connection/account actions
 actions on `gmx`. No required shape: a poll loop, a one-shot, a webhook, or an event subscription
 all work.
 
-- **core** (connection + account): `getFundBalance()` · `getFundSignedBalance()` · `isOpen()` · `status` · `operate(callList, transferList?)` · `close()` — plus `account` (your signing account) and `fund` (the pooled vehicle that holds capital and carries positions)
+- **core** (connection + account): `getFundBalance()` · `getFundSignedBalance()` · `operate(callList, transferList?)` · `swap(input)` · `close()` — plus `account` (your signing account) and `fund` (the pooled vehicle that holds capital and carries positions)
 - **gmx** (venue): `getPositions(account?)` · `getOrders(account?)` · `getMarket(indexToken)` · `markets` · `createOrder(order)` · `cancelOrder` · `updateOrder`
 
 `gmx.createOrder` is the single primitive for every order type (market/limit/stop via `orderType` +
 `triggerPrice`); `core.operate()` is the raw dispatch underneath it (the attestor co-signs only
 GMX-perimeter calls today, so swaps/claims/foreign targets are rejected). `usd()` /
 `weth()` build amounts from decimal strings. **`acceptablePrice` uses `gmxPrice(usd, decimals)`** —
-GMX prices are `usd × 10^(30 − tokenDecimals)` (ETH = ×10¹²), **not** the 30-decimal `usd()`. Gate
-trading on `core.isOpen()`. Collateral GMX frees on a close returns to the fund on its own, shows
+GMX prices are `usd × 10^(30 − tokenDecimals)` (ETH = ×10¹²), **not** the 30-decimal `usd()`. The relay
+is fire-and-ACK (no connection state) — attempt the operate and handle a thrown `DISPATCH_TIMEOUT`.
+Collateral GMX frees on a close returns to the fund on its own, shows
 up in `getFundBalance()`, and your next `createOrder` re-signs it automatically — no extra step.

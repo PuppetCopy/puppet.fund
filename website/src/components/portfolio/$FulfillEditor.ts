@@ -1,20 +1,13 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { STAKE_RATIO_CAP } from '@puppet/sdk/attestation'
+import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
+import { WEIGHT_RATIO_CAP } from '@puppet/sdk/attestation'
 import { HUB_CHAIN } from '@puppet/sdk/const'
-import { readableTokenAmount } from '@puppet/sdk/core'
-import { getTokenDescription } from '@puppet/sdk/gmx'
+import { getRegisteredTokenDescription, readableTokenAmount } from '@puppet/sdk/core'
 import {
   computeClaimable,
   computeQueuedShares,
-  getFundPoolState,
-  getPuppetRedeemPosition,
-  type IFundPoolState,
-  type IPuppetRedeemPosition,
+  type IFund,
+  type IFundPosition,
   type ITokenRegistryMap,
-  liveFundPoolState,
-  livePuppetRedeemPosition,
-  liveSelect,
-  select,
   tokenInfoFor
 } from '@puppet/sdk/state'
 import {
@@ -45,59 +38,53 @@ import {
   $TokenAmountInput,
   text
 } from '@/ui-components'
-import { fetchPositions } from '@puppet/sdk/venue'
 import { formatUsd, priceFor } from '../../io/gmx/priceFeed.js'
-import { sqlClient } from '../../io/indexer/sql.js'
-import { type IRedeemDraft, SHARE_DECIMALS } from './draft.js'
+import { liveBalance, liveFundPool, liveRedeemPosition } from '../../io/live.js'
+import { fetchOpenPositions } from '../../io/matchmaker/reads.js'
+import { readAccountBalances } from '../../io/onchain/balances.js'
+import type { IRedeemDraft } from './draft.js'
+import { createFocusState } from './editorUtils.js'
 
 export interface I$FulfillEditor {
   master: Address
   masterAccount: Address
   baseToken: Address
-  baseTokenId: Hex
   tokenRegistry: ITokenRegistryMap
 }
 
 type IExitMode = 'redeem' | 'liquidate'
 
-const EMPTY_POSITION: IPuppetRedeemPosition = {
-  sharesHeld: 0n,
-  stake: 0n,
-  cursor: 0n,
-  accrued: 0n,
-  accruedPerStake: 0n,
-  totalStake: 0n,
-  queuedShares: 0n
-}
-
-// Mirrors the on-chain guard on post-queue values: the master's share of the queue may
-// not exceed his share of the fund, so he can never exit ahead of his investors.
-function guardPasses(pool: IFundPoolState, position: IPuppetRedeemPosition, sharesOut: bigint): boolean {
+// Mirrors the on-chain guard: with carried weight the master must still hold at least half
+// of the non-queued shares, so he can never exit ahead of his investors.
+function guardPasses(pool: IFund | undefined, position: IFundPosition | undefined, sharesOut: bigint): boolean {
+  if (!pool) return false
   let queued = pool.queuedShares
-  let totalStake = pool.totalStake
-  let stake = position.stake
-  let wallet = position.sharesHeld
+  let poolWeight = pool.weight
+  // Carried weight from a previous fund epoch is zeroed on-chain (attestRedeemIntent: masterEpoch < poolEpoch -> 0), so
+  // mirror that here or the off-chain guard would wrongly block a redeem the contract accepts.
+  let positionWeight = position ? (position.epoch < pool.epoch ? 0n : position.weight) : 0n
+  let wallet = position?.sharesHeld ?? 0n
   if (sharesOut > 0n) {
     if (sharesOut > wallet) return false
-    if (totalStake > queued * STAKE_RATIO_CAP) return false
-    const added = totalStake === 0n ? sharesOut : (sharesOut * totalStake) / queued
+    if (poolWeight > queued * WEIGHT_RATIO_CAP) return false
+    const added = poolWeight === 0n ? sharesOut : (sharesOut * poolWeight) / queued
     if (added === 0n) return false
-    stake += added
-    totalStake += added
+    positionWeight += added
+    poolWeight += added
     queued += sharesOut
     wallet -= sharesOut
   }
-  if (stake === 0n) return true
-  return wallet * totalStake + stake * queued >= stake * pool.totalShareSupply
+  if (positionWeight === 0n) return true
+  return 2n * wallet >= pool.totalShareSupply - queued
 }
 
 // Largest exit-alongside the guard admits (the boundary is exact: equality passes, one
 // share over reverts); -1 means even a plain drain is blocked by carried stake. The
 // pass predicate is monotone in sharesOut, so bisect.
-function maxExitAlongside(pool: IFundPoolState, position: IPuppetRedeemPosition): bigint {
+function maxExitAlongside(pool: IFund | undefined, position: IFundPosition | undefined): bigint {
   if (!guardPasses(pool, position, 0n)) return -1n
   let lo = 0n
-  let hi = position.sharesHeld
+  let hi = position?.sharesHeld ?? 0n
   while (lo < hi) {
     const mid = (lo + hi + 1n) / 2n
     if (guardPasses(pool, position, mid)) lo = mid
@@ -106,30 +93,12 @@ function maxExitAlongside(pool: IFundPoolState, position: IPuppetRedeemPosition)
   return lo
 }
 
-// The fund's payable base: the indexed SIGNED balance is true accounting (fund
-// dispatches sign real amounts), so no RPC read is needed.
-const liveFundBalance = (fund: Address, baseTokenId: Hex): IStream<bigint> => {
-  const balanceArgs = {
-    where: {
-      account: { _eq: getAddress(fund) },
-      chainId: { _eq: BigInt(HUB_CHAIN_ID) },
-      tokenId: { _eq: baseTokenId }
-    },
-    orderBy: { blockTimestamp: 'desc' as const },
-    limit: 1,
-    fields: ['signedBalance'] as const
-  }
-  return op(
-    merge(
-      fromPromise(select(sqlClient, 'AccountBalanceCheckpoint', balanceArgs)),
-      liveSelect(sqlClient, 'AccountBalanceCheckpoint', balanceArgs)
-    ),
-    map(rows => rows[0]?.signedBalance ?? 0n),
-    state()
-  )
-}
+// The fund's payable base: the folded SIGNED balance is true accounting (fund dispatches sign real amounts), so no RPC
+// read is needed. Polled on the relay head. null = unreadable (treated as not-ready, i.e. 0n, by the gates below).
+const liveFundBalance = (fund: Address, baseToken: Address): IStream<bigint | null> =>
+  liveBalance(getAddress(fund), HUB_CHAIN_ID, baseToken)
 
-export const $FulfillEditor = ({ master, masterAccount, baseToken, baseTokenId, tokenRegistry }: I$FulfillEditor) =>
+export const $FulfillEditor = ({ master, masterAccount, baseToken, tokenRegistry }: I$FulfillEditor) =>
   component(
     (
       [inputAssets, inputAssetsTether]: IBehavior<bigint>,
@@ -142,19 +111,16 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, baseTokenId, 
       [toggleSelfExit, toggleSelfExitTether]: IBehavior<boolean>,
       [clickSubmit, clickSubmitTether]: IBehavior<PointerEvent>
     ) => {
-      const desc = getTokenDescription(tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseTokenId).token)
+      const desc = getRegisteredTokenDescription(tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseToken).token)
 
-      const poolStream: IStream<IFundPoolState> = op(
-        merge(fromPromise(getFundPoolState(sqlClient, masterAccount)), liveFundPoolState(sqlClient, masterAccount)),
-        state()
+      const poolStream: IStream<IFund | undefined> = op(liveFundPool(getAddress(masterAccount)), state())
+      const navStream: IStream<bigint> = op(
+        liveFundBalance(masterAccount, baseToken),
+        map(nav => nav ?? 0n)
       )
-      const navStream: IStream<bigint> = liveFundBalance(masterAccount, baseTokenId)
-      const positionStream: IStream<IPuppetRedeemPosition> = op(
-        merge(
-          fromPromise(getPuppetRedeemPosition(sqlClient, master, masterAccount)),
-          livePuppetRedeemPosition(sqlClient, master, masterAccount)
-        ),
-        state(EMPTY_POSITION)
+      const positionStream: IStream<IFundPosition | undefined> = op(
+        liveRedeemPosition(getAddress(master), getAddress(masterAccount)),
+        state()
       )
 
       const maxExitStream: IStream<bigint> = op(
@@ -162,22 +128,23 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, baseTokenId, 
         map(p => maxExitAlongside(p.pool, p.pos))
       )
 
+      // Liquidate is irreversible, so an UNREADABLE positions/balances read must keep it BLOCKED (fail closed), never
+      // unblock it by mistaking a failed read for "no positions / no off-hub liquidity".
       const hasOpenPositions: IStream<boolean> = op(
-        fromPromise(fetchPositions(sqlClient, masterAccount, 'open')),
-        map(positions => positions.length > 0),
+        fromPromise(
+          fetchOpenPositions(getAddress(masterAccount))
+            .then(positions => positions.length > 0)
+            .catch(() => true)
+        ),
         state(true)
       )
       const offHubLiquidity: IStream<boolean> = op(
         fromPromise(
-          select(sqlClient, 'AccountBalanceCheckpoint', {
-            where: { account: { _eq: getAddress(masterAccount) } },
-            distinctOn: ['chainId', 'tokenId'],
-            orderBy: [{ chainId: 'asc' }, { tokenId: 'asc' }, { blockTimestamp: 'desc' }],
-            fields: ['chainId', 'tokenId', 'signedBalance']
-          })
-        ),
-        map(rows =>
-          rows.some(r => (Number(r.chainId) !== HUB_CHAIN_ID || r.tokenId !== baseTokenId) && r.signedBalance > 0n)
+          readAccountBalances(tokenRegistry, getAddress(masterAccount))
+            .then(rows =>
+              rows.some(r => (Number(r.chainId) !== HUB_CHAIN_ID || r.token !== baseToken) && r.signedBalance > 0n)
+            )
+            .catch(() => true)
         ),
         state(true)
       )
@@ -186,22 +153,24 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, baseTokenId, 
         map(p => p.pos || p.off),
         state(true)
       )
-      // Self-exit rides every redeem by default, sized PROPORTIONALLY to the drain:
-      // the investors' queue is paid first, and only the surplus of the chosen amount
-      // folds the master's own shares in (capped by the guard ceiling). A partial drain
-      // therefore retires everything it queues and leaves no own residual in the pool.
-      const selfExit: IStream<boolean> = state(true, toggleSelfExit)
-      const selfExitCap: IStream<bigint> = map(
-        p => (p.on && p.max > 0n ? p.max : 0n),
-        combine({ on: selfExit, max: maxExitStream })
-      )
+      // The master's own exit is ALWAYS available up to the skin-guard ceiling (the contract's redeem(sharesOut)
+      // path: 2*masterShares >= supply - poolShares). It does not depend on investor exits — the master's shares
+      // ARE the queue when he redeems. The chosen amount folds them in proportionally (any investor queue is paid
+      // first), capped here at the skin limit.
+      const selfExitCap: IStream<bigint> = map(max => (max > 0n ? max : 0n), maxExitStream)
+      // The toggle only decides whether the drain is sized to ALSO clear the pending investor queue alongside the
+      // master's exit; the master can always reach his own skin-limited exit regardless of it.
+      const fulfillQueue: IStream<boolean> = state(true, toggleSelfExit)
 
-      // The reachable ceiling: the queue's worth plus the full self-exit allowance.
+      // The reachable ceiling: the master's full self-exit allowance, plus the investor queue when folding it in.
       const queueValueStream: IStream<bigint> = op(
-        combine({ pool: poolStream, nav: navStream, cap: selfExitCap }),
-        map(p =>
-          p.pool.totalShareSupply === 0n ? 0n : ((p.pool.queuedShares + p.cap) * p.nav) / p.pool.totalShareSupply
-        )
+        combine({ pool: poolStream, nav: navStream, cap: selfExitCap, fulfill: fulfillQueue }),
+        map(p => {
+          const supply = p.pool?.totalShareSupply ?? 0n
+          if (supply === 0n) return 0n
+          const queued = p.fulfill ? (p.pool?.queuedShares ?? 0n) : 0n
+          return ((queued + p.cap) * p.nav) / supply
+        })
       )
 
       // The slider spans the WHOLE fund so the queue reads at its true scale: the drag
@@ -222,8 +191,9 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, baseTokenId, 
       // WHOLE resulting queue (ceil so the drain never overshoots the queue's worth).
       const sharesOutValue: IStream<bigint> = map(
         p => {
-          if (p.cap === 0n || p.nav === 0n || p.pool.totalShareSupply === 0n) return 0n
-          const needed = (p.assets * p.pool.totalShareSupply + p.nav - 1n) / p.nav - p.pool.queuedShares
+          const supply = p.pool?.totalShareSupply ?? 0n
+          if (p.cap === 0n || p.nav === 0n || supply === 0n) return 0n
+          const needed = (p.assets * supply + p.nav - 1n) / p.nav - (p.pool?.queuedShares ?? 0n)
           return needed <= 0n ? 0n : needed < p.cap ? needed : p.cap
         },
         combine({ pool: poolStream, nav: navStream, cap: selfExitCap, assets: assetsValue })
@@ -241,7 +211,7 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, baseTokenId, 
         false,
         merge(constant(true, clickFulfill), constant(false, merge(inputAssets, sliderPercent)))
       )
-      const focused: IStream<boolean> = state(false, merge(constant(true, focusAssets), constant(false, blurAssets)))
+      const focused = createFocusState(focusAssets, blurAssets)
 
       const changeDraft: IStream<IRedeemDraft> = sampleMap(
         (p): IRedeemDraft => ({
@@ -253,7 +223,6 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, baseTokenId, 
           master,
           masterAccount,
           baseToken,
-          baseTokenId,
           sharesOut: p.mode === 'liquidate' ? 0n : p.shares,
           assetsOut: p.assets,
           fulfill: p.mode === 'redeem' && (p.fulfill || p.assets === p.queueValue),
@@ -288,9 +257,9 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, baseTokenId, 
       // DOM, not re-render the editor (which recreates the input and drops focus).
       const $editor = switchMap(
         p => {
-          const supply = p.pool.totalShareSupply
-          const queuedValue = supply === 0n ? 0n : (p.pool.queuedShares * p.nav) / supply
-          const ownStakeShares = computeQueuedShares(p.pos)
+          const supply = p.pool?.totalShareSupply ?? 0n
+          const queuedValue = supply === 0n ? 0n : ((p.pool?.queuedShares ?? 0n) * p.nav) / supply
+          const ownStakeShares = computeQueuedShares(p.pos, p.pool)
           const blocked = p.maxExit < 0n
 
           const valueToShow: IStream<string> = map(
@@ -401,32 +370,32 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, baseTokenId, 
             $column(spacing.small)(
               $statRow(
                 'Awaiting redemption',
-                `${readableTokenAmount(SHARE_DECIMALS, p.pool.queuedShares)} shares (${readableTokenAmount(desc, queuedValue)} ${desc.symbol})`
+                `${readableTokenAmount(PRECISION.shareTokenDecimals, p.pool?.queuedShares ?? 0n)} shares (${readableTokenAmount(desc, queuedValue)} ${desc.symbol})`
               ),
-              ...(p.pos.stake > 0n
+              ...((p.pos?.weight ?? 0n) > 0n
                 ? [
-                    $statRow('Your queued stake', `${readableTokenAmount(SHARE_DECIMALS, ownStakeShares)} shares`),
+                    $statRow('Your queued stake', `${readableTokenAmount(PRECISION.shareTokenDecimals, ownStakeShares)} shares`),
                     $node(style({ color: palette.foreground, fontSize: text.xs }))(
                       $text('Your queued payout flushes to your balance with this redeem.')
                     )
                   ]
                 : []),
-              ...(computeClaimable(p.pos) > 0n
+              ...(computeClaimable(p.pos, p.pool) > 0n
                 ? [
                     $statRow(
                       'Your pending payout',
-                      `${readableTokenAmount(desc, computeClaimable(p.pos))} ${desc.symbol}`
+                      `${readableTokenAmount(desc, computeClaimable(p.pos, p.pool))} ${desc.symbol}`
                     )
                   ]
                 : [])
             ),
             $column(spacing.small)(
               $row(spacing.small, style({ alignItems: 'center', justifyContent: 'space-between' }))(
-                $Checkbox({ value: selfExit, label: 'Exit alongside' })({ check: toggleSelfExitTether() }),
+                $Checkbox({ value: fulfillQueue, label: 'Fulfill investor queue' })({ check: toggleSelfExitTether() }),
                 $node(style({ color: palette.message, fontWeight: '600', fontSize: text.xs }))(
                   $text(
                     map(
-                      shares => (shares === 0n ? '' : `${readableTokenAmount(SHARE_DECIMALS, shares)} shares`),
+                      shares => (shares === 0n ? '' : `${readableTokenAmount(PRECISION.shareTokenDecimals, shares)} shares`),
                       sharesOutValue
                     )
                   )
@@ -435,10 +404,10 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, baseTokenId, 
               $node(style({ color: palette.foreground, fontSize: text.xs }))(
                 $text(
                   blocked
-                    ? 'Processing blocked: your carried stake is ahead of your fund share. Add stake or await investor exits.'
+                    ? 'Processing blocked: your carried stake exceeds your current fund share; it must rebalance before you can exit.'
                     : p.maxExit === 0n
-                      ? 'Nothing to exit against yet. Your exit capacity grows with investor exits; this is the skin-in-the-game guarantee.'
-                      : `Folds up to ${readableTokenAmount(SHARE_DECIMALS, p.maxExit)} of your shares into this redeem, capped by investor exits.`
+                      ? "You're at your skin-in-the-game floor: redeeming more would drop your share below the required half."
+                      : `Redeems up to ${readableTokenAmount(PRECISION.shareTokenDecimals, p.maxExit)} of your shares, keeping your required skin.`
                 )
               )
             ),
@@ -471,7 +440,9 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, baseTokenId, 
                             '18px'
                           )
                         ),
-                        $node(style({ color: p.liquidateBlocked ? palette.negative : palette.message, fontSize: text.xs }))(
+                        $node(
+                          style({ color: p.liquidateBlocked ? palette.negative : palette.message, fontSize: text.xs })
+                        )(
                           $text(
                             p.liquidateBlocked
                               ? `Unwind every open position and move all holdings to ${HUB_CHAIN.name} as ${desc.symbol} first: the full NAV must be liquid here to settle everyone.`

@@ -1,90 +1,61 @@
-import type { IAccount__AccountCall, IDeposit__Deposit } from '@puppet/indexer-graphql/entities'
-import { type Address, getAddress, type Hex } from 'viem'
-import { type IIndexerClient, selectOne } from './shared.js'
+import { HUB_CHAIN_ID } from '@puppet/contracts/const'
+import DEPLOYMENTS from '@puppet/contracts/deployments'
+import type { Address, Hex, PublicClient } from 'viem'
+import { getCode, readContract, waitForTransactionReceipt } from 'viem/actions'
+import { awaitWhile } from '../core/await.js'
 
-export type IAccountCallRow = IAccount__AccountCall
-export type IWalletDepositRow = IDeposit__Deposit
+// Settlement is confirmed on-chain over RPC, not from an indexer: the matchmaker dispatches the
+// tx and ACKs at dispatch, so the client polls chain truth for the consumed nonce / deployed code
+// / mined deposit. The Account module address is deterministic (one CREATE2 universe), so the
+// isNonceConsumed read is chain-agnostic in address and only the client varies.
+const ACCOUNT = DEPLOYMENTS[`Account:${HUB_CHAIN_ID}`]
 
 const SETTLEMENT_POLL_START_MS = 250
 const SETTLEMENT_POLL_MAX_MS = 500
 
-const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms))
-
-async function pollUntil<T>(run: () => Promise<T | undefined>, timeoutMs: number, timeoutMessage: string): Promise<T> {
-  const deadline = Date.now() + timeoutMs
-  let delay = SETTLEMENT_POLL_START_MS
-  do {
-    const found = await run()
-    if (found !== undefined) return found
-    await sleep(delay)
-    delay = Math.min(delay * 2, SETTLEMENT_POLL_MAX_MS)
-  } while (Date.now() < deadline)
-  throw new Error(timeoutMessage)
-}
-
-export async function findAccountCallByNonce(
-  sql: IIndexerClient,
-  account: Address,
-  chainId: number,
-  nonce: bigint
-): Promise<IAccountCallRow | undefined> {
-  return selectOne(sql, 'Account__AccountCall', {
-    where: { account: { _eq: getAddress(account) }, chainId: { _eq: BigInt(chainId) }, nonce: { _eq: nonce } }
+// The contract's nonce replay guard (Account.dispatch consumes the nonce keyed by the executing
+// account); true once the dispatched intent has settled on-chain. Answers even for not-yet-deployed
+// accounts (isNonceConsumed lives on the shared Account module, keyed per account).
+export function isNonceConsumed(client: PublicClient, account: Address, nonce: bigint): Promise<boolean> {
+  return readContract(client, {
+    address: ACCOUNT.address,
+    abi: ACCOUNT.abi,
+    functionName: 'isNonceConsumed',
+    args: [account, nonce]
   })
 }
 
 export async function awaitAccountCall(
-  sql: IIndexerClient,
+  client: PublicClient,
   account: Address,
-  chainId: number,
   nonce: bigint,
   timeoutMs: number
-): Promise<IAccountCallRow> {
-  return pollUntil(
-    () => findAccountCallByNonce(sql, account, chainId, nonce),
-    timeoutMs,
-    `AccountCall not surfaced for ${account} nonce=${nonce} chain=${chainId} within ${timeoutMs}ms`
-  )
-}
-
-// Event-sourced: deployment presence IS the raw deploy event row.
-export async function awaitAccountDeployed(
-  sql: IIndexerClient,
-  kind: 'createPuppetAccount' | 'createFundAccount',
-  account: Address,
-  chainId: number,
-  timeoutMs: number
 ): Promise<void> {
-  const entity =
-    kind === 'createFundAccount' ? ('Account__DeployFundAccount' as const) : ('Account__DeployPuppetAccount' as const)
-  await pollUntil(
-    () =>
-      selectOne(sql, entity, {
-        where: { account: { _eq: getAddress(account) }, chainId: { _eq: BigInt(chainId) } },
-        fields: ['id']
-      }),
+  await awaitWhile(async () => (await isNonceConsumed(client, account, nonce)) || undefined, {
     timeoutMs,
-    `account ${account} not deployed on chain ${chainId} within ${timeoutMs}ms`
-  )
-}
-
-export async function findWalletDepositByTxHash(
-  sql: IIndexerClient,
-  transactionHash: Hex
-): Promise<IWalletDepositRow | undefined> {
-  return selectOne(sql, 'Deposit__Deposit', {
-    where: { transactionHash: { _eq: transactionHash.toLowerCase() as Hex } }
+    pollMs: SETTLEMENT_POLL_START_MS,
+    maxPollMs: SETTLEMENT_POLL_MAX_MS,
+    timeoutMessage: `nonce ${nonce} for ${account} not consumed on-chain within ${timeoutMs}ms`
   })
 }
 
-export async function awaitWalletDeposit(
-  sql: IIndexerClient,
-  transactionHash: Hex,
-  timeoutMs: number
-): Promise<IWalletDepositRow> {
-  return pollUntil(
-    () => findWalletDepositByTxHash(sql, transactionHash),
-    timeoutMs,
-    `WalletDeposit not surfaced for tx=${transactionHash} within ${timeoutMs}ms`
+export async function awaitAccountDeployed(client: PublicClient, account: Address, timeoutMs: number): Promise<void> {
+  await awaitWhile(
+    async () => {
+      const code = await getCode(client, { address: account })
+      return (!!code && code !== '0x') || undefined
+    },
+    {
+      timeoutMs,
+      pollMs: SETTLEMENT_POLL_START_MS,
+      maxPollMs: SETTLEMENT_POLL_MAX_MS,
+      timeoutMessage: `account ${account} not deployed on-chain within ${timeoutMs}ms`
+    }
   )
+}
+
+// The deposit settles when its tx is mined successfully; the receipt is the confirmation.
+export async function awaitWalletDeposit(client: PublicClient, transactionHash: Hex, timeoutMs: number): Promise<void> {
+  const receipt = await waitForTransactionReceipt(client, { hash: transactionHash, timeout: timeoutMs })
+  if (receipt.status !== 'success') throw new Error(`deposit tx ${transactionHash} reverted on-chain`)
 }

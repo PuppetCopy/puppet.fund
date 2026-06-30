@@ -1,7 +1,7 @@
 import type { IntervalTime } from '@puppet/sdk/const'
 import type { IStream } from 'aelea/stream'
 import type { Address, Hex } from 'viem'
-import type { IGmxPositionDecrease, IGmxPositionIncrease } from '../io/indexer/query.js'
+import type { IGmxPositionDecrease, IGmxPositionIncrease } from '../io/datastore/query.js'
 
 export type { IMasterMetricSummary } from './common.js'
 

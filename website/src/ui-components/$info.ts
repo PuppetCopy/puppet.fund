@@ -9,7 +9,6 @@ export const $tooltipDropContainer = $column(
     maxWidth: '600px',
     userSelect: 'text',
     background: colorShade(palette.foreground, 14),
-    border: `1px solid ${colorShade(palette.foreground, 32)}`,
     boxShadow: `${palette.shadow} 0px 4px 20px 8px, ${palette.shadow} 0px 1px 3px 1px`,
     padding: '16px',
     minWidth: '300px',
@@ -19,7 +18,7 @@ export const $tooltipDropContainer = $column(
 
 import { text } from '@/ui-components'
 import { $fromText, $icon } from './$common.js'
-import { $caretDblDown, $info } from './$icons.js'
+import { $info } from './$icons.js'
 
 export const $infoLabel = $node(style({ color: palette.foreground }))
 
@@ -62,9 +61,9 @@ export const $infoTooltip = (text: string | I$Slottable, color = palette.foregro
 export const $labeledDivider = (label: string | I$Slottable) =>
   $row(spacing.default, style({ placeContent: 'center', alignItems: 'center' }))(
     $column(style({ flex: 1, borderBottom: `1px solid ${palette.horizon}` }))(),
-    $row(spacing.small, style({ color: palette.foreground, alignItems: 'center' }))(
-      $node(style({ fontSize: text.sm }))($fromText(label)),
-      $icon({ $content: $caretDblDown, width: '10px', viewBox: '0 0 32 32', fill: palette.foreground })
-    ),
+    $row(
+      spacing.small,
+      style({ fontSize: text.sm, color: palette.foreground, alignItems: 'center' })
+    )($fromText(label)),
     $column(style({ flex: 1, borderBottom: `1px solid ${palette.horizon}` }))()
   )

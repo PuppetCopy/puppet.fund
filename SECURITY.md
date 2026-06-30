@@ -17,7 +17,7 @@ Encrypt sensitive details with the PGP key published at `puppet.fund/.well-known
 
 In scope:
 
-- Smart contracts in `contracts/src/` deployed at the addresses listed in `@puppet/contracts/PUPPET_CONTRACT_MAP`.
+- Smart contracts in `contracts/src/` deployed at the addresses listed in `contracts/deployments.toml`.
 - The `@puppet/sdk` runtime as published.
 - Cryptographic, economic, or correctness flaws in the protocol design itself.
 

@@ -1,14 +1,13 @@
-import { FLOAT_PRECISION, HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { computeClaimable, computeQueuedShares, type ISubaccountState, type ITokenRegistryMap } from '@puppet/sdk/state'
+
+import type { ISubaccountState, ITokenRegistryMap } from '@puppet/sdk/state'
 import {
-  combine,
   constant,
   empty,
   filter,
+  fromPromise,
   type IStream,
   map,
   merge,
-  nowWith,
   o,
   op,
   start,
@@ -23,7 +22,6 @@ import {
   attr,
   attrBehavior,
   component,
-  effectProp,
   effectRun,
   type I$Slottable,
   type INode,
@@ -44,8 +42,8 @@ import {
   spacing
 } from 'aelea/ui-components'
 import { colorShade, palette, type Theme, theme } from 'aelea/ui-components-theme'
-import { $defaultAnchor, $Link, locationChange, pushUrl, type Route } from 'aelea/ui-router'
-import { type Address, formatUnits, getAddress, type Hex } from 'viem'
+import { $defaultAnchor, $Link, locationChange, type Route } from 'aelea/ui-router'
+import type { Address, } from 'viem'
 import {
   $alertIntermediateSpinnerContainer,
   $anchor,
@@ -58,22 +56,22 @@ import {
   $moreDots,
   $twitter,
   keyActivate,
+  softNavClick,
   text
 } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
 import { $jazzicon } from '../common/$avatar.js'
 import { $puppetLogo } from '../common/$icons.js'
 import { DOCS_URL, GITHUB_REPO_URL } from '../const/links.js'
-import * as context from '../io/context.js'
-import { latestPriceMap } from '../io/gmx/priceFeed.js'
-import { matchmakerStatus } from '../io/matchmaker/index.js'
+import context from '../io/context.js'
+import { liveTotalUsdValue } from '../io/totalValue.js'
 import { $separator2 } from '../pages/common.js'
 import { type connectWallet, type IConnectedWallet, walletQuery } from '../wallet/index.js'
 import { $accountLabel } from './$AccountProfile.js'
 import { $ServicesConnectivity } from './$ServicesConnectivity.js'
-import { $WalletLink } from './$WalletLink.js'
 import { $ThemePicker } from './$ThemePicker.js'
 import { $WalletConnect } from './$WalletConnect.js'
+import { $WalletLink } from './$WalletLink.js'
 
 interface I$MainMenu {
   walletState: IStream<ISubaccountState | null>
@@ -251,13 +249,16 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
           )(
             $Link({
               route: routeSchema,
-              $anchor: $defaultAnchor(attr({ 'aria-label': 'Home' })),
+              $anchor: $defaultAnchor(
+                attr({ 'aria-label': 'Home' }),
+                style({ display: 'inline-flex', cursor: 'pointer' })
+              ),
               $content: $icon({ $content: $puppetLogo, width: '45px', viewBox: '0 0 32 32' })
             })({})
           ),
 
           $row(spacing.default, style({ flex: 1, alignItems: 'center', placeContent: 'center' }))(
-            $ServicesConnectivity({ matchmaker: matchmakerStatus })({}),
+            $ServicesConnectivity()({}),
             $intermediatePromise({
               $loader: $node(style({ position: 'relative', display: 'inline-flex', borderRadius: '50px' }))(
                 style({ position: 'relative' })($target),
@@ -301,49 +302,18 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
                 })
 
                 const registryState: IStream<ITokenRegistryMap> = op(
-                  context.tokenRegistryQuery,
-                  switchPromises,
+                  fromPromise(context.getTokenRegistry()),
                   state()
                 )
-                // Total account value, lensed off the root PA state: cash + per-position
-                // value (claimable + held shares at fund NAV). The fund's own cash is the
-                // backing of those shares, so position value IS the wallet's claim on it.
-                const totalUsdText: IStream<string> = op(
-                  combine({ root: walletState, prices: latestPriceMap, registry: registryState }),
-                  map(p => {
-                    if (!p.root) return '-'
-                    const priceOf = (tokenId: Hex): bigint => {
-                      const hubToken = p.registry.get(HUB_CHAIN_ID)?.get(tokenId)?.token
-                      return (hubToken ? p.prices[hubToken]?.price : undefined) ?? 0n
-                    }
-                    const fundById = new Map(p.root.funds.map(f => [getAddress(f.fund), f] as const))
-                    let total = 0n
-                    for (const [tokenId, row] of p.root.balances) total += row.signedBalance * priceOf(tokenId)
-                    for (const pos of p.root.positions) {
-                      const fund = fundById.get(getAddress(pos.fund))
-                      if (!fund) continue
-                      const px = priceOf(fund.baseTokenId as Hex)
-                      const redeemPos = {
-                        sharesHeld: pos.sharesHeld,
-                        stake: pos.stake,
-                        cursor: pos.cursor,
-                        accrued: pos.accrued,
-                        accruedPerStake: fund.accruedPerStake,
-                        totalStake: fund.totalStake,
-                        queuedShares: fund.queuedShares
-                      }
-                      total +=
-                        (computeClaimable(redeemPos) +
-                          ((pos.sharesHeld + computeQueuedShares(redeemPos)) * fund.navPerShare) / FLOAT_PRECISION) *
-                        px
-                    }
-                    return `$${Number(formatUnits(total, 30)).toFixed(2)}`
-                  }),
-                  start('-')
+                // Total account value, lensed off the root PA state: cash + per-position value (claimable + held shares
+                // at fund NAV) + mastered-fund AUM. Shared with the wallet-page chart headline via liveTotalUsdValue.
+                const totalUsdText: IStream<string> = map(
+                  v => (v === null ? '-' : `$${v.toFixed(2)}`),
+                  liveTotalUsdValue(walletState, registryState)
                 )
 
                 return $element('a')(
-                  attr({ 'aria-label': 'Wallet Page', href: '/portfolio' }),
+                  attr({ 'aria-label': 'Portfolio', href: '/portfolio' }),
                   style({
                     display: 'inline-flex',
                     alignItems: 'center',
@@ -355,14 +325,7 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
                     textDecoration: 'none'
                   }),
                   stylePseudo(':hover', { borderColor: palette.foreground }),
-                  effectProp(
-                    'onclick',
-                    nowWith(() => (ev: MouseEvent) => {
-                      if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return
-                      ev.preventDefault()
-                      pushUrl('/portfolio')
-                    })
-                  )
+                  softNavClick('/portfolio')
                 )(
                   $row(
                     spacing.small,
@@ -380,7 +343,7 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
                 )
               }, walletQuery)
             }),
-            $WalletLink({ walletState: op(walletQuery, switchPromises, state()) })({})
+            $WalletLink({ walletState: op(walletQuery, switchPromises, state()), rootState: walletState })({})
           ),
 
           $row(spacing.big, style({ flex: 1, placeContent: 'flex-end', alignItems: 'center' }))(

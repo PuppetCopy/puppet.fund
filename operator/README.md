@@ -27,7 +27,7 @@ The package is split by operator, so you choose yours:
 - **`@puppet.fund/operator`** — the generic, venue-agnostic core. `pairOverBrowser()` →
   `createOperatorCore(session)` gives you the RPC client, account + fund prediction and
   deploy checks, the matchmaker compact, the generic `operate(callList)` dispatch,
-  `getFundBalance()`, and connection lifecycle (`onStatus()` / `isOpen()` / `close()`). Compose it
+  `getFundBalance()`, and `close()`. Compose it
   with your own venue call shapes to build an extended operator — a different venue, base token,
   or surface. The GMX venue is built on exactly this. Also here: `runOperator`,
   `pairOverBrowser`, `buildSession`, `createCompact`, `TOKEN_ID`, and the compact error helpers. Type your
@@ -35,9 +35,10 @@ The package is split by operator, so you choose yours:
 
 ## Usage
 
-`pairOverBrowser()` returns the **session** — the whole sealed identity (account params, the fund
-and its base token, the matchmaker endpoint, the token registry). Pass it to `createOperatorCore`
-to build the **core** (signing, the matchmaker compact, your account + fund, lifecycle), then wrap
+`pairOverBrowser()` returns the **session**: the sealed identity seed (your wallet address, the
+fund's base token and name, the matchmaker endpoint, the token registry). Pass it to
+`createOperatorCore`, which derives your account and fund from it and builds the **core** (signing,
+the matchmaker compact, your account + fund, lifecycle), then wrap
 it in the GMX venue. The core does the async setup and owns the connection; `gmxOperator(core)` is
 synchronous and adds only GMX execution + reads — so you call connection/account actions on `core`,
 GMX actions on `gmx`. RPC defaults to the public Arbitrum endpoint (set `rpcUrl` beyond a first
@@ -75,29 +76,36 @@ Two addresses matter, both deterministic and printed at startup:
 - **`core.account`** — your account, the identity that signs. The session key delegated to the
   operator signs through it.
 - **`core.fund`** — the fund your account controls: it holds the pooled base capital (yours plus
-  any subscribers'), it is the GMX account positions live under, and every `operate` executes from
+  any puppets'), it is the GMX account positions live under, and every `operate` executes from
   it. Its idle base is `getFundBalance()` — deployable as collateral with no manual bookkeeping:
   fund value moves settle as signed transfer legs, and `createOrder` declares the outflow and
   re-signs anything GMX returned since the last order in the same leg. The protocol co-signs
-  every action against the rules the backers signed.
+  every action against the rules the puppets signed.
 
 ## Surface
 
 - `pairOverBrowser(pairUrl?)` (async, package root) — opens a one-time `127.0.0.1` listener and
-  prints a link to open on the site; returns the sealed `IPairedSession`: `params` ({user,
-  signer}), `share` ({master, baseTokenId, name}), `matchmakerUrl`, and the token registry. For
-  unattended runs build the same shape with `buildSession({ signerKey, user, baseTokenId, name })`.
+  prints a link to open on the site; returns the sealed `IPairedSession` seed: `signerKey`, `user`,
+  `baseTokenId`, `name`, `matchmakerUrl`, and the token registry (the operator derives `params`,
+  `fundParams`, `account`, and `fund` from these). For unattended runs build the same seed with
+  `buildSession({ signerKey, user, baseTokenId, name })`.
 - `createOperatorCore(session, config?)` (async, package root) — takes a session, sets up the
   matchmaker compact, predicts + checks the account and the fund (asserting the session's
   identity is internally consistent), and returns the connection + account surface you call
   directly: `getFundBalance()` (live base in the fund), `getFundSignedBalance()` (the signed
-  portion, on-chain), `isOpen()` (is the matchmaker connected — gate a tick on it), `onStatus()`,
+  portion, on-chain),
   `operate(callList, transferList?)` (the generic signed-call dispatch under the venue surface —
   declare value the calls move as transfer legs; the default 0/0 leg fits value-neutral
   dispatches, and the protocol attestor co-signs only calls inside the venue perimeter it can
-  screen, so arbitrary targets are rejected), and `close()`; plus `params`, `share`, `account`,
+  screen, so arbitrary targets are rejected), `swap(input)` (convert one registered token the fund
+  holds to another via an allowlisted DEX: pass the input/output token, amounts including the output
+  floor, and the `provider` + `providerCallData` from a LI.FI quote you fetch with the fund as the
+  output recipient. Defaults to an internal rebalance of the fund's signed balance; set `fromRoute`
+  to source the deposit route. The matchmaker re-prices in-domain, and the contract bounds the output
+  and enforces the provider allowlist. Swaps are hub-local; cross-chain consolidation is a site flow),
+  and `close()`; plus `params`, `fundParams`, `account`,
   `fund`, `signer`, `user`, `token`, `baseTokenId`, `publicClient`, `compact`. Type it as
-  `IOperatorCore`. The base token is the paired fund's (`share.baseTokenId`); the matchmaker
+  `IOperatorCore`. The base token is the paired fund's (`fundParams.baseTokenId`); the matchmaker
   endpoint and registry come from the session too. The operator needs no indexer: intent block
   anchors arrive as head frames on the relay socket, balances and settlement are read from the
   chain. `config.rpcUrl` defaults to the public Arbitrum endpoint. `config.dryRun: true` runs
@@ -126,8 +134,9 @@ Two addresses matter, both deterministic and printed at startup:
 ## Pairing
 
 `pairOverBrowser()` opens a one-time `127.0.0.1` listener and prints a link you open on the site.
-The browser seals the session — your session key, the fund identity (`params` + `share`), the
-matchmaker endpoint, and the token registry — to an ephemeral key in that link and posts it back.
+The browser seals the session (your session key, your wallet address, the fund's base token and
+name, the matchmaker endpoint, and the token registry) to an ephemeral key in that link and posts
+it back.
 The key reaches the operator in memory only, never written to disk. Your account and fund must
 already exist (create the account and allocate the fund on the site first).
 

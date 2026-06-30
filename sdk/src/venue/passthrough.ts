@@ -1,16 +1,21 @@
-import { PUPPET_CONTRACT_MAP } from '@puppet/contracts'
-import { HUB_CHAIN_ID, TOKEN_ID } from '@puppet/contracts/const'
-import type { IIAccount__Call, IIAccount__SignTransfer } from '@puppet/contracts/types'
+import { CHAIN_TOKEN_MAP, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import DEPLOYMENTS from '@puppet/contracts/deployments'
+import type {
+  IFundAccountLib__FundAccountInitParams,
+  IIAccount__Call,
+  IIAccount__SignTransfer
+} from '@puppet/contracts/types'
 import { type Address, erc20Abi, getAddress, type Hex, isAddressEqual, type PublicClient } from 'viem'
 import { predictFundAccount, predictPuppetAccount } from '../account/index.js'
 import { attestOperateIntent, type IOperateInput } from '../attestation/index.js'
 import type { ICompact } from '../compact/compact.js'
-import { ADDRESS_ZERO } from '../const/common.js'
-import { DEFAULT_DEADLINE_SEC, HUB_CHAIN_NETWORK } from '../const/index.js'
-import { getAcceptableRelayFee, relayRouterForKind } from '../state/fee.js'
+import { DEFAULT_DEADLINE_SEC } from '../const/index.js'
+import { getAcceptableRelayFee, relayDispatch } from '../state/fee.js'
 import { randomNonce } from '../state/nonce.js'
-import { type ITokenRegistryMap, tokenIdForToken, tokenInfoFor } from '../state/tokenRegistry.js'
+import { type ITokenRegistryMap, registeredTokenAddresses, tokenInfoFor } from '../state/tokenRegistry.js'
 import { assertOperateSignable, deriveGmxOutflow, screenGmxOperate } from './operate.js'
+
+const FUND_ACCOUNT = DEPLOYMENTS[`FundAccount:${HUB_CHAIN_ID}`]
 
 export interface IPassthroughTransaction {
   to?: string
@@ -27,9 +32,15 @@ export interface IPassthroughSigner {
 export interface IPassthroughDeps {
   user: Address
   signer: IPassthroughSigner
+  // The specific fund the passthrough operates. Multi-key CREATE2 derives a fund address
+  // from {master, baseToken, name}; the master is this session's puppet account, so the
+  // caller threads only the fund's base and name.
+  baseToken: Hex
+  name: Hex
   compact: ICompact
   publicClient: PublicClient
   tokenRegistry: ITokenRegistryMap
+  getTokenPerNativeToken: (token: Address) => Promise<bigint>
 }
 
 const DEFAULT_CALL_GAS_LIMIT = 2_000_000n
@@ -40,13 +51,18 @@ const DEFAULT_CALL_GAS_LIMIT = 2_000_000n
 // by the session key, and relayed. Shared by every client that impersonates the fund
 // toward dApps (wallet extension, the website /bridge endpoint).
 export async function sendOperatePassthrough(deps: IPassthroughDeps, tx: IPassthroughTransaction): Promise<Hex> {
-  const { user, signer, compact, publicClient, tokenRegistry } = deps
+  const { user, signer, baseToken, name, compact, publicClient, tokenRegistry, getTokenPerNativeToken } = deps
   if (!tx.to) throw new Error('eth_sendTransaction requires a target')
   const params = { user, signer: signer.address } as const
-  const fund = predictFundAccount(predictPuppetAccount(params))
+  const fundParams: IFundAccountLib__FundAccountInitParams = {
+    master: predictPuppetAccount(params),
+    baseToken,
+    name
+  }
+  const fund = predictFundAccount(fundParams)
 
   // Native value is the GMX execution fee, paid from the fund's own ETH (a registered
-  // token, tokenId 0/ADDRESS_ZERO). The screen pins it to a sendWnt -> OrderVault.
+  // token under the native marker). The screen pins it to a sendWnt -> OrderVault.
   const value = tx.value ? BigInt(tx.value) : 0n
   const callList: IIAccount__Call[] = [
     {
@@ -61,54 +77,61 @@ export async function sendOperatePassthrough(deps: IPassthroughDeps, tx: IPassth
   // sendWnt). A standalone approval yields a single zero-amount leg on the approved token.
   const outflows = deriveGmxOutflow(callList)
   const legs = outflows.map(o => {
-    const tokenId = tokenIdForToken(tokenRegistry, HUB_CHAIN_ID, o.token)
-    return { tokenId, token: tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, tokenId).token, amountOut: o.amountOut }
+    const token = getAddress(o.token)
+    tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, token)
+    return { token, amountOut: o.amountOut }
   })
 
-  assertOperateSignable(screenGmxOperate({ callList, account: fund, baseTokens: legs.map(l => l.token) }))
+  assertOperateSignable(
+    screenGmxOperate({
+      callList,
+      account: fund,
+      baseTokens: legs.map(l => l.token),
+      registeredTokens: registeredTokenAddresses(tokenRegistry, HUB_CHAIN_ID)
+    })
+  )
 
   // Recognize the fund's surplus on each leg's token: native legs read the account ETH
   // balance, ERC-20 legs read balanceOf. amountIn = balance - signed turns the on-chain
   // post-balance check into a minimum-custody guard for that token.
   const enriched = await Promise.all(
     legs.map(async leg => {
-      const isNative = isAddressEqual(getAddress(leg.token), ADDRESS_ZERO)
+      const isNative = isAddressEqual(getAddress(leg.token), PROTOCOL.nativeToken)
       const [balance, signed] = await Promise.all([
         isNative
           ? publicClient.getBalance({ address: fund })
           : publicClient.readContract({ address: leg.token, abi: erc20Abi, functionName: 'balanceOf', args: [fund] }),
         publicClient.readContract({
           address: fund,
-          abi: PUPPET_CONTRACT_MAP.FundAccount.abi,
+          abi: FUND_ACCOUNT.abi,
           functionName: 'signedBalanceOf',
-          args: [leg.tokenId]
+          args: [getAddress(leg.token)]
         })
       ])
       return { ...leg, signed, amountIn: balance > signed ? balance - signed : 0n }
     })
   )
   const transferList: IIAccount__SignTransfer[] = enriched.map(l => ({
-    tokenId: l.tokenId,
     token: l.token,
     amountIn: l.amountIn,
     amountOut: l.amountOut
   }))
-  const signedBalanceByTokenId: Record<Hex, bigint> = Object.fromEntries(enriched.map(l => [l.tokenId, l.signed]))
-  // The relay quotes its fee against transferList[0].tokenId (handlers.ts signAndQuote), so
+  const signedBalanceByToken: Record<Address, bigint> = Object.fromEntries(enriched.map(l => [getAddress(l.token), l.signed]))
+  // The relay quotes its fee against transferList[0].token (handlers.ts signAndQuote), so
   // the signed acceptableRelayFee MUST be denominated in that same token or the off-chain
-  // RELAY_FEE_EXCEEDED check compares mismatched units. getTokenPerEth prices native as 1e18.
-  const feeToken = enriched[0]?.token ?? tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, TOKEN_ID.WETH).token
+  // RELAY_FEE_EXCEEDED check compares mismatched units. getTokenPerNativeToken prices native as 1e18.
+  const feeToken = enriched[0]?.token ?? getAddress(CHAIN_TOKEN_MAP[HUB_CHAIN_ID].WETH)
 
-  // The intent block anchor MUST be the relay's own indexed head (broadcast on the
-  // socket): the live RPC head is ahead of the relay's view and would be rejected.
-  const blockNumber = await compact.awaitHead(HUB_CHAIN_NETWORK)
+  // The intent block anchor is the live RPC head, read from our own client: the relay validates the intent's blockNumber
+  // against its own live head (verifyTimeBounds ± maxBlockDelay), so both sides see live heads within tolerance.
+  const blockNumber = await publicClient.getBlockNumber()
   const gasPrice = await publicClient.getGasPrice()
-  const acceptableRelayFee = await getAcceptableRelayFee(
+  const tokenPerNativeToken = await getTokenPerNativeToken(feeToken)
+  const acceptableRelayFee = getAcceptableRelayFee(
     gasPrice,
-    relayRouterForKind('operate'),
+    relayDispatch('operate').router,
     'operate',
-    feeToken,
-    publicClient,
+    tokenPerNativeToken,
     BigInt(callList.length)
   )
 
@@ -119,11 +142,12 @@ export async function sendOperatePassthrough(deps: IPassthroughDeps, tx: IPassth
     acceptableRelayFee,
     nonce: randomNonce(),
     chainId: BigInt(HUB_CHAIN_ID),
+    fundParams,
     callList,
     transferList
   }
   const { intent, typedData } = attestOperateIntent(
-    { chainId: HUB_CHAIN_ID, tokenRegistry, currentBlock: blockNumber, signedBalanceByTokenId },
+    { chainId: HUB_CHAIN_ID, tokenRegistry, currentBlock: blockNumber, signedBalanceByToken },
     input
   )
   const signature = await signer.signTypedData(typedData)

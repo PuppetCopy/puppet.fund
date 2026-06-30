@@ -13,16 +13,19 @@ import {AllocateStore} from "./store/AllocateStore.sol";
 import {RedeemStore} from "./store/RedeemStore.sol";
 import {Access} from "../utils/auth/Access.sol";
 import {CallLib} from "../utils/CallLib.sol";
+import {SignLib} from "../utils/SignLib.sol";
 import {Error} from "../utils/Error.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";
 import {ShareToken} from "./ShareToken.sol";
-import {ShareLib} from "../utils/ShareLib.sol";
+import {FundAccountLib} from "../utils/FundAccountLib.sol";
 
 bytes32 constant ALLOCATE_INTENT_TYPEHASH = keccak256(
-    "AllocateIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,ShareInitParams share,uint256 acceptableNetAssetValue,uint256 totalShareSupply,uint256 masterAmount,bytes32 puppetListHash,bytes32 matchedAmountListHash)AccountInitParams(address user,address signer)ShareInitParams(address master,bytes32 baseTokenId,bytes32 name)"
+    "AllocateIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,FundAccountInitParams fundParams,uint256 acceptableNetAssetValue,uint256 totalShareSupply,uint256 masterAmount,bytes32 puppetListHash,bytes32 allocatedAmountListHash)AccountInitParams(address user,address signer)FundAccountInitParams(address master,address baseToken,bytes32 name)"
 );
 
 uint constant SHARE_PRECISION = 1e12;
+uint constant MIN_MANDATE_BODY = 64;
+uint constant MANDATE_GAS_BUFFER = 800_000;
 
 contract Allocate is Access {
     struct AllocateIntent {
@@ -32,25 +35,17 @@ contract Allocate is Access {
         uint acceptableRelayFee;
         uint nonce;
         uint chainId;
-        ShareLib.ShareInitParams share;
+        FundAccountLib.FundAccountInitParams fundParams;
         uint acceptableNetAssetValue;
         uint totalShareSupply;
         uint masterAmount;
         address[] puppetList;
-        uint[] matchedAmountList;
+        uint[] allocatedAmountList;
     }
 
     constructor(
         IAuthority _authority
     ) Access(_authority) {}
-
-    function _sharesFor(
-        uint _amount,
-        uint _preMintSupply,
-        uint _netAssetValue
-    ) internal pure returns (uint) {
-        return _preMintSupply == 0 ? _amount * SHARE_PRECISION : Math.mulDiv(_amount, _preMintSupply, _netAssetValue);
-    }
 
     function allocate(
         AllocateIntent calldata _intent,
@@ -60,7 +55,7 @@ contract Allocate is Access {
         Issue _shareGate,
         AllocateStore _store,
         RedeemStore _redeemStore,
-        IERC20 _base,
+        address _baseToken,
         bytes32 _digest,
         bytes32 _routerDomainSeparator,
         bytes calldata _userSignature,
@@ -72,20 +67,22 @@ contract Allocate is Access {
     ) external auth returns (uint fundAccountIn_) {
         if (_intent.acceptableNetAssetValue == 0) revert Error.Allocate__ZeroAcceptableNav();
         uint _n = _intent.puppetList.length;
-        if (_bodyList.length != _n || _mandateList.length != _n || _intent.matchedAmountList.length != _n) {
+        if (_bodyList.length != _n || _mandateList.length != _n || _intent.allocatedAmountList.length != _n) {
             revert Error.Allocate__ListLengthMismatch(_n, _bodyList.length, _mandateList.length);
         }
 
-        address _fundAccount = _accountGate.predictFundAccount(_intent.share.master);
-        if (_fundAccount.code.length == 0) _accountGate.createFundAccount(_intent.params.user, _intent.share.master);
-        if (_redeemStore.closeRateMap(_fundAccount) != 0) revert Error.Share__FundClosed();
-        ShareToken _shareToken = ShareToken(_shareGate.predict(_fundAccount, _intent.share));
+        address _fundAccount = _accountGate.predictFundAccount(_intent.fundParams);
+        if (_fundAccount.code.length == 0) {
+            _accountGate.createFundAccount(_intent.params.user, _intent.fundParams);
+        }
+        if (_redeemStore.liquidationRateMap(_fundAccount) != 0) revert Error.Share__FundLiquidated();
+        ShareToken _shareToken = ShareToken(_shareGate.predict(_fundAccount, _intent.fundParams));
         uint _preMintSupply;
         if (address(_shareToken).code.length == 0) {
-            _shareGate.createShareToken(_fundAccount, _intent.share);
+            _shareGate.createShareToken(_fundAccount, _intent.fundParams);
         } else {
             _preMintSupply = _shareToken.totalSupply();
-            if (_preMintSupply == 0 && _redeemStore.getPool(_fundAccount).totalStake != 0) {
+            if (_preMintSupply == 0 && _redeemStore.getPool(_fundAccount).weight != 0) {
                 revert Error.Share__Empty();
             }
         }
@@ -94,8 +91,10 @@ contract Allocate is Access {
         }
 
         uint[] memory _puppetSharesMintedList = new uint[](_n);
-        uint _totalMatched;
+        uint _totalAllocated;
         uint _totalPuppetMinted;
+        uint _remainingFee = _preMintSupply > 0 ? _actualRelayFee : 0;
+        uint _masterLeg = _intent.masterAmount > 0 ? 1 : 0;
 
         AllocateStore.PuppetState[] memory _stateList = _store.getPuppetStateList(_intent.puppetList, _fundAccount);
         for (uint _i; _i < _n; ++_i) {
@@ -103,12 +102,14 @@ contract Allocate is Access {
             if (_i > 0 && uint160(_puppet) <= uint160(_intent.puppetList[_i - 1])) {
                 revert Error.Allocate__PuppetListNotSorted(_intent.puppetList[_i - 1], _puppet);
             }
-            uint _amount = _intent.matchedAmountList[_i];
+            if (_puppet == _intent.fundParams.master) continue;
+            uint _amount = _intent.allocatedAmountList[_i];
             if (_amount == 0) continue;
 
             bytes calldata _body = _bodyList[_i];
+            if (_body.length < MIN_MANDATE_BODY) continue;
             (bytes32 _bodyHash, bytes32 _mandateDigest) =
-                RuleLib.mandate(_routerDomainSeparator, _puppet, _fundAccount, _base, _body);
+                RuleLib.mandate(_routerDomainSeparator, _puppet, _fundAccount, _baseToken, _body);
             if (_stateList[_i].mandate != _bodyHash) continue;
             uint _lastAllocatedAt = _stateList[_i].lastAllocatedAt;
             uint _throttle = RuleLib.throttlePeriod(_body);
@@ -118,21 +119,24 @@ contract Allocate is Access {
             uint _rateLimit = RuleLib.rateLimit(_body);
             if (_rateLimit != 0 && _amount > _rateLimit) _amount = _rateLimit;
 
-            uint _sa = _sharesFor(_amount, _preMintSupply, _intent.acceptableNetAssetValue);
+            uint _feeSlice = _remainingFee / (_n - _i + _masterLeg);
+            if (_amount <= _feeSlice) continue;
+            uint _sa = _sharesFor(_amount - _feeSlice, _preMintSupply, _intent.acceptableNetAssetValue);
             if (_sa == 0) continue;
 
-            try _accountGate.dispatchMandate(
+            try _accountGate.dispatchMandate{gas: _transferGasLimit + MANDATE_GAS_BUFFER}(
                 IAccount(_puppet),
                 _mandateDigest,
                 _mandateList[_i],
-                CallLib.wrap(CallLib.transferCall(_base, _fundAccount, _amount, _transferGasLimit)),
-                CallLib.signTransfer(_intent.share.baseTokenId, _base, 0, _amount)
+                CallLib.compose(CallLib.transfer(_baseToken, _fundAccount, _amount, _transferGasLimit)),
+                SignLib.transfer(_baseToken,0, _amount)
             ) returns (
                 uint[] memory, uint[] memory, bytes[] memory
             ) {
                 _puppetSharesMintedList[_i] = _sa;
                 _totalPuppetMinted += _sa;
-                _totalMatched += _amount;
+                _totalAllocated += _amount;
+                _remainingFee -= _feeSlice;
             } catch {
                 continue;
             }
@@ -140,38 +144,43 @@ contract Allocate is Access {
 
         uint _ownerNewShares;
         uint _masterIn = _intent.masterAmount;
-        if (_masterIn > 0) {
-            _ownerNewShares = _sharesFor(_masterIn, _preMintSupply, _intent.acceptableNetAssetValue);
-            if (_ownerNewShares == 0) _masterIn = 0;
+        if (_masterIn > _remainingFee) {
+            _ownerNewShares = _sharesFor(_masterIn - _remainingFee, _preMintSupply, _intent.acceptableNetAssetValue);
+            if (_ownerNewShares == 0) {
+                _masterIn = 0;
+            } else {
+                try _accountGate.dispatch(
+                    IAccount(_intent.fundParams.master),
+                    CallLib.compose(
+                        CallLib.routeExecute(
+                            _accountGate.predictRoute(_intent.fundParams.master),
+                            CallLib.compose(CallLib.transfer(_baseToken, _fundAccount, _masterIn, _transferGasLimit))
+                        )
+                    ),
+                    SignLib.none(),
+                    _digest,
+                    _userSignature,
+                    _attestorSignature,
+                    _attestor,
+                    _intent.nonce
+                ) returns (uint[] memory, uint[] memory, bytes[] memory) {
+                    _remainingFee = 0;
+                } catch {
+                    _masterIn = 0;
+                    _ownerNewShares = 0;
+                }
+            }
+        } else {
+            _masterIn = 0;
         }
 
-        fundAccountIn_ = _masterIn + _totalMatched;
+        fundAccountIn_ = _masterIn + _totalAllocated;
         if (fundAccountIn_ == 0) revert Error.Allocate__ZeroAmount();
 
-        if (_masterIn > 0) {
-            _accountGate.dispatch(
-                IAccount(_intent.share.master),
-                CallLib.wrap(
-                    CallLib.routeDeposit(
-                        _accountGate.predictRoute(_intent.share.master),
-                        _base,
-                        _fundAccount,
-                        _masterIn,
-                        _transferGasLimit
-                    )
-                ),
-                CallLib.noTransfers(),
-                _digest,
-                _userSignature,
-                _attestorSignature,
-                _attestor,
-                _intent.nonce
-            );
-        }
         _accountGate.dispatch(
             IAccount(_fundAccount),
-            CallLib.feeOnly(_base, _feeReceiver, _actualRelayFee, _transferGasLimit),
-            CallLib.signTransfer(_intent.share.baseTokenId, _base, fundAccountIn_, _actualRelayFee),
+            CallLib.feeOnly(_baseToken, _feeReceiver, _actualRelayFee, _transferGasLimit),
+            SignLib.transfer(_baseToken,fundAccountIn_, _actualRelayFee),
             _digest,
             _userSignature,
             _attestorSignature,
@@ -179,9 +188,12 @@ contract Allocate is Access {
             _intent.nonce
         );
 
-        if (_ownerNewShares > 0) _shareGate.mint(_shareToken, _intent.share.master, _ownerNewShares);
-        if (_totalPuppetMinted > 0) {
+        uint _ownerSharesPost = _ownerNewShares > 0
+            ? _shareGate.mint(_shareToken, _intent.fundParams.master, _ownerNewShares)
+            : _shareToken.balanceOf(_intent.fundParams.master);
+        uint[] memory _puppetSharesPostList =
             _shareGate.mintMany(_shareToken, _intent.puppetList, _puppetSharesMintedList);
+        if (_totalPuppetMinted > 0) {
             _store.setLastAllocatedAtMany(_intent.puppetList, _puppetSharesMintedList, _fundAccount, block.timestamp);
         }
 
@@ -189,14 +201,24 @@ contract Allocate is Access {
             "Allocate",
             abi.encode(
                 _intent,
+                _actualRelayFee,
                 _fundAccount,
                 _ownerNewShares,
-                _puppetSharesMintedList,
-                _totalMatched,
+                _puppetSharesPostList,
+                _totalAllocated,
                 _preMintSupply,
                 _totalPuppetMinted,
-                _actualRelayFee
+                fundAccountIn_,
+                _ownerSharesPost
             )
         );
+    }
+
+    function _sharesFor(
+        uint _amount,
+        uint _preMintSupply,
+        uint _netAssetValue
+    ) internal pure returns (uint) {
+        return _preMintSupply == 0 ? _amount * SHARE_PRECISION : Math.mulDiv(_amount, _preMintSupply, _netAssetValue);
     }
 }

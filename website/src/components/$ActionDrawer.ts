@@ -1,33 +1,30 @@
-import { HUB_CHAIN_ID, TOKEN_ID } from '@puppet/contracts/const'
+import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
 import {
-  predictDepositRoute,
   predictFundAccount,
-  predictPuppetAccount,
   predictShareToken,
   symbolForBaseTokenId
 } from '@puppet/sdk/account'
-import { resolveDispatchChainId, resolveDispatchNetwork } from '@puppet/sdk/attestation'
+import { resolveDispatchChainId } from '@puppet/sdk/attestation'
 import { formatThrownError } from '@puppet/sdk/compact'
 import { CHAIN_MAP, HUB_CHAIN } from '@puppet/sdk/const'
 import {
   getAccountExplorerUrl,
   getDuration,
+  getRegisteredTokenDescription,
   getTxExplorerUrl,
   ignoreAll,
   readableAddress,
   readableHash,
   readablePercentage,
-  readableTokenAmount,
-  readableTokenAmountLabel
+  readableTokenAmount
 } from '@puppet/sdk/core'
-import { getTokenDescription } from '@puppet/sdk/gmx'
 import {
-  type IndexerHealth,
+  chainHeadBlock,
+  type IChainLiveness,
   type ISubaccountState,
   type ITokenRegistryMap,
-  indexerBlock,
+  symbolByAddress,
   type RelayFeeMap,
-  type RelayMethod,
   stubSubaccountState,
   tokenInfoFor
 } from '@puppet/sdk/state'
@@ -43,7 +40,6 @@ import {
   just,
   map,
   merge,
-  nowWith,
   op,
   sample,
   sampleMap,
@@ -56,10 +52,9 @@ import {
   take
 } from 'aelea/stream'
 import { type IBehavior, multicast, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
-import { $node, $text, attr, component, effectProp, effectRun, type I$Node, style } from 'aelea/ui'
+import { $node, $text, attr, component, effectRun, type I$Node, style } from 'aelea/ui'
 import { $Button, $column, $Popover, $row, designSheet, isMobileScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { pushUrl } from 'aelea/ui-router'
 import { type Address, getAddress, type Hex, isAddressEqual } from 'viem'
 import {
   $addressRef,
@@ -84,15 +79,14 @@ import {
   text
 } from '@/ui-components'
 import { $jazzicon } from '../common/$avatar.js'
-import { $route } from '../common/$common.js'
 import { $chainIcon, chainName } from '../common/$chain.js'
+import { $route } from '../common/$common.js'
 import { $roboAvatar } from '../common/$roboAvatar.js'
 import { $heading3 } from '../common/$text.js'
-import { $card2 } from '../common/elements/$common.js'
-import * as context from '../io/context.js'
-import { fetchMasterPoolState, findWalletDepositTxByRecipient } from '../io/indexer/query.js'
-import { sqlClient } from '../io/indexer/sql.js'
-import { matchmakerStatus } from '../io/matchmaker/index.js'
+import { $card2, $navText } from '../common/elements/$common.js'
+import context, { displayRelayFeeMap } from '../io/context.js'
+import { fetchMasterPoolState, findWalletDepositTxByRecipient } from '../io/datastore/query.js'
+import { formatUsd, priceFor } from '../io/gmx/priceFeed.js'
 import { subject } from '../utils/subject.js'
 import {
   bindSession,
@@ -108,19 +102,18 @@ import {
   type IClaimDraft,
   type IDepositDraft,
   type IDraft,
+  type IFundSwapDraft,
   type IRedeemDraft,
   type ISellDraft,
   type ISubscribeDraft,
-  type ISwapDraft,
   type IWithdrawDraft,
-  SHARE_DECIMALS,
   STEP_DESCRIPTION,
   STEP_LABEL,
   type StepKind,
-  stepNonce
 } from './portfolio/draft.js'
 import { SESSION_BIND_KEY } from './portfolio/runner/_shared.js'
-import { type IAttestation, runDraft } from './portfolio/runner/steps.js'
+import { type PlannedStep, planExecution, planShape, shouldRecognize } from './portfolio/runner/plan.js'
+import { type IAttestation, runDraft, runMandateBatch } from './portfolio/runner/steps.js'
 
 export type { IDraft }
 
@@ -130,26 +123,55 @@ interface I$ActionDrawer {
   title?: string
 }
 
-type PlannedStep = { kind: 'bind' } | { kind: 'draft'; draft: IDraft }
-
 const chainFor = (id: number) => (CHAIN_MAP as Record<number, typeof HUB_CHAIN>)[id] ?? HUB_CHAIN
 
 const DRAFT_VERB: Record<IDraft['kind'], string> = {
   deposit: 'Deposit',
   withdraw: 'Withdraw',
-  subscribe: 'Subscribe',
+  mandate: 'Fund',
   allocate: 'Allocate',
-  swap: 'Swap',
+  fundSwap: 'Swap',
   sell: 'Sell',
   claim: 'Claim',
-  redeem: 'Redeem'
+  redeem: 'Redeem',
+  recognizeFund: 'Recognize'
 }
 
 function subscribeNeedsFunding(d: IDraft, root: ISubaccountState | null, list: IDraft[]): boolean {
-  if (d.kind !== 'subscribe' || d.allocationRate === 0n) return false
-  if ((root?.balances.get(d.baseTokenId)?.signedBalance ?? 0n) > 0n) return false
-  return !list.some(x => x.kind === 'deposit' && x.output.baseTokenId === d.baseTokenId)
+  if (d.kind !== 'mandate' || d.allocationRate === 0n) return false
+  if ((root?.balances.get(d.baseToken)?.signedBalance ?? 0n) > 0n) return false
+  return !list.some(x => x.kind === 'deposit' && x.output.baseToken === d.baseToken)
 }
+
+const chainsForDraft = (d: IDraft): number[] => {
+  const chains = new Set<number>([HUB_CHAIN_ID])
+  if (d.kind === 'deposit' || d.kind === 'allocate') {
+    if (d.wallet) chains.add(d.wallet.chainId)
+    if (d.swap) chains.add(Number(d.swap.chainId))
+  } else if (d.kind === 'fundSwap') {
+    chains.add(d.chainId)
+  }
+  return [...chains]
+}
+
+const staleChainFor = (d: IDraft, health: IChainLiveness): number | null => {
+  for (const chainId of chainsForDraft(d)) {
+    const chain = health.chains[resolveDispatchChainId(chainId)]
+    if (chain && !chain.reachable) return chainId
+  }
+  return null
+}
+
+const firstStaleChain = (drafts: IDraft[], health: IChainLiveness): number | null =>
+  drafts.reduce<number | null>((found, d) => found ?? staleChainFor(d, health), null)
+
+const severitySig = (h: IChainLiveness): string =>
+  h.reachable
+    ? Object.entries(h.chains)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([id, c]) => `${id}:${c.reachable}`)
+        .join('|')
+    : 'unreachable'
 
 type BindStep = { kind: 'bind'; key: typeof SESSION_BIND_KEY; query: Promise<ISessionKey> }
 type DraftStep = {
@@ -167,9 +189,6 @@ interface Submission {
 type SubmitEnv = {
   wallet: IConnectedWallet
   planned: PlannedStep[]
-  gasPrice: bigint
-  indexerHealth: IndexerHealth
-  registry: ITokenRegistryMap
   root: ISubaccountState | null
 }
 
@@ -185,11 +204,11 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
       [clickCloseRaw, clickCloseTether]: IBehavior<PointerEvent>,
       [changeDraft, _changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>
     ) => {
-      const tokenRegistryValue = switchPromises(context.tokenRegistryQuery)
+      const tokenRegistryValue = fromPromise(context.getTokenRegistry())
       const walletState: IStream<IConnectedWallet | null> = op(walletQuery, switchPromises, state())
 
       // Attestation rows captured from each runDraft return value, fed up to
-      // the parent so it can fold them into account state without the indexer.
+      // the parent so it can fold them into account state without a datastore round-trip.
       const attestSubject = subject<IAttestation>()
 
       const enableSessionFlow = op(
@@ -198,6 +217,11 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
         filter((w): w is IConnectedWallet => w !== null),
         switchMap(w => promiseState(just(bindSession(w)))),
         state()
+      )
+      const enableSessionError: IStream<string | null> = op(
+        enableSessionFlow,
+        map(s => (s.status === PromiseStatus.ERROR ? formatThrownError(s.error) : null)),
+        state(null)
       )
       const sessionTick = start(
         null,
@@ -226,7 +250,6 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
           tick: sessionTick
         }),
         map(({ wallet, list }): PlannedStep[] => {
-          context.setIndexerUrgency(list.length > 0 ? 'high' : 'idle')
           const plan: PlannedStep[] = []
           if (!wallet) return list.map(d => ({ kind: 'draft', draft: d }))
           if (!getStoredSessionKey(wallet.address)) plan.push({ kind: 'bind' })
@@ -255,9 +278,6 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
         combine({
           wallet: walletState,
           planned: plannedSteps,
-          gasPrice: context.gasPrice,
-          indexerHealth: context.indexerHealth,
-          registry: tokenRegistryValue,
           root: rootState
         }),
         map((p): SubmitEnv | null => (p.wallet ? (p as SubmitEnv) : null)),
@@ -268,56 +288,84 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
         clickSubmit,
         sampleMap((env, _click) => env, submitEnv),
         filterNull,
-        map((env): Submission => {
+        switchMap((env): IStream<Submission> => {
           const sessionPromise: Promise<ISessionKey> = bindSession(env.wallet)
-          const steps: Step[] = []
-          let chain: Promise<unknown> = sessionPromise
-          for (const planStep of env.planned) {
-            if (planStep.kind === 'bind') {
-              steps.push({ kind: 'bind', key: SESSION_BIND_KEY, query: sessionPromise })
-              continue
-            }
-            const draft = planStep.draft
-            const query = chain.then<IAttestation[]>(async () => {
-              const session = await sessionPromise
-              const events = await runDraft(draft, {
-                gasPrice: env.gasPrice,
-                indexerHealth: env.indexerHealth,
-                tokenRegistry: env.registry,
-                sql: sqlClient,
-                wallet: env.wallet,
-                session,
-                walletState: rootState
-              })
-              for (const event of events) attestSubject.push(event)
-              return events
+          const submissionPromise: Promise<Submission> = (async (): Promise<Submission> => {
+            const [gasPrice, chainLiveness, registry] = await Promise.all([
+              context.getChainGasPrice(HUB_CHAIN_ID),
+              context.getChainLiveness(),
+              context.getTokenRegistry()
+            ])
+            const steps: Step[] = []
+            const runCtx = (session: ISessionKey) => ({
+              gasPrice,
+              chainLiveness,
+              tokenRegistry: registry,
+              wallet: env.wallet,
+              session
             })
-            const submitBlockByChain = new Map<number, bigint>()
-            if (draft.kind === 'deposit' || draft.kind === 'withdraw') {
-              for (const s of draft.inputSteps) {
-                if (s.kind !== 'walletDeposit' && s.kind !== 'walletDepositWnt') continue
-                const chainId = s.input.chainId
-                if (submitBlockByChain.has(chainId)) continue
+            const submitBlocksFor = (draft: IDraft): Map<number, bigint> => {
+              const submitBlockByChain = new Map<number, bigint>()
+              if (draft.kind === 'deposit' && draft.wallet) {
+                const chainId = draft.wallet.chainId
                 try {
                   submitBlockByChain.set(
                     chainId,
-                    indexerBlock(env.indexerHealth, resolveDispatchNetwork(resolveDispatchChainId(chainId)))
+                    chainHeadBlock(chainLiveness, resolveDispatchChainId(chainId))
                   )
                 } catch {
-                  // chain not in indexerHealth; txByRecipient falls back to 0n
+                  // chain not in chainLiveness; txByRecipient falls back to 0n
                 }
               }
+              return submitBlockByChain
             }
-            steps.push({ kind: 'draft', key: draft.id, draft, query, submitBlockByChain })
-            chain = query
-          }
-          return { steps }
+
+            const queryByBase = new Map<Hex, Promise<IAttestation[]>>()
+            const draftsInOrder: IDraft[] = []
+            for (const ps of env.planned) if (ps.kind === 'draft') draftsInOrder.push(ps.draft)
+
+            let chain: Promise<unknown> = sessionPromise
+            for (const entry of planExecution(env.planned)) {
+              if (entry.kind === 'bind') {
+                steps.push({ kind: 'bind', key: SESSION_BIND_KEY, query: sessionPromise })
+                continue
+              }
+              const draft = entry.draft
+              let query: Promise<IAttestation[]>
+              if (draft.kind === 'mandate' && !entry.lead) {
+                query = queryByBase.get(draft.baseToken) as Promise<IAttestation[]>
+              } else {
+                const group = entry.batch
+                query = chain.then<IAttestation[]>(async () => {
+                  const session = await sessionPromise
+                  const events =
+                    draft.kind === 'mandate'
+                      ? await runMandateBatch(group as ISubscribeDraft[], runCtx(session))
+                      : await runDraft(draft, runCtx(session), shouldRecognize(draft, draftsInOrder))
+                  for (const event of events) attestSubject.push(event)
+                  return events
+                })
+                chain = query
+                if (draft.kind === 'mandate') queryByBase.set(draft.baseToken, query)
+              }
+              steps.push({ kind: 'draft', key: draft.id, draft, query, submitBlockByChain: submitBlocksFor(draft) })
+            }
+            return { steps }
+          })()
+          return fromPromise(submissionPromise)
         })
       )
 
       const submission: IStream<Submission | null> = op(
         merge(submitEvent, constant(null, clickClose) as IStream<Submission | null>),
         state(null)
+      )
+
+      const chainLivenessValue: IStream<IChainLiveness> = op(
+        merge(draftList, submission),
+        switchMap(() => fromPromise(context.getChainLiveness())),
+        skipRepeatsWith((a, b) => severitySig(a) === severitySig(b)),
+        multicast
       )
 
       const isOpen: IStream<boolean> = op(
@@ -401,17 +449,15 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
           submission,
           errored: submissionErrored,
           needsBind,
-          indexerHealth: context.indexerHealth,
-          matchmaker: matchmakerStatus,
+          chainLiveness: chainLivenessValue,
           root: rootState
         }),
         map(p => {
           if (p.submission !== null && !p.errored) return true
           if (p.list.length === 0) return true
           if (p.needsBind) return true
-          if (p.indexerHealth.worstSeverity === 'unreachable') return true
-          if (p.indexerHealth.worstSeverity === 'stale') return true
-          if (p.matchmaker !== 'open') return true
+          if (!p.chainLiveness.reachable) return true
+          if (firstStaleChain(p.list, p.chainLiveness) !== null) return true
           if (p.list.some(d => d.alert !== null)) return true
           if (p.list.some(d => subscribeNeedsFunding(d, p.root, p.list))) return true
           return false
@@ -424,93 +470,127 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
         skipRepeats
       )
 
-      const baseTokenIdFor = (d: IDraft): Hex | null => {
-        if (d.kind === 'deposit' || d.kind === 'withdraw') return d.inputAmount.baseTokenId
-        if (d.kind === 'swap') return d.tokenInId
-        if (d.kind === 'subscribe') return d.baseTokenId
-        if ('baseTokenId' in d) return d.baseTokenId
+      const baseTokenIdFor = (d: IDraft): Address | null => {
+        if (d.kind === 'deposit' || d.kind === 'withdraw') return d.inputAmount.baseToken
+        if (d.kind === 'mandate') return d.baseToken
+        if (d.kind === 'fundSwap') return d.tokenIn
+        if ('baseToken' in d) return d.baseToken
         return null
       }
 
       type FeeBreakdown = {
-        relay: Map<Hex, bigint>
-        bridge: Map<Hex, bigint>
-        descOf: (token: Hex) => ReturnType<typeof getTokenDescription>
+        relayUsd: bigint
+        swapFeeUsd: bigint
+        // true if any pending draft's relay fee is unpriceable (oracle has no rate) -> the total can't be summed
+        // honestly, so the row shows '-' rather than an understated figure.
+        feeUnavailable: boolean
       }
 
-      const feeBreakdown: IStream<FeeBreakdown> = switchMap(list => {
-        const tokens = [...new Set(list.map(baseTokenIdFor).filter((t): t is Hex => t !== null))]
-        const tokenFeeStreams = tokens.map(t => context.relayFeeMapForToken(t))
-
-        return op(
-          combineMap(
-            (_gas: bigint, registry: ITokenRegistryMap, ...feeMaps: RelayFeeMap[]): FeeBreakdown => {
-              const feeMapByToken = new Map<Hex, RelayFeeMap>()
-              tokens.forEach((t, i) => {
-                feeMapByToken.set(t, feeMaps[i]!)
-              })
-              const relay = new Map<Hex, bigint>()
-              const bridge = new Map<Hex, bigint>()
-              const addRelay = (token: Hex, fee: bigint) => relay.set(token, (relay.get(token) ?? 0n) + fee)
-              const addBridge = (token: Hex, fee: bigint) => bridge.set(token, (bridge.get(token) ?? 0n) + fee)
-              for (const d of list) {
-                const token = baseTokenIdFor(d)
-                const feeMap = token ? feeMapByToken.get(token) : undefined
-                if (!feeMap || !token) continue
-                if (d.kind === 'subscribe') addRelay(token, feeMap.subscribe.relayFee)
-                else if (d.kind === 'allocate') addRelay(token, feeMap.allocate.relayFee)
-                else if (d.kind === 'swap') addRelay(token, feeMap.operate.relayFee)
-                else if (d.kind === 'sell') addRelay(token, feeMap.sell.relayFee)
-                else if (d.kind === 'claim') addRelay(token, feeMap.claim.relayFee)
-                else if (d.kind === 'redeem') addRelay(token, feeMap.redeem.relayFee)
-                else if (d.kind === 'deposit' || d.kind === 'withdraw') {
-                  for (const step of d.inputSteps) {
-                    if (step.kind === 'walletDeposit' || step.kind === 'walletDepositWnt') continue
-                    const fee = feeMap[step.kind as RelayMethod]?.relayFee
-                    if (fee) addRelay(token, fee)
-                  }
-                  if (d.output.approx && token === TOKEN_ID.USDC) {
-                    const f = d.inputAmount.amount - d.output.amount
-                    if (f > 0n) addBridge(token, f)
-                  }
-                }
+      const feeBreakdown: IStream<FeeBreakdown> = switchMap(({ list }) => {
+        // Price EVERY token toUsd touches below, not just baseTokenIdFor: bridge legs price step.input.token,
+        // and deposit/withdraw approx prices the input and output base tokens. A narrower set silently zeroes those
+        // swap-fee terms (the old shared price map covered all registered tokens). Deduped, so extras are harmless.
+        const tokens = [
+          ...new Set(
+            list.flatMap((d): Address[] => {
+              const ts: Address[] = []
+              const base = baseTokenIdFor(d)
+              if (base !== null) ts.push(base)
+              if (d.kind === 'allocate') {
+                if (d.swap) ts.push(d.swap.inputToken, d.baseToken)
+              } else if (d.kind === 'deposit' || d.kind === 'withdraw') {
+                ts.push(d.inputAmount.baseToken)
+                if (d.output.approx) ts.push(d.output.baseToken)
               }
-              const descOf = (token: Hex) => getTokenDescription(tokenInfoFor(registry, HUB_CHAIN_ID, token).token)
-              return { relay, bridge, descOf }
-            },
-            context.gasPrice,
-            tokenRegistryValue,
-            ...tokenFeeStreams
+              return ts
+            })
           )
-        )
-      }, draftList)
+        ]
+        const tokenFeeStreams = tokens.map(t => fromPromise(displayRelayFeeMap(t)))
+
+        // Per-token prices arrive as their own 10s-refreshing streams. The hub
+        // addresses come from the registry, so resolve it first then fan the
+        // distinct base tokens out into priceFor streams (positional, by index).
+        return switchMap((registry: ITokenRegistryMap) => {
+          const tokenPriceStreams = tokens.map(t =>
+            priceFor(getAddress(tokenInfoFor(registry, HUB_CHAIN_ID, t).token))
+          )
+          return op(
+            combineMap(
+              (_gas: bigint, ...rest: (RelayFeeMap | bigint | null)[]): FeeBreakdown => {
+                const feeMaps = rest.slice(0, tokens.length) as (RelayFeeMap | null)[]
+                const prices = rest.slice(tokens.length) as (bigint | null)[]
+                const feeMapByToken = new Map<Address, RelayFeeMap | null>()
+                const priceByToken = new Map<Address, bigint | null>()
+                tokens.forEach((t, i) => {
+                  feeMapByToken.set(t, feeMaps[i]!)
+                  priceByToken.set(t, prices[i] ?? null)
+                })
+                const toUsd = (amount: bigint, token: Address): bigint => {
+                  const price = priceByToken.get(token) ?? null
+                  return price === null ? 0n : amount * price
+                }
+                let relayUsd = 0n
+                let swapFeeUsd = 0n
+                let feeUnavailable = false
+                for (const d of list) {
+                  const token = baseTokenIdFor(d)
+                  if (!token) continue
+                  const feeMap = feeMapByToken.get(token)
+                  if (feeMap === undefined) continue
+                  // Unpriceable fee for a pending draft -> the summed total is incomplete; flag it so the row shows '-'.
+                  if (feeMap === null) {
+                    feeUnavailable = true
+                    continue
+                  }
+                  let relayToken = 0n
+                  if (d.kind === 'mandate') relayToken = feeMap.mandate.relayFee
+                  else if (d.kind === 'allocate') {
+                    relayToken = feeMap.allocate.relayFee
+                    if (d.swap) {
+                      relayToken += feeMap.swap?.relayFee ?? 0n
+                      const lost = toUsd(d.swap.inputAmount, d.swap.inputToken) - toUsd(d.swap.outputAmount, d.baseToken)
+                      if (lost > 0n) swapFeeUsd += lost
+                    }
+                  } else if (d.kind === 'fundSwap') relayToken = feeMap.swap.relayFee
+                  else if (d.kind === 'sell') relayToken = feeMap.sell.relayFee
+                  else if (d.kind === 'claim') relayToken = feeMap.claim.relayFee
+                  else if (d.kind === 'redeem') relayToken = feeMap.redeem.relayFee
+                  else if (d.kind === 'deposit') {
+                    if (d.swap) relayToken += feeMap.swap?.relayFee ?? 0n
+                    if (shouldRecognize(d, list)) relayToken += feeMap.recognize?.relayFee ?? 0n
+                    if (d.output.approx) {
+                      const lost =
+                        toUsd(d.inputAmount.amount, d.inputAmount.baseToken) -
+                        toUsd(d.output.amount, d.output.baseToken)
+                      if (lost > 0n) swapFeeUsd += lost
+                    }
+                  } else if (d.kind === 'withdraw') {
+                    relayToken += feeMap.withdraw?.relayFee ?? 0n
+                  }
+                  relayUsd += toUsd(relayToken, token)
+                }
+                return { relayUsd, swapFeeUsd, feeUnavailable }
+              },
+              fromPromise(context.getChainGasPrice(HUB_CHAIN_ID)),
+              ...tokenFeeStreams,
+              ...tokenPriceStreams
+            )
+          )
+        }, tokenRegistryValue)
+      }, combine({ list: draftList }))
 
       // The fee breakdown (per-token bridge/relay + gas). Used as the hover
       // tooltip on desktop and rendered inline on touch (mobile) where there is
       // no hover. A factory so each placement gets a fresh node.
       const $executionFeesBreakdown = (): I$Node =>
         switchMap(p => {
-          const tokens = new Set<Hex>([...p.relay.keys(), ...p.bridge.keys()])
-          if (tokens.size === 0) {
-            return $column(
-              spacing.small,
-              style({ minWidth: '200px', fontSize: text.sm })
-            )($labeledValue('Relay fees', $text('-')))
-          }
-          return $column(
-            spacing.small,
-            style({ minWidth: '200px', fontSize: text.sm })
-          )(
-            ...[...tokens].flatMap(t => {
-              const bridgeFee = p.bridge.get(t) ?? 0n
-              const relayFee = p.relay.get(t) ?? 0n
-              const desc = p.descOf(t)
-              const rows: I$Node[] = []
-              if (bridgeFee > 0n) rows.push($labeledValue('Bridge fees', readableTokenAmountLabel(desc, bridgeFee)))
-              rows.push($labeledValue('Relay fees', relayFee === 0n ? '-' : readableTokenAmountLabel(desc, relayFee)))
-              return rows
-            })
+          const rows: I$Node[] = []
+          if (p.swapFeeUsd > 0n) rows.push($labeledValue('Swap fee', formatUsd(p.swapFeeUsd, 1n)))
+          rows.push(
+            $labeledValue('Relay fees', p.feeUnavailable || p.relayUsd === 0n ? '-' : formatUsd(p.relayUsd, 1n))
           )
+          return $column(spacing.small, style({ minWidth: '200px', fontSize: text.sm }))(...rows)
         }, feeBreakdown)
 
       const $executionFees = (): I$Node =>
@@ -518,11 +598,9 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
           'Execution fees',
           $text(
             map(p => {
-              const tokens = new Set<Hex>([...p.relay.keys(), ...p.bridge.keys()])
-              if (tokens.size === 0) return '-'
-              return [...tokens]
-                .map(t => readableTokenAmountLabel(p.descOf(t), (p.relay.get(t) ?? 0n) + (p.bridge.get(t) ?? 0n)))
-                .join(' + ')
+              if (p.feeUnavailable) return '-'
+              const total = p.relayUsd + p.swapFeeUsd
+              return total === 0n ? '-' : formatUsd(total, 1n)
             }, feeBreakdown)
           ),
           $executionFeesBreakdown()
@@ -589,17 +667,17 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
               : effectiveStatus === 'current'
                 ? pillBg($alertIntermediateSpinnerContainer(...content))
                 : $row(
-                    spacing.small,
-                    style({
-                      alignItems: 'center',
-                      padding: '8px 12px',
-                      borderRadius: '100px',
-                      border: '1px dashed transparent',
-                      backgroundColor: colorShade(palette.background, 25),
-                      fontSize: text.xs,
-                      cursor: 'help'
-                    })
-                  )(...content)
+                  spacing.small,
+                  style({
+                    alignItems: 'center',
+                    padding: '8px 12px',
+                    borderRadius: '100px',
+                    border: '1px dashed transparent',
+                    backgroundColor: colorShade(palette.background, 25),
+                    fontSize: text.xs,
+                    cursor: 'help'
+                  })
+                )(...content)
         const recipientChain = recipient ? chainFor(recipient.chainId) : null
         const txChain = tx ? chainFor(tx.chainId) : null
         return $Tooltip({
@@ -608,27 +686,21 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
             $text(STEP_DESCRIPTION[kind]),
             recipient && recipientChain
               ? $row(spacing.tiny, style({ alignItems: 'center', color: palette.foreground, fontSize: text.xs }))(
-                  $text(
-                    kind === 'createPuppetAccount'
-                      ? 'Account'
-                      : kind === 'walletDeposit' || kind === 'walletDepositWnt'
-                        ? 'To'
-                        : 'From'
-                  ),
-                  $chainIcon(recipient.chainId, 14),
-                  $anchor(attr({ href: getAccountExplorerUrl(recipient.address, recipientChain), target: '_blank' }))(
-                    $text(readableAddress(recipient.address))
-                  )
+                $text(kind === 'walletTransfer' ? 'To' : 'From'),
+                $chainIcon(recipient.chainId, 14),
+                $anchor(attr({ href: getAccountExplorerUrl(recipient.address, recipientChain), target: '_blank' }))(
+                  $text(readableAddress(recipient.address))
                 )
+              )
               : $node(),
             tx && txChain
               ? $row(spacing.tiny, style({ alignItems: 'center', color: palette.foreground, fontSize: text.xs }))(
-                  $text('Tx'),
-                  $chainIcon(tx.chainId, 14),
-                  $anchor(attr({ href: getTxExplorerUrl(tx.txHash, txChain), target: '_blank' }))(
-                    $text(readableHash(tx.txHash))
-                  )
+                $text('Tx'),
+                $chainIcon(tx.chainId, 14),
+                $anchor(attr({ href: getTxExplorerUrl(tx.txHash, txChain), target: '_blank' }))(
+                  $text(readableHash(tx.txHash))
                 )
+              )
               : $node()
           ),
           $anchor: $pillNode
@@ -667,7 +739,7 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
               start(null as ResolvedHash | null)
             )
           }
-          if (s.recipient !== null && (s.kind === 'walletDeposit' || s.kind === 'walletDepositWnt')) {
+          if (s.recipient !== null && s.kind === 'walletTransfer') {
             const recipient = s.recipient
             const minBlock = submitBlockByChain.get(recipient.chainId) ?? 0n
             return op(
@@ -687,10 +759,10 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
           priorQuery === null
             ? just(true)
             : op(
-                promiseState(just(priorQuery)),
-                map(s => s.status === PromiseStatus.DONE),
-                skipRepeats
-              )
+              promiseState(just(priorQuery)),
+              map(s => s.status === PromiseStatus.DONE),
+              skipRepeats
+            )
         const combined = combineMap(
           (qs, draftActive: boolean, ...txs: (ResolvedHash | null)[]) => ({ qs, draftActive, txs }),
           promiseState(just(query)),
@@ -707,7 +779,7 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
               if (p.qs.status === PromiseStatus.ERROR)
                 return $stepPill(
                   step.kind,
-                  priorAllDone ? 'failed' : 'queued',
+                  p.draftActive && priorAllDone ? 'failed' : 'queued',
                   null,
                   step.recipient,
                   false,
@@ -728,10 +800,10 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
 
       // ── per-draft-kind description ────────────────────────────────────────
 
-      const renderToken = (registry: ITokenRegistryMap, baseTokenId: Hex) => {
-        const homeToken = tokenInfoFor(registry, HUB_CHAIN_ID, baseTokenId).token
-        const desc = getTokenDescription(homeToken)
-        return { symbol: symbolForBaseTokenId(baseTokenId) ?? desc.symbol, desc }
+      const renderToken = (registry: ITokenRegistryMap, token: Address) => {
+        const homeToken = tokenInfoFor(registry, HUB_CHAIN_ID, token).token
+        const desc = getRegisteredTokenDescription(homeToken)
+        return { symbol: symbolByAddress(token), desc }
       }
 
       const $accountProfile = (address: Address, fundName?: Hex, avatarSeed?: Address): I$Node =>
@@ -740,11 +812,11 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
             return root && isAddressEqual(root.account, address)
               ? $profileDisplay({ address, isFund: false, user: root.user, profileSize: 24 })
               : $profileDisplay({
-                  address,
-                  name: fundName,
-                  profileSize: 24,
-                  $avatar: avatarSeed ? $roboAvatar(avatarSeed, 24) : undefined
-                })
+                address,
+                name: fundName,
+                profileSize: 24,
+                $avatar: avatarSeed ? $roboAvatar(avatarSeed, 24) : undefined
+              })
           }, rootState)
         )
 
@@ -759,6 +831,14 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
             if (!fetched) {
               fetched = fetchMasterPoolState(fundAccount)
               fundStateCache.set(key, fetched)
+              // Never cache a not-yet-indexed (undefined) fund or a getPriceead forever: evict so a later render
+              // re-queries once the fund is indexed, instead of pinning the bare on-chain address for the session.
+              void fetched.then(
+                fund => {
+                  if (!fund) fundStateCache.delete(key)
+                },
+                () => fundStateCache.delete(key)
+              )
             }
             return switchLatest(
               map(
@@ -773,19 +853,20 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
         )
 
       const $depositDesc = (draft: IDepositDraft, registry: ITokenRegistryMap): I$Node => {
-        const { symbol, desc } = renderToken(registry, draft.inputAmount.baseTokenId)
-        const isSweep = draft.inputAmount.amount === 0n
-        const approx = draft.output.approx ? '≈ ' : ''
-        const sweep = isSweep ? 'Sweep all · ' : ''
-        const amountText = `${sweep}${approx}${readableTokenAmount(desc, draft.output.amount)} ${symbol}`
-        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))($text(amountText))
+        if (draft.inputAmount.amount === 0n) {
+          return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))($text('Sweep all'))
+        }
+        return $row(
+          spacing.small,
+          style({ alignItems: 'center', flexWrap: 'wrap' })
+        )($text(map(price => `≈ ${formatUsd(draft.inputAmount.amount, price)}`, priceFor(draft.inputAmount.baseToken))))
       }
 
       const $withdrawDesc = (draft: IWithdrawDraft, registry: ITokenRegistryMap): I$Node => {
-        const step = draft.inputSteps[0]!
-        const isBridge = step.kind === 'withdrawToBridge'
-        const isSweep = isBridge && step.input.inputAmount === 0n
-        const { symbol, desc } = renderToken(registry, draft.inputAmount.baseTokenId)
+        const input = draft.input
+        const isBridge = input.route.kind === 'across'
+        const isSweep = isBridge && input.inputAmount === 0n
+        const { symbol, desc } = renderToken(registry, draft.inputAmount.baseToken)
         const approx = draft.output.approx ? '≈ ' : ''
         const sweep = isSweep ? 'Sweep all · ' : ''
         const amountText = `${sweep}${approx}${readableTokenAmount(desc, draft.output.amount)} ${symbol}`
@@ -815,15 +896,17 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
       }
 
       const $subscribeDesc = (draft: ISubscribeDraft, registry: ITokenRegistryMap): I$Node => {
-        const trader = $fundIdentity(predictFundAccount(draft.master))
+        const trader = $fundIdentity(
+          predictFundAccount({ master: draft.master, baseToken: draft.baseToken, name: draft.name })
+        )
         if (draft.allocationRate === 0n) {
-          return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))($text('Stop copying'), trader)
+          return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))($text('Stop funding'), trader)
         }
-        const { symbol, desc } = renderToken(registry, draft.baseTokenId)
+        const { symbol, desc } = renderToken(registry, draft.baseToken)
         return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
           trader,
           $metaText('·'),
-          $text(`${readablePercentage(draft.allocationRate)} of your ${symbol} per trade`),
+          $text(`${readablePercentage(draft.allocationRate)} of your ${symbol} per funding request`),
           ...(draft.throttlePeriod > 0n ? [$metaText(`max 1 / ${getDuration(Number(draft.throttlePeriod))}`)] : []),
           ...(draft.rateLimit > 0n ? [$metaText(`cap ${readableTokenAmount(desc, draft.rateLimit)}`)] : []),
           ...(draft.symmetry > 0n ? [$metaText('≤ trader')] : [])
@@ -831,58 +914,36 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
       }
 
       const $allocateDesc = (draft: IAllocateDraft, registry: ITokenRegistryMap): I$Node => {
-        const { symbol, desc } = renderToken(registry, draft.baseTokenId)
+        const { symbol, desc } = renderToken(registry, draft.baseToken)
         return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
           $text(`${readableTokenAmount(desc, draft.masterAmount)} ${symbol}`),
           $metaText('to'),
           $accountProfile(
             draft.master,
             draft.name,
-            predictShareToken(draft.masterSigner, draft.baseTokenId, draft.name)
+            predictShareToken({ master: draft.masterSigner, baseToken: draft.baseToken, name: draft.name })
           )
-        )
-      }
-
-      const $swapDesc = (draft: ISwapDraft, registry: ITokenRegistryMap): I$Node => {
-        const tokenIn = renderToken(registry, draft.tokenInId)
-        if (draft.destinationChainId !== draft.chainId) {
-          return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-            $text(`${readableTokenAmount(tokenIn.desc, draft.amountIn)} ${tokenIn.symbol}`),
-            $metaText('to'),
-            $fundIdentity(draft.account),
-            $metaText('on'),
-            $chainIcon(draft.destinationChainId, 14),
-            $text(chainName(draft.destinationChainId))
-          )
-        }
-        const tokenOut = renderToken(registry, draft.tokenOutId)
-        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $text(`${readableTokenAmount(tokenIn.desc, draft.amountIn)} ${tokenIn.symbol}`),
-          $metaText('to at least'),
-          $text(`${readableTokenAmount(tokenOut.desc, draft.minOut)} ${tokenOut.symbol}`),
-          $metaText('in'),
-          $fundIdentity(draft.account)
         )
       }
 
       const $sellDesc = (draft: ISellDraft): I$Node =>
         $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $text(`${readableTokenAmount(SHARE_DECIMALS, draft.sharesOut)} shares`),
+          $text(`${readableTokenAmount(PRECISION.shareTokenDecimals, draft.sharesOut)} shares`),
           $metaText('queued from'),
           $addressOnChain(draft.masterAccount, HUB_CHAIN_ID)
         )
 
       const $claimDesc = (draft: IClaimDraft, registry: ITokenRegistryMap): I$Node => {
-        const { symbol, desc } = renderToken(registry, draft.baseTokenId)
+        const { symbol } = renderToken(registry, draft.baseToken)
         return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $text(`${readableTokenAmount(desc, draft.amount)} ${symbol}`),
+          $text(`all claimable ${symbol}`),
           $metaText('from'),
           $addressOnChain(draft.masterAccount, HUB_CHAIN_ID)
         )
       }
 
       const $redeemDesc = (draft: IRedeemDraft, registry: ITokenRegistryMap): I$Node => {
-        const { symbol, desc } = renderToken(registry, draft.baseTokenId)
+        const { symbol, desc } = renderToken(registry, draft.baseToken)
         return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
           $text(
             draft.liquidate
@@ -892,19 +953,31 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
                 : `${readableTokenAmount(desc, draft.assetsOut)} ${symbol}`
           ),
           ...(draft.sharesOut > 0n
-            ? [$metaText(`incl. ${readableTokenAmount(SHARE_DECIMALS, draft.sharesOut)} of your shares queued`)]
+            ? [$metaText(`incl. ${readableTokenAmount(PRECISION.shareTokenDecimals, draft.sharesOut)} of your shares queued`)]
             : []),
           $metaText('from'),
           $fundIdentity(draft.masterAccount)
         )
       }
 
+      const $swapDesc = (draft: IFundSwapDraft, registry: ITokenRegistryMap): I$Node => {
+        const tokenIn = renderToken(registry, draft.tokenIn)
+        const tokenOut = renderToken(registry, draft.tokenOut)
+        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
+          $text(`${readableTokenAmount(tokenIn.desc, draft.amountIn)} ${tokenIn.symbol}`),
+          $metaText('to at least'),
+          $text(`${readableTokenAmount(tokenOut.desc, draft.minOut)} ${tokenOut.symbol}`),
+          $metaText('in'),
+          $fundIdentity(draft.account)
+        )
+      }
+
       const $draftDescription = (draft: IDraft, registry: ITokenRegistryMap): I$Node => {
-        if (draft.kind === 'subscribe') return $subscribeDesc(draft, registry)
+        if (draft.kind === 'mandate') return $subscribeDesc(draft, registry)
         if (draft.kind === 'deposit') return $depositDesc(draft, registry)
         if (draft.kind === 'withdraw') return $withdrawDesc(draft, registry)
         if (draft.kind === 'allocate') return $allocateDesc(draft, registry)
-        if (draft.kind === 'swap') return $swapDesc(draft, registry)
+        if (draft.kind === 'fundSwap') return $swapDesc(draft, registry)
         if (draft.kind === 'sell') return $sellDesc(draft)
         if (draft.kind === 'claim') return $claimDesc(draft, registry)
         if (draft.kind === 'redeem') return $redeemDesc(draft, registry)
@@ -913,83 +986,19 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
 
       const $draftBadge = (
         draft: IDraft,
+        registry: ITokenRegistryMap,
         query: Promise<unknown> | null,
         priorQuery: Promise<unknown> | null,
-        submitBlockByChain: Map<number, bigint>
-      ) => {
-        if (draft.kind === 'allocate') {
-          const fundSteps = draft.inputSteps.map(step => {
-            if (step.kind === 'transferToMaster' || step.kind === 'transferToMasterWnt') {
-              return {
-                kind: step.kind,
-                nonce: null,
-                recipient: {
-                  address: predictDepositRoute(step.input.params.signer),
-                  chainId: step.input.chainId
-                }
-              }
-            }
-            if (step.kind === 'createPuppetAccount') {
-              return {
-                kind: step.kind,
-                nonce: stepNonce(step),
-                recipient: { address: draft.masterSigner, chainId: Number(step.input.chainId) }
-              }
-            }
-            const account =
-              step.kind === 'createFundAccount'
-                ? predictFundAccount(predictPuppetAccount(step.input.params))
-                : step.input.params.signer
-            return {
-              kind: step.kind,
-              nonce: step.kind === 'createFundAccount' ? null : stepNonce(step),
-              recipient: { address: predictDepositRoute(account), chainId: Number(step.input.chainId) }
-            }
-          })
-          const trailingKind: StepKind = draft.kind === 'allocate' ? 'allocate' : 'createFundAccount'
-          return $sequencedStepRow(
-            [...fundSteps, { kind: trailingKind, nonce: null, recipient: null }],
-            query,
-            priorQuery,
-            submitBlockByChain,
-            draft.alert !== null
-          )
-        }
-        if (draft.kind !== 'deposit' && draft.kind !== 'withdraw') {
-          const kind: StepKind =
-            draft.kind === 'redeem' && draft.liquidate
-              ? 'liquidate'
-              : draft.kind === 'swap' && draft.destinationChainId !== draft.chainId
-                ? 'bridge'
-                : draft.kind
-          const label = draft.kind === 'subscribe' && draft.allocationRate === 0n ? 'Unsubscribe' : undefined
-          return $sequencedStepRow(
-            [{ kind, nonce: null, recipient: null, label }],
-            query,
-            priorQuery,
-            submitBlockByChain,
-            draft.alert !== null
-          )
-        }
-        const steps = draft.inputSteps.map(step => {
-          if (step.kind === 'createPuppetAccount') {
-            return {
-              kind: step.kind,
-              nonce: stepNonce(step),
-              recipient: { address: predictPuppetAccount(step.input.params), chainId: Number(step.input.chainId) }
-            }
-          }
-          const depositRoute = predictDepositRoute(predictPuppetAccount(step.input.params))
-          const hasChainId =
-            step.kind === 'walletDeposit' ||
-            step.kind === 'walletDepositWnt' ||
-            step.kind === 'recognize' ||
-            step.kind === 'bridge'
-          const recipient = hasChainId ? { address: depositRoute, chainId: Number(step.input.chainId) } : null
-          return { kind: step.kind, nonce: stepNonce(step), recipient }
-        })
-        return $sequencedStepRow(steps, query, priorQuery, submitBlockByChain, draft.alert !== null)
-      }
+        submitBlockByChain: Map<number, bigint>,
+        recognize: boolean
+      ) =>
+        $sequencedStepRow(
+          planShape(draft, registry, recognize),
+          query,
+          priorQuery,
+          submitBlockByChain,
+          draft.alert !== null
+        )
 
       const $item = (
         step: PlannedStep | Step,
@@ -998,14 +1007,15 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
         query: Promise<unknown> | null,
         priorQuery: Promise<unknown> | null,
         submitBlockByChain: Map<number, bigint>,
-        showIndex: boolean
+        showIndex: boolean,
+        recognize: boolean
       ): I$Node => {
         if (step.kind === 'bind') return empty
         const draft = step.draft
         const isMultiStep = draft.kind === 'deposit' || draft.kind === 'withdraw' || draft.kind === 'allocate'
         return $row(spacing.small, style({ alignItems: 'center', padding: '6px 0' }))(
           ...(showIndex ? [$stepIndex(idx ?? 0)] : []),
-          $draftBadge(draft, query, priorQuery, submitBlockByChain),
+          $draftBadge(draft, registry, query, priorQuery, submitBlockByChain, recognize),
           $node(style({ flex: 1, minWidth: '16px' }))(),
           ...(isMultiStep
             ? [$node(style({ color: palette.message, fontWeight: '600' }))($text(DRAFT_VERB[draft.kind]))]
@@ -1015,10 +1025,11 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
       }
 
       const $depositHeader = (
-        tokenId: Hex,
+        token: Hex,
         wallet: IConnectedWallet,
         root: ISubaccountState | null,
-        registry: ITokenRegistryMap
+        registry: ITokenRegistryMap,
+        depositQueued: boolean
       ): I$Node => {
         const signer = wallet.session?.signer ?? root?.signer ?? wallet.address
         const accountState: IStream<ISubaccountState> = op(
@@ -1028,42 +1039,35 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
         return op(
           accountState,
           skipRepeatsWith(
-            (a, b) =>
-              (a.balances.get(tokenId)?.signedBalance ?? 0n) === (b.balances.get(tokenId)?.signedBalance ?? 0n)
+            (a, b) => (a.balances.get(token)?.signedBalance ?? 0n) === (b.balances.get(token)?.signedBalance ?? 0n)
           ),
           map(metric => {
-            const token = tokenInfoFor(registry, HUB_CHAIN_ID, tokenId).token
-            const tokenDescription = getTokenDescription(token)
-            const balance = metric.balances.get(tokenId)?.signedBalance ?? 0n
+            const tokenDescription = getRegisteredTokenDescription(token)
+            const balance = metric.balances.get(token)?.signedBalance ?? 0n
             return $row(spacing.default, style({ padding: '4px', alignItems: 'center', flex: 1 }))(
               $route(tokenDescription, true),
-              $node(style({ flex: 1 }))(),
-              balance === 0n
+              balance === 0n && !depositQueued
                 ? $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
-                    $icon({ $content: $info, width: '12px', fill: palette.indeterminate }),
-                    $node(
-                      style({
-                        color: palette.foreground,
-                        fontSize: text.xs,
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        minWidth: '0'
-                      })
-                    )($text('Funds your account, not the trader'))
+                    $Tooltip({
+                      $dropContainer: $defaultTooltipDropContainer,
+                      $content: $column(spacing.tiny, style({ maxWidth: '260px', fontSize: text.sm, whiteSpace: 'normal' }))(
+                        $text(
+                          'Matching pulls from your own deposited balance when this trader opens a position. Your funds stay in your account, in your custody. You are funding yourself, not paying the trader.'
+                        )
+                      ),
+                      $anchor: $icon({ $content: $info, width: '12px', fill: palette.indeterminate })
+                    })({}),
+                    $node(style({ color: palette.foreground, fontSize: text.xs, whiteSpace: 'nowrap' }))(
+                      $text('Deposit to your account to enable matching')
+                    ),
+                    $navText(
+                      `/portfolio?action=deposit-${symbolForBaseTokenId(token) ?? tokenDescription.symbol}`,
+                      'Portfolio',
+                      undefined,
+                      text.xs
+                    )
                   )
-                : $node(style({ flex: 1 }))(),
-              $node(
-                style({ cursor: 'pointer', color: palette.message, fontSize: text.sm, whiteSpace: 'nowrap' }),
-                effectProp(
-                  'onclick',
-                  nowWith(() => (ev: MouseEvent) => {
-                    if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return
-                    ev.preventDefault()
-                    pushUrl('/portfolio')
-                  })
-                )
-              )($text('Wallet Page'))
+                : $node()
             )
           }),
           switchLatest
@@ -1086,7 +1090,7 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
             )
           ).filter(el => !el.hasAttribute('disabled') && el.tabIndex !== -1 && el.offsetParent !== null)
         const first = focusables()[0]
-        ;(first ?? root).focus()
+          ; (first ?? root).focus()
         const onKeyDown = (ev: KeyboardEvent): void => {
           if (ev.key === 'Escape') {
             ev.preventDefault()
@@ -1148,8 +1152,8 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
               p => {
                 const steps: ReadonlyArray<PlannedStep | Step> = p.submission ? p.submission.steps : p.planned
                 if (steps.length === 0) return empty
-                const showIndex = steps.filter(s => s.kind === 'draft').length > 1
-                let idx = 0
+                const isSub = (s: PlannedStep | Step): boolean => s.kind === 'draft' && s.draft.kind === 'mandate'
+
                 const priorQueryByDraft = new Map<string, Promise<unknown> | null>()
                 let prevQuery: Promise<unknown> | null = null
                 for (const st of steps) {
@@ -1157,41 +1161,59 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
                   if (st.kind === 'draft' && q) priorQueryByDraft.set(st.draft.id, prevQuery)
                   if (q) prevQuery = q
                 }
+
+                const firstSub = steps.findIndex(isSub)
+                const lastSub = firstSub < 0 ? -1 : steps.reduce((acc, s, i) => (isSub(s) ? i : acc), firstSub)
+                const groups = new Map<Hex, (PlannedStep | Step)[]>()
+                for (const s of steps.slice(firstSub < 0 ? 0 : firstSub, lastSub + 1)) {
+                  if (!isSub(s)) continue
+                  const tid = ((s as DraftStep).draft as ISubscribeDraft).baseToken
+                  groups.set(tid, [...(groups.get(tid) ?? []), s])
+                }
+                const nonSubDraftCount = steps.filter(s => s.kind === 'draft' && !isSub(s)).length
+                const showIndex = nonSubDraftCount + groups.size > 1
+
+                const draftsInOrder: IDraft[] = []
+                for (const s of steps) if (s.kind === 'draft') draftsInOrder.push(s.draft)
+
+                let idx = 0
                 const renderStep = (s: PlannedStep | Step): I$Node => {
                   const stepIdx = s.kind === 'draft' ? idx++ : null
                   const query = 'query' in s ? s.query : null
                   const priorQuery =
                     s.kind === 'draft' && 'query' in s ? (priorQueryByDraft.get(s.draft.id) ?? null) : null
                   const submitBlocks = 'submitBlockByChain' in s ? s.submitBlockByChain : new Map<number, bigint>()
-                  return $item(s, stepIdx, p.registry, query, priorQuery, submitBlocks, showIndex)
+                  const recognize = s.kind === 'draft' ? shouldRecognize(s.draft, draftsInOrder) : true
+                  return $item(s, stepIdx, p.registry, query, priorQuery, submitBlocks, showIndex, recognize)
                 }
-                const isSub = (s: PlannedStep | Step): boolean => s.kind === 'draft' && s.draft.kind === 'subscribe'
-                const firstSub = steps.findIndex(isSub)
                 if (firstSub < 0) return $column(spacing.small)(...steps.map(renderStep))
-                const lastSub = steps.reduce((acc, s, i) => (isSub(s) ? i : acc), firstSub)
-                const groups = new Map<Hex, (PlannedStep | Step)[]>()
-                for (const s of steps.slice(firstSub, lastSub + 1)) {
-                  if (!isSub(s)) continue
-                  const tid = ((s as DraftStep).draft as ISubscribeDraft).baseTokenId
-                  const g = groups.get(tid) ?? []
-                  g.push(s)
-                  groups.set(tid, g)
+
+                const $group = (token: Hex, group: (PlannedStep | Step)[]): I$Node => {
+                  const first = group[0]!
+                  const draft = (first as DraftStep).draft
+                  const query = 'query' in first ? first.query : null
+                  const priorQuery = priorQueryByDraft.get(draft.id) ?? null
+                  const stepIdx = idx++
+                  const depositQueued = draftsInOrder.some(d => d.kind === 'deposit' && d.output.baseToken === token)
+                  return $column(spacing.small)(
+                    ...(p.wallet ? [$depositHeader(token, p.wallet, p.root, p.registry, depositQueued)] : []),
+                    $row(spacing.small, style({ alignItems: 'center', padding: '6px 0' }))(
+                      ...(showIndex ? [$stepIndex(stepIdx)] : []),
+                      $draftBadge(draft, p.registry, query, priorQuery, new Map<number, bigint>(), true)
+                    ),
+                    $column(
+                      spacing.small,
+                      style({
+                        paddingLeft: '14px',
+                        marginLeft: '10px',
+                        borderLeft: `1px solid ${colorShade(palette.foreground, 15)}`
+                      })
+                    )(...group.map(s => $draftDescription((s as DraftStep).draft, p.registry)))
+                  )
                 }
                 return $column(spacing.small)(
                   ...steps.slice(0, firstSub).map(renderStep),
-                  ...[...groups.entries()].map(([tokenId, group]) => {
-                    return $column(spacing.small)(
-                      ...(p.wallet ? [$depositHeader(tokenId, p.wallet, p.root, p.registry)] : []),
-                      $column(
-                        spacing.small,
-                        style({
-                          paddingLeft: '14px',
-                          marginLeft: '10px',
-                          borderLeft: `1px solid ${colorShade(palette.foreground, 15)}`
-                        })
-                      )(...group.map(renderStep))
-                    )
-                  }),
+                  ...[...groups.entries()].map(([token, group]) => $group(token, group)),
                   ...steps.slice(lastSub + 1).map(renderStep)
                 )
               },
@@ -1214,20 +1236,20 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
               const weight = positive ? '600' : '500'
               return isMobileScreen
                 ? $node(style({ color, fontSize: text.xs, fontWeight: weight, minWidth: 0, whiteSpace: 'normal' }))(
-                    $text(full)
-                  )
+                  $text(full)
+                )
                 : $node(
-                    style({
-                      display: 'block',
-                      color,
-                      fontSize: text.xs,
-                      fontWeight: weight,
-                      whiteSpace: 'nowrap',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      minWidth: 0
-                    })
-                  )($text(full))
+                  style({
+                    display: 'block',
+                    color,
+                    fontSize: text.xs,
+                    fontWeight: weight,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    minWidth: 0
+                  })
+                )($text(full))
             }
 
             const footerNotice: IStream<{ text: string; positive: boolean } | null> = op(
@@ -1235,27 +1257,27 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
                 p => {
                   if (p.status?.kind === 'done') return { text: 'Done', positive: true }
                   if (p.status?.kind === 'error') return { text: p.status.message, positive: false }
-                  if (p.matchmaker === 'connecting') return { text: 'Reconnecting to relay…', positive: false }
-                  if (p.matchmaker !== 'open') return { text: 'Service offline, cannot submit', positive: false }
-                  if (p.indexerHealth.worstSeverity === 'unreachable')
+                  if (!p.chainLiveness.reachable)
                     return { text: 'Service unreachable, cannot submit', positive: false }
-                  if (p.indexerHealth.worstSeverity === 'stale')
-                    return { text: 'Data out of sync, cannot submit yet', positive: false }
+                  const staleChain = firstStaleChain(p.list, p.chainLiveness)
+                  if (staleChain !== null)
+                    return { text: `${chainName(staleChain)} out of sync, cannot submit yet`, positive: false }
                   const offending = p.list.find(d => d.alert !== null)
                   if (offending) return { text: offending.alert as string, positive: false }
                   const unfunded = p.list.find(d => subscribeNeedsFunding(d, p.root, p.list))
-                  if (unfunded && unfunded.kind === 'subscribe') {
-                    const sym =
-                      symbolForBaseTokenId(unfunded.baseTokenId) ?? getTokenDescription(unfunded.baseToken).symbol
-                    return { text: `Deposit ${sym} above to fund this copy before you can submit`, positive: false }
+                  if (unfunded && unfunded.kind === 'mandate') {
+                    const sym = getRegisteredTokenDescription(unfunded.baseToken).symbol
+                    return {
+                      text: `Deposit ${sym} above to fund this allocation before you can submit`,
+                      positive: false
+                    }
                   }
                   return null
                 },
                 combine({
                   list: draftList,
                   status: submissionStatus,
-                  matchmaker: matchmakerStatus,
-                  indexerHealth: context.indexerHealth,
+                  chainLiveness: chainLivenessValue,
                   root: rootState
                 })
               ),
@@ -1265,9 +1287,9 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
             const $feesContent = (): I$Node =>
               isMobileScreen
                 ? $column(spacing.small, style({ fontSize: text.sm, minWidth: 0, whiteSpace: 'normal' }))(
-                    $executionFees(),
-                    $executionFeesBreakdown()
-                  )
+                  $executionFees(),
+                  $executionFeesBreakdown()
+                )
                 : $node(style({ fontSize: text.sm, whiteSpace: 'nowrap' }))($executionFees())
             const $fees = switchMap(
               notice => (notice === null ? $feesContent() : $noticeLine(notice.text, notice.positive)),
@@ -1278,38 +1300,42 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
               show =>
                 show
                   ? $Popover({
+                    $container: isMobileScreen
+                      ? $node(style({ display: 'flex', width: '100%' }))
+                      : $node(style({ display: 'flex' })),
+                    $open: map(
+                      () =>
+                        $column(spacing.default, style({ maxWidth: '320px' }))(
+                          ...$enableSessionDisclaimer(),
+                          $Button({
+                            $container: $defaultButtonPrimary(style({ width: '100%', minHeight: '40px' })),
+                            disabled: enableSessionPending,
+                            $content: switchMap(
+                              pending => $node($text(pending ? 'Enabling…' : 'Enable session')),
+                              enableSessionPending
+                            )
+                          })({ click: clickEnableSessionTether() }),
+                          switchMap(
+                            err => (err ? $alertNegativeContainer(style({ fontSize: text.sm }))($text(err)) : empty),
+                            enableSessionError
+                          )
+                        ),
+                      popEnableSession
+                    ),
+                    dismiss: op(
+                      enableSessionFlow,
+                      filter(s => s.status === PromiseStatus.DONE)
+                    ),
+                    $target: $ButtonSecondary({
                       $container: isMobileScreen
-                        ? $node(style({ display: 'flex', width: '100%' }))
-                        : $node(style({ display: 'flex' })),
-                      $open: map(
-                        () =>
-                          $column(spacing.default, style({ maxWidth: '320px' }))(
-                            ...$enableSessionDisclaimer(),
-                            $Button({
-                              $container: $defaultButtonPrimary(style({ width: '100%', minHeight: '40px' })),
-                              disabled: enableSessionPending,
-                              $content: switchMap(
-                                pending => $node($text(pending ? 'Enabling…' : 'Enable session')),
-                                enableSessionPending
-                              )
-                            })({ click: clickEnableSessionTether() })
-                          ),
-                        popEnableSession
-                      ),
-                      dismiss: op(
-                        enableSessionFlow,
-                        filter(s => s.status === PromiseStatus.DONE)
-                      ),
-                      $target: $ButtonSecondary({
-                        $container: isMobileScreen
-                          ? $defaultButtonSecondary(style({ width: '100%', minHeight: '44px' }))
-                          : $defaultButtonSecondary,
-                        $content: $row(spacing.tiny, style({ alignItems: 'center' }))(
-                          $text('Enable Session'),
-                          $popoverCaret()
-                        )
-                      })({ click: popEnableSessionTether() })
-                    })({})
+                        ? $defaultButtonSecondary(style({ width: '100%', minHeight: '44px' }))
+                        : $defaultButtonSecondary,
+                      $content: $row(spacing.tiny, style({ alignItems: 'center' }))(
+                        $text('Enable Session'),
+                        $popoverCaret()
+                      )
+                    })({ click: popEnableSessionTether() })
+                  })({})
                   : empty,
               showEnableSession
             )
@@ -1319,25 +1345,28 @@ export const $ActionDrawer = ({ walletState: rootState, draftList, title = 'Pend
                 ? $defaultButtonPrimary(style({ width: '100%', minHeight: '44px' }))
                 : $defaultButtonPrimary,
               disabled: submitDisabled,
-              $content: switchMap(list => {
-                if (list.some(d => d.alert !== null)) return $node($text('Resolve alerts'))
-                return $node($text(list.length > 1 ? `Submit ${list.length} actions` : 'Submit'))
-              }, draftList)
+              $content: switchMap(planned => {
+                if (planned.some(ps => ps.kind === 'draft' && ps.draft.alert !== null)) {
+                  return $node($text('Resolve alerts'))
+                }
+                const count = planExecution(planned).filter(e => e.kind === 'exec' && e.lead).length
+                return $node($text(count > 1 ? `Submit ${count} actions` : 'Submit'))
+              }, plannedSteps)
             })({
               click: clickSubmitTether()
             })
 
             return isMobileScreen
               ? $column(spacing.small, style({ padding: '0 24px', minWidth: 0 }))(
-                  $fees,
-                  $enableSessionButton,
-                  $submitButton
-                )
+                $fees,
+                $enableSessionButton,
+                $submitButton
+              )
               : $row(spacing.small, style({ padding: '0 24px', alignItems: 'center', minWidth: 0 }))(
-                  $node(style({ flex: 1, minWidth: 0 }))($fees),
-                  $enableSessionButton,
-                  $submitButton
-                )
+                $node(style({ flex: 1, minWidth: 0 }))($fees),
+                $enableSessionButton,
+                $submitButton
+              )
           })()
         )
       )

@@ -6,8 +6,8 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {Dictate} from "src/core/Dictate.sol";
 import {Attest} from "src/core/Attest.sol";
-import {Account as AccountContract, CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH} from "src/core/Account.sol";
-import {RegisterToken} from "src/core/RegisterToken.sol";
+import {Account as AccountContract} from "src/core/Account.sol";
+import {Register} from "src/core/Register.sol";
 import {Deposit} from "src/core/Deposit.sol";
 import {PuppetAccount} from "src/core/PuppetAccount.sol";
 import {FundAccount} from "src/core/FundAccount.sol";
@@ -15,18 +15,18 @@ import {Route} from "src/core/Route.sol";
 import {AccountLib, ACCOUNT_TYPEHASH} from "src/utils/AccountLib.sol";
 
 import {BaseGate} from "src/utils/BaseGate.sol";
-import {AccountGate} from "src/AccountGate.sol";
-import {MasterGate} from "src/MasterGate.sol";
+import {PuppetGate} from "src/PuppetGate.sol";
+import {FundGate} from "src/FundGate.sol";
 import {HubGate} from "src/HubGate.sol";
 
 import {ShareToken} from "src/hub/ShareToken.sol";
 import {Issue} from "src/hub/Issue.sol";
 import {Allocate} from "src/hub/Allocate.sol";
 import {AllocateStore} from "src/hub/store/AllocateStore.sol";
-import {Subscribe} from "src/hub/Subscribe.sol";
+import {Mandate} from "src/hub/Mandate.sol";
 import {Redeem} from "src/hub/Redeem.sol";
 import {RedeemStore} from "src/hub/store/RedeemStore.sol";
-import {ShareLib, SHARE_INIT_TYPEHASH} from "src/utils/ShareLib.sol";
+import {FundAccountLib, FUND_ACCOUNT_INIT_TYPEHASH} from "src/utils/FundAccountLib.sol";
 
 import {MockERC20} from "./mock/MockERC20.t.sol";
 import {MockWNT} from "./mock/MockWNT.t.sol";
@@ -34,9 +34,7 @@ import {MockWNT} from "./mock/MockWNT.t.sol";
 // Shared v2 deploy/wire/co-sign harness. Gates are used directly (no RouterProxy);
 // setPermission/setAccess mark the gate+module loggable, so _logEvent works without setGate.
 contract V2Base is Test {
-    bytes32 constant USDC_ID = keccak256("USDC");
-    bytes32 constant WETH_ID = keccak256("WETH");
-    uint constant HUB_CHAIN_ID = 42_161;
+    uint constant HUB_CHAIN_ID = 1;
     uint constant GAS = 200_000;
     uint constant SP = 1e12;
 
@@ -49,21 +47,21 @@ contract V2Base is Test {
     MockWNT wnt;
 
     Dictate dictate;
-    RegisterToken register;
+    Register register;
     AccountContract accountModule;
     Deposit walletDeposit;
-    AccountGate accountGate;
-    MasterGate masterGate;
+    PuppetGate puppetGate;
+    FundGate fundGate;
     HubGate hubGate;
     Issue shareGate;
     Allocate allocate;
     AllocateStore allocateStore;
-    Subscribe subscribe;
+    Mandate mandate;
     Redeem redeem;
     RedeemStore redeemStore;
 
-    bytes32 accountGateDomain;
-    bytes32 masterGateDomain;
+    bytes32 puppetGateDomain;
+    bytes32 fundGateDomain;
     bytes32 hubGateDomain;
 
     function setUp() public virtual {
@@ -74,7 +72,7 @@ contract V2Base is Test {
         usdc = new MockERC20("USDC", "USDC", 6);
         wnt = new MockWNT();
         dictate = new Dictate(owner);
-        register = new RegisterToken(dictate, HUB_CHAIN_ID);
+        register = new Register(dictate);
 
         Attest attest = new Attest(dictate);
         accountModule = new AccountContract(
@@ -83,10 +81,10 @@ contract V2Base is Test {
         dictate.setAccess(attest, address(accountModule));
         walletDeposit = new Deposit(dictate);
 
-        shareGate = new Issue(dictate, address(new ShareToken()));
+        shareGate = new Issue(dictate, address(new ShareToken(HUB_CHAIN_ID)));
         allocate = new Allocate(dictate);
         allocateStore = new AllocateStore(dictate);
-        subscribe = new Subscribe(dictate);
+        mandate = new Mandate(dictate);
         redeem = new Redeem(dictate);
         redeemStore = new RedeemStore(dictate);
 
@@ -94,42 +92,46 @@ contract V2Base is Test {
             attestor: attestor, feeReceiver: feeReceiver, transferGasLimit: GAS, maxBlockDelay: 50, maxRelayFeeBps: 2000
         });
 
-        accountGate = new AccountGate(dictate, accountModule, walletDeposit, register, HUB_CHAIN_ID, cfg);
-        masterGate = new MasterGate(dictate, accountModule, register, cfg);
+        puppetGate = new PuppetGate(dictate, accountModule, walletDeposit, register, cfg);
+        fundGate = new FundGate(dictate, accountModule, register, cfg);
         hubGate = new HubGate(
-            dictate, accountModule, shareGate, allocate, allocateStore, subscribe, redeem, redeemStore, register, cfg
+            dictate, accountModule, shareGate, allocate, allocateStore, mandate, redeem, redeemStore, register, cfg
         );
 
-        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(accountGate));
-        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, address(accountGate));
-        dictate.setAccess(walletDeposit, address(accountGate));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(puppetGate));
+        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, address(puppetGate));
+        dictate.setAccess(walletDeposit, address(puppetGate));
 
-        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(masterGate));
-        dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, address(masterGate));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(fundGate));
+        dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, address(fundGate));
+        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, address(fundGate));
+        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, address(this));
+        dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, address(this));
 
-        dictate.setAccess(allocateStore, address(subscribe));
+        dictate.setAccess(allocateStore, address(mandate));
         dictate.setAccess(allocateStore, address(allocate));
         dictate.setAccess(redeemStore, address(redeem));
         dictate.setAccess(shareGate, address(allocate));
         dictate.setAccess(shareGate, address(redeem));
-        dictate.setAccess(subscribe, address(hubGate));
+        dictate.setAccess(mandate, address(hubGate));
         dictate.setAccess(allocate, address(hubGate));
         dictate.setAccess(redeem, address(hubGate));
         dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(hubGate));
+        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, address(hubGate));
         dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, address(allocate));
-        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(subscribe));
+        dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(mandate));
         dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(allocate));
         dictate.setPermission(accountModule, AccountContract.dispatchMandate.selector, address(allocate));
         dictate.setPermission(accountModule, AccountContract.dispatch.selector, address(redeem));
 
         dictate.setAccess(register, owner);
-        register.registerToken(USDC_ID, IERC20(address(usdc)), 0, address(usdc));
-        register.registerToken(WETH_ID, IERC20(address(wnt)), 0, address(wnt));
-        register.setWnt(WETH_ID);
+        register.registerToken(address(usdc), type(uint).max);
+        register.registerToken(address(wnt), type(uint).max);
+        register.setWnt(address(wnt));
         vm.stopPrank();
 
-        accountGateDomain = _domainSep("AccountGate", address(accountGate));
-        masterGateDomain = _domainSep("MasterGate", address(masterGate));
+        puppetGateDomain = _domainSep("PuppetGate", address(puppetGate));
+        fundGateDomain = _domainSep("FundGate", address(fundGate));
         hubGateDomain = _domainSep("HubGate", address(hubGate));
         vm.mockCall(address(100), abi.encodeWithSignature("arbBlockNumber()"), abi.encode(block.number));
     }
@@ -178,16 +180,28 @@ contract V2Base is Test {
         return keccak256(abi.encode(ACCOUNT_TYPEHASH, _user, _signer));
     }
 
-    function _share(
+    function _fundParams(
         address _master
-    ) internal pure returns (ShareLib.ShareInitParams memory) {
-        return ShareLib.ShareInitParams({master: _master, baseTokenId: USDC_ID, name: bytes32("Fund")});
+    ) internal view returns (FundAccountLib.FundAccountInitParams memory) {
+        return FundAccountLib.FundAccountInitParams({master: _master, baseToken: address(usdc), name: bytes32("Fund")});
     }
 
-    function _hashShare(
-        ShareLib.ShareInitParams memory _p
+    function _shareTokenOf(
+        address _master
+    ) internal view returns (address) {
+        return address(hubGate.predictShareToken(_fundParams(_master)));
+    }
+
+    function _fundOf(
+        address _master
+    ) internal view returns (address) {
+        return accountModule.predictFundAccount(_fundParams(_master));
+    }
+
+    function _hashFundParams(
+        FundAccountLib.FundAccountInitParams memory _p
     ) internal pure returns (bytes32) {
-        return keccak256(abi.encode(SHARE_INIT_TYPEHASH, _p.master, _p.baseTokenId, _p.name));
+        return keccak256(abi.encode(FUND_ACCOUNT_INIT_TYPEHASH, _p.master, _p.baseToken, _p.name));
     }
 
     function _seedSignedUsdc(
@@ -195,7 +209,7 @@ contract V2Base is Test {
         uint _amount
     ) internal {
         usdc.mint(_acct, _amount);
-        vm.store(_acct, keccak256(abi.encode(USDC_ID, uint(0))), bytes32(_amount));
+        vm.store(_acct, keccak256(abi.encode(address(usdc), uint(0))), bytes32(_amount));
     }
 
     struct Puppet {
@@ -215,34 +229,8 @@ contract V2Base is Test {
         string memory _label
     ) internal returns (Puppet memory p) {
         (p.user, p.key) = makeAddrAndKey(_label);
-        AccountContract.CreatePuppetAccountIntent memory intent = AccountContract.CreatePuppetAccountIntent({
-            params: _params(p.user),
-            blockNumber: block.number,
-            deadline: block.timestamp + 60,
-            acceptableRelayFee: 0,
-            nonce: 0,
-            chainId: block.chainid,
-            tokenId: USDC_ID,
-            initialDepositAmount: 0
-        });
-        bytes32 structHash = keccak256(
-            abi.encode(
-                CREATE_PUPPET_ACCOUNT_INTENT_TYPEHASH,
-                _hashAccount(p.user, address(0)),
-                intent.blockNumber,
-                intent.deadline,
-                intent.acceptableRelayFee,
-                intent.nonce,
-                intent.chainId,
-                intent.tokenId,
-                intent.initialDepositAmount
-            )
-        );
-        bytes32 digest = _digest(accountGateDomain, structHash);
-        accountGate.createPuppetAccount(
-            intent, _signDeploy(p.key), "", _sign(p.key, digest), _sign(attestorKey, digest), 0
-        );
+        accountModule.createPuppetAccount(_params(p.user), _signDeploy(p.key), "");
         p.acct = PuppetAccount(payable(accountModule.predictPuppetAccount(_params(p.user))));
-        p.nonce = 1;
+        p.nonce = 0;
     }
 }

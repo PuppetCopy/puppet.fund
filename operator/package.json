@@ -34,7 +34,7 @@
     "@puppet/contracts": "workspace:*",
     "@puppet/sdk": "workspace:*",
     "@types/bun": "catalog:",
-    "tsdown": "0.22.2",
+    "tsdown": "0.22.3",
     "typescript": "catalog:"
   },
   "keywords": [

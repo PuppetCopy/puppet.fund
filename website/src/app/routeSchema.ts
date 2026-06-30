@@ -14,7 +14,7 @@ export const routeSchema = createRouteSchema({
     },
     portfolio: {
       fragment: 'portfolio',
-      title: 'Wallet Page'
+      title: 'Portfolio'
     }
   }
 } as const)

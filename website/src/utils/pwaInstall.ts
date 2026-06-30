@@ -23,10 +23,6 @@ window.addEventListener('appinstalled', () => {
   notify()
 })
 
-export const isAppInstalled = (): boolean =>
-  window.matchMedia('(display-mode: standalone)').matches ||
-  (navigator as unknown as { standalone?: boolean }).standalone === true
-
 export const canInstallApp: IStream<boolean> = fromCallback(cb => {
   cb(deferredPrompt !== null)
   listeners.add(cb)

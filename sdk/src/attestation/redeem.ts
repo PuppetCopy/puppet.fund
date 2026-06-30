@@ -2,8 +2,8 @@ import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { HUB_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
-  IRedeem__RedeemIntent,
-  IShareLib__ShareInitParams
+  IFundAccountLib__FundAccountInitParams,
+  IRedeem__RedeemIntent
 } from '@puppet/contracts/types'
 import { type Address, isAddressEqual, type TypedDataDefinition } from 'viem'
 import { predictPuppetAccount, predictShareToken } from '../account/index.js'
@@ -11,7 +11,7 @@ import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
 import { factor } from '../core/math.js'
 import * as IntentLib from './intentLib.js'
-import { HUB_DOMAIN, type IDraftContext, STAKE_RATIO_CAP } from './shared.js'
+import { HUB_DOMAIN, type IDraftContext, WEIGHT_RATIO_CAP } from './shared.js'
 
 export interface IRedeemInput {
   params: IAccountLib__AccountInitParams
@@ -19,20 +19,22 @@ export interface IRedeemInput {
   deadline: bigint
   acceptableRelayFee: bigint
   nonce: bigint
-  share: IShareLib__ShareInitParams
+  fundParams: IFundAccountLib__FundAccountInitParams
   sharesOut: bigint
   assetsOut: bigint
   acceptableNetAssetValue: bigint
 }
 
-export interface IRedeemAttestContext extends IDraftContext {
+interface IRedeemAttestContext extends IDraftContext {
   currentBlock: bigint
   shareToken: Address | null
-  closeRate: bigint
+  liquidationRate: bigint
   totalShareSupply: bigint
   queuedShares: bigint
-  poolTotalStake: bigint
-  masterStake: bigint
+  poolWeight: bigint
+  masterWeight: bigint
+  masterEpoch: bigint
+  poolEpoch: bigint
   masterWalletShares: bigint
   signedBalance: bigint
 }
@@ -41,7 +43,7 @@ export function attestRedeemIntent(ctx: IRedeemAttestContext, input: IRedeemInpu
   IntentLib.verifyCommonIntent(ctx, {
     blockNumber: input.blockNumber,
     deadline: input.deadline,
-    baseTokenId: input.share.baseTokenId,
+    baseToken: input.fundParams.baseToken,
     lookupChain: HUB_CHAIN_ID,
     capAmount: 0n,
     acceptableRelayFee: input.acceptableRelayFee,
@@ -49,16 +51,13 @@ export function attestRedeemIntent(ctx: IRedeemAttestContext, input: IRedeemInpu
   })
 
   if (input.acceptableNetAssetValue === 0n) throw new CompactContractError('Redeem__ZeroAcceptableNav', [])
-  if (ctx.closeRate !== 0n) throw new CompactContractError('Share__FundClosed', [])
+  if (ctx.liquidationRate !== 0n) throw new CompactContractError('Share__FundLiquidated', [])
 
   const master = predictPuppetAccount(input.params)
-  if (!isAddressEqual(master, input.share.master)) {
-    throw new CompactContractError('Share__MasterMismatch', [master, input.share.master])
+  if (!isAddressEqual(master, input.fundParams.master)) {
+    throw new CompactContractError('Share__MasterMismatch', [master, input.fundParams.master])
   }
-  if (
-    ctx.shareToken === null ||
-    !isAddressEqual(predictShareToken(input.share.master, input.share.baseTokenId, input.share.name), ctx.shareToken)
-  ) {
+  if (ctx.shareToken === null || !isAddressEqual(predictShareToken(input.fundParams), ctx.shareToken)) {
     throw new CompactContractError('Share__NotCreated', [])
   }
   const supply = ctx.totalShareSupply
@@ -67,8 +66,8 @@ export function attestRedeemIntent(ctx: IRedeemAttestContext, input: IRedeemInpu
   // sharesOut > 0 embeds the master self-sell before the drain: the master's shares join
   // the queue first, so the guard, queue value and retire math all run on the enlarged pool.
   let poolShares = ctx.queuedShares
-  let poolTotalStake = ctx.poolTotalStake
-  let masterStake = ctx.masterStake
+  let poolWeight = ctx.poolWeight
+  let masterWeight = ctx.masterEpoch < ctx.poolEpoch ? 0n : ctx.masterWeight
   let masterWalletShares = ctx.masterWalletShares
   if (input.sharesOut > 0n) {
     if (input.sharesOut > masterWalletShares) {
@@ -77,20 +76,18 @@ export function attestRedeemIntent(ctx: IRedeemAttestContext, input: IRedeemInpu
         `master holds ${masterWalletShares} shares, cannot queue ${input.sharesOut}`
       )
     }
-    if (poolTotalStake > poolShares * STAKE_RATIO_CAP) throw new CompactContractError('Share__PoolDegraded', [])
-    const stakeAdded = poolTotalStake === 0n ? input.sharesOut : (input.sharesOut * poolTotalStake) / poolShares
-    if (stakeAdded === 0n) throw new CompactContractError('Share__ZeroStakeAdded', [])
-    masterStake += stakeAdded
-    poolTotalStake += stakeAdded
+    if (poolWeight > poolShares * WEIGHT_RATIO_CAP) throw new CompactContractError('Share__PoolDegraded', [])
+    const weightAdded = poolWeight === 0n ? input.sharesOut : (input.sharesOut * poolWeight) / poolShares
+    if (weightAdded === 0n) throw new CompactContractError('Share__ZeroWeightAdded', [])
+    masterWeight += weightAdded
+    poolWeight += weightAdded
     poolShares += input.sharesOut
     masterWalletShares -= input.sharesOut
   }
 
-  // The skin-in-the-game guard: the master's share of the queue may not exceed his share
-  // of the fund, so he can never exit ahead of his investors.
-  if (masterStake > 0n) {
-    if (masterWalletShares * poolTotalStake + masterStake * poolShares < masterStake * supply) {
-      throw new CompactContractError('Redeem__MasterFractionDecreased', [])
+  if (masterWeight > 0n) {
+    if (2n * masterWalletShares < supply - poolShares) {
+      throw new CompactContractError('Redeem__MasterSkinTooLow', [])
     }
   }
 
@@ -102,8 +99,8 @@ export function attestRedeemIntent(ctx: IRedeemAttestContext, input: IRedeemInpu
   if (input.assetsOut <= input.acceptableRelayFee) throw new CompactContractError('Redeem__RelayFeeTooHigh', [])
   IntentLib.assertOutflowCovered(ctx, { amountIn: 0n, amountOut: input.assetsOut })
 
-  if (poolTotalStake === 0n) throw new CompactContractError('Share__NoStakeToCredit', [])
-  if (factor(input.assetsOut - input.acceptableRelayFee, poolTotalStake) === 0n) {
+  if (poolWeight === 0n) throw new CompactContractError('Share__NoWeightToCredit', [])
+  if (factor(input.assetsOut - input.acceptableRelayFee, poolWeight) === 0n) {
     throw new CompactContractError('Share__CreditTooSmall', [])
   }
 
@@ -114,7 +111,7 @@ export function attestRedeemIntent(ctx: IRedeemAttestContext, input: IRedeemInpu
     acceptableRelayFee: input.acceptableRelayFee,
     nonce: input.nonce,
     chainId: BigInt(ctx.chainId),
-    share: input.share,
+    fundParams: input.fundParams,
     sharesOut: input.sharesOut,
     assetsOut: input.assetsOut,
     acceptableNetAssetValue: input.acceptableNetAssetValue

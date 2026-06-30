@@ -1,4 +1,4 @@
-import { CHAIN_TOKEN_MAP, GMX_REFERRAL_CODE, HUB_CHAIN_ID } from '@puppet/contracts/const'
+import { CHAIN_TOKEN_MAP, GMX, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
 import { ARBITRUM_MARKET_LIST, GMX_V2_CONTRACT_MAP } from '@puppet/contracts/gmx'
 import type { IIAccount__Call } from '@puppet/contracts/types'
 import {
@@ -162,7 +162,7 @@ function encodeGmxCreateOrder(
         isLong: order.isLong,
         shouldUnwrapNativeToken,
         autoCancel: order.autoCancel ?? false,
-        referralCode: GMX_REFERRAL_CODE,
+        referralCode: GMX.referralCode,
         dataList: []
       }
     ]
@@ -170,99 +170,50 @@ function encodeGmxCreateOrder(
 }
 
 // Builds the calls + per-token outflow legs for a GMX order over any registered base token.
-// The execution fee is always WNT: a WETH base pays it (and the collateral) in WETH via
-// sendTokens (WETH IS WNT); a native-ETH base funds collateral + fee with one sendWnt; any
-// other ERC-20 base sends collateral via sendTokens and the fee as native ETH via sendWnt.
-// shouldUnwrapNativeToken returns WNT outputs (freed collateral, fee refunds) as native ETH
-// EXCEPT for a WETH base, which keeps them as WETH so they settle back onto its WETH leg.
-// Outflows always include the base-token leg (amountOut 0 on a decrease) so a close re-signs
-// the freed collateral on the next order. The collateral GMX records is the base token, or
-// WETH when the base is native ETH (GMX wraps it).
+// The execution fee always reaches the OrderVault as WNT: a WETH base funds it (and the
+// collateral) in WETH via sendTokens (WETH IS WNT); any other ERC-20 base sends collateral via
+// sendTokens and the fee as native ETH via sendWnt. shouldUnwrapNativeToken returns WNT outputs
+// (freed collateral, fee refunds) as native ETH EXCEPT a WETH base, which keeps them as WETH so
+// they settle onto its WETH leg. The base leg is always emitted (amountOut 0 on a decrease) so a
+// close re-signs the freed collateral on the next order. Increase deposits collateral into the
+// vault (order amount 0); decrease withdraws it via the order's collateralDeltaAmount.
 export function buildGmxOrderCalls(order: IGmxOrder, ctx: IGmxBuildContext): IGmxBuildResult {
   const { master, executionFee } = ctx
   const base = getAddress(ctx.baseToken)
-  const nativeBase = isAddressEqual(base, zeroAddress)
   const wethBase = isAddressEqual(base, GMX_WNT)
-  const collateralToken = nativeBase ? GMX_WNT : base
-  const unwrap = !wethBase
+  const isIncrease = GMX_INCREASE_TYPES.has(order.orderType)
+  if (!isIncrease && !GMX_DECREASE_TYPES.has(order.orderType)) {
+    throw new Error(`unsupported GMX order type ${order.orderType} for a single-base-token operator`)
+  }
 
-  if (GMX_INCREASE_TYPES.has(order.orderType)) {
-    const collateral = order.collateralDelta
-    if (wethBase) {
-      const total = collateral + executionFee
-      return {
-        callList: [
-          gmxCall(base, gmxApprove(total), 100_000n),
-          gmxCall(GMX_ROUTER, gmxSendTokens(base, executionFee), 150_000n),
-          gmxCall(GMX_ROUTER, gmxSendTokens(base, collateral), 150_000n),
-          gmxCall(
-            GMX_ROUTER,
-            encodeGmxCreateOrder(master, collateralToken, order, 0n, executionFee, unwrap),
-            1_000_000n
-          )
-        ],
-        outflows: [{ token: base, amountOut: total }]
-      }
-    }
-    if (nativeBase) {
-      const total = collateral + executionFee
-      return {
-        callList: [
-          gmxCall(GMX_ROUTER, gmxSendWnt(total), 200_000n, total),
-          gmxCall(
-            GMX_ROUTER,
-            encodeGmxCreateOrder(master, collateralToken, order, 0n, executionFee, unwrap),
-            1_000_000n
-          )
-        ],
-        outflows: [{ token: zeroAddress, amountOut: total }]
-      }
-    }
-    return {
-      callList: [
-        gmxCall(base, gmxApprove(collateral), 100_000n),
-        gmxCall(GMX_ROUTER, gmxSendWnt(executionFee), 150_000n, executionFee),
-        gmxCall(GMX_ROUTER, gmxSendTokens(base, collateral), 150_000n),
-        gmxCall(GMX_ROUTER, encodeGmxCreateOrder(master, collateralToken, order, 0n, executionFee, unwrap), 1_000_000n)
-      ],
-      outflows: [
-        { token: base, amountOut: collateral },
-        { token: zeroAddress, amountOut: executionFee }
-      ]
-    }
-  }
-  if (GMX_DECREASE_TYPES.has(order.orderType)) {
-    if (wethBase) {
-      return {
-        callList: [
-          gmxCall(base, gmxApprove(executionFee), 100_000n),
-          gmxCall(GMX_ROUTER, gmxSendTokens(base, executionFee), 150_000n),
-          gmxCall(
-            GMX_ROUTER,
-            encodeGmxCreateOrder(master, collateralToken, order, order.collateralDelta, executionFee, unwrap),
-            1_000_000n
-          )
-        ],
-        outflows: [{ token: base, amountOut: executionFee }]
-      }
-    }
-    const callList = [
-      gmxCall(GMX_ROUTER, gmxSendWnt(executionFee), 150_000n, executionFee),
-      gmxCall(
-        GMX_ROUTER,
-        encodeGmxCreateOrder(master, collateralToken, order, order.collateralDelta, executionFee, unwrap),
-        1_000_000n
-      )
+  const deposit = isIncrease ? order.collateralDelta : 0n
+  const createOrder = gmxCall(
+    GMX_ROUTER,
+    encodeGmxCreateOrder(master, base, order, isIncrease ? 0n : order.collateralDelta, executionFee, !wethBase),
+    1_000_000n
+  )
+
+  if (wethBase) {
+    const total = deposit + executionFee
+    const funding = [
+      gmxCall(base, gmxApprove(total), 100_000n),
+      gmxCall(GMX_ROUTER, gmxSendTokens(base, executionFee), 150_000n)
     ]
-    const outflows: IGmxOutflow[] = nativeBase
-      ? [{ token: zeroAddress, amountOut: executionFee }]
-      : [
-          { token: base, amountOut: 0n },
-          { token: zeroAddress, amountOut: executionFee }
-        ]
-    return { callList, outflows }
+    if (deposit > 0n) funding.push(gmxCall(GMX_ROUTER, gmxSendTokens(base, deposit), 150_000n))
+    return { callList: [...funding, createOrder], outflows: [{ token: base, amountOut: total }] }
   }
-  throw new Error(`unsupported GMX order type ${order.orderType} for a single-base-token operator`)
+
+  const funding: IIAccount__Call[] = []
+  if (deposit > 0n) funding.push(gmxCall(base, gmxApprove(deposit), 100_000n))
+  funding.push(gmxCall(GMX_ROUTER, gmxSendWnt(executionFee), 150_000n, executionFee))
+  if (deposit > 0n) funding.push(gmxCall(GMX_ROUTER, gmxSendTokens(base, deposit), 150_000n))
+  return {
+    callList: [...funding, createOrder],
+    outflows: [
+      { token: base, amountOut: deposit },
+      { token: PROTOCOL.nativeToken, amountOut: executionFee }
+    ]
+  }
 }
 
 export function selectGmxMarket(baseToken: Address, indexToken: Address): Address {
@@ -280,6 +231,20 @@ export function selectGmxMarket(baseToken: Address, indexToken: Address): Addres
   throw new Error(
     `ambiguous GMX market for index=${indexToken} collateral=${baseToken} — pass the marketToken directly`
   )
+}
+
+export function traceSwapPathOutput(tokenIn: Address, swapPath: readonly Address[]): Address | undefined {
+  let token = getAddress(tokenIn)
+  for (const hop of swapPath) {
+    const market = ARBITRUM_MARKET_LIST.find(m => isAddressEqual(m.marketToken as Address, getAddress(hop)))
+    if (!market) return undefined
+    const long = getAddress(market.longToken as Address)
+    const short = getAddress(market.shortToken as Address)
+    if (isAddressEqual(token, long)) token = short
+    else if (isAddressEqual(token, short)) token = long
+    else return undefined
+  }
+  return token
 }
 
 export const gmxVenue: IVenue = {

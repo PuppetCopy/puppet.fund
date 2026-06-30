@@ -1,14 +1,22 @@
-import { TOKEN_ID } from '@puppet/contracts/const'
+import { CHAIN_NETWORK_MAP, CHAIN_TOKEN_MAP, PROTOCOL } from '@puppet/contracts/const'
 import { ARBITRUM_MARKET_LIST, GMX_V2_CONTRACT_MAP } from '@puppet/contracts/gmx'
-import type { IIAccount__Call } from '@puppet/contracts/types'
-import { symbolForBaseTokenId } from '@puppet/sdk/account'
+import type { IIAccount__Call, IIAccount__SignTransfer } from '@puppet/contracts/types'
+import {
+  NATIVE_PRECISION,
+  registeredTokenAddresses,
+  staticTokenRegistry,
+  symbolByAddress,
+  tokenInfoFor
+} from '@puppet/sdk/state'
 import { calculateExecutionFee, getGasLimitsConfig, getPositionPnlUsd, type IGasLimitsConfig } from '@puppet/sdk/gmx'
 import {
+  assertOperateSignable,
   buildGmxOrderCalls,
   GMX_DECREASE_SWAP_TYPE,
   GMX_INCREASE_TYPES,
   GMX_ORDER_TYPE,
   type IGmxOrder,
+  screenGmxOperate,
   selectGmxMarket
 } from '@puppet/sdk/venue'
 import {
@@ -19,10 +27,18 @@ import {
   getAddress,
   type Hex,
   isAddressEqual,
-  parseUnits,
-  zeroAddress
+  parseUnits
 } from 'viem'
 import type { IOperatorCore } from '../core.js'
+
+// GMX V2 lives on Arbitrum; resolve the chain id off the network slug so it tracks const.toml.
+const GMX_NETWORK = 'arbitrum' as const
+type IGmxChainId = {
+  [K in keyof typeof CHAIN_NETWORK_MAP]: (typeof CHAIN_NETWORK_MAP)[K] extends typeof GMX_NETWORK ? K : never
+}[keyof typeof CHAIN_NETWORK_MAP]
+export const GMX_V2_CHAIN_ID = Number(
+  Object.entries(CHAIN_NETWORK_MAP).find(([, network]) => network === GMX_NETWORK)![0]
+) as IGmxChainId
 
 export { GMX_DECREASE_SWAP_TYPE, GMX_ORDER_TYPE, type IGmxOrder } from '@puppet/sdk/venue'
 
@@ -45,7 +61,15 @@ export const gmxPrice = (usdPerToken: string | number, indexTokenDecimals: numbe
 
 export { calculateExecutionFee, getGasLimitsConfig, getPositionPnlUsd, type IGasLimitsConfig } from '@puppet/sdk/gmx'
 
-export const GMX_BASE_TOKEN_ID = TOKEN_ID.WETH
+export const GMX_BASE_TOKEN = getAddress(CHAIN_TOKEN_MAP[GMX_V2_CHAIN_ID].WETH)
+
+// GMX funds settle in WETH (the venue's wrapped native, ~1:1 with the gas token). Pass this as the
+// operator's `getTokenPerNativeToken` so the WETH relay-fee leg auto-prices; the chain-agnostic core
+// only auto-prices the bare native token.
+export const gmxTokenPerNativeToken = async (feeToken: Address): Promise<bigint> => {
+  if (isAddressEqual(getAddress(feeToken), GMX_BASE_TOKEN)) return NATIVE_PRECISION
+  throw new Error(`gmx operator prices relay fees in WETH only, not ${feeToken}`)
+}
 
 export const acceptablePrice = (
   spotUsd: number,
@@ -115,7 +139,21 @@ export interface IUpdateOrder {
 }
 
 export function gmxOperator(core: IOperatorCore, opts: IGmxOptions = {}) {
-  const { operate, publicClient, token, fund } = core
+  const { publicClient, token, fund } = core
+  const screenRegistry = staticTokenRegistry()
+  const registeredTokens = registeredTokenAddresses(screenRegistry, GMX_V2_CHAIN_ID)
+
+  // Advisory client screen: confine every dispatched call to the GMX perimeter with the fund as the
+  // sole beneficiary before it leaves the machine. The matchmaker re-screens and the gate enforces,
+  // so this only buys an early, readable rejection — the venue owns it, the generic core does not.
+  function operate(
+    callList: IIAccount__Call[],
+    transferList: IIAccount__SignTransfer[] = [{ token, amountIn: 0n, amountOut: 0n }]
+  ) {
+    const baseTokens = transferList.map(l => tokenInfoFor(screenRegistry, GMX_V2_CHAIN_ID, getAddress(l.token)).token)
+    assertOperateSignable(screenGmxOperate({ callList, account: fund, baseTokens, registeredTokens }))
+    return core.operate(callList, transferList)
+  }
 
   const executionFeeBufferBps = opts.executionFeeBufferBps ?? 2_000n
   let gasLimitsConfig: IGasLimitsConfig | null = null
@@ -139,21 +177,20 @@ export function gmxOperator(core: IOperatorCore, opts: IGmxOptions = {}) {
     const transferList = await Promise.all(
       outflows.map(async o => {
         const outToken = getAddress(o.token)
-        const tokenId = core.tokenIdFor(outToken)
-        const isNative = isAddressEqual(outToken, zeroAddress)
+        const isNative = isAddressEqual(outToken, PROTOCOL.nativeToken)
         const [balance, signed] = await Promise.all([
           isNative
             ? publicClient.getBalance({ address: fund })
             : publicClient.readContract({ address: outToken, abi: erc20Abi, functionName: 'balanceOf', args: [fund] }),
-          core.readSignedBalance(tokenId)
+          core.readSignedBalance(outToken)
         ])
         if (o.amountOut > balance) {
-          const sym = symbolForBaseTokenId(tokenId) ?? outToken
+          const sym = symbolByAddress(outToken)
           throw new Error(
             `insufficient ${sym}: fund holds ${balance}, order needs ${o.amountOut} — allocate more on the site or size down`
           )
         }
-        return { tokenId, token: outToken, amountIn: balance > signed ? balance - signed : 0n, amountOut: o.amountOut }
+        return { token: outToken, amountIn: balance > signed ? balance - signed : 0n, amountOut: o.amountOut }
       })
     )
     return operate(callList, transferList)

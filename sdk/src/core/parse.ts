@@ -1,4 +1,4 @@
-import { BASIS_POINTS } from '@puppet/contracts/const'
+import { PRECISION } from '@puppet/contracts/const'
 import { formatUnits, parseUnits } from 'viem'
 import type { ITokenDescription } from './types.js'
 
@@ -35,5 +35,5 @@ export function getTokenDenominator(tokenDEsc: ITokenDescription) {
 }
 
 export function formatDiv(a: bigint, b: bigint): number {
-  return formatFixed(4, (a * BASIS_POINTS) / b)
+  return formatFixed(4, (a * PRECISION.basisPoints) / b)
 }

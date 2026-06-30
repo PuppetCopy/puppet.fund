@@ -1,13 +1,18 @@
-import { PUPPET_CONTRACT_MAP } from '@puppet/contracts'
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
+import { PROTOCOL } from '@puppet/contracts/const'
+import DEPLOYMENTS from '@puppet/contracts/deployments'
 import type {
   IAccountLib__AccountInitParams,
+  IFundAccountLib__FundAccountInitParams,
   IIAccount__Call,
-  IIAccount__SignTransfer,
-  IShareLib__ShareInitParams
+  IIAccount__SignTransfer
 } from '@puppet/contracts/types'
-import { type IPairedSession, predictFundAccount, predictPuppetAccount, symbolForBaseTokenId } from '@puppet/sdk/account'
-import { attestOperateIntent, type IOperateInput } from '@puppet/sdk/attestation'
+import { type IPairedSession, predictFundAccount, predictPuppetAccount, predictRoute } from '@puppet/sdk/account'
+import {
+  attestFundSwapIntent,
+  attestOperateIntent,
+  type IFundSwapInput,
+  type IOperateInput
+} from '@puppet/sdk/attestation'
 import {
   CompactError,
   createCompact,
@@ -15,17 +20,17 @@ import {
   type IDispatchedFrame,
   SETTLEMENT_TIMEOUT_MS
 } from '@puppet/sdk/compact'
-import { DEFAULT_DEADLINE_SEC, HUB_CHAIN, HUB_CHAIN_NETWORK } from '@puppet/sdk/const'
+import { CHAIN_MAP, type ChainId, DEFAULT_DEADLINE_SEC } from '@puppet/sdk/const'
 import {
   getAcceptableRelayFee,
+  NATIVE_PRECISION,
   randomNonce,
-  relayRouterForKind,
+  relayDispatch,
   staticTokenRegistry,
-  tokenIdForToken,
+  symbolByAddress,
   tokenInfoFor,
   tokenRegistryFromRows
 } from '@puppet/sdk/state'
-import { assertOperateSignable, screenGmxOperate } from '@puppet/sdk/venue'
 import {
   type Address,
   createPublicClient,
@@ -35,57 +40,74 @@ import {
   http,
   isAddressEqual,
   type PublicClient,
-  zeroAddress,
   zeroHash
 } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 
 export interface IOperatorConfig {
+  // The chain this operator trades and settles on (the venue's chain). The fund is universal
+  // CREATE2 so it exists here at the same address; intents dispatch to this chain's gate.
+  chainId: ChainId
   rpcUrl?: string
   dryRun?: boolean
+  // Relay-fee pricing for a non-native fee token (token units per 1e18 of native). The native
+  // token is auto-priced 1:1; a venue's wrapped/collateral fee token needs this.
+  getTokenPerNativeToken?: (feeToken: Address) => Promise<bigint>
+}
+
+export interface IOperatorSwap {
+  inputToken: Address
+  outputToken: Address
+  inputAmount: bigint
+  outputAmount: bigint
+  provider: Address
+  providerCallData: Hex
+  fromRoute?: boolean
+  expectedOutputAmount?: bigint
 }
 
 export interface IOperatorCore {
+  chainId: ChainId
   params: IAccountLib__AccountInitParams
-  share: IShareLib__ShareInitParams
+  fundParams: IFundAccountLib__FundAccountInitParams
   user: Address
   signer: Address
   account: Address
   fund: Address
-  baseTokenId: Hex
+  baseToken: Address
   token: Address
   publicClient: PublicClient
   compact: ICompact
-  onStatus: ICompact['onStatus']
-  tokenIdFor: (token: Address) => Hex
-  readSignedBalance: (tokenId: Hex) => Promise<bigint>
-  isOpen: () => boolean
+  readSignedBalance: (token: Address) => Promise<bigint>
+  readRouteBalance: (token: Address) => Promise<bigint>
   getFundBalance: () => Promise<bigint>
   getFundSignedBalance: () => Promise<bigint>
   operate: (callList: IIAccount__Call[], transferList?: IIAccount__SignTransfer[]) => Promise<IDispatchedFrame>
+  swap: (input: IOperatorSwap) => Promise<IDispatchedFrame>
   close: () => void
 }
 
-export async function createOperatorCore(session: IPairedSession, config: IOperatorConfig = {}): Promise<IOperatorCore> {
+// The chain-agnostic, venue-agnostic building block: it resolves a paired session into an account
+// and fund on `config.chainId`, opens a relay + RPC connection, and exposes the two signed-dispatch
+// primitives (operate, swap) plus reads. It does NOT know any venue — callers build the callList /
+// transferList (a GMX venue, a custom one) and dispatch through `operate`; the matchmaker and the
+// on-chain gate are the authoritative screen. Compose a venue on top.
+export async function createOperatorCore(session: IPairedSession, config: IOperatorConfig): Promise<IOperatorCore> {
+  const { chainId } = config
+  const chain = CHAIN_MAP[chainId]
   const matchmakerUrl = session.matchmakerUrl
-  const rpcUrl = config.rpcUrl ?? HUB_CHAIN.rpcUrls.default.http[0]
+  const rpcUrl = config.rpcUrl ?? chain.rpcUrls.default.http[0]
 
-  const { params, share } = session
-  const baseTokenId = share.baseTokenId
-
+  const baseToken = session.baseToken
   const sessionSigner = privateKeyToAccount(session.signerKey)
-  if (!isAddressEqual(sessionSigner.address, getAddress(params.signer))) {
-    throw new Error('paired session is inconsistent: signerKey does not back params.signer')
-  }
+  const params: IAccountLib__AccountInitParams = { user: session.user, signer: sessionSigner.address }
   const account = predictPuppetAccount(params)
-  if (!isAddressEqual(getAddress(share.master), account)) {
-    throw new Error('paired session is inconsistent: share.master is not the account these params derive to')
-  }
-  const fund = predictFundAccount(account)
+  const fundParams: IFundAccountLib__FundAccountInitParams = { master: account, baseToken, name: session.name }
+  const fund = predictFundAccount(fundParams)
 
-  const publicClient: PublicClient = createPublicClient({ chain: HUB_CHAIN, transport: http(rpcUrl) })
+  const publicClient: PublicClient = createPublicClient({ chain, transport: http(rpcUrl) })
   const tokenRegistry = session.tokenRegistry ? tokenRegistryFromRows(session.tokenRegistry) : staticTokenRegistry()
-  const token = tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseTokenId).token
+  const token = tokenInfoFor(tokenRegistry, chainId, baseToken).token
 
   const accountCode = await publicClient.getCode({ address: account })
   if (!accountCode || accountCode === '0x') {
@@ -96,24 +118,24 @@ export async function createOperatorCore(session: IPairedSession, config: IOpera
     throw new Error(`fund ${fund} is not created — allocate funds to your account on the site, then restart`)
   }
 
-  const baseBalance = isAddressEqual(getAddress(token), zeroAddress)
+  const baseBalance = isAddressEqual(getAddress(token), PROTOCOL.nativeToken)
     ? await publicClient.getBalance({ address: fund })
     : await publicClient.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [fund] })
   if (baseBalance === 0n) {
-    const others = [...(tokenRegistry.get(HUB_CHAIN_ID)?.values() ?? [])].filter(
-      info => info.tokenId !== baseTokenId
+    const others = [...(tokenRegistry.get(chainId)?.values() ?? [])].filter(
+      info => !isAddressEqual(getAddress(info.token), getAddress(baseToken))
     )
     const balances = await Promise.all(
       others.map(info =>
-        isAddressEqual(getAddress(info.token), zeroAddress)
+        isAddressEqual(getAddress(info.token), PROTOCOL.nativeToken)
           ? publicClient.getBalance({ address: fund })
           : publicClient.readContract({ address: info.token, abi: erc20Abi, functionName: 'balanceOf', args: [fund] })
       )
     )
     const funded = others.find((_, i) => balances[i] > 0n)
     if (funded) {
-      const have = symbolForBaseTokenId(funded.tokenId) ?? funded.tokenId
-      const want = symbolForBaseTokenId(baseTokenId) ?? baseTokenId
+      const have = symbolByAddress(funded.token)
+      const want = symbolByAddress(baseToken)
       console.warn(
         `[operator] fund ${fund} holds ${have} but this operator trades ${want} — allocate ${want} to your fund on the site or orders will be skipped`
       )
@@ -122,32 +144,66 @@ export async function createOperatorCore(session: IPairedSession, config: IOpera
 
   const compact = createCompact({ matchmakerUrl })
 
-  function readSignedBalance(tokenId: Hex): Promise<bigint> {
+  function readSignedBalance(token_: Address): Promise<bigint> {
     return publicClient.readContract({
       address: fund,
-      abi: PUPPET_CONTRACT_MAP.FundAccount.abi,
+      abi: DEPLOYMENTS[`FundAccount:${chainId}`].abi,
       functionName: 'signedBalanceOf',
-      args: [tokenId]
+      args: [token_]
     })
+  }
+
+  async function readRouteBalance(tokenAddr: Address): Promise<bigint> {
+    const route = predictRoute(fund)
+    return isAddressEqual(getAddress(tokenAddr), PROTOCOL.nativeToken)
+      ? publicClient.getBalance({ address: route })
+      : publicClient.readContract({ address: tokenAddr, abi: erc20Abi, functionName: 'balanceOf', args: [route] })
+  }
+
+  async function feeRate(feeToken: Address): Promise<bigint> {
+    if (isAddressEqual(getAddress(feeToken), PROTOCOL.nativeToken)) return NATIVE_PRECISION
+    if (config.getTokenPerNativeToken) return config.getTokenPerNativeToken(getAddress(feeToken))
+    throw new Error(
+      `fee token ${feeToken} needs a price — pass getTokenPerNativeToken in the operator config (the native token is auto-priced)`
+    )
+  }
+
+  async function settle(kind: string, ack: IDispatchedFrame): Promise<IDispatchedFrame> {
+    let mined: Awaited<ReturnType<PublicClient['waitForTransactionReceipt']>>
+    try {
+      mined = await publicClient.waitForTransactionReceipt({ hash: ack.txHash, timeout: SETTLEMENT_TIMEOUT_MS })
+    } catch (err) {
+      throw new CompactError(
+        'SETTLEMENT_TIMEOUT',
+        `${kind} was dispatched (tx ${ack.txHash}) but was not mined in time; verify the transaction before retrying: ${err instanceof Error ? err.message : String(err)}`,
+        'server'
+      )
+    }
+    if (mined.status !== 'success') {
+      throw new CompactError('DISPATCH_REVERTED', `${kind} transaction ${ack.txHash} reverted on-chain`, 'server')
+    }
+    return ack
   }
 
   async function operate(
     callList: IIAccount__Call[],
-    transferList: IIAccount__SignTransfer[] = [{ tokenId: baseTokenId, token, amountIn: 0n, amountOut: 0n }]
+    transferList: IIAccount__SignTransfer[] = [{ token, amountIn: 0n, amountOut: 0n }]
   ): Promise<IDispatchedFrame> {
-    const blockNumber = await compact.awaitHead(HUB_CHAIN_NETWORK)
-    const signedBalanceByTokenId: Record<Hex, bigint> = {}
+    if (transferList.length === 0) {
+      throw new Error('operate needs at least one transfer leg (the default 0/0 base leg satisfies it)')
+    }
+    const blockNumber = await publicClient.getBlockNumber()
+    const signedBalanceByToken: Record<Address, bigint> = {}
     for (const leg of transferList) {
-      signedBalanceByTokenId[leg.tokenId] ??= await readSignedBalance(leg.tokenId)
+      signedBalanceByToken[getAddress(leg.token)] ??= await readSignedBalance(getAddress(leg.token))
     }
     const gasPrice = await publicClient.getGasPrice()
     const feeToken = transferList[0]?.token ?? token
-    const acceptableRelayFee = await getAcceptableRelayFee(
+    const acceptableRelayFee = getAcceptableRelayFee(
       gasPrice,
-      relayRouterForKind('operate'),
+      relayDispatch('operate').router,
       'operate',
-      feeToken,
-      publicClient,
+      await feeRate(feeToken),
       BigInt(callList.length)
     )
     const input: IOperateInput = {
@@ -156,71 +212,90 @@ export async function createOperatorCore(session: IPairedSession, config: IOpera
       deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
       acceptableRelayFee,
       nonce: randomNonce(),
-      chainId: BigInt(HUB_CHAIN_ID),
+      chainId: BigInt(chainId),
+      fundParams,
       callList,
       transferList
     }
-    if (transferList.length === 0) {
-      throw new Error('operate needs at least one transfer leg to screen (the default 0/0 base leg satisfies it)')
-    }
-    const baseTokens = transferList.map(leg => tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, leg.tokenId).token)
-    assertOperateSignable(screenGmxOperate({ callList, account: fund, baseTokens }))
     const { intent, typedData } = attestOperateIntent(
-      { chainId: HUB_CHAIN_ID, tokenRegistry, currentBlock: blockNumber, signedBalanceByTokenId },
+      { chainId, tokenRegistry, currentBlock: blockNumber, signedBalanceByToken },
       input
     )
     if (config.dryRun) {
       const leg = transferList[0]
       console.log(
-        `[operator] dry-run: operate verified and screened (${callList.length} calls${leg ? `, leg in=${leg.amountIn} out=${leg.amountOut}` : ''}, relayFee<=${acceptableRelayFee}) — not dispatched`
+        `[operator] dry-run: operate built (${callList.length} calls${leg ? `, leg in=${leg.amountIn} out=${leg.amountOut}` : ''}, relayFee<=${acceptableRelayFee}) — not dispatched`
       )
-      return {
-        chainId: BigInt(HUB_CHAIN_ID),
-        account: fund,
-        nonce: input.nonce,
-        txHash: zeroHash,
-        actualRelayFee: 0n
-      }
+      return { chainId: BigInt(chainId), account: fund, nonce: input.nonce, txHash: zeroHash, actualRelayFee: 0n }
     }
     const signature = await sessionSigner.signTypedData(typedData)
     const ack = await compact.attest({ kind: 'operate', input, intent, signature })
-    let mined: Awaited<ReturnType<PublicClient['waitForTransactionReceipt']>>
-    try {
-      mined = await publicClient.waitForTransactionReceipt({ hash: ack.txHash, timeout: SETTLEMENT_TIMEOUT_MS })
-    } catch (err) {
-      throw new CompactError(
-        'SETTLEMENT_TIMEOUT',
-        `operate was dispatched (tx ${ack.txHash}) but was not mined in time; verify the transaction before retrying: ${err instanceof Error ? err.message : String(err)}`,
-        'server'
+    return settle('operate', ack)
+  }
+
+  async function swap(s: IOperatorSwap): Promise<IDispatchedFrame> {
+    const blockNumber = await publicClient.getBlockNumber()
+    const inputToken = tokenInfoFor(tokenRegistry, chainId, s.inputToken).token
+    const fromRoute = s.fromRoute ?? false
+    const sourceBalance = fromRoute ? await readRouteBalance(inputToken) : await readSignedBalance(s.inputToken)
+    const gasPrice = await publicClient.getGasPrice()
+    const dispatch = relayDispatch('fundSwap')
+    const acceptableRelayFee = getAcceptableRelayFee(gasPrice, dispatch.router, dispatch.method, await feeRate(inputToken), 1n)
+    const input: IFundSwapInput = {
+      params,
+      fundParams,
+      inputToken: s.inputToken,
+      outputToken: s.outputToken,
+      blockNumber,
+      deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
+      acceptableRelayFee,
+      nonce: randomNonce(),
+      chainId: BigInt(chainId),
+      inputAmount: s.inputAmount,
+      outputAmount: s.outputAmount,
+      destinationChainId: BigInt(chainId),
+      route: { kind: 'swap', provider: s.provider, providerCallData: s.providerCallData },
+      fillDeadline: 0,
+      fromRoute
+    }
+    const { intent, typedData } = attestFundSwapIntent(
+      { chainId, tokenRegistry, currentBlock: blockNumber, sourceBalance, expectedOutputAmount: s.expectedOutputAmount ?? null },
+      input
+    )
+    if (config.dryRun) {
+      const inSym = symbolByAddress(s.inputToken)
+      const outSym = symbolByAddress(s.outputToken)
+      console.log(
+        `[operator] dry-run: swap ${s.inputAmount} ${inSym} -> >=${s.outputAmount} ${outSym} (relayFee<=${acceptableRelayFee}) — not dispatched`
       )
+      return { chainId: BigInt(chainId), account: fund, nonce: input.nonce, txHash: zeroHash, actualRelayFee: 0n }
     }
-    if (mined.status !== 'success') {
-      throw new CompactError('DISPATCH_REVERTED', `operate transaction ${ack.txHash} reverted on-chain`, 'server')
-    }
-    return ack
+    const signature = await sessionSigner.signTypedData(typedData)
+    const ack = await compact.attest({ kind: 'fundSwap', input, intent, signature })
+    return settle('fundSwap', ack)
   }
 
   return {
+    chainId,
     params,
-    share,
+    fundParams,
     user: params.user,
     signer: params.signer,
     account,
     fund,
-    baseTokenId,
+    baseToken,
     token,
     publicClient,
     compact,
-    onStatus: compact.onStatus,
-    isOpen: () => compact.isOpen(),
-    tokenIdFor: (t: Address): Hex => tokenIdForToken(tokenRegistry, HUB_CHAIN_ID, t),
     readSignedBalance,
+    readRouteBalance,
     getFundBalance: (): Promise<bigint> =>
-      isAddressEqual(getAddress(token), zeroAddress)
+      isAddressEqual(getAddress(token), PROTOCOL.nativeToken)
         ? publicClient.getBalance({ address: fund })
         : publicClient.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [fund] }),
-    getFundSignedBalance: (): Promise<bigint> => readSignedBalance(baseTokenId),
+    getFundSignedBalance: (): Promise<bigint> => readSignedBalance(baseToken),
     operate,
+    swap,
     close: (): void => {
       compact.close()
     }

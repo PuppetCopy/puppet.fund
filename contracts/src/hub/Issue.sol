@@ -4,7 +4,7 @@ pragma solidity ^0.8.35;
 import {LibClone} from "solady/utils/LibClone.sol";
 
 import {ShareToken} from "./ShareToken.sol";
-import {ShareLib} from "../utils/ShareLib.sol";
+import {FundAccountLib} from "../utils/FundAccountLib.sol";
 import {Error} from "../utils/Error.sol";
 import {Access} from "../utils/auth/Access.sol";
 import {IAuthority} from "../utils/interfaces/IAuthority.sol";
@@ -22,30 +22,30 @@ contract Issue is Access {
 
     function predict(
         address _fund,
-        ShareLib.ShareInitParams calldata _shareParams
+        FundAccountLib.FundAccountInitParams calldata _fundParams
     ) public view returns (address) {
         return LibClone.predictDeterministicAddress(
-            shareTokenImpl, _cloneArgs(_fund, _shareParams), bytes32(uint(uint160(_fund))), address(this)
+            shareTokenImpl, _cloneArgs(_fund, _fundParams), bytes32(uint(uint160(_fund))), address(this)
         );
     }
 
     function verifyShareToken(
         address _fund,
-        ShareLib.ShareInitParams calldata _shareParams
+        FundAccountLib.FundAccountInitParams calldata _fundParams
     ) external view returns (address shareToken_) {
-        shareToken_ = predict(_fund, _shareParams);
+        shareToken_ = predict(_fund, _fundParams);
         if (shareToken_.code.length == 0) revert Error.Share__NotCreated();
     }
 
     function createShareToken(
         address _fund,
-        ShareLib.ShareInitParams calldata _shareParams
+        FundAccountLib.FundAccountInitParams calldata _fundParams
     ) external auth {
         address _shareToken =
-            LibClone.cloneDeterministic(shareTokenImpl, _cloneArgs(_fund, _shareParams), bytes32(uint(uint160(_fund))));
+            LibClone.cloneDeterministic(shareTokenImpl, _cloneArgs(_fund, _fundParams), bytes32(uint(uint160(_fund))));
         _logEvent(
             "CreateShareToken",
-            abi.encode(_fund, _shareToken, _shareParams.master, _shareParams.baseTokenId, _shareParams.name)
+            abi.encode(_fund, _fundParams.master, _fundParams.baseToken, _fundParams.name, _shareToken)
         );
     }
 
@@ -53,16 +53,16 @@ contract Issue is Access {
         ShareToken _shareToken,
         address _to,
         uint _amount
-    ) external auth {
-        _shareToken.mint(_to, _amount);
+    ) external auth returns (uint) {
+        return _shareToken.mint(_to, _amount);
     }
 
     function mintMany(
         ShareToken _shareToken,
         address[] calldata _toList,
         uint[] calldata _amountList
-    ) external auth {
-        _shareToken.mintMany(_toList, _amountList);
+    ) external auth returns (uint[] memory) {
+        return _shareToken.mintMany(_toList, _amountList);
     }
 
     function burn(
@@ -84,8 +84,8 @@ contract Issue is Access {
 
     function _cloneArgs(
         address _fund,
-        ShareLib.ShareInitParams calldata _shareParams
+        FundAccountLib.FundAccountInitParams calldata _fundParams
     ) internal view returns (bytes memory) {
-        return abi.encodePacked(_fund, address(this), _shareParams.baseTokenId, _shareParams.name);
+        return abi.encodePacked(_fund, address(this), _fundParams.baseToken, _fundParams.name);
     }
 }

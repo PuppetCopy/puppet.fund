@@ -1,7 +1,9 @@
 import {
   type IConnectionsResponse,
-  type IHandoffSessionRequest,
-  type IHandoffSessionResponse,
+  // Wallet extension sunset: the session handoff requires an active-fund selection
+  // (baseToken + name) the site no longer surfaces. Handoff usage is commented below.
+  // type IHandoffSessionRequest,
+  // type IHandoffSessionResponse,
   type IRejectConnectRequest,
   PUPPET_EXTENSION_RDNS,
   WALLET_EVENT,
@@ -12,7 +14,8 @@ import {
 import { fromPromise, type IStream, map, merge, op, skipRepeats, switchMap } from 'aelea/stream'
 import { fromCallback, state } from 'aelea/stream-extended'
 import { type Address, getAddress, type Hex } from 'viem'
-import { lastStoredSession } from './sessionKey.js'
+
+// import { lastStoredSession } from './sessionKey.js'
 
 export { PUPPET_EXTENSION_RDNS }
 export const PUPPET_EXTENSION_INSTALL_URL = 'https://puppet.fund/wallet'
@@ -39,12 +42,13 @@ if (typeof window !== 'undefined') {
   // The extension holds the signer key in MEMORY only; when an MV3 worker recycle drops
   // it, the extension asks any open puppet tab to re-hand the session. The site is the
   // wallet — the stored session answers without needing a live EOA connection.
-  window.addEventListener('message', e => {
-    if (e.source !== window || e.data?.target !== WALLET_TARGET.WEBSITE_EVENT) return
-    if (e.data.payload?.event !== WALLET_EVENT.SESSION_REQUEST) return
-    const session = lastStoredSession()
-    if (session) rearmActiveAccount(session).catch(() => {})
-  })
+  // Wallet extension sunset: re-arm handoff disabled (needs active-fund selection).
+  // window.addEventListener('message', e => {
+  //   if (e.source !== window || e.data?.target !== WALLET_TARGET.WEBSITE_EVENT) return
+  //   if (e.data.payload?.event !== WALLET_EVENT.SESSION_REQUEST) return
+  //   const session = lastStoredSession()
+  //   if (session) rearmActiveAccount(session).catch(() => {})
+  // })
 }
 
 function send<T>(type: string, payload?: unknown): Promise<T> {
@@ -88,21 +92,25 @@ async function readConnection(): Promise<IExtensionConnection> {
 
 // Re-arm after an MV3 worker recycle: refill the in-memory signer key. The extension
 // derives the fund from the pair and keeps its origin grants.
-export async function rearmActiveAccount(session: { user: Address; privateKey: Hex }): Promise<void> {
-  const payload: IHandoffSessionRequest = { user: session.user, signerKey: session.privateKey }
-  await send(WALLET_MESSAGE.HANDOFF_SESSION, payload)
+// Wallet extension sunset: handoff now needs an active-fund selection (baseToken + name)
+// the site no longer provides. Kept as a no-op; revive with a fund picker (see $ExtensionBanner).
+export async function rearmActiveAccount(_session: { user: Address; privateKey: Hex }): Promise<void> {
+  // const payload: IHandoffSessionRequest = { user: session.user, signerKey: session.privateKey }
+  // await send(WALLET_MESSAGE.HANDOFF_SESSION, payload)
 }
 
 // User approves a pending dApp connection: HANDOFF_SESSION carrying the session +
 // `approveOrigin`, which grants that dApp origin access and resolves its
 // eth_requestAccounts with the fund address. Reject denies the pending request.
-export async function approveConnection(active: { user: Address; privateKey: Hex; origin: string }): Promise<void> {
-  const payload: IHandoffSessionRequest = {
-    user: active.user,
-    signerKey: active.privateKey,
-    approveOrigin: active.origin
-  }
-  await send<IHandoffSessionResponse>(WALLET_MESSAGE.HANDOFF_SESSION, payload)
+// Wallet extension sunset: handoff now needs an active-fund selection (baseToken + name)
+// the site no longer provides. Kept as a no-op; revive with a fund picker (see $ExtensionBanner).
+export async function approveConnection(_active: { user: Address; privateKey: Hex; origin: string }): Promise<void> {
+  // const payload: IHandoffSessionRequest = {
+  //   user: active.user,
+  //   signerKey: active.privateKey,
+  //   approveOrigin: active.origin
+  // }
+  // await send<IHandoffSessionResponse>(WALLET_MESSAGE.HANDOFF_SESSION, payload)
 }
 
 export async function rejectConnection(origin: string): Promise<void> {

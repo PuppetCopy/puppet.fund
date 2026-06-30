@@ -93,7 +93,7 @@ export const $Chart = <TSeriesType extends keyof ISeriesType>({
       const visibleLogicalRangeChange: IStream<LogicalRange | null> = multicast(
         fromCallback(cb => {
           timeScale.subscribeVisibleLogicalRangeChange(cb)
-          return disposeWith(handler => timeScale.subscribeVisibleLogicalRangeChange(handler), cb)
+          return disposeWith(handler => timeScale.unsubscribeVisibleLogicalRangeChange(handler), cb)
         })
       )
 

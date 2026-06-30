@@ -1,5 +1,8 @@
+import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { predictFundAccount, predictPuppetAccount } from '@puppet/sdk/account'
+import { BYTES32_ZERO } from '@puppet/sdk/const'
 import { readableAddress } from '@puppet/sdk/core'
+import { wrappedNativeAddressOf } from '@puppet/sdk/state'
 import { combine, type IStream, map, nowWith, op, switchLatest, switchPromises } from 'aelea/stream'
 import { state } from 'aelea/stream-extended'
 import { $node, $text, component, effectProp, type I$Node, style } from 'aelea/ui'
@@ -15,7 +18,6 @@ import {
   type IConnectedWallet,
   type ISessionKey,
   lastStoredSession,
-  puppetActiveAccount,
   rejectConnection
 } from '../wallet/index.js'
 
@@ -44,7 +46,11 @@ const $frame = (...$content: I$Node[]): I$Node =>
   )($card(spacing.small)($column(spacing.small)(...$content)))
 
 function fundOf(session: ISessionKey): Address {
-  return predictFundAccount(predictPuppetAccount({ user: session.user, signer: session.signer }))
+  return predictFundAccount({
+    master: predictPuppetAccount({ user: session.user, signer: session.signer }),
+    baseToken: wrappedNativeAddressOf(HUB_CHAIN_ID),
+    name: BYTES32_ZERO
+  })
 }
 
 function readableOrigin(origin: string): string {
@@ -71,9 +77,13 @@ export const $ExtensionBanner = ({ walletQuery }: IExtensionBanner) =>
     const $content = switchLatest(
       map(
         p => {
-          if (p.connected || p.dismissed) return $hidden
+          if (p.dismissed) return $hidden
 
-          const session = p.wallet?.session ?? lastStoredSession()
+          // Fall back to the stored session ONLY when there is no live wallet (the extension's no-EOA handoff). When a
+          // live wallet IS connected we use ITS session and nothing else: after an account switch the new account may
+          // have no session yet, and resorting to lastStoredSession() there would resurrect the PREVIOUS account and
+          // offer to connect its fund instead of prompting this account to sign one.
+          const session = p.wallet ? p.wallet.session : lastStoredSession()
 
           if (session) {
             const fund = fundOf(session)
@@ -135,7 +145,7 @@ export const $ExtensionBanner = ({ walletQuery }: IExtensionBanner) =>
         },
         combine({
           wallet: op(walletQuery, switchPromises, state(null)),
-          connected: puppetActiveAccount,
+          // connected: puppetActiveAccount,
           dismissed: op(dismissed.stream, state(false)),
           refresh: op(refresh.stream, state(0))
         })

@@ -1,11 +1,12 @@
-import { BASIS_POINTS } from '@puppet/contracts/const'
+import { PRECISION } from '@puppet/contracts/const'
 import { CompactError } from '../compact/error.js'
-import { delta } from '../core/math.js'
+import { abs, delta, max } from '../core/math.js'
 import type { IEvaluationConfig, INavBreakdown, INavGate, INavGateReason, INavKind } from './types.js'
 
 export function navDriftBps(clientNav: bigint, computedNav: bigint): bigint {
-  const denom = computedNav === 0n ? 1n : computedNav
-  return (delta(clientNav, computedNav) * BASIS_POINTS) / denom
+  const denom = max(abs(clientNav), abs(computedNav))
+  if (denom === 0n) return 0n
+  return (delta(clientNav, computedNav) * PRECISION.basisPoints) / denom
 }
 
 export function checkNavGate(
@@ -16,12 +17,11 @@ export function checkNavGate(
 ): INavGate {
   const reasons: INavGateReason[] = []
 
+  // Liveness, not lag: the cash leg is read on-chain per intent (no indexer to trail the head), so the only blocking
+  // condition is a chain we cannot reach — there is no "behind" to gate on. A reachable chain is always current.
   for (const c of breakdown.perChain) {
-    if (c.severity === 'unreachable' || c.ageSec > config.maxIndexerAgeSec) {
-      reasons.push({
-        code: 'INDEXER_STALE',
-        detail: `chain ${c.chainId} indexed ${Math.round(c.ageSec)}s behind (max ${config.maxIndexerAgeSec}s)`
-      })
+    if (!c.reachable) {
+      reasons.push({ code: 'CHAIN_UNREACHABLE', detail: `chain ${c.chainId} is unreachable; cannot price its custody` })
     }
   }
 
@@ -69,23 +69,12 @@ export function checkNavGate(
   }
 
   if (opts?.clientNav !== undefined && opts.kind !== 'view') {
-    // Liquidate pins BOTH directions: an overstated close NAV over-drains, an understated
-    // one strands a residual on the closed fund the master can still reach via operate.
-    // Allocate/redeem only police the direction that cheats the counterparty.
-    const deviation =
-      opts.kind === 'liquidate'
-        ? delta(opts.clientNav, navSigned)
-        : opts.kind === 'redeem'
-          ? opts.clientNav - navSigned
-          : navSigned - opts.clientNav
-    if (deviation > 0n) {
-      const drift = navDriftBps(opts.clientNav, navSigned)
-      if (drift > config.driftToleranceBps) {
-        reasons.push({
-          code: 'NAV_MISMATCH',
-          detail: `client NAV ${opts.clientNav} deviates from computed ${navSigned} by ${drift}bps for ${opts.kind} (max ${config.driftToleranceBps}bps)`
-        })
-      }
+    const drift = navDriftBps(opts.clientNav, navSigned)
+    if (drift > config.driftToleranceBps) {
+      reasons.push({
+        code: 'NAV_MISMATCH',
+        detail: `client NAV ${opts.clientNav} diverges from computed ${navSigned} by ${drift}bps for ${opts.kind} (consensus max ${config.driftToleranceBps}bps)`
+      })
     }
   }
 

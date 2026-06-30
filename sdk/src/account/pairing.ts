@@ -5,10 +5,9 @@
 // the POST (port squat, loopback sniff) gets ciphertext it cannot read, because
 // the public key in the link came from the agent's own terminal output.
 
-import type { IAccountLib__AccountInitParams, IShareLib__ShareInitParams } from '@puppet/contracts/types'
-import type { Hex } from 'viem'
+import type { Address, Hex } from 'viem'
 import { decode, encode } from '../compact/frame.js'
-import type { ITokenInfo } from '../state/index.js'
+import type { ITokenRegistry } from '../state/index.js'
 
 const CURVE = { name: 'ECDH', namedCurve: 'P-256' } as const
 
@@ -18,14 +17,16 @@ export interface ISealedPayload {
   ct: string
 }
 
-// The sealed pairing handshake: the site hands the agent its whole identity in one shot, in the
-// same canonical shapes the SDK uses everywhere — `params` is the account, `share` the fund.
+// The sealed pairing handshake: the site hands the agent the minimal identity seed and the
+// operator derives the rest (signer from signerKey, account/fund from these). `name` is the
+// fund's bytes32 name; `baseToken` the token it trades.
 export interface IPairedSession {
   signerKey: Hex
-  params: IAccountLib__AccountInitParams
-  share: IShareLib__ShareInitParams
+  user: Address
+  baseToken: Hex
+  name: Hex
   matchmakerUrl: string
-  tokenRegistry?: ITokenInfo[]
+  tokenRegistry?: ITokenRegistry[]
 }
 
 export interface IPairingKeypair {
