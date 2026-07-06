@@ -1,6 +1,6 @@
 import type {  IGmxPositionProvider } from '@puppet/sdk/evaluate'
 import { getAddress } from 'viem'
-import { fetchOpenPositions } from '../matchmaker/reads.js'
+import { fetchOpenPositions } from '../datastore/reads.js'
 
 // Browser-side NAV providers, the client counterpart to the matchmaker's in-process ones. The evaluate module
 // is provider-injected: open positions come from the journal's folded gmxPositionTable (via /query), prices

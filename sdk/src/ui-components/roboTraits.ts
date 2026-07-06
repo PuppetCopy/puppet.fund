@@ -28,21 +28,21 @@ const skinBlock = (skin: string): IRoboArt => ({
 const background: IRoboCategory = {
   name: 'background',
   traits: {
-    teal: { gradient: ['#75e0cf', '#6bcad3'] },
-    grape: { gradient: ['#c38fff', '#a277ff'] },
-    gold: { gradient: ['#ffde75', '#ffb86b'] },
-    lime: { gradient: ['#92de75', '#79c66b'] },
-    rose: { gradient: ['#ff8fb5', '#e2799a'] },
+    ember: { gradient: ['#ff9385', '#ee6a5c'] },
+    coral: { gradient: ['#ffb597', '#ff9070'] },
+    rose: { gradient: ['#ff9dc0', '#ec84a6'] },
+    gold: { gradient: ['#ffde8f', '#ffc06b'] },
+    lime: { gradient: ['#c8e88f', '#a3cf6b'] },
+    forest: { gradient: ['#8fd08f', '#63ab6b'] },
+    mint: { gradient: ['#9cf0cc', '#72d3ac'] },
+    teal: { gradient: ['#84dbe8', '#5cb8cc'] },
     sky: { gradient: ['#aadeff', '#8cb8f6'] },
-    ember: { gradient: ['#ff826b', '#d66561'] },
-    midnight: { gradient: ['#6975a8', '#5c5f75'] },
-    mint: { gradient: ['#9cf4cf', '#71d3ad'] },
-    sunset: { gradient: ['#ffc475', '#ff8ca2'] },
-    violet: { gradient: ['#b38fff', '#806dc8'] },
-    slate: { gradient: ['#a6adbd', '#808694'] },
-    coral: { gradient: ['#ffa68f', '#ff8ca2'] },
-    forest: { gradient: ['#75bd75', '#62976d'] },
-    neon: { gradient: ['#d4ff75', '#7ed697'] }
+    azure: { gradient: ['#93b3ff', '#6d8ce6'] },
+    indigo: { gradient: ['#a99cf2', '#8478d8'] },
+    violet: { gradient: ['#c4a0f2', '#a37fe0'] },
+    plum: { gradient: ['#e8a6dd', '#cc80c2'] },
+    slate: { gradient: ['#b3bac8', '#8b92a2'] },
+    midnight: { gradient: ['#7b86b0', '#5a6180'] }
   }
 }
 

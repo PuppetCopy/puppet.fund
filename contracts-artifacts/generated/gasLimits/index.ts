@@ -7,8 +7,9 @@ export const router__gasLimit = {
   },
   FundGate: {
     operate: 160912n,
-    recognize: 473810n,
-    swap: 531916n
+    recognize: 473750n,
+    swap: 531924n,
+    wrap: 215472n
   },
   HubGate: {
     allocate: 696803n,

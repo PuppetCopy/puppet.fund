@@ -2,8 +2,8 @@ import { PRECISION } from '@puppet/contracts/const'
 import { curry2 } from 'aelea/stream'
 import { type Address, formatUnits } from 'viem'
 import { USD_DECIMALS } from '../const/common.js'
-import { getRegisteredTokenDescription } from './token.js'
 import { formatFixed, getTokenDenominator } from './parse.js'
+import { getRegisteredTokenDescription } from './token.js'
 import type { ITokenDescription } from './types.js'
 
 const readableAccountingNumber: Intl.NumberFormatOptions = { maximumFractionDigits: 2, minimumFractionDigits: 2 }

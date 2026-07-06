@@ -6,8 +6,10 @@ import {PuppetGate, SWAP_INTENT_TYPEHASH, RECOGNIZE_INTENT_TYPEHASH} from "src/P
 import {
     FundGate,
     SWAP_INTENT_TYPEHASH as FUND_SWAP_INTENT_TYPEHASH,
-    RECOGNIZE_INTENT_TYPEHASH as FUND_RECOGNIZE_INTENT_TYPEHASH
+    RECOGNIZE_INTENT_TYPEHASH as FUND_RECOGNIZE_INTENT_TYPEHASH,
+    WRAP_INTENT_TYPEHASH
 } from "src/FundGate.sol";
+import {NATIVE_TOKEN} from "src/utils/Native.sol";
 import {HubGate, WITHDRAW_INTENT_TYPEHASH} from "src/HubGate.sol";
 import {SwapLib, SWAP_PARAMS_TYPEHASH} from "src/utils/SwapLib.sol";
 import {FundAccount} from "src/core/FundAccount.sol";
@@ -527,6 +529,98 @@ contract SwapFlowsTest is V2Base {
         assertEq(
             FundAccount(payable(fund)).signedBalanceOf(address(usdc)), seed - inputAmount, "input signed debited, no output credit"
         );
+    }
+
+    function _wrapDigest(Puppet memory m, FundGate.WrapIntent memory intent) internal view returns (bytes32) {
+        return _digest(
+            fundGateDomain,
+            keccak256(
+                abi.encode(
+                    WRAP_INTENT_TYPEHASH,
+                    _hashAccount(m.user, address(0)),
+                    intent.blockNumber,
+                    intent.deadline,
+                    intent.acceptableRelayFee,
+                    intent.nonce,
+                    intent.chainId,
+                    _hashFundParams(intent.fundParams),
+                    intent.amount,
+                    intent.unwrap
+                )
+            )
+        );
+    }
+
+    function _wrapIntent(Puppet memory m, FundAccountLib.FundAccountInitParams memory fp, uint amount, bool unwrap)
+        internal
+        view
+        returns (FundGate.WrapIntent memory)
+    {
+        return FundGate.WrapIntent({
+            params: _params(m.user),
+            blockNumber: block.number,
+            deadline: block.timestamp + 60,
+            acceptableRelayFee: 0,
+            nonce: m.nonce,
+            chainId: block.chainid,
+            fundParams: fp,
+            amount: amount,
+            unwrap: unwrap
+        });
+    }
+
+    function test_fundgate_wrap_native_to_wnt() public {
+        Puppet memory master = _makePuppet("WR");
+        FundAccountLib.FundAccountInitParams memory fundParams = _fundParams(address(master.acct));
+        address fund = accountModule.predictFundAccount(fundParams);
+        address fundRoute = accountModule.predictRoute(fund);
+        uint amount = 5e16;
+
+        // Deploy the fund + seed a signed NATIVE balance (physical native + signed slot), as GMX fee refunds leave native.
+        usdc.mint(fundRoute, 1e6);
+        _fundRecognize(master, fundParams, address(usdc), 1e6, 0);
+        vm.deal(fund, amount);
+        vm.store(fund, keccak256(abi.encode(NATIVE_TOKEN, uint(0))), bytes32(amount));
+        FundAccount fa = FundAccount(payable(fund));
+        assertEq(fa.signedBalanceOf(NATIVE_TOKEN), amount, "signed native seeded");
+
+        master.nonce = 1; // nonce 0 consumed by the deploying recognize
+        FundGate.WrapIntent memory intent = _wrapIntent(master, fundParams, amount, false);
+        bytes32 digest = _wrapDigest(master, intent);
+        fundGate.wrap(intent, _sign(master.key, digest), _sign(attestorKey, digest), 0);
+
+        assertEq(fa.signedBalanceOf(address(wnt)), amount, "signed WNT credited 1:1");
+        assertEq(fa.signedBalanceOf(NATIVE_TOKEN), 0, "signed native drained");
+        assertEq(wnt.balanceOf(fund), amount, "physical WNT held");
+        assertEq(fund.balance, 0, "native spent on deposit");
+    }
+
+    function test_fundgate_unwrap_wnt_to_native() public {
+        Puppet memory master = _makePuppet("UW");
+        FundAccountLib.FundAccountInitParams memory fundParams = _fundParams(address(master.acct));
+        address fund = accountModule.predictFundAccount(fundParams);
+        address fundRoute = accountModule.predictRoute(fund);
+        uint amount = 5e16;
+
+        // Deploy the fund + seed a signed WNT balance (physical WNT + signed slot).
+        usdc.mint(fundRoute, 1e6);
+        _fundRecognize(master, fundParams, address(usdc), 1e6, 0);
+        vm.deal(address(this), amount);
+        wnt.deposit{value: amount}();
+        wnt.transfer(fund, amount);
+        vm.store(fund, keccak256(abi.encode(address(wnt), uint(0))), bytes32(amount));
+        FundAccount fa = FundAccount(payable(fund));
+        assertEq(fa.signedBalanceOf(address(wnt)), amount, "signed WNT seeded");
+
+        master.nonce = 1; // nonce 0 consumed by the deploying recognize
+        FundGate.WrapIntent memory intent = _wrapIntent(master, fundParams, amount, true);
+        bytes32 digest = _wrapDigest(master, intent);
+        fundGate.wrap(intent, _sign(master.key, digest), _sign(attestorKey, digest), 0);
+
+        assertEq(fa.signedBalanceOf(NATIVE_TOKEN), amount, "signed native credited 1:1");
+        assertEq(fa.signedBalanceOf(address(wnt)), 0, "signed WNT drained");
+        assertEq(fund.balance, amount, "native returned to fund");
+        assertEq(wnt.balanceOf(fund), 0, "WNT burned");
     }
 
     function _fundRecognize(

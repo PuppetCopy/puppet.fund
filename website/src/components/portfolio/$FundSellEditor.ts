@@ -1,16 +1,17 @@
 import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
-import { applyFactor, getRegisteredTokenDescription, readableTokenAmount } from '@puppet/sdk/core'
+import { applyFactor, getChainTokenDescription, readableTokenAmount } from '@puppet/sdk/core'
 import type { IFund, IFundPosition } from '@puppet/sdk/schema'
 import { computeClaimable, computeQueuedShares, type ITokenRegistryMap, tokenInfoFor } from '@puppet/sdk/state'
-import { combine, constant, empty, filter, type IStream, map, merge, op, sampleMap, switchMap } from 'aelea/stream'
+import { combine, empty, filter, type IStream, map, merge, op, sampleMap, switchMap } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $element, $node, $text, attr, component, type INode, nodeEvent, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { type Address, getAddress, type Hex } from 'viem'
-import { $ButtonSecondary, $defaultSliderContainer, $Slider, $TokenAmountInput, text } from '@/ui-components'
+import { type Address, getAddress, } from 'viem'
+import { $ButtonPrimaryOutline, $ButtonSecondary, $TokenAmountInput, text } from '@/ui-components'
 import { liveFundPool, liveRedeemPosition } from '../../io/live.js'
 import type { IClaimDraft, ISellDraft } from './draft.js'
+import { $editorPercentSlider, createFocusState, scaleByPercent } from './editorUtils.js'
 
 export interface I$FundSellEditor {
   puppet: Address
@@ -43,24 +44,17 @@ export const $FundSellEditor = ({ puppet, masterAccount, baseToken, tokenRegistr
       [clickSell, clickSellTether]: IBehavior<PointerEvent>,
       [clickClaim, clickClaimTether]: IBehavior<PointerEvent>
     ) => {
-      const desc = getRegisteredTokenDescription(tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseToken).token)
+      const desc = getChainTokenDescription(HUB_CHAIN_ID, tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseToken).token)
 
       const positionStream = positionStreamFor(puppet, masterAccount)
       const poolStream = poolStreamFor(masterAccount)
       const settleState = combine({ position: positionStream, pool: poolStream })
       const sharesHeldStream: IStream<bigint> = map(p => p?.sharesHeld ?? 0n, positionStream)
 
-      const sliderShares: IStream<bigint> = sampleMap(
-        (held, pct) => {
-          const bp = BigInt(Math.round(Math.max(0, Math.min(1, pct)) * 10000))
-          return (held * bp) / 10000n
-        },
-        sharesHeldStream,
-        sliderPercent
-      )
+      const sliderShares: IStream<bigint> = sampleMap(scaleByPercent, sharesHeldStream, sliderPercent)
       const maxShares: IStream<bigint> = sampleMap(held => held, sharesHeldStream, clickMax)
       const sharesValue: IStream<bigint> = op(merge(inputShares, sliderShares, maxShares), state(0n))
-      const focused: IStream<boolean> = state(false, merge(constant(true, focusShares), constant(false, blurShares)))
+      const focused: IStream<boolean> = createFocusState(focusShares, blurShares)
 
       const sellDraft: IStream<ISellDraft> = sampleMap(
         (shares): ISellDraft => ({
@@ -196,17 +190,11 @@ export const $FundSellEditor = ({ puppet, masterAccount, baseToken, tokenRegistr
             $heldBadge
           ),
           $node(style({ margin: '0 -26px', display: 'flex' }))(
-            $Slider({
+            $editorPercentSlider({
               value: sliderValue,
-              step: 0.01,
-              orientation: 'horizontal',
               ariaLabel: 'Sell percentage',
               disabled: map(() => held === 0n, sharesValue),
-              error: map(() => false, sharesValue),
-              motion: { stiffness: 800, damping: 58 },
-              $container: $defaultSliderContainer(
-                style({ height: '14px', width: '100%', margin: '-26px 0', flexShrink: '0' })
-              )
+              error: map(() => false, sharesValue)
             })({ change: sliderPercentTether() })
           ),
           queued > 0n
@@ -226,7 +214,7 @@ export const $FundSellEditor = ({ puppet, masterAccount, baseToken, tokenRegistr
               )
             : empty,
           $row(spacing.small, style({ alignItems: 'center' }))(
-            $ButtonSecondary({
+            $ButtonPrimaryOutline({
               disabled: sellDisabled,
               $content: $text(
                 map(amt => (amt > 0n ? `Sell ${readableTokenAmount(PRECISION.shareTokenDecimals, amt)}` : 'Sell'), sharesValue)

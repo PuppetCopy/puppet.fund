@@ -24,17 +24,25 @@ const ACROSS_DEPOSIT_ABI = [
   }
 ] as const
 
-// The Across entry point is DETERMINISTIC: the SAME acrossPeriphery address on every chain (const.toml SWAP_PROVIDER —
-// the same table the deploy seeds Register.providerAllowed from, so the off-chain screen and the on-chain allowlist
-// cannot drift). No per-chain map: one constant screens every chain. Asserted uniform so a stray per-chain value can't
-// silently break the deterministic assumption. NOTE: the deposit BODY below is still the SpokePool deposit shape;
-// migrating it to Periphery.deposit (depositor=recipient=fund) is the pending piece flagged in const.toml before
-// cross-chain bridging is live on the new universe.
+// The deterministic Across SWAP periphery (same address every chain). Retained for activity labelling only — same-asset
+// bridge DEPOSITS target the per-chain SpokePool via acrossSpokePoolOf below (the periphery has no deposit(bytes32...)
+// function, so depositing to it empty-reverts). Asserted uniform so a stray per-chain value can't drift silently.
 export const ACROSS_PERIPHERY: Address = (() => {
   const [periphery, ...rest] = [...new Set(Object.values(SWAP_PROVIDER).map(p => getAddress(p.acrossPeriphery)))]
   if (!periphery || rest.length > 0) throw new Error('acrossPeriphery must be a single deterministic address across all chains')
   return periphery
 })()
+
+// A same-asset bridge deposits DIRECTLY to the origin chain's Across SpokePool (its deposit(bytes32...) pulls the input
+// from the approved caller) — NOT the swap periphery, which has no such function (an empty-revert fallback). The
+// SpokePool is per-chain (SWAP_PROVIDER, chainId-keyed), and the deploy seeds Register.providerAllowed from the SAME
+// table, so this off-chain target can't drift from the on-chain allowlist.
+export function acrossSpokePoolOf(chainId: number): Address {
+  const spokePool = (SWAP_PROVIDER[chainId as keyof typeof SWAP_PROVIDER] as { acrossSpokePool?: string } | undefined)
+    ?.acrossSpokePool
+  if (!spokePool) throw new Error(`no Across SpokePool configured for chain ${chainId}`)
+  return getAddress(spokePool)
+}
 
 const ACROSS_DOMAIN_TAG = '0x1dc0de00f973c0de' as const
 
@@ -83,6 +91,8 @@ export interface IAcrossRouteFields {
 }
 
 export interface IRouteAcrossDepositParams {
+  // The chain the deposit executes on (its SpokePool is the provider target).
+  originChainId: number
   depositor: Address
   recipient: Address
   inputToken: Address
@@ -98,7 +108,7 @@ export function buildRouteAcrossDeposit(params: IRouteAcrossDepositParams): {
   provider: Address
   providerCallData: Hex
 } {
-  const provider = ACROSS_PERIPHERY
+  const provider = acrossSpokePoolOf(params.originChainId)
   const providerCallData = buildAcrossDeposit({
     depositor: params.depositor,
     recipient: params.recipient,

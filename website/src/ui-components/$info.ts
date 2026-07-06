@@ -7,6 +7,9 @@ export const $tooltipDropContainer = $column(
   style({
     whiteSpace: 'pre-wrap',
     maxWidth: '600px',
+    lineHeight: '1.5',
+    fontSize: text.base,
+    fontWeight: 'normal',
     userSelect: 'text',
     background: colorShade(palette.foreground, 14),
     boxShadow: `${palette.shadow} 0px 4px 20px 8px, ${palette.shadow} 0px 1px 3px 1px`,

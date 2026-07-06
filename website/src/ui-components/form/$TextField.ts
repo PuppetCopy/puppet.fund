@@ -55,7 +55,7 @@ const inputStyles = o(
 )
 
 export interface I$FieldLabeled extends Partial<Input<string>> {
-  label: string | null
+  label: string | I$Node | null
   // Secondary description displayed below the input: a plain string, a stream of
   // strings, or any slottable node (compose your own $Tooltip there if you want one).
   hint?: string | IStream<string> | I$Node
@@ -147,7 +147,9 @@ export const $FieldLabeled = ({
         label === null
           ? $field
           : $row(spacing.small, style({ width: '100%' }))(
-              $labelDisplay(style({ width: labelWidth ? `${labelWidth}px` : '' }))($text(label)),
+              $labelDisplay(style({ width: labelWidth ? `${labelWidth}px` : '' }))(
+                typeof label === 'string' ? $text(label) : label
+              ),
               $field
             ),
         $below

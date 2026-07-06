@@ -1,4 +1,4 @@
-import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import { CHAIN_TOKEN_MAP, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
 import DEPLOYMENTS from '@puppet/contracts/deployments'
 import type {
   IAccountLib__AccountInitParams,
@@ -19,6 +19,7 @@ import {
   attestSellIntent,
   attestSwapIntent,
   attestWithdrawIntent,
+  attestWrapIntent,
   type IAllocateInput,
   type IClaimInput,
   type IDepositRoute,
@@ -26,45 +27,59 @@ import {
   type IFundSwapInput,
   type ILiquidateInput,
   type IMandateInput,
+  type IMandateRule,
   type IOperateInput,
   type IRecognizeBalanceInput,
   type IRedeemInput,
   type ISellInput,
   type ISwapInput,
   type IWithdrawInput,
+  type IWrapInput,
   resolveDispatchChainId
 } from '@puppet/sdk/attestation'
-import { type IDispatchedFrame, type IRelayRequest, SETTLEMENT_TIMEOUT_MS } from '@puppet/sdk/compact'
+import { CompactError, type IDispatchedFrame, type IRelayRequest, SETTLEMENT_TIMEOUT_MS } from '@puppet/sdk/compact'
 import type { ChainId } from '@puppet/sdk/const'
+import { awaitWhile } from '@puppet/sdk/core'
+import { assertNavSignable, evaluateCrossChainSwapValue, evaluateSwapValue } from '@puppet/sdk/evaluate'
 import { fundPositionTable } from '@puppet/sdk/schema'
 import {
-  symbolByAddress,
   awaitAccountCall,
   awaitWalletDeposit,
-  chainHeadBlock,
   computeClaimable,
   fetchDepositRouteBalance,
   fetchRouteBalance,
+  isNonceConsumed,
   pollDepositRouteBalance,
   pollRouteBalance,
   randomNonce,
-  tokenInfoFor
+  symbolByAddress,
+  tokenInfoFor,
+  wrappedNativeAddressOf
 } from '@puppet/sdk/state'
-import { getPublicClient } from '@wagmi/core'
-import { type Address, erc20Abi, getAddress, type Hex, type PublicClient, type TypedDataDefinition } from 'viem'
-import { getBalance, getGasPrice, readContract, sendCalls, writeContract } from 'viem/actions'
+import {
+  type Address,
+  erc20Abi,
+  getAddress,
+  type Hex,
+  isAddressEqual,
+  type PublicClient,
+  type TypedDataDefinition
+} from 'viem'
+import { getBalance, readContract, sendCalls, writeContract } from 'viem/actions'
 import { fetchLifiSwapQuote } from '../../../io/bridge/lifiSwap.js'
 import { fetchSwapQuote } from '../../../io/bridge/swapQuote.js'
+import { getRate } from '../../../io/context.js'
 import { fetchMasterPoolState, fetchMasterSubscribers } from '../../../io/datastore/query.js'
+import { client } from '../../../io/datastore/reads.js'
 import { compact } from '../../../io/matchmaker/index.js'
-import { client } from '../../../io/matchmaker/reads.js'
 import { readAccountDeployed, readSignedBalance } from '../../../io/onchain/account.js'
-import { homePublicClient, wagmi } from '../../../wallet/index.js'
+import { homePublicClient, } from '../../../wallet/index.js'
 import type { IDepositDraft, IDraft, IFundSwapDraft, ISubscribeDraft } from '../draft.js'
 import {
   DEFAULT_DEADLINE_SEC,
   type ExecContext,
   pollCallsStatus,
+  publicClientForChain,
   resolveRelayFee,
   stepMetadata,
   supportsAtomicBatch,
@@ -78,6 +93,10 @@ export type IAttestation = {
   request: IRelayRequest
   token: Address
   result: IDispatchedFrame
+  // The dispatch tx's mined block (from its receipt) — the floor the settlement REFRESH reads pin at: an eth_call
+  // served by a load-balanced node lagging this block answers with pre-settlement state and would otherwise be cached
+  // as fresh. Falls back to the confirming client's head when the receipt is unavailable (e.g. the relay repriced).
+  settledBlock: bigint
 }
 
 async function signAndSettle(
@@ -85,18 +104,31 @@ async function signAndSettle(
   typedData: TypedDataDefinition,
   token: Address,
   ctx: ExecContext
-): Promise<IAttestation> {
+): Promise<IAttestation | null> {
+  // Idempotent re-run: a draft retried after a settle-timeout re-signs the SAME nonce (deposit/withdraw bake it at
+  // Save). If the chain already consumed it, the step settled on the first attempt — skip instead of dispatching a
+  // guaranteed nonce-revert; downstream steps re-read live balances.
+  const intent = request.intent as { chainId: bigint; nonce: bigint }
+  const execChainId = resolveDispatchChainId(Number(intent.chainId))
+  const account = accountForRequest(request as IRelayRequest)
+  const consumed = await isNonceConsumed(publicClientForChain(execChainId), account, intent.nonce).catch(() => false)
+  if (consumed) return null
   const signature = await ctx.session.account.signTypedData(typedData)
   const signed = { ...request, signature } as IRelayRequest
   const ack = await compact.attest(signed)
+  const settleClient = publicClientForChain(Number(ack.chainId))
   try {
-    await awaitAccountCall(publicClientForChain(Number(ack.chainId)), ack.account, ack.nonce, SETTLEMENT_TIMEOUT_MS)
+    await awaitAccountCall(settleClient, ack.account, ack.nonce, SETTLEMENT_TIMEOUT_MS)
   } catch (err) {
     throw new Error(
       `${signed.kind} was dispatched (tx ${ack.txHash}) but its settlement was not confirmed in time, verify the transaction before retrying: ${err instanceof Error ? err.message : String(err)}`
     )
   }
-  return { request: signed, token, result: ack }
+  const settledBlock = await settleClient
+    .getTransactionReceipt({ hash: ack.txHash })
+    .then(r => r.blockNumber)
+    .catch(() => settleClient.getBlockNumber())
+  return { request: signed, token, result: ack, settledBlock }
 }
 
 export function computeSignedDelta(request: IRelayRequest, actualRelayFee: bigint): bigint {
@@ -167,7 +199,7 @@ async function recognizeFundSurplus(
   if (transferList.length === 0) return null
 
   const feeToken = transferList[0].token
-  const acceptableRelayFee = await resolveRelayFee(ctx, 'FundGate', 'operate', feeToken, 0n)
+  const acceptableRelayFee = await resolveRelayFee(ctx, HUB_CHAIN_ID, 'FundGate', 'operate', feeToken, 0n)
   const input: IOperateInput = {
     params: { user: ctx.wallet.address, signer: ctx.session.signer },
     fundParams: { master: fundParams.master, baseToken: fundParams.baseToken, name: pool.name as Hex },
@@ -193,19 +225,31 @@ const PUPPET_GATE_ABI = DEPLOYMENTS[`PuppetGate:${HUB_CHAIN_ID}`].abi
 const PUPPET_GATE_ADDRESS = DEPLOYMENTS[`PuppetGate:${HUB_CHAIN_ID}`].address
 
 const BRIDGE_FILL_TIMEOUT_MS = 15 * 60 * 1000
-
-function publicClientForChain(chainIdNum: number): PublicClient {
-  const client = chainIdNum === HUB_CHAIN_ID ? homePublicClient : getPublicClient(wagmi, { chainId: chainIdNum })
-  if (!client) throw new Error(`no public client for chain ${chainIdNum}`)
-  return client as PublicClient
-}
-
+// Local preconditions (same-chain wallet transfer landing, input funds reaching the route) settle in seconds; a
+// planner/state bug there should fail fast, not consume the 15-minute bridge budget.
+const LOCAL_SETTLE_TIMEOUT_MS = 2 * 60 * 1000
 function resolveTokenAddress(ctx: ExecContext, chainIdNum: number, token: Address): Address {
   return tokenInfoFor(ctx.tokenRegistry, chainIdNum as ChainId, token).token
 }
 
-function refreshBlock<T extends { blockNumber: bigint }>(input: T, ctx: ExecContext, chainId: number): T {
-  return { ...input, blockNumber: chainHeadBlock(ctx.chainLiveness, resolveDispatchChainId(chainId)) }
+// Re-stamp the intent envelope at EXECUTION time: blockNumber AND deadline. Drafts bake a deadline at Save
+// (now + DEFAULT_DEADLINE_SEC) which expires while the draft sits in the cart or while earlier steps (wallet
+// approvals, bridge fills) run — signing must always use a fresh window since the session key signs here anyway.
+async function freshEnvelope<T extends { blockNumber: bigint; deadline: bigint }>(
+  input: T,
+  _ctx: ExecContext,
+  chainId: number
+): Promise<T> {
+  // Live head per SIGNING, not the submit-time chainLiveness snapshot: a multi-step draft whose earlier legs burn the
+  // staleness window (wallet confirm, up-to-15min bridge fill, a recognize round-trip) would otherwise re-stamp a
+  // blockNumber the matchmaker + contract already reject as Intent__StaleSignature, aborting mid-flow with funds
+  // already bridged. One live getBlockNumber per signed step keeps every intent inside maxBlockDelay at attest time.
+  const blockNumber = await publicClientForChain(resolveDispatchChainId(chainId)).getBlockNumber()
+  return {
+    ...input,
+    blockNumber,
+    deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC)
+  }
 }
 
 // Reads ONE token's signed balance for signing (fail-loud): a transient RPC failure throws so signing aborts, rather
@@ -223,11 +267,17 @@ async function fetchSignedBalance(_ctx: ExecContext, account: Address, chainId: 
 
 async function runDeposit(input: IDepositRoute, ctx: ExecContext): Promise<void> {
   if (input.amount <= 0n) return
+  const account = predictPuppetAccount(input.params)
+  // Effect-based idempotency for the one leg that moves REAL wallet money: a retried draft whose prior attempt
+  // already landed this transfer must not send again. The route balance IS the transfer's effect, so a funded route
+  // means done (the read fails loud — retrying blind on a dead RPC could double-send). Save-time walletBalance is
+  // checked after, so a wallet drained by the prior successful send does not false-fail the retry.
+  const delivered = await fetchDepositRouteBalance(publicClientForChain(input.chainId), input.token, account)
+  if (delivered >= input.amount) return
   if (input.walletBalance < input.amount) {
     throw new Error(`wallet balance ${input.walletBalance} below required ${input.amount}`)
   }
 
-  const account = predictPuppetAccount(input.params)
   const settle = async (depositHash: Hex): Promise<void> => {
     await awaitWalletDeposit(publicClientForChain(input.chainId), depositHash, BRIDGE_FILL_TIMEOUT_MS)
   }
@@ -312,21 +362,20 @@ async function runDeposit(input: IDepositRoute, ctx: ExecContext): Promise<void>
   }
 
   const wallet = await walletClientForChain(ctx.wallet.walletClient, input.chainId)
+  const routeAddr = predictDepositRoute(account)
+  const routeClient = publicClientForChain(input.chainId)
+  // Delta wait: an absolute >= amount check can pass on a pre-existing surplus BEFORE the transfer mines, letting the
+  // next step read a short balance. Capture before, wait for before + amount.
+  const before = await fetchRouteBalance(routeClient, input.token, routeAddr)
   await writeContract(wallet, {
     address: input.token,
     abi: erc20Abi,
     functionName: 'transfer',
-    args: [predictDepositRoute(account), input.amount],
+    args: [routeAddr, input.amount],
     account: ctx.wallet.address,
     chain: wallet.chain
   })
-  await pollRouteBalance(
-    publicClientForChain(input.chainId),
-    input.token,
-    predictDepositRoute(account),
-    input.amount,
-    BRIDGE_FILL_TIMEOUT_MS
-  )
+  await pollRouteBalance(routeClient, input.token, routeAddr, before + input.amount, LOCAL_SETTLE_TIMEOUT_MS)
 }
 
 // Multi-key CREATE2: a fund address no longer reverse-derives to its {master, baseToken,
@@ -338,32 +387,102 @@ async function resolveFundParams(ctx: ExecContext, fund: Address): Promise<IFund
   return { master: row.master as Address, baseToken: row.baseToken as Hex, name: row.name as Hex }
 }
 
-async function runFundSwapStep(
-  input: ISwapInput,
-  ctx: ExecContext
-): Promise<{ attestation: IAttestation; expectedOutput: bigint }> {
-  const puppet = predictPuppetAccount(input.params)
-  const originChainId = Number(input.chainId)
-  const originToken = resolveTokenAddress(ctx, originChainId, input.inputToken)
-  const originClient = publicClientForChain(originChainId)
-
-  await pollRouteBalance(
-    originClient,
-    originToken,
-    predictDepositRoute(puppet),
-    input.inputAmount > 0n ? input.inputAmount : 1n,
-    BRIDGE_FILL_TIMEOUT_MS
+// Off-chain value bound for every external swap leg, mirroring the matchmaker's screenSwapValue (the relay is the
+// attestor and enforces the same gate; running it here too fails a bad route BEFORE the user is asked to sign). A LOCAL
+// swap's on-chain SignTransfer only proves the account received the client-signed outputAmount (the ratio check is
+// tautological) and a cross-chain leg signs no on-chain floor at all (SignLib.none) — so the value is bounded here
+// against the median oracle (cross-token swap) or an in-domain same-token ratio (across bridge). Fail closed on an
+// unpriceable / stale pair.
+async function screenSwapValue(swap: {
+  routeKind: 'swap' | 'across'
+  inputToken: Address
+  outputToken: Address
+  inputAmount: bigint
+  outputAmount: bigint
+  acceptableRelayFee: bigint
+}): Promise<void> {
+  if (swap.routeKind === 'across') {
+    if (symbolByAddress(swap.inputToken) !== symbolByAddress(swap.outputToken)) {
+      throw new CompactError(
+        'CROSS_CHAIN_ASSET_MISMATCH',
+        `across must bridge the same asset; ${swap.inputToken} and ${swap.outputToken} are different assets`,
+        'hard'
+      )
+    }
+    assertNavSignable(
+      evaluateCrossChainSwapValue({
+        inputAmount: swap.inputAmount - swap.acceptableRelayFee,
+        outputAmount: swap.outputAmount
+      })
+    )
+    return
+  }
+  assertNavSignable(
+    await evaluateSwapValue({
+      input: { token: swap.inputToken, amount: swap.inputAmount },
+      output: { token: swap.outputToken, amount: swap.outputAmount },
+      nowSec: Math.floor(Date.now() / 1000),
+      getRate
+    })
   )
+}
 
-  const fresh = refreshBlock(
+// The quote's own fillDeadline IS the failure boundary: past it no relayer can fill (Across enforces it on-chain),
+// so the wait is bounded by min(deadline, the 15m cap) — no provider status API needed. On timeout the draft fails
+// loudly; whatever the bridge ultimately does with the funds (origin refund, or the input token delivered on the
+// destination) lands back at a route the editors already watch and surface as recoverable surplus.
+const BRIDGE_FILL_FLOOR_MS = 30_000
+function bridgeFillTimeoutMs(fillDeadlineSec: number): number {
+  const untilDeadline = Math.floor(fillDeadlineSec * 1000) - Date.now()
+  return Math.min(BRIDGE_FILL_TIMEOUT_MS, Math.max(BRIDGE_FILL_FLOOR_MS, untilDeadline))
+}
+
+async function awaitBridgeFill(p: {
+  client: PublicClient
+  token: Address
+  route: Address
+  min: bigint
+  fillDeadline: number
+}): Promise<bigint> {
+  const timeoutMs = bridgeFillTimeoutMs(p.fillDeadline)
+  return awaitWhile(
+    async () => {
+      const balance = await fetchRouteBalance(p.client, p.token, p.route)
+      return balance >= p.min ? balance : undefined
+    },
+    {
+      timeoutMs,
+      pollMs: 2_000,
+      timeoutMessage: `the bridge did not deliver to ${p.route} within its fill deadline; if the fill failed, the funds return as a refund on the origin chain or as the bridged input token on the destination — both surface as recoverable surplus in the deposit editor`
+    }
+  )
+}
+
+async function runSwapStep(input: ISwapInput, ctx: ExecContext): Promise<IAttestation | null> {
+  const account = predictPuppetAccount(input.params)
+  const chainId = Number(input.chainId)
+  const token = resolveTokenAddress(ctx, chainId, input.inputToken)
+  const publicClient = publicClientForChain(chainId)
+
+  const minAmount = input.inputAmount > 0n ? input.inputAmount : 1n
+  const routeBalance = await pollDepositRouteBalance(publicClient, token, account, minAmount, LOCAL_SETTLE_TIMEOUT_MS)
+
+  const fresh = await freshEnvelope(
     { ...input, userDeploySig: ctx.session.bindSig, userSignerProof: ctx.session.signerProof },
     ctx,
-    originChainId
+    chainId
   )
-  const routeBalance = await fetchDepositRouteBalance(originClient, originToken, puppet)
+  await screenSwapValue({
+    routeKind: fresh.route.kind,
+    inputToken: fresh.inputToken,
+    outputToken: fresh.outputToken,
+    inputAmount: fresh.inputAmount,
+    outputAmount: fresh.outputAmount,
+    acceptableRelayFee: fresh.acceptableRelayFee
+  })
   const { intent, typedData } = attestSwapIntent(
     {
-      chainId: resolveDispatchChainId(originChainId),
+      chainId: resolveDispatchChainId(chainId),
       tokenRegistry: ctx.tokenRegistry,
       currentBlock: fresh.blockNumber,
       sourceBalance: routeBalance,
@@ -371,25 +490,22 @@ async function runFundSwapStep(
     },
     fresh
   )
-  return {
-    attestation: await signAndSettle({ kind: 'swap', input: fresh, intent }, typedData, fresh.inputToken, ctx),
-    expectedOutput: input.outputAmount
-  }
+  return signAndSettle({ kind: 'swap', input: fresh, intent }, typedData, fresh.inputToken, ctx)
 }
 
 async function runRecognizeStep(
   input: IRecognizeBalanceInput,
   ctx: ExecContext,
   signedBalance: bigint
-): Promise<IAttestation> {
+): Promise<IAttestation | null> {
   const account = predictPuppetAccount(input.params)
   const chainIdNum = Number(input.chainId)
   const token = resolveTokenAddress(ctx, chainIdNum, input.token)
   const publicClient = publicClientForChain(chainIdNum)
   const routeBalance = await pollDepositRouteBalance(publicClient, token, account, input.amount, BRIDGE_FILL_TIMEOUT_MS)
-  const acceptableRelayFee = await resolveRelayFee(ctx, 'PuppetGate', 'recognize', input.token)
+  const acceptableRelayFee = await resolveRelayFee(ctx, chainIdNum, 'PuppetGate', 'recognize', input.token)
 
-  const fresh = refreshBlock(
+  const fresh = await freshEnvelope(
     {
       ...input,
       amount: routeBalance,
@@ -414,36 +530,8 @@ async function runRecognizeStep(
   return signAndSettle({ kind: 'recognize', input: fresh, intent }, typedData, fresh.token, ctx)
 }
 
-async function runSwapHubStep(input: ISwapInput, ctx: ExecContext): Promise<IAttestation> {
-  const account = predictPuppetAccount(input.params)
-  const spokeChainId = Number(input.chainId)
-  const token = resolveTokenAddress(ctx, spokeChainId, input.inputToken)
-  const publicClient = publicClientForChain(spokeChainId)
-
-  const minAmount = input.inputAmount > 0n ? input.inputAmount : 1n
-  await pollDepositRouteBalance(publicClient, token, account, minAmount, BRIDGE_FILL_TIMEOUT_MS)
-
-  const fresh = refreshBlock(
-    { ...input, userDeploySig: ctx.session.bindSig, userSignerProof: ctx.session.signerProof },
-    ctx,
-    spokeChainId
-  )
-  const routeBalance = await fetchDepositRouteBalance(publicClient, token, account)
-  const { intent, typedData } = attestSwapIntent(
-    {
-      chainId: resolveDispatchChainId(spokeChainId),
-      tokenRegistry: ctx.tokenRegistry,
-      currentBlock: fresh.blockNumber,
-      sourceBalance: routeBalance,
-      expectedOutputAmount: null
-    },
-    fresh
-  )
-  return signAndSettle({ kind: 'swap', input: fresh, intent }, typedData, fresh.inputToken, ctx)
-}
-
-async function runWithdrawStep(input: IWithdrawInput, ctx: ExecContext, signedBalance: bigint): Promise<IAttestation> {
-  const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
+async function runWithdrawStep(input: IWithdrawInput, ctx: ExecContext, signedBalance: bigint): Promise<IAttestation | null> {
+  const fresh = await freshEnvelope(input, ctx, HUB_CHAIN_ID)
   const { intent, typedData } = attestWithdrawIntent(
     {
       chainId: resolveDispatchChainId(HUB_CHAIN_ID),
@@ -457,11 +545,11 @@ async function runWithdrawStep(input: IWithdrawInput, ctx: ExecContext, signedBa
   return signAndSettle({ kind: 'withdraw', input: fresh, intent }, typedData, fresh.inputToken, ctx)
 }
 
-async function runAllocateStep(input: IAllocateInput, ctx: ExecContext): Promise<IAttestation> {
+async function runAllocateStep(input: IAllocateInput, ctx: ExecContext): Promise<IAttestation | null> {
   const fund = predictFundAccount(input.fundParams)
-  const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
+  const fresh = await freshEnvelope(input, ctx, HUB_CHAIN_ID)
   const [positions, fundState] = await Promise.all([
-    fetchMasterSubscribers(ctx.tokenRegistry, fund, fresh.fundParams.baseToken),
+    fetchMasterSubscribers(fund, fresh.fundParams.baseToken),
     fetchMasterPoolState(fund)
   ])
   const { intent, typedData } = attestAllocateIntent(
@@ -480,9 +568,9 @@ async function runAllocateStep(input: IAllocateInput, ctx: ExecContext): Promise
   return signAndSettle({ kind: 'allocate', input: fresh, intent }, typedData, fresh.fundParams.baseToken, ctx)
 }
 
-async function runSellStep(input: ISellInput, ctx: ExecContext, signedBalance: bigint): Promise<IAttestation> {
+async function runSellStep(input: ISellInput, ctx: ExecContext, signedBalance: bigint): Promise<IAttestation | null> {
   const fund = predictFundAccount(input.fundParams)
-  const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
+  const fresh = await freshEnvelope(input, ctx, HUB_CHAIN_ID)
   const pool = await fetchMasterPoolState(fund)
   const { intent, typedData } = attestSellIntent(
     {
@@ -507,8 +595,8 @@ async function runSellStep(input: ISellInput, ctx: ExecContext, signedBalance: b
   return signAndSettle({ kind: 'sell', input: fresh, intent }, typedData, fresh.fundParams.baseToken, ctx)
 }
 
-async function runClaimStep(input: IClaimInput, ctx: ExecContext): Promise<IAttestation> {
-  const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
+async function runClaimStep(input: IClaimInput, ctx: ExecContext): Promise<IAttestation | null> {
+  const fresh = await freshEnvelope(input, ctx, HUB_CHAIN_ID)
   const { intent, typedData } = attestClaimIntent(
     {
       chainId: resolveDispatchChainId(HUB_CHAIN_ID),
@@ -520,9 +608,9 @@ async function runClaimStep(input: IClaimInput, ctx: ExecContext): Promise<IAtte
   return signAndSettle({ kind: 'claim', input: fresh, intent }, typedData, fresh.fundParams.baseToken, ctx)
 }
 
-async function runRedeemStep(input: IRedeemInput, ctx: ExecContext, signedBalance: bigint): Promise<IAttestation> {
+async function runRedeemStep(input: IRedeemInput, ctx: ExecContext, signedBalance: bigint): Promise<IAttestation | null> {
   const fund = predictFundAccount(input.fundParams)
-  const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
+  const fresh = await freshEnvelope(input, ctx, HUB_CHAIN_ID)
   const [pool, masterPosition] = await Promise.all([
     fetchMasterPoolState(fund),
     client.find(fundPositionTable, { holder: getAddress(input.fundParams.master), fund: getAddress(fund) })
@@ -548,9 +636,9 @@ async function runRedeemStep(input: IRedeemInput, ctx: ExecContext, signedBalanc
   return signAndSettle({ kind: 'redeem', input: fresh, intent }, typedData, fresh.fundParams.baseToken, ctx)
 }
 
-async function runLiquidateStep(input: ILiquidateInput, ctx: ExecContext): Promise<IAttestation> {
+async function runLiquidateStep(input: ILiquidateInput, ctx: ExecContext): Promise<IAttestation | null> {
   const fund = predictFundAccount(input.fundParams)
-  const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
+  const fresh = await freshEnvelope(input, ctx, HUB_CHAIN_ID)
   const pool = await fetchMasterPoolState(fund)
   const { intent, typedData } = attestLiquidateIntent(
     {
@@ -576,8 +664,8 @@ async function runMandateStep(
   ctx: ExecContext,
   signedBalance: bigint,
   routeBalance: bigint
-): Promise<IAttestation> {
-  const fresh = refreshBlock(input, ctx, HUB_CHAIN_ID)
+): Promise<IAttestation | null> {
+  const fresh = await freshEnvelope(input, ctx, HUB_CHAIN_ID)
   const { intent, typedData } = attestMandateIntent(
     {
       chainId: resolveDispatchChainId(HUB_CHAIN_ID),
@@ -622,6 +710,33 @@ function accountForRequest(req: IRelayRequest): Address {
   return predictPuppetAccount(input.params)
 }
 
+// A mandate settles on-chain when its nonce is consumed (signAndSettle → awaitAccountCall), but the following list reads
+// the journal's folded fundPositionTable, which the indexer updates a beat LATER. Await that fold so the mandate step
+// doesn't resolve — and the UI doesn't refetch the list — until the subscription is actually queryable: a subscribe
+// lands body+mandate on the (holder, fund) row, a revoke clears them. Same await-the-settled-post-state pattern as
+// awaitAccountCall, extended to the indexed read the list depends on. Best-effort: a slow/broken indexer must never
+// turn an already-settled action into a failure, so a timeout only warns (the list then lags until a reload).
+const MANDATE_INDEX_TIMEOUT_MS = 20_000
+async function awaitMandateIndexed(puppet: Address, rules: readonly IMandateRule[]): Promise<void> {
+  const holder = getAddress(puppet)
+  await Promise.all(
+    rules.map(async rule => {
+      const fund = getAddress(predictFundAccount(rule.fundParams))
+      const wantActive = rule.body !== '0x'
+      await awaitWhile(
+        async () => {
+          const row = await client.find(fundPositionTable, { holder, fund })
+          const active = row?.body !== undefined && row?.mandate !== undefined
+          return active === wantActive ? true : undefined
+        },
+        { timeoutMs: MANDATE_INDEX_TIMEOUT_MS, pollMs: 250, maxPollMs: 1000 }
+      ).catch((err: unknown) =>
+        console.warn(`[mandate] subscription for ${fund} not indexed in time; following list may lag until reload:`, err)
+      )
+    })
+  )
+}
+
 export async function runMandateBatch(drafts: ISubscribeDraft[], ctx: ExecContext): Promise<IAttestation[]> {
   const out: IAttestation[] = []
   const input = await buildMandateInput(drafts, ctx)
@@ -632,7 +747,10 @@ export async function runMandateBatch(drafts: ISubscribeDraft[], ctx: ExecContex
     fetchSignedBalance(ctx, puppet, HUB_CHAIN_ID, input.baseToken),
     fetchDepositRouteBalance(publicClientForChain(HUB_CHAIN_ID), resolveTokenAddress(ctx, HUB_CHAIN_ID, input.baseToken), puppet)
   ])
-  out.push(await runMandateStep(input, ctx, signedBalance, routeBalance))
+  push(out, await runMandateStep(input, ctx, signedBalance, routeBalance))
+  // Gate the step's resolution on the indexer reflecting the mandate, so the following-list refetch (fired off this
+  // attestation) reads the settled state in one shot — no post-hoc polling in the view layer.
+  await awaitMandateIndexed(puppet, input.rules)
   return out
 }
 
@@ -642,26 +760,227 @@ const SWAP_REQUOTE_TOLERANCE_BPS = 500n
 const belowReviewedFloor = (reviewedMinOut: bigint, requotedOutput: bigint): boolean =>
   reviewedMinOut > 0n && requotedOutput < (reviewedMinOut * (10000n - SWAP_REQUOTE_TOLERANCE_BPS)) / 10000n
 
+// A draft staged BEFORE the session existed (pre-session exploration) quoted its swap leg for a placeholder
+// identity, and the delivery route is baked inside providerCallData — rebinding params alone cannot rewrite it.
+// Re-quote the same leg for the live identity and floor-check against the output the user reviewed, so those
+// drafts self-heal at submit instead of being refused. Composed leg 1 is covered too: its input and output ids
+// are the same asset, so crossToken resolves false and the race re-runs the same-asset bridge lanes.
+async function rebindSwapLeg(
+  swap: ISwapInput,
+  params: IAccountLib__AccountInitParams,
+  ctx: ExecContext
+): Promise<ISwapInput> {
+  const originChainId = Number(swap.chainId)
+  const destinationChainId = Number(swap.destinationChainId)
+  const inputToken = resolveTokenAddress(ctx, originChainId, swap.inputToken)
+  const outputToken = resolveTokenAddress(ctx, destinationChainId, swap.outputToken)
+  // The gate approves the provider only inputAmount - actualRelayFee (the fee is skimmed BEFORE the DEX runs), so
+  // the provider calldata MUST be quoted for that NET amount — a gross-amount quote transferFroms past the on-chain
+  // allowance and reverts TransferFromFailed (burned a live dispatch on 42161, 2026-07-03). acceptableRelayFee is
+  // the fee ceiling, so netting by it stays at or under the approval.
+  const netInput = swap.inputAmount - swap.acceptableRelayFee
+  if (netInput <= 0n) throw new Error('Swap amount does not cover the relay fee; remove and re-add the action')
+  const quote = await fetchSwapQuote({
+    originChainId,
+    destinationChainId,
+    inputToken,
+    outputToken,
+    inputAmount: netInput,
+    route: predictDepositRoute(predictPuppetAccount(params)),
+    // Same ASSET on two chains has two different addresses, so cross-asset-ness compares priced symbols, never
+    // raw addresses (an address compare would race a cross-asset quote for a plain same-asset bridge).
+    crossToken: symbolByAddress(inputToken) !== symbolByAddress(outputToken)
+  })
+  if (belowReviewedFloor(swap.outputAmount, quote.outputAmount)) {
+    throw new Error(
+      `The route re-quoted for your new session pays materially less than the one you reviewed (${quote.outputAmount} vs ${swap.outputAmount}). Remove and re-add the deposit to review the current route.`
+    )
+  }
+  return { ...swap, params, route: quote.route, outputAmount: quote.outputAmount, fillDeadline: quote.fillDeadline }
+}
+
+// Leg 2 of a composed deposit: the bridge delivered the input's hub-side twin to the route; convert it to the base
+// with a hub-LOCAL swap. The executable calldata cannot be pre-baked (the delivered amount is only known after the
+// fill), so it is quoted FRESH here from the live route balance and floor-checked against the Save-time estimate
+// the user reviewed. A failed leg leaves the bridged token on the route — the deposit editor surfaces it as
+// recoverable surplus.
+async function runHubSwapLeg(
+  hubSwap: { inputToken: Hex; estimateOut: bigint },
+  baseToken: Hex,
+  params: IAccountLib__AccountInitParams,
+  ctx: ExecContext
+): Promise<IAttestation | null> {
+  const account = predictPuppetAccount(params)
+  const inputToken = resolveTokenAddress(ctx, HUB_CHAIN_ID, hubSwap.inputToken)
+  const outputToken = resolveTokenAddress(ctx, HUB_CHAIN_ID, baseToken)
+  const routeBalance = await fetchDepositRouteBalance(homePublicClient, inputToken, account)
+  if (routeBalance === 0n) {
+    throw new Error('the bridged funds were not found on the hub route yet; retry shortly')
+  }
+  const acceptableRelayFee = await resolveRelayFee(ctx, HUB_CHAIN_ID, 'PuppetGate', 'swap', hubSwap.inputToken)
+  const netInput = routeBalance - acceptableRelayFee
+  if (netInput <= 0n) throw new Error('the bridged amount does not cover the hub swap relay fee')
+  const quote = await fetchLifiSwapQuote({
+    chainId: HUB_CHAIN_ID,
+    inputToken,
+    outputToken,
+    inputAmount: netInput,
+    fromAddress: predictDepositRoute(account),
+    toAddress: predictDepositRoute(account)
+  })
+  if (quote.outputAmount === 0n || belowReviewedFloor(hubSwap.estimateOut, quote.outputAmount)) {
+    throw new Error(
+      'the hub swap re-quoted materially below the output you reviewed; the bridged funds remain on your route as recoverable surplus in the deposit editor'
+    )
+  }
+  const input: ISwapInput = {
+    params,
+    inputToken: hubSwap.inputToken,
+    outputToken: baseToken,
+    ...stepMetadata(ctx, HUB_CHAIN_ID),
+    acceptableRelayFee,
+    chainId: BigInt(HUB_CHAIN_ID),
+    inputAmount: routeBalance,
+    outputAmount: quote.outputAmount,
+    destinationChainId: BigInt(HUB_CHAIN_ID),
+    route: quote.route,
+    fillDeadline: Math.floor(quote.fillDeadline),
+    userDeploySig: ctx.session.bindSig,
+    userSignerProof: ctx.session.signerProof
+  }
+  return runSwapStep(input, ctx)
+}
+
 // FA internal rebalance: one guarded FundGate.swap (fromRoute=false) debiting the fund's signed
 // inputToken, running the DEX on the fund account, crediting signed outputToken. A LOCAL swap delivers the
 // output to the fund and credits it in the same intent. A CROSS-CHAIN swap (destinationChainId !== chainId) debits
 // the input, bridges the output to the fund's route on the destination, and credits it via a second FundGate
 // recognize there (mirrors the cross-chain deposit's source -> destination-recognize, but for the fund account).
+// Wrap the fund's native holding (NATIVE_TOKEN signed balance — e.g. GMX execution-fee refunds accrue as native) into
+// its wrapped-native ERC-20 so a dust balance becomes a swappable source. A dedicated, atomic FundGate.wrap: a fixed
+// WNT.deposit + a 1:1 signed re-key, no DEX or provider calldata to screen; the on-chain shortfall check makes it exact.
+async function runWrapStep(
+  fundParams: IFundAccountLib__FundAccountInitParams,
+  chainId: number,
+  amount: bigint,
+  ctx: ExecContext,
+  unwrap = false
+): Promise<IAttestation | null> {
+  const wnt = wrappedNativeAddressOf(chainId as ChainId)
+  const acceptableRelayFee = await resolveRelayFee(ctx, chainId, 'FundGate', 'wrap', wnt, 0n)
+  const input: IWrapInput = {
+    params: { user: ctx.wallet.address, signer: ctx.session.signer },
+    fundParams,
+    amount,
+    unwrap,
+    ...stepMetadata(ctx, chainId),
+    acceptableRelayFee,
+    chainId: BigInt(chainId)
+  }
+  const fresh = await freshEnvelope(input, ctx, chainId)
+  const { intent, typedData } = attestWrapIntent(
+    { chainId: resolveDispatchChainId(chainId), tokenRegistry: ctx.tokenRegistry, currentBlock: fresh.blockNumber },
+    fresh
+  )
+  return signAndSettle({ kind: 'wrap', input: fresh, intent }, typedData, wnt, ctx)
+}
+
 async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promise<IAttestation[]> {
   const fundParams = await resolveFundParams(ctx, draft.account)
   const fund = predictFundAccount(fundParams)
   const destChainId = draft.destinationChainId ?? draft.chainId
   const isLocal = destChainId === draft.chainId
-  const inputToken = resolveTokenAddress(ctx, draft.chainId, draft.tokenIn)
+  // UNWRAP: wrapped-native -> native on the same chain (WMON -> MON) is a dedicated 1:1 FundGate.wrap(unwrap), not a DEX
+  // swap (the DEX can't produce the codeless native marker).
+  if (
+    isLocal &&
+    isAddressEqual(getAddress(draft.tokenIn), getAddress(wrappedNativeAddressOf(draft.chainId as ChainId))) &&
+    isAddressEqual(getAddress(draft.tokenOut), getAddress(PROTOCOL.nativeToken))
+  ) {
+    const unwrapped = await runWrapStep(fundParams, draft.chainId, draft.amountIn, ctx, true)
+    return unwrapped ? [unwrapped] : []
+  }
+  // Native is not an ERC-20 the DEX can approve/transferFrom, so a native-input swap first WRAPS the holding to the
+  // chain's wrapped-native token (1:1), then swaps that. tokenIn from here on is the wrapped ERC-20.
+  const wrapResults: IAttestation[] = []
+  const nativeInput = isAddressEqual(getAddress(draft.tokenIn), getAddress(PROTOCOL.nativeToken))
+  if (nativeInput) {
+    const wrap = await runWrapStep(fundParams, draft.chainId, draft.amountIn, ctx)
+    if (wrap) wrapResults.push(wrap)
+  }
+  const tokenIn: Hex = nativeInput ? wrappedNativeAddressOf(draft.chainId as ChainId) : draft.tokenIn
+  const inputToken = resolveTokenAddress(ctx, draft.chainId, tokenIn)
   const outputToken = resolveTokenAddress(ctx, destChainId, draft.tokenOut)
+  // MON -> WMON is the wrap ALONE: after wrapping, the wrapped input already IS the output, so there is no DEX swap.
+  if (nativeInput && isLocal && isAddressEqual(getAddress(inputToken), getAddress(outputToken))) return wrapResults
+
+  // COMPOSED cross-token cross-chain: a single cross-chain swap-and-bridge has an unpinnable delivery recipient (the
+  // co-signer rejects it), so route through a bridgeable intermediate X: local swap tokenIn -> X on the origin, a
+  // SAME-ASSET Across bridge X -> X to the dest (recipient pinned), then a local swap X -> tokenOut on the dest. Each leg
+  // is signable on its own. X = the editor's chosen bridgeToken (the output's twin when Across bridges it, else a
+  // stablecoin) so execution matches the priced route; every leg is sized from the amount the PRIOR leg actually
+  // delivered. leg 1 is skipped when the input already IS X, leg 3 when the bridge already delivered the output asset.
+  if (!isLocal && symbolByAddress(tokenIn) !== symbolByAddress(draft.tokenOut)) {
+    const originTokens = CHAIN_TOKEN_MAP[draft.chainId as keyof typeof CHAIN_TOKEN_MAP] as Record<string, Hex> | undefined
+    const destTokens = CHAIN_TOKEN_MAP[destChainId as keyof typeof CHAIN_TOKEN_MAP] as Record<string, Hex> | undefined
+    const xOrigin = draft.bridgeToken ?? originTokens?.[symbolByAddress(draft.tokenOut)]
+    if (!xOrigin) throw new Error(`no bridge intermediate for ${symbolByAddress(draft.tokenOut)} on chain ${draft.chainId}`)
+    const xSymbol = symbolByAddress(xOrigin)
+    const xDest = destTokens?.[xSymbol]
+    if (!xDest) throw new Error(`bridge intermediate ${xSymbol} is not registered on chain ${destChainId}`)
+    const needsDestSwap = xSymbol !== symbolByAddress(draft.tokenOut)
+    const results = [...wrapResults]
+
+    // leg 1: local swap tokenIn -> X on the origin. Floor it at the reviewed minOut ONLY when X is already the output
+    // asset (the 2-leg direct shape); a stablecoin intermediate is floored downstream at leg 3.
+    let bridgeAmount = draft.amountIn
+    if (xSymbol !== symbolByAddress(tokenIn)) {
+      const before = await fetchSignedBalance(ctx, fund, draft.chainId, xOrigin)
+      const leg1 = await runFundSwapDraft(
+        { ...draft, tokenIn, tokenOut: xOrigin, destinationChainId: undefined, bridgeToken: undefined, minOut: needsDestSwap ? 0n : draft.minOut },
+        ctx
+      )
+      bridgeAmount = (await fetchSignedBalance(ctx, fund, draft.chainId, xOrigin)) - before
+      if (bridgeAmount <= 0n) throw new Error('the local swap produced no output to bridge')
+      results.push(...leg1)
+    }
+
+    // leg 2: same-asset X -> X bridge to the dest (recipient pinned) + dest recognize.
+    const beforeDest = needsDestSwap ? await fetchSignedBalance(ctx, fund, destChainId, xDest) : 0n
+    const leg2 = await runFundSwapDraft(
+      { ...draft, tokenIn: xOrigin, tokenOut: xDest, amountIn: bridgeAmount, minOut: 0n, bridgeToken: undefined },
+      ctx
+    )
+    results.push(...leg2)
+    if (!needsDestSwap) return results
+
+    // leg 3: local swap the bridged intermediate -> the requested output on the dest chain, sized from what the bridge
+    // actually delivered, floored at the reviewed overall minOut (the cumulative-slippage backstop).
+    const producedDest = (await fetchSignedBalance(ctx, fund, destChainId, xDest)) - beforeDest
+    if (producedDest <= 0n) throw new Error('the bridge produced no output to swap on the destination')
+    const leg3 = await runFundSwapDraft(
+      {
+        ...draft,
+        chainId: destChainId,
+        tokenIn: xDest,
+        tokenOut: draft.tokenOut,
+        amountIn: producedDest,
+        destinationChainId: undefined,
+        bridgeToken: undefined
+      },
+      ctx
+    )
+    results.push(...leg3)
+    return results
+  }
+
   const route = predictDepositRoute(fund)
 
   // FundGate.swap skims the relay fee off the input token BEFORE running the DEX: it approves the provider only
   // inputAmount - actualRelayFee. So the provider calldata must be quoted for that NET amount, not the full input, or the
   // DEX's transferFrom exceeds the on-chain approval and reverts TRANSFER_FROM_FAILED. acceptableRelayFee is the fee
   // ceiling (the matchmaker's actual fee is <= it), so netting by it stays at or under the on-chain approval.
-  const gasPrice = draft.chainId === HUB_CHAIN_ID ? ctx.gasPrice : await getGasPrice(publicClientForChain(draft.chainId))
-  const acceptableRelayFee = await resolveRelayFee(ctx, 'FundGate', 'swap', draft.tokenIn, undefined, gasPrice)
+  const acceptableRelayFee = await resolveRelayFee(ctx, draft.chainId, 'FundGate', 'swap', tokenIn)
   const swapInputAmount = draft.amountIn - acceptableRelayFee
   if (swapInputAmount <= 0n) throw new Error('Swap amount does not cover the relay fee; increase the amount and retry')
 
@@ -681,7 +1000,7 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
         outputToken,
         inputAmount: swapInputAmount,
         route,
-        crossToken: symbolByAddress(draft.tokenIn) !== symbolByAddress(draft.tokenOut)
+        crossToken: symbolByAddress(tokenIn) !== symbolByAddress(draft.tokenOut)
       })
   if (quote.outputAmount === 0n) throw new Error('swap route quoted zero output, adjust the amount and retry')
   if (belowReviewedFloor(draft.minOut, quote.outputAmount)) {
@@ -689,12 +1008,12 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
   }
 
   const destRouteBefore = isLocal ? 0n : await fetchRouteBalance(publicClientForChain(destChainId), outputToken, route)
-  const signedBalance = await fetchSignedBalance(ctx, fund, draft.chainId, draft.tokenIn)
+  const signedBalance = await fetchSignedBalance(ctx, fund, draft.chainId, tokenIn)
 
   const input: IFundSwapInput = {
     params: { user: ctx.wallet.address, signer: ctx.session.signer },
     fundParams,
-    inputToken: draft.tokenIn,
+    inputToken: tokenIn,
     outputToken: draft.tokenOut,
     ...stepMetadata(ctx, draft.chainId),
     acceptableRelayFee,
@@ -706,7 +1025,15 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
     fillDeadline: Math.floor(quote.fillDeadline),
     fromRoute: false
   }
-  const fresh = refreshBlock(input, ctx, draft.chainId)
+  const fresh = await freshEnvelope(input, ctx, draft.chainId)
+  await screenSwapValue({
+    routeKind: fresh.route.kind,
+    inputToken: fresh.inputToken,
+    outputToken: fresh.outputToken,
+    inputAmount: fresh.inputAmount,
+    outputAmount: fresh.outputAmount,
+    acceptableRelayFee: fresh.acceptableRelayFee
+  })
   const { intent, typedData } = attestFundSwapIntent(
     {
       chainId: resolveDispatchChainId(draft.chainId),
@@ -718,8 +1045,15 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
     fresh
   )
   const swapped = await signAndSettle({ kind: 'fundSwap', input: fresh, intent }, typedData, fresh.inputToken, ctx)
-  if (isLocal) return [swapped]
+  if (isLocal) return [...wrapResults, ...(swapped === null ? [] : [swapped])]
 
+  await awaitBridgeFill({
+    client: publicClientForChain(destChainId),
+    token: outputToken,
+    route,
+    min: destRouteBefore + quote.outputAmount,
+    fillDeadline: quote.fillDeadline
+  })
   const recognized = await runFundRecognizeStep(
     fundParams,
     destChainId,
@@ -727,7 +1061,10 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
     destRouteBefore + quote.outputAmount,
     ctx
   )
-  return [swapped, recognized]
+  const settledSteps: IAttestation[] = [...wrapResults]
+  if (swapped !== null) settledSteps.push(swapped)
+  if (recognized !== null) settledSteps.push(recognized)
+  return settledSteps
 }
 
 // Destination leg of a cross-chain fund swap: wait for the bridge to fill the fund's route on the destination chain,
@@ -739,14 +1076,17 @@ async function runFundRecognizeStep(
   outputToken: Hex,
   minRouteBalance: bigint,
   ctx: ExecContext
-): Promise<IAttestation> {
+): Promise<IAttestation | null> {
   const fund = predictFundAccount(fundParams)
   const route = predictDepositRoute(fund)
   const token = resolveTokenAddress(ctx, destChainId, outputToken)
   const destClient = publicClientForChain(destChainId)
   const routeBalance = await pollRouteBalance(destClient, token, route, minRouteBalance, BRIDGE_FILL_TIMEOUT_MS)
   const signedBalance = await fetchSignedBalance(ctx, fund, destChainId, outputToken)
-  const acceptableRelayFee = await resolveRelayFee(ctx, 'FundGate', 'recognize', outputToken)
+  // The recognize DISPATCHES on the dest chain, so its fee must be priced against THAT chain's gas price (the matchmaker
+  // quotes with getChainGasPrice(destChainId)); ctx.gasPrice is the hub's and under-quotes a pricier spoke, tripping
+  // RELAY_FEE_EXCEEDED — same reason the cross-chain swap leg above fetches the dest gas price.
+  const acceptableRelayFee = await resolveRelayFee(ctx, destChainId, 'FundGate', 'recognize', outputToken)
 
   const input: IFundRecognizeInput = {
     params: { user: ctx.wallet.address, signer: ctx.session.signer },
@@ -759,7 +1099,7 @@ async function runFundRecognizeStep(
     userDeploySig: ctx.session.bindSig,
     userSignerProof: ctx.session.signerProof
   }
-  const fresh = refreshBlock(input, ctx, destChainId)
+  const fresh = await freshEnvelope(input, ctx, destChainId)
   const { intent, typedData } = attestFundRecognizeIntent(
     {
       chainId: destChainId as ChainId,
@@ -792,34 +1132,49 @@ export async function runDraft(draft: IDraft, ctx: ExecContext, recognize = true
     const chainId = Number((settled.request.intent as { chainId: bigint }).chainId)
     const token = settled.token
     const key = balanceKey(acc, chainId, token)
-    const prior = balances.get(key) ?? 0n
-    balances.set(key, prior + computeSignedDelta(settled.request, settled.result.actualRelayFee))
+    // Project the delta ONLY onto a balance this draft already read: seeding an unread key from 0n fabricates a
+    // balance that a later step would sign against. An unread key stays absent, so its first read is live (correct:
+    // signAndSettle already awaited settlement).
+    const prior = balances.get(key)
+    if (prior !== undefined) {
+      balances.set(key, prior + computeSignedDelta(settled.request, settled.result.actualRelayFee))
+    }
     return settled
   }
 
   if (draft.kind === 'mandate') return runMandateBatch([draft], ctx)
   if (draft.kind === 'allocate') {
     const params = { user: ctx.wallet.address, signer: ctx.session.signer }
+    // The swap's providerCallData bakes the DELIVERY ROUTE of the identity that drafted it (pre-session placeholder
+    // or a stale prior session); rebinding params alone cannot rewrite that calldata, so re-quote the same leg for
+    // the live identity instead of executing a route the live account does not own.
+    let swapLeg = draft.swap
+    if (
+      swapLeg &&
+      (!isAddressEqual(getAddress(swapLeg.params.user), getAddress(params.user)) ||
+        !isAddressEqual(getAddress(swapLeg.params.signer), getAddress(params.signer)))
+    ) {
+      swapLeg = await rebindSwapLeg(swapLeg, params, ctx)
+    }
     const puppet = predictPuppetAccount(params)
     const hubBefore = await fetchDepositRouteBalance(homePublicClient, draft.baseToken, puppet)
     if (draft.wallet) await runDeposit({ ...draft.wallet, params }, ctx)
     let bridged: bigint | null = null
-    if (draft.swap) {
-      const r = await runFundSwapStep({ ...draft.swap, params }, ctx)
-      push(out, r.attestation)
-      bridged = r.expectedOutput
+    if (swapLeg) {
+      push(out, await runSwapStep({ ...swapLeg, params }, ctx))
+      bridged = swapLeg.outputAmount
     }
     // Cross-chain only: the swapped funds reach the hub route asynchronously (the bridge fill), so wait for them. A
-    // same-chain swap already settled synchronously in runFundSwapStep (its output is on the route), so polling for the
+    // same-chain swap already settled synchronously in runSwapStep (its output is on the route), so polling for the
     // exact expected output would only stall on normal swap slippage — read the actual route balance below instead.
-    if (bridged !== null && bridged > 0n && draft.swap && draft.swap.chainId !== draft.swap.destinationChainId) {
-      await pollDepositRouteBalance(
-        homePublicClient,
-        draft.baseToken,
-        puppet,
-        hubBefore + bridged,
-        BRIDGE_FILL_TIMEOUT_MS
-      )
+    if (bridged !== null && bridged > 0n && swapLeg && swapLeg.chainId !== swapLeg.destinationChainId) {
+      await awaitBridgeFill({
+        client: homePublicClient,
+        token: draft.baseToken,
+        route: predictDepositRoute(puppet),
+        min: hubBefore + bridged,
+        fillDeadline: swapLeg.fillDeadline
+      })
     }
     const masterAmount = await fetchDepositRouteBalance(homePublicClient, draft.baseToken, puppet)
     // Fold the settled-position recognize in front of the allocate (same as the redeem path): a re-allocate to a fund
@@ -853,6 +1208,11 @@ export async function runDraft(draft: IDraft, ctx: ExecContext, recognize = true
   if (draft.kind === 'claim') {
     push(out, record(await runClaimStep(await buildClaimInput(draft, ctx), ctx)))
     return out
+  }
+  if (draft.kind === 'claimRoute') {
+    const fundParams = await resolveFundParams(ctx, draft.account)
+    const claimed = await runFundRecognizeStep(fundParams, draft.chainId, draft.token, draft.amount, ctx)
+    return claimed ? [claimed] : []
   }
   if (draft.kind === 'recognizeFund') {
     const recognized = await recognizeFundSurplus(
@@ -889,36 +1249,63 @@ export async function runDraft(draft: IDraft, ctx: ExecContext, recognize = true
     rebindParams ? { ...input, params: rebindParams } : input
 
   if (draft.kind === 'deposit') {
-    if (draft.wallet) await runDeposit(withParams(draft.wallet), ctx)
-    if (draft.swap) push(out, record(await runSwapHubStep(withParams(draft.swap), ctx)))
-    if (recognize) {
-      const input = withParams(depositRecognizeInput(draft))
-      const puppet = predictPuppetAccount(input.params)
+    let deposit = draft
+    if (
+      deposit.swap !== null &&
+      rebindParams !== undefined &&
+      (!isAddressEqual(getAddress(deposit.swap.params.user), getAddress(rebindParams.user)) ||
+        !isAddressEqual(getAddress(deposit.swap.params.signer), getAddress(rebindParams.signer)))
+    ) {
+      const swap = await rebindSwapLeg(deposit.swap, rebindParams, ctx)
+      deposit = {
+        ...deposit,
+        swap,
+        output: deposit.hubSwap ? deposit.output : { ...deposit.output, amount: swap.outputAmount }
+      }
+    }
+    if (deposit.wallet) await runDeposit(withParams(deposit.wallet), ctx)
+    const crossChain = deposit.swap !== null && deposit.swap.chainId !== deposit.swap.destinationChainId
+    const input = withParams(depositRecognizeInput(deposit))
+    const puppet = predictPuppetAccount(input.params)
+    const hubSwap = deposit.hubSwap ?? null
+    // Composed delivery waits on the BRIDGED token (the input's hub twin), not the base — capture its baseline
+    // BEFORE the bridge dispatches so the fill is measured as a delta.
+    const hubLegToken = hubSwap !== null ? resolveTokenAddress(ctx, HUB_CHAIN_ID, hubSwap.inputToken) : null
+    const hubLegBefore =
+      hubLegToken !== null ? await fetchDepositRouteBalance(homePublicClient, hubLegToken, puppet) : 0n
+    if (deposit.swap) push(out, record(await runSwapStep(withParams(deposit.swap), ctx)))
+    // For a CROSS-CHAIN deposit the swapped funds reach the hub route asynchronously (the bridge fill), so hold here
+    // until they land — whether the recognize runs next or was folded into a following ALLOCATE/MANDATE sweep. The
+    // wait is bounded by the quote's fill deadline; past it the fill cannot happen and the draft fails loudly (funds
+    // resurface as route surplus). A SAME-CHAIN swap is NOT polled: runSwapStep already settled it synchronously
+    // (awaitAccountCall confirmed the output mined onto the route), so polling for the exact expected output would
+    // only stall on normal DEX slippage. A home deposit needs no wait.
+    if (crossChain && deposit.swap) {
+      await awaitBridgeFill({
+        client: publicClientForChain(Number(input.chainId)),
+        token: hubLegToken ?? resolveTokenAddress(ctx, Number(input.chainId), input.token),
+        route: predictDepositRoute(puppet),
+        min: hubLegToken !== null ? hubLegBefore + deposit.swap.outputAmount : deposit.output.amount,
+        fillDeadline: deposit.swap.fillDeadline
+      })
+    }
+    if (hubSwap !== null) {
+      // The local swap credits the SIGNED balance directly, so no recognize follows a composed delivery.
+      push(out, record(await runHubSwapLeg(hubSwap, deposit.output.baseToken, input.params, ctx)))
+    } else if (recognize) {
       push(
         out,
         record(await runRecognizeStep(input, ctx, await getBalance(puppet, Number(input.chainId), input.token)))
-      )
-    } else if (draft.swap && draft.swap.chainId !== draft.swap.destinationChainId) {
-      // Recognize was folded into a following ALLOCATE/MANDATE, which sweeps the deposit route itself. For a CROSS-CHAIN
-      // deposit the swapped funds reach the hub route asynchronously (the bridge fill), so hold here until they land — the
-      // sweeper must not run before the fill. A SAME-CHAIN swap is NOT polled here: runSwapHubStep already settled it
-      // synchronously (awaitAccountCall confirmed the swap tx mined the output onto the route), so polling again for the
-      // exact expected output would only stall on normal LI.FI slippage. A home deposit (no swap) needs no wait either.
-      const input = withParams(depositRecognizeInput(draft))
-      const token = resolveTokenAddress(ctx, Number(input.chainId), input.token)
-      await pollDepositRouteBalance(
-        publicClientForChain(Number(input.chainId)),
-        token,
-        predictPuppetAccount(input.params),
-        draft.output.amount,
-        BRIDGE_FILL_TIMEOUT_MS
       )
     }
     return out
   }
 
-  const puppet = predictPuppetAccount(draft.input.params)
-  push(out, record(await runWithdrawStep(draft.input, ctx, await getBalance(puppet, HUB_CHAIN_ID, draft.input.inputToken))))
+  // Rebind the signing identity to the live session (a pre-session draft bakes the placeholder signer). The
+  // withdraw's delivery needs no re-quote: its receiver is the user's WALLET, identity-independent by construction.
+  const input = { ...draft.input, params: { user: draft.input.params.user, signer: ctx.session.signer } }
+  const puppet = predictPuppetAccount(input.params)
+  push(out, record(await runWithdrawStep(input, ctx, await getBalance(puppet, HUB_CHAIN_ID, input.inputToken))))
   return out
 }
 

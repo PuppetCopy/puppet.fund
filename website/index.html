@@ -36,6 +36,14 @@
             scrollbar-gutter: stable;
         }
 
+        /* Every popover surface (aelea $Popover content rides the native popover attribute) scrolls with the same
+           subtle scrollbar the dropdowns use: thin, dimmed thumb, transparent track. Wheel smoothing comes from the
+           app's smooth-scroll layer; this covers the visual half. */
+        [popover] {
+            scrollbar-width: thin;
+            scrollbar-color: color-mix(in srgb, var(--foreground) 50%, transparent) transparent;
+        }
+
         input[type=number]::-webkit-inner-spin-button,
         input[type=number]::-webkit-outer-spin-button {
             appearance: none;
@@ -126,15 +134,15 @@
     <style id="aelea-theme-config">
         body.light {
             --name: 'light';
-            --primary: #b02a42;
+            --primary: #870B38;
             --message: #171B1F;
-            --background: #f7faff;
-            --horizon: #ebf1f8;
+            --background: #edf1f7;
+            --horizon: #dfe6f0;
             --middleground: #ffffff;
-            --foreground: #51585f;
-            --positive: #0cab00;
-            --negative: #ea004c;
-            --indeterminate: #F6964C;
+            --foreground: #5c6b85;
+            --positive: #0c8f4c;
+            --negative: #d92d20;
+            --indeterminate: #b45309;
             --shade-pole: var(--background);
             --card-shadow: rgb(0 0 0 / 25%) 0px 0px 1px, rgb(59 60 74 / 15%) 0px 15px 20px, rgb(0 0 0 / 8%) 0px 1px 12px;
         }
@@ -163,11 +171,11 @@
     <meta property="og:image" content="__OG_IMAGE__">
     <meta property="og:image:type" content="image/png">
     <meta property="og:image:width" content="1200">
-    <meta property="og:image:height" content="1200">
+    <meta property="og:image:height" content="630">
 
     <meta name="twitter:image:src" content="__OG_IMAGE__">
     <meta name="twitter:site" content="__TWITTER_ID__" />
-    <meta name="twitter:card" content="summary">
+    <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="__APP_DESC_SHORT__">
     <meta name="twitter:description" content="__APP_DESC_LONG__">
 

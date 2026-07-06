@@ -30,7 +30,7 @@ import {
   take
 } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
-import { $node, $text, component, type INode, nodeEvent, style, stylePseudo } from 'aelea/ui'
+import { $node, $text, component, type I$Node, type INode, nodeEvent, style, stylePseudo } from 'aelea/ui'
 import { $column, $Popover, $row, $Tooltip, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { type BaselineData, LineType } from 'lightweight-charts'
@@ -43,12 +43,13 @@ import {
   $ButtonToggle,
   $caretDown,
   $DropSelect,
-  $defaultDropSelectContainer,
+  $defaultDropSelectAnchor,
   $defaultMiniButtonSecondary,
   $defaultTableCell,
   $defaultTableContainer,
   $defaultTableRowContainer,
   $defaultTextFieldContainer,
+  $errorCard,
   $FieldLabeled,
   $fundCompositionGauge,
   $icon,
@@ -66,7 +67,6 @@ import {
 import { uiStorage } from '@/ui-storage'
 import { localStoreSchema } from '../app/localStoreSchema.js'
 import {
-  $errorWithRetry,
   $leverage,
   $MasterDisplay,
   $pnlDisplay,
@@ -86,8 +86,6 @@ import {
 import type { ISubscribeRule } from '../components/portfolio/$MatchingRuleEditor.js'
 import { $SubscribeEditor } from '../components/portfolio/$SubscribeEditor.js'
 import context from '../io/context.js'
-import { livePlatformScale } from '../io/live.js'
-import { fundRank } from '../io/matchmaker/reads.js'
 import {
   fetchGmxTraderLeaderboardPage,
   fetchLeaderboardPage,
@@ -96,8 +94,78 @@ import {
   type ILeaderboardView,
   type IPerformanceMetric
 } from '../io/datastore/query.js'
+import { fundRank } from '../io/datastore/reads.js'
+import { livePlatformScale } from '../io/live.js'
 import { $separator2 } from './common.js'
 import type { IPageFilterParams } from './types.js'
+
+const $leaderboardTableContainer = $defaultTableContainer(
+  style({
+    backgroundColor: palette.background,
+    borderTop: `1px solid ${colorShade(palette.foreground, 40)}`,
+    padding: isDesktopScreen ? '24px 36px 36px' : '12px'
+  })
+)
+
+const $leaderboardCell = $defaultTableCell(style({ padding: '0', height: '60px' }))
+
+const $leaderboardLoader = style({
+  placeContent: 'center',
+  margin: '0 1px',
+  background: palette.background,
+  flexDirection: 'row-reverse',
+  padding: '16px 0'
+})($spinner)
+
+const $activityHead = (metricLabel: string, timeframe: IntervalTime): I$Node =>
+  $row(spacing.small, style({ flex: 1, placeContent: 'space-between', alignItems: 'center' }))(
+    $text(metricLabel),
+    $node(style({ textAlign: 'right', alignSelf: 'center', color: palette.foreground }))(
+      $text(`${getMappedValue(activityOptionShortLabelMap, timeframe)} activity`)
+    )
+  )
+
+const $timelineCell = ($value: I$Node, timeline: readonly unknown[], autoscaleFloor: number): I$Node => {
+  if (timeline.length === 0) {
+    return $row(style({ alignItems: 'center', placeContent: 'flex-start', flex: 1 }))($value)
+  }
+  return $row(style({ position: 'relative', height: '100%', flex: 1, overflow: 'hidden' }))(
+    style({
+      flex: 1,
+      inset: '0px 0px 0px 0px',
+      position: 'absolute',
+      pointerEvents: 'none',
+      width: '100%'
+    })(
+      $Baseline({
+        markers: just([] as IMarker[]),
+        chartConfig: {
+          leftPriceScale: { visible: false, scaleMargins: { top: 0.1, bottom: 0.1 } },
+          crosshair: { horzLine: { visible: false }, vertLine: { visible: false } },
+          timeScale: { visible: false }
+        },
+        data: timeline as any as BaselineData<ISeriesTime>[],
+        baselineOptions: {
+          baseValue: { price: 0, type: 'price' },
+          lineWidth: 1,
+          lineType: LineType.Curved,
+          autoscaleInfoProvider: floorAutoscaleByAum(autoscaleFloor)
+        }
+      })({})
+    ),
+    $row(
+      style({
+        position: 'absolute',
+        background: `linear-gradient(to right, ${palette.background} 0%, ${palette.background} 32%, transparent 100%)`,
+        inset: 0,
+        zIndex: 1,
+        alignItems: 'center',
+        paddingLeft: '4px',
+        pointerEvents: 'none'
+      })
+    )($value)
+  )
+}
 
 interface I$Leaderboard extends IPageFilterParams {
   userMatchingRuleQuery: IStream<Promise<ISubscribeRule[]>>
@@ -123,16 +191,8 @@ export const $Leaderboard = (config: I$Leaderboard) =>
         IMastersSort
       >,
       [toggleCollateral, toggleCollateralTether]: IBehavior<INode, Address[]>,
-      // Recovery actions surfaced inside the table empty/error states. Each is a PointerEvent
-      // behavior (so a $Button `click` output can tether into it directly) that is mapped to the
-      // relevant value and merged into the page request / filter outputs below.
-      [retryFetch, retryFetchTether]: IBehavior<PointerEvent>,
       [clearCollateralFilter, clearCollateralFilterTether]: IBehavior<PointerEvent>,
-      // Clears every active filter at once, driven by the (x) on the Filters anchor; fans out to the
-      // account and collateral sources below.
       [clearAllFilters, clearAllFiltersTether]: IBehavior<PointerEvent>,
-      // Opens the advanced-filters popover (collateral + address search live there, keeping the top
-      // bar to the two core filters: Performance/PnL + activity timeframe).
       [clickFilters, clickFiltersTether]: IBehavior<PointerEvent>,
       [selectLeaderboardView, selectLeaderboardViewTether]: IBehavior<ILeaderboardView>,
       [changeSort, changeSortTether]: IBehavior<{ direction: 'asc' | 'desc'; selector: string }, IShadowSort>
@@ -143,16 +203,6 @@ export const $Leaderboard = (config: I$Leaderboard) =>
         uiStorage.replayWrite(localStoreSchema.leaderboard.performanceMetric, changePerformanceMetric),
         state()
       )
-      // `replayWrite` is a cold stream (each subscriber re-runs its own IndexedDB read + write
-      // pipeline), so different consumers (hasFilter gate, trigger chip, tables, active-filters row)
-      // could observe divergent values and a clear could appear to "not work". `state()` collapses it
-      // to a single authoritative multicast value that replays the latest to every subscriber, so a
-      // cleared `undefined` propagates everywhere at once.
-      //
-      // The stored value is fed by the debounced search field (`filterAccount`, also driven by the
-      // field's own clear x) and "Clear all" (`clearAllFilters`). The cleared `undefined` is what empties
-      // the search field (its value stream reacts to `account` going falsy), so clearing never depends on
-      // where the x was clicked.
       const account = op(
         uiStorage.replayWrite(
           localStoreSchema.leaderboard.account,
@@ -160,14 +210,10 @@ export const $Leaderboard = (config: I$Leaderboard) =>
         ),
         state()
       )
-      // Masters-view sort. There is no dedicated localStoreSchema key for this, so it is kept as in-memory
-      // reactive state seeded to sort by the active performance metric.
       const mastersSort = op(
         start({ direction: 'desc', selector: 'realisedPnl' } as IMastersSort, changeMastersSort),
         state()
       )
-      // Persisted masters|shadow view toggle; clearing all filters returns to masters. state() collapses the cold
-      // replayWrite to one authoritative value (same treatment as account/performanceMetric).
       const leaderboardView = op(
         uiStorage.replayWrite(
           localStoreSchema.leaderboard.view,
@@ -175,23 +221,10 @@ export const $Leaderboard = (config: I$Leaderboard) =>
         ),
         state()
       )
-      // Shadow-view sort, in-memory and state()-wrapped (breaks the changeSort<->shadowSort sampleMap cycle that
-      // otherwise stalls the table), seeded to sort by size.
       const shadowSort = op(start({ direction: 'desc', selector: 'size' } as IShadowSort, changeSort), state())
-      // Retrying re-emits the first page request, which re-runs the page fetcher (combine has no
-      // skipRepeats, so re-pushing an identical request still re-triggers the async fetch).
-      const paging = start(
-        { offset: 0, pageSize: 20 },
-        merge(scrollRequest, constant({ offset: 0, pageSize: 20 } as IPageRequest, retryFetch))
-      )
+      const paging = start({ offset: 0, pageSize: 20 } as IPageRequest, scrollRequest)
       const registry = fromPromise(context.getTokenRegistry())
-      const platformScale = livePlatformScale
 
-      // Filter-aware empty state + recoverable error state for the leaderboard tables.
-      // An empty result under an active collateral filter / short timeframe reads as
-      // "no traders match these filters" with one-tap recovery actions instead of the generic
-      // "No items to display"; a failed fetch renders the shared $errorCard with a Retry button
-      // that re-runs the fetcher, instead of the default tiny inline alert pill.
       const $tableScrollStates = (filterParams: {
         collateralTokenList: Address[]
         activityTimeframe: IntervalTime
@@ -222,14 +255,13 @@ export const $Leaderboard = (config: I$Leaderboard) =>
               )($node(style({ color: palette.foreground }))($text('No traders yet')))
 
         const $$fail = (error: unknown) =>
-          $errorWithRetry(error, $ButtonSecondary({ $content: $text('Retry') })({ click: retryFetchTether() }))
+          $column(style({ placeSelf: 'center', margin: 'auto', alignItems: 'center', padding: '24px 0', width: '100%' }))(
+            $errorCard(error)
+          )
 
         return { $emptyMessage, $$fail }
       }
 
-      // Trader address search. Emits a checksummed address when the (debounced) input is a plausible 0x address,
-      // and `undefined` to clear the filter (empty/invalid input, or the clear affordance). The single `change`
-      // output is fed into the existing `filterAccount` behavior, whose value already flows into both fetchers.
       const $traderSearch = component(
         (
           [searchInput, searchInputTether]: IBehavior<string>,
@@ -245,7 +277,6 @@ export const $Leaderboard = (config: I$Leaderboard) =>
             skipRepeats
           )
 
-          // Drives the clear (x) affordance: shown only while a filter is active.
           const hasFilter = op(
             account,
             map(a => Boolean(a)),
@@ -256,11 +287,6 @@ export const $Leaderboard = (config: I$Leaderboard) =>
             $row(spacing.small, style({ alignItems: 'center' }))(
               $FieldLabeled({
                 label: null,
-                // Seed once from the restored filter, and empty the field whenever the address filter is
-                // cleared — either via the in-field (x) (`clearSearch`) or via any external clear (the
-                // popover "Active filters" trader chip / "Clear all"), which all drive `account` to a
-                // falsy value. We only react to `account` becoming falsy (never re-push the address back),
-                // so the field is not overwritten mid-type while the user is entering an address.
                 value: merge(
                   take(
                     1,
@@ -300,7 +326,6 @@ export const $Leaderboard = (config: I$Leaderboard) =>
         }
       )
 
-      // Small summary chip rendered on the Filters trigger so active filters are legible collapsed.
       const $filterChip = (label: string) =>
         $node(
           style({
@@ -313,9 +338,6 @@ export const $Leaderboard = (config: I$Leaderboard) =>
           })
         )($text(label))
 
-      // Advanced-filters popover. The top bar shows only this Filters trigger (left) and the activity
-      // timeframe (pinned right). Metric (Performance/PnL), collateral and the address search all live
-      // in the popover; the trigger anchor summarizes what's active.
       const $advancedFilters = $Popover({
         $open: constant(
           $column(spacing.default, style({ minWidth: '280px' }))(
@@ -456,8 +478,6 @@ export const $Leaderboard = (config: I$Leaderboard) =>
         )
       })({})
 
-      // Shadow (GMX-trader) view: ranks GMX traders from the gmxTraderMetric fold. fetchSort maps the combined
-      // pnl/roi sort column to the metric the Performance/PnL toggle selects.
       const $shadowTable = switchMap(
         params => {
           const fetchSort = {
@@ -495,22 +515,10 @@ export const $Leaderboard = (config: I$Leaderboard) =>
 
           return $Table({
             $headerRowContainer: $defaultTableRowContainer,
-            $container: $defaultTableContainer(
-              style({
-                backgroundColor: palette.background,
-                borderTop: `1px solid ${colorShade(palette.foreground, 40)}`,
-                padding: isDesktopScreen ? '24px 36px 36px' : '12px'
-              })
-            ),
-            $cell: $defaultTableCell(style({ padding: '0', height: '60px' })),
+            $container: $leaderboardTableContainer,
+            $cell: $leaderboardCell,
             scrollConfig: {
-              $loader: style({
-                placeContent: 'center',
-                margin: '0 1px',
-                background: palette.background,
-                flexDirection: 'row-reverse',
-                padding: '16px 0'
-              })($spinner),
+              $loader: $leaderboardLoader,
               $emptyMessage,
               $$fail
             },
@@ -575,11 +583,9 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                 )
               },
               {
-                $head: $row(spacing.small, style({ flex: 1, placeContent: 'space-between', alignItems: 'center' }))(
-                  $text(params.metric === 'navPerShare' ? 'ROI % / PnL $' : 'PnL $ / ROI %'),
-                  $node(style({ textAlign: 'right', alignSelf: 'center', color: palette.foreground }))(
-                    $text(`${getMappedValue(activityOptionShortLabelMap, params.activityTimeframe)} activity`)
-                  )
+                $head: $activityHead(
+                  params.metric === 'navPerShare' ? 'ROI % / PnL $' : 'PnL $ / ROI %',
+                  params.activityTimeframe
                 ),
                 sortBy: 'pnlroi',
                 gridTemplate: isDesktopScreen ? 'minmax(0, 1fr)' : '220px',
@@ -611,45 +617,10 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                     showRoiPrimary ? $secondaryPnl : $secondaryRoi
                   )
 
-                  if (row.pnlTimeline.length === 0) {
-                    return $row(style({ alignItems: 'center', placeContent: 'flex-start', flex: 1 }))($value)
-                  }
-
-                  return $row(style({ position: 'relative', height: '100%', flex: 1, overflow: 'hidden' }))(
-                    style({
-                      flex: 1,
-                      inset: '0px 0px 0px 0px',
-                      position: 'absolute',
-                      pointerEvents: 'none',
-                      width: '100%'
-                    })(
-                      $Baseline({
-                        markers: just([] as IMarker[]),
-                        chartConfig: {
-                          leftPriceScale: { visible: false, scaleMargins: { top: 0.1, bottom: 0.1 } },
-                          crosshair: { horzLine: { visible: false }, vertLine: { visible: false } },
-                          timeScale: { visible: false }
-                        },
-                        data: row.pnlTimeline as any as BaselineData<ISeriesTime>[],
-                        baselineOptions: {
-                          baseValue: { price: 0, type: 'price' },
-                          lineWidth: 1,
-                          lineType: LineType.Curved,
-                          autoscaleInfoProvider: floorAutoscaleByAum(Number(row.collateralUsd) / Number(PRECISION.floatPrecisionExp))
-                        }
-                      })({})
-                    ),
-                    $row(
-                      style({
-                        position: 'absolute',
-                        background: `linear-gradient(to right, ${palette.background} 0%, ${palette.background} 32%, transparent 100%)`,
-                        inset: 0,
-                        zIndex: 1,
-                        alignItems: 'center',
-                        paddingLeft: '4px',
-                        pointerEvents: 'none'
-                      })
-                    )($value)
+                  return $timelineCell(
+                    $value,
+                    row.pnlTimeline,
+                    Number(row.collateralUsd) / Number(PRECISION.floatPrecisionExp)
                   )
                 })
               }
@@ -681,13 +652,12 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                   spacing.default,
                   style({ padding: '12px', placeContent: 'center', flexWrap: 'wrap', alignItems: 'flex-start' })
                 ))(
-              // Filters trigger on the left; activity timeframe pinned to the extreme right.
               $advancedFilters,
 
               $DropSelect({
                 value: activityTimeframe,
                 optionList: [...PLATFORM_STAT_INTERVAL],
-                $anchor: $defaultDropSelectContainer(style({ borderRadius: '100px' })),
+                $anchor: $defaultDropSelectAnchor(style({ borderRadius: '100px' })),
                 closeOnSelect: true,
                 $valueLabel: map(tf =>
                   $node(style({ whiteSpace: 'nowrap' }))($text(getMappedValue(activityOptionPeriodLabelMap, tf)))
@@ -708,8 +678,6 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                     ? $shadowTable
                     : switchMap(
                         params => {
-                          // When sorting on the performance column, follow the live Performance/PnL toggle. AUM ('allocated')
-                          // is independent of the toggle.
                           const sortSelector: keyof ILeaderboardRow =
                             params.sort.selector === 'allocated' ? 'allocated' : params.performanceMetric
                           const mastersSortBy = { direction: params.sort.direction, selector: sortSelector }
@@ -734,22 +702,10 @@ export const $Leaderboard = (config: I$Leaderboard) =>
 
                           return $Table({
                             $headerRowContainer: $defaultTableRowContainer,
-                            $container: $defaultTableContainer(
-                              style({
-                                backgroundColor: palette.background,
-                                borderTop: `1px solid ${colorShade(palette.foreground, 40)}`,
-                                padding: isDesktopScreen ? '24px 36px 36px' : '12px'
-                              })
-                            ),
-                            $cell: $defaultTableCell(style({ padding: '0', height: '60px' })),
+                            $container: $leaderboardTableContainer,
+                            $cell: $leaderboardCell,
                             scrollConfig: {
-                              $loader: style({
-                                placeContent: 'center',
-                                margin: '0 1px',
-                                background: palette.background,
-                                flexDirection: 'row-reverse',
-                                padding: '16px 0'
-                              })($spinner),
+                              $loader: $leaderboardLoader,
                               $emptyMessage,
                               $$fail
                             },
@@ -769,23 +725,16 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                                     puppetList: pos.puppetList,
                                     profileSize: isDesktopScreen ? 50 : 32
                                   })({})
-                                  const token = tokenInfoFor(params.registry, HUB_CHAIN_ID, pos.baseToken).token
-                                  const $fund = $SubscribeEditor({
+                                  // The profile rides INSIDE the editor's popover anchor ($lead): the open backdrop
+                                  // highlights trader + button together, while only the Follow button triggers.
+                                  return $SubscribeEditor({
                                     master: pos.master,
                                     name: pos.name ?? BYTES32_ZERO,
-                                    collateralToken: token,
                                     baseToken: pos.baseToken,
                                     userMatchingRuleQuery,
-                                    draftMatchingRuleList
+                                    draftMatchingRuleList,
+                                    $lead: style({ display: 'flex', flex: 1, minWidth: '0', overflow: 'hidden' })($master)
                                   })({ changeMatchRuleList: changeMatchRuleListTether() })
-                                  
-                                  return $row(
-                                    spacing.default,
-                                    style({ alignItems: 'center', minWidth: '0', flex: 1 })
-                                  )(
-                                    style({ display: 'flex', flex: 1, minWidth: '0', overflow: 'hidden' })($master),
-                                    $fund
-                                  )
                                 })
                               },
                               {
@@ -797,19 +746,9 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                                 })
                               },
                               {
-                                // AUM + the active metric overlaid on the activity chart in one column: numbers are
-                                // left-aligned (the chart reads left→right, so the latest values on the right stay
-                                // unobscured) over a palette.background→transparent gradient. Mirrors the shadow view.
-                                $head: $row(
-                                  spacing.small,
-                                  style({ flex: 1, placeContent: 'space-between', alignItems: 'center' })
-                                )(
-                                  $text(params.performanceMetric === 'navPerShare' ? 'ROI % / AUM' : 'PnL $ / AUM'),
-                                  $node(style({ textAlign: 'right', alignSelf: 'center', color: palette.foreground }))(
-                                    $text(
-                                      `${getMappedValue(activityOptionShortLabelMap, params.activityTimeframe)} activity`
-                                    )
-                                  )
+                                $head: $activityHead(
+                                  params.performanceMetric === 'navPerShare' ? 'ROI % / AUM' : 'PnL $ / AUM',
+                                  params.activityTimeframe
                                 ),
                                 sortBy: params.performanceMetric,
                                 gridTemplate: isDesktopScreen ? 'minmax(0, 1fr)' : '220px',
@@ -844,57 +783,10 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                                     )
                                   )
 
-                                  if (pos.pnlTimeline.length === 0) {
-                                    return $row(style({ alignItems: 'center', placeContent: 'flex-start', flex: 1 }))(
-                                      $value
-                                    )
-                                  }
-
-                                  return $row(
-                                    style({ position: 'relative', height: '100%', flex: 1, overflow: 'hidden' })
-                                  )(
-                                    style({
-                                      flex: 1,
-                                      inset: '0px 0px 0px 0px',
-                                      position: 'absolute',
-                                      pointerEvents: 'none',
-                                      width: '100%'
-                                    })(
-                                      $Baseline({
-                                        markers: just([] as IMarker[]),
-                                        chartConfig: {
-                                          leftPriceScale: {
-                                            visible: false,
-                                            scaleMargins: { top: 0.1, bottom: 0.1 }
-                                          },
-                                          crosshair: {
-                                            horzLine: { visible: false },
-                                            vertLine: { visible: false }
-                                          },
-                                          timeScale: { visible: false }
-                                        },
-                                        data: pos.pnlTimeline as any as BaselineData<ISeriesTime>[],
-                                        baselineOptions: {
-                                          baseValue: { price: 0, type: 'price' },
-                                          lineWidth: 1,
-                                          lineType: LineType.Curved,
-                                          autoscaleInfoProvider: floorAutoscaleByAum(
-                                            Number(pos.allocated) / 10 ** desc.decimals
-                                          )
-                                        }
-                                      })({})
-                                    ),
-                                    $row(
-                                      style({
-                                        position: 'absolute',
-                                        background: `linear-gradient(to right, ${palette.background} 0%, ${palette.background} 32%, transparent 100%)`,
-                                        inset: 0,
-                                        zIndex: 1,
-                                        alignItems: 'center',
-                                        paddingLeft: '4px',
-                                        pointerEvents: 'none'
-                                      })
-                                    )($value)
+                                  return $timelineCell(
+                                    $value,
+                                    pos.pnlTimeline,
+                                    Number(pos.allocated) / 10 ** desc.decimals
                                   )
                                 })
                               }
@@ -920,7 +812,7 @@ export const $Leaderboard = (config: I$Leaderboard) =>
                           account,
                           collateralTokenList,
                           registry,
-                          platformScale,
+                          platformScale: livePlatformScale,
                           sort: mastersSort
                         })
                       ),

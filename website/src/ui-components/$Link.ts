@@ -40,9 +40,6 @@ export const $Link = ({ disabled = empty, $content, $anchor = $defaultLinkAnchor
 export interface I$NavLink<T extends RouteSpec> {
   route: RouteNode<T>
   params?: ParamsOf<T>
-  // Optional query string appended to the resolved path (e.g. { action: 'deposit-USDC' } -> ?action=deposit-USDC), for
-  // deep links that carry an intent the target page reads on arrival.
-  query?: Record<string, string>
   $content: I$Slottable
   $anchor?: INodeCompose<HTMLAnchorElement>
 }
@@ -63,10 +60,9 @@ export const softNavClick = (url: string, after?: () => void) =>
 export const $navLink = <T extends RouteSpec>({
   route,
   params,
-  query,
   $content,
   $anchor = $plainAnchor
 }: I$NavLink<T>): I$Slottable => {
-  const url = href(route, params) + (query ? `?${new URLSearchParams(query)}` : '')
+  const url = href(route, params)
   return $anchor(attr({ href: url }), softNavClick(url))($content)
 }

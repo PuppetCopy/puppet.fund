@@ -1,23 +1,24 @@
+import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 
 import type { IAccountLib__AccountInitParams, IFundAccountLib__FundAccountInitParams } from '@puppet/contracts/types'
 import { resolveDispatchChainId } from '@puppet/sdk/attestation'
 import { awaitWhile } from '@puppet/sdk/core'
-import {
+import { 
   chainHeadBlock,
   getAcceptableRelayFee,
   type IChainLiveness,
   type ISubaccountState,
-  type ITokenRegistryMap,
+  type ITokenRegistryMap,MIN_TTL_MS,
   randomNonce
 } from '@puppet/sdk/state'
-import { getWalletClient } from '@wagmi/core'
-import { getAddress, type Hex } from 'viem'
+import { getPublicClient, getWalletClient } from '@wagmi/core'
+import { getAddress, type Hex, type PublicClient } from 'viem'
 import type { Address } from 'viem/accounts'
-import { getCallsStatus, getCapabilities } from 'viem/actions'
+import { getCallsStatus, getCapabilities, getGasPrice } from 'viem/actions'
 import context from '../../../io/context.js'
 import { fetchMasterPoolState } from '../../../io/datastore/query.js'
-import { readSubaccountState } from '../../../io/matchmaker/walletState.js'
-import { type IConnectedWallet, type ISessionKey, wagmi } from '../../../wallet/index.js'
+import { readSubaccountState } from '../../../io/datastore/walletState.js'
+import { homePublicClient, type IConnectedWallet, type ISessionKey, wagmi } from '../../../wallet/index.js'
 
 export const DEFAULT_DEADLINE_SEC = 5 * 60
 export const SESSION_BIND_KEY = 'session-bind'
@@ -44,15 +45,27 @@ export function stepMetadata(
   }
 }
 
+// chainId is REQUIRED and the gas price is fetched HERE, paired to it — a separate gasPrice param let a caller mix a
+// dest chain with the hub's gas (the misdenomination pitfall). MIN_TTL_MS: step-run fee legs price against a fresh
+// gas/rate basis, never the 5-minute display cache.
+export function publicClientForChain(chainIdNum: number): PublicClient {
+  const client = chainIdNum === HUB_CHAIN_ID ? homePublicClient : getPublicClient(wagmi, { chainId: chainIdNum })
+  if (!client) throw new Error(`no public client for chain ${chainIdNum}`)
+  return client as PublicClient
+}
+
 export async function resolveRelayFee(
   ctx: ExecContext,
+  chainId: number,
   router: IRelayRouter,
   method: IRelayMethod,
   token: Address,
-  unitCount?: bigint,
-  gasPrice: bigint = ctx.gasPrice
+  unitCount?: bigint
 ): Promise<bigint> {
-  const tokenPerNativeToken = await context.getTokenPerNativeToken(token)
+  const [gasPrice, tokenPerNativeToken] = await Promise.all([
+    chainId === HUB_CHAIN_ID ? ctx.gasPrice : getGasPrice(publicClientForChain(chainId)),
+    context.getTokenPerNativeToken(chainId, token, MIN_TTL_MS)
+  ])
   return getAcceptableRelayFee(gasPrice, router, method, tokenPerNativeToken, unitCount)
 }
 
@@ -72,7 +85,7 @@ export async function buildFundIntentEnvelope(
   const [fund, pool, acceptableRelayFee] = await Promise.all([
     readSubaccountState(ctx.tokenRegistry, getAddress(opts.masterAccount)),
     fetchMasterPoolState(opts.masterAccount),
-    resolveRelayFee(ctx, 'HubGate', opts.method, opts.baseToken, opts.unitCount)
+    resolveRelayFee(ctx, HUB_CHAIN_ID, 'HubGate', opts.method, opts.baseToken, opts.unitCount)
   ])
   if (!fund) throw new Error(`fund ${opts.masterAccount} not in datastore`)
   if (!pool) throw new Error(`fund ${opts.masterAccount} pool state not in datastore`)

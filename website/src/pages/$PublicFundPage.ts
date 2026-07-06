@@ -1,14 +1,15 @@
-import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
-import { symbolForBaseTokenId } from '@puppet/sdk/account'
+import { HUB_CHAIN_ID, PRECISION, PROTOCOL, SWAP_PROVIDER } from '@puppet/contracts/const'
 import { ACROSS_PERIPHERY } from '@puppet/sdk/attestation'
-import { type IntervalTime, USD_DECIMALS } from '@puppet/sdk/const'
+import { type ChainId, type IntervalTime, USD_DECIMALS } from '@puppet/sdk/const'
 import {
   dustToZeroUsd,
   formatFixed,
   getAccountExplorerUrl,
+  getChainTokenDescription,
   getDuration,
-  getRegisteredTokenDescription,
   getUnixTimestamp,
+  isNativeToken,
+  periodicRun,
   readableAddress,
   readablePercentage,
   readableTokenAmountLabel,
@@ -16,17 +17,20 @@ import {
   readableUsd,
   toBasisPoints
 } from '@puppet/sdk/core'
-import { composeCashLeg, evaluateAccountNav } from '@puppet/sdk/evaluate'
+import { composeCashLeg, composeHoldings, evaluateAccountNav, USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
 import { getMarketDescription, getPositionPnlUsd, getTokenDescription } from '@puppet/sdk/gmx'
+import { tokenInfoFor, wrappedNativeAddressOf } from '@puppet/sdk/state'
 import { GMX_ROUTER, GMX_TOKEN_SPENDER, type IAccountPosition, LIFI_DIAMOND } from '@puppet/sdk/venue'
 import {
   combine,
   combineMap,
+  delay,
   empty,
   fromPromise,
   type IStream,
   just,
   map,
+  merge,
   nowWith,
   op,
   start,
@@ -34,17 +38,30 @@ import {
   switchPromises
 } from 'aelea/stream'
 import { type IBehavior, multicast, state } from 'aelea/stream-extended'
-import { $element, $node, $text, attr, component, effectProp, type I$Node, style, stylePseudo } from 'aelea/ui'
+import {
+  $element,
+  $node,
+  $text,
+  attr,
+  component,
+  effectProp,
+  type I$Node,
+  type INode,
+  type IStyleCSS,
+  nodeEvent,
+  style,
+  stylePseudo
+} from 'aelea/ui'
 
 import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { pushUrl } from 'aelea/ui-router'
-import { getAddress } from 'viem'
+import { formatUnits, getAddress, type Hex } from 'viem'
 import type { Address } from 'viem/accounts'
 import {
-  $amountDisplay,
   $anchor,
   $arrowRight,
+  $copy,
   $external,
   $gmx,
   $icon,
@@ -52,9 +69,10 @@ import {
   $infoTooltip,
   $intermediatePromise,
   $unknown,
+  $wallet,
   text
 } from '@/ui-components'
-import { $tokenWithChainBadge, chainExplorerAddressUrl } from '../common/$chain.js'
+import { chainExplorerAddressUrl, chainExplorerTxUrl, chainName } from '../common/$chain.js'
 import { $drawdownDisplay, $pnlDisplay, $size } from '../common/$common.js'
 import { $roboAvatar } from '../common/$roboAvatar.js'
 import { $heading3 } from '../common/$text.js'
@@ -63,21 +81,21 @@ import { $accountLabel, $fundProfile, readableAccountName } from '../components/
 import { $FundAccountTimeline } from '../components/participant/$ProfilePeformanceTimeline.js'
 import { $allocationDistribution } from '../components/portfolio/$fundHoldings.js'
 import type { ISubscribeRule } from '../components/portfolio/$MatchingRuleEditor.js'
-import { $defaultSubscribeEditorContainer, $SubscribeEditor } from '../components/portfolio/$SubscribeEditor.js'
-import { $tokenIconBySymbol } from '../components/portfolio/$tokenOption.js'
+import { $SubscribeEditor } from '../components/portfolio/$SubscribeEditor.js'
+import { $tokenBalanceRow, $tokenIconBySymbol } from '../components/portfolio/$tokenOption.js'
 import context, { getRate } from '../io/context.js'
 import {
+  fetchFundAccountMetricList,
   fetchFundActivity,
   fetchFundAllocationDistribution,
   fetchMasterPoolState,
-  fetchFundAccountMetricList,
   fetchMasterSubscribers,
   type IFundAction
 } from '../io/datastore/query.js'
+import { fetchOpenPositions } from '../io/datastore/reads.js'
+import { readSubaccountState } from '../io/datastore/walletState.js'
 import { gmxPositionProvider } from '../io/gmx/navProviders.js'
-import { formatUsd, priceFor } from '../io/gmx/priceFeed.js'
-import { fetchOpenPositions } from '../io/matchmaker/reads.js'
-import { readSubaccountState } from '../io/matchmaker/walletState.js'
+import { formatUsd, priceFor } from '../io/price.js'
 import { $separator2, accountSettledPositionListSummary } from './common'
 import type { IPageFilterParams } from './types.js'
 
@@ -99,7 +117,13 @@ const TARGET_VENUE_BY_ADDRESS: Record<string, string> = {
   [GMX_ROUTER.toLowerCase()]: 'gmx',
   [GMX_TOKEN_SPENDER.toLowerCase()]: 'gmx',
   [LIFI_DIAMOND.toLowerCase()]: 'swap',
-  [ACROSS_PERIPHERY.toLowerCase()]: 'bridge'
+  [ACROSS_PERIPHERY.toLowerCase()]: 'bridge',
+  // Same-asset bridges deposit to the per-chain Across SpokePool (not the periphery), so label those too.
+  ...Object.fromEntries(
+    Object.values(SWAP_PROVIDER).flatMap(p =>
+      'acrossSpokePool' in p && p.acrossSpokePool ? [[p.acrossSpokePool.toLowerCase(), 'bridge']] : []
+    )
+  )
 }
 const ERC20_APPROVE_SELECTOR = '0x095ea7b3'
 const venueForAddress = (addr: Address | undefined): string | undefined =>
@@ -137,7 +161,8 @@ export const $PublicFundPage = ({
     (
       [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<any, IntervalTime>,
       [selectCollateralTokenList, selectCollateralTokenListTether]: IBehavior<Address[]>,
-      [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>
+      [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>,
+      [copyShareLink, copyShareLinkTether]: IBehavior<INode, string>
     ) => {
       const urlFragments = document.location.pathname.split('/')
       const fund = urlFragments[urlFragments.length - 1].toLowerCase() as Address
@@ -165,18 +190,21 @@ export const $PublicFundPage = ({
       const openPositionsQuery = just(fetchOpenPositions(getAddress(fund)).catch(() => []))
       const subscribersQuery = just(
         poolStatePromise
-          .then(async f => (f ? fetchMasterSubscribers(await context.getTokenRegistry(), fund, f.baseToken) : []))
+          .then(f => (f ? fetchMasterSubscribers(fund, f.baseToken) : []))
           .catch(() => [])
       )
       const distributionQuery = just(
         poolStatePromise.then(f => (f ? fetchFundAllocationDistribution(fund, f.master) : []))
       )
-      const activityQuery = just(fetchFundActivity(fund))
+      // Read from the indexer's raw event log (server-filtered by fund). The relay is fire-and-ACK with no request feed,
+      // so a request surfaces here once it settles and the indexer folds it; re-poll so it appears without a reload.
+      const activityQuery = op(
+        periodicRun({ startImmediate: true, interval: 15_000, actionOp: map(() => fetchFundActivity(fund)) }),
+        multicast
+      )
 
       const tokenRegistryValue = fromPromise(context.getTokenRegistry())
 
-      // Capital trusted by puppets (cumulative, time-decayed): the "Allocated" figure, the ROI/drawdown denominator,
-      // and the timeline autoscale floor. NOT current AUM — see navUsdQuery.
       const aumUsdQuery = op(
         combine({ metrics: fundAccountMetricQuery, registry: tokenRegistryValue }),
         map(async p => {
@@ -191,8 +219,6 @@ export const $PublicFundPage = ({
           if (legs.length === 0) return just(0)
           return combineMap(
             (...prices: (bigint | null)[]) => {
-              // Any unresolved/unpriceable leg makes the total indeterminate: emit null (shown as '-') rather than
-              // skipping the leg and presenting a partial/zero figure as real.
               if (prices.some(price => price === null)) return null
               return legs.reduce((usd, leg, i) => usd + formatFixed(USD_DECIMALS, leg.allocated * prices[i]!), 0)
             },
@@ -202,9 +228,6 @@ export const $PublicFundPage = ({
         multicast
       )
 
-      // AUM = the fund's CURRENT NAV (supply x navPerShare), folded as post-state on allocate/redeem/liquidate, so a
-      // liquidation drops it to the outstanding-claims value (0 once fully claimed). The stale-after-liquidation bug
-      // was the AUM display reading `allocated` (above) instead of this.
       const navUsdQuery = op(
         combine({ fund: fundStateQuery, registry: tokenRegistryValue }),
         map(async p => {
@@ -241,6 +264,7 @@ export const $PublicFundPage = ({
             baseToken: info.token,
             kind: 'view',
             cashLeg: composeCashLeg(subaccount, p.health, f.baseToken),
+            holdings: composeHoldings(subaccount, f.baseToken),
             getRate,
             positions: await gmxPositionProvider(getAddress(fund), info.token)
           })
@@ -264,6 +288,20 @@ export const $PublicFundPage = ({
       const $sectionLabel = (label: string): I$Node =>
         $node(style({ color: palette.foreground, fontSize: text.sm, fontWeight: '500', letterSpacing: '0.5px' }))(
           $text(label)
+        )
+
+      const $panel = (label: string, extraStyle: IStyleCSS, $content: I$Node, $headerEnd?: I$Node): I$Node =>
+        $column(
+          spacing.default,
+          style({ backgroundColor: palette.middleground, borderRadius: '8px', padding: '20px', ...extraStyle })
+        )(
+          $headerEnd
+            ? $row(style({ alignItems: 'center', justifyContent: 'space-between', gap: '12px' }))(
+                $sectionLabel(label),
+                $headerEnd
+              )
+            : $sectionLabel(label),
+          $content
         )
 
       const $metric = (label: string, $value: I$Node): I$Node =>
@@ -372,6 +410,24 @@ export const $PublicFundPage = ({
           )
         )
 
+      const shareLinkLabel = start(
+        'Copy share link',
+        switchMap(() => merge(just('Link copied'), delay(1800, just('Copy share link'))), copyShareLink)
+      )
+
+      const $shareLink = $element('span')(
+        style({ color: palette.foreground, fontSize: text.sm, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }),
+        stylePseudo(':hover', { color: palette.message }),
+        copyShareLinkTether(
+          nodeEvent('click'),
+          map(() => {
+            const url = `${document.location.origin}/fund/${fund}?s=${Date.now().toString(36)}`
+            navigator.clipboard.writeText(url)
+            return url
+          })
+        )
+      )($icon({ $content: $copy, width: '12px' }), $text(shareLinkLabel))
+
       const $profileOverview = $column(spacing.default)(
         $column(spacing.small)(
           $intermediatePromise({
@@ -381,15 +437,19 @@ export const $PublicFundPage = ({
               return fundState
                 ? $fundProfile(
                     { master: fundState.master, baseToken: fundState.baseToken, name: fundState.name },
-                    56
+                    56,
+                    fundState
                   )
                 : $row(spacing.default, style({ alignItems: 'center' }))($roboAvatar(fund, 56), $identityHeader())
             }, fundStateQuery)
           }),
-          $anchor(
-            attr({ href: getAccountExplorerUrl(fund), target: '_blank' }),
-            style({ color: palette.foreground, fontSize: text.sm })
-          )($text('View fund account on explorer'), $icon({ $content: $external, width: '11px' }))
+          $row(spacing.default, style({ alignItems: 'center' }))(
+            $anchor(
+              attr({ href: getAccountExplorerUrl(fund), target: '_blank' }),
+              style({ color: palette.foreground, fontSize: text.sm })
+            )($text('View fund account on explorer'), $icon({ $content: $external, width: '11px' })),
+            $shareLink
+          )
         ),
         $vitals,
         $intermediatePromise({
@@ -400,14 +460,12 @@ export const $PublicFundPage = ({
               const info = p.registry.get(HUB_CHAIN_ID)?.get(fundState.baseToken)
               if (!info) return $infoLabel($text('Unsupported collateral'))
               return $SubscribeEditor({
-                collateralToken: info.token,
                 baseToken: fundState.baseToken,
                 userMatchingRuleQuery,
                 draftMatchingRuleList,
                 master: fundState.master as Address,
                 name: fundState.name,
-                prominent: true,
-                $container: $defaultSubscribeEditorContainer(style({ marginLeft: '-12px' }))
+                prominent: true
               })({
                 changeMatchRuleList: changeMatchRuleListTether()
               })
@@ -417,50 +475,90 @@ export const $PublicFundPage = ({
         })
       )
 
-      const $fundBalances = $column(
-        spacing.default,
-        style({ backgroundColor: palette.middleground, borderRadius: '8px', padding: '20px' })
-      )(
-        $sectionLabel('Liquid balances'),
-        $intermediatePromise({
-          $display: map(
-            async p => {
-              const state = await readSubaccountState(p.registry, getAddress(fund))
-              const rows = [...(state?.balances.values() ?? [])].filter(b => b.signedBalance > 0n)
-              if (rows.length === 0) {
-                return $node(style({ color: palette.foreground, fontSize: text.sm }))($text('No balances yet'))
-              }
-              return $column(spacing.default)(
-                ...rows.map(b => {
-                  const info = p.registry.get(HUB_CHAIN_ID)?.get(b.token)
-                  if (!info) return empty
-                  const desc = getRegisteredTokenDescription(info.token)
-                  const symbol = symbolForBaseTokenId(b.token) ?? desc.symbol
-                  return $row(spacing.small, style({ alignItems: 'center' }))(
-                    $tokenWithChainBadge($tokenIconBySymbol(symbol, '32px'), Number(b.chainId), 32, 14),
-                    $node(style({ fontSize: text.sm, color: palette.message }))($text(symbol)),
-                    $node(style({ flex: 1 }))(),
-                    $amountDisplay({
-                      hideBalances,
-                      usd: map(price => formatUsd(b.signedBalance, price), priceFor(info.token)),
-                      amount: readableTokenAmountLabel(desc, b.signedBalance),
-                      align: 'flex-end',
-                      usdFontSize: text.sm
-                    })
-                  )
-                })
+      // One read shared by the header total and the rows below, so they never disagree.
+      const liquidBalancesQuery = context.getTokenRegistry().then(async registry => {
+        const state = await readSubaccountState(registry, getAddress(fund))
+        return [...(state?.balances.values() ?? [])]
+          .filter(b => b.signedBalance > 0n)
+          .flatMap(b => {
+            const info = registry.get(HUB_CHAIN_ID)?.get(b.token)
+            if (!info) return []
+            const chainId = Number(b.chainId) as ChainId
+            const desc = getChainTokenDescription(chainId, info.token)
+            const priceToken = isNativeToken(info.token) ? wrappedNativeAddressOf(chainId) : info.token
+            return [{ balance: b.signedBalance, chainId, desc, priceToken }]
+          })
+      })
+      const liquidBalancesStream = just(liquidBalancesQuery)
+
+      // Wallet total, sitting on the section header row. Indeterminate (a leg unpriceable) shows '-' rather than an
+      // understated sum; masked when balances are hidden.
+      const $liquidBalancesTotal = $intermediatePromise({
+        $display: map(async future => {
+          const rows = await future
+          if (rows.length === 0) return empty
+          const totalUsd = combineMap(
+            (hidden: boolean, ...prices: (bigint | null)[]) => {
+              if (hidden) return '••••'
+              if (prices.some(price => price === null)) return '-'
+              const sum = rows.reduce(
+                (acc, r, i) => acc + Number(formatUnits(r.balance * prices[i]!, USD_PRICE_DECIMALS)),
+                0
               )
+              return `$${readableUnitAmount(sum)}`
             },
-            combine({ registry: tokenRegistryValue })
+            hideBalances,
+            ...rows.map(r => priceFor(r.priceToken))
           )
-        })
+          return $row(spacing.small, style({ alignItems: 'center' }))(
+            $icon({ $content: $wallet, viewBox: '0 0 32 32', fill: palette.foreground, width: '15px' }),
+            $node(style({ fontWeight: '700', fontSize: text.lg, color: palette.message }))($text(totalUsd))
+          )
+        }, liquidBalancesStream)
+      })
+
+      const $fundBalances = $panel(
+        'Liquid balances',
+        {},
+        $intermediatePromise({
+          $display: map(async future => {
+            const rows = await future
+            if (rows.length === 0) {
+              return $node(style({ color: palette.foreground, fontSize: text.sm }))($text('No balances yet'))
+            }
+            return $column(style({ margin: '0 -10px' }))(
+              ...rows.flatMap((r, i) => {
+                const $row_ = $row(
+                  style({ padding: '8px 10px', borderRadius: '6px' }),
+                  stylePseudo(':hover', { backgroundColor: colorShade(palette.foreground, 8) })
+                )(
+                  $tokenBalanceRow({
+                    symbol: r.desc.symbol,
+                    chainId: r.chainId,
+                    amount: readableTokenAmountLabel(r.desc, r.balance),
+                    hideBalances,
+                    usd: map(price => formatUsd(r.balance, price), priceFor(r.priceToken)),
+                    iconSize: 34
+                  })
+                )
+                return i === 0
+                  ? [$row_]
+                  : [
+                      $node(
+                        style({ height: '1px', margin: '0 10px', backgroundColor: colorShade(palette.foreground, 15) })
+                      )(),
+                      $row_
+                    ]
+              })
+            )
+          }, liquidBalancesStream)
+        }),
+        $liquidBalancesTotal
       )
 
-      const $puppetDistribution = $column(
-        spacing.default,
-        style({ flex: 1, backgroundColor: palette.middleground, borderRadius: '8px', padding: '20px' })
-      )(
-        $sectionLabel('Puppet distribution'),
+      const $puppetDistribution = $panel(
+        'Puppet distribution',
+        { flex: 1 },
         $intermediatePromise({
           $display: map(
             async p => $allocationDistribution(hideBalances, await p.dist, await p.pool, p.registry),
@@ -539,11 +637,9 @@ export const $PublicFundPage = ({
         )
       }
 
-      const $openPositions = $column(
-        spacing.default,
-        style({ backgroundColor: palette.middleground, borderRadius: '8px', padding: '20px' })
-      )(
-        $sectionLabel('Open positions'),
+      const $openPositions = $panel(
+        'Open positions',
+        {},
         $intermediatePromise({
           $display: map(async positionsFuture => {
             const positions = (await positionsFuture).filter(p => p.sizeInUsd > 0n)
@@ -673,8 +769,26 @@ export const $PublicFundPage = ({
         )
       )
 
-      const $actionDetail = (a: IFundAction, baseDesc: ReturnType<typeof getTokenDescription> | undefined): I$Node => {
-        if (a.kind === 'event') return empty
+      const $actionDetail = (
+        a: IFundAction,
+        baseDesc: ReturnType<typeof getTokenDescription> | undefined,
+        rowTokenDesc?: (chainId: number, token: Hex | undefined) => ReturnType<typeof getTokenDescription> | undefined
+      ): I$Node => {
+        if (a.kind === 'event') {
+          if (a.wrapAmount !== undefined) {
+            const nativeDesc = getChainTokenDescription(a.chainId as ChainId, PROTOCOL.nativeToken)
+            return $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm, color: palette.foreground }))(
+              $node($text(readableTokenAmountLabel(nativeDesc, a.wrapAmount)))
+            )
+          }
+          const amountDesc = a.tokenAmount ? rowTokenDesc?.(a.chainId, a.tokenAmount.token) : undefined
+          if (a.tokenAmount && amountDesc) {
+            return $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm, color: palette.foreground }))(
+              $node($text(readableTokenAmountLabel(amountDesc, a.tokenAmount.amount)))
+            )
+          }
+          return empty
+        }
         if (a.kind === 'allocate') {
           const allocatedLabel = baseDesc ? readableTokenAmountLabel(baseDesc, a.allocated) : `${a.puppetCount} matched`
           return $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm, color: palette.foreground }))(
@@ -722,52 +836,98 @@ export const $PublicFundPage = ({
           const fundState = await p.fund
           const info = fundState ? p.registry.get(HUB_CHAIN_ID)?.get(fundState.baseToken) : undefined
           const baseDesc = info ? indexTokenDescription(info.token) : undefined
-          return { actions, baseDesc }
+          // Per-chain token description for a row's amount/fee token (a registry BASE id on the ROW's chain: a Polygon
+          // credit denominates in Polygon USDC, not the fund base). Falls back to baseDesc for unresolvable ids.
+          const rowTokenDesc = (chainId: number, token: Hex | undefined) => {
+            if (!token) return baseDesc
+            try {
+              return getChainTokenDescription(chainId as ChainId, tokenInfoFor(p.registry, chainId as ChainId, token).token)
+            } catch {
+              return baseDesc
+            }
+          }
+          return { actions, baseDesc, rowTokenDesc }
         })
       )
 
-      const $activity = $column(
-        spacing.default,
-        style({ flex: 1, minWidth: 0, backgroundColor: palette.middleground, borderRadius: '8px', padding: '20px' })
-      )(
-        $sectionLabel('Activity'),
+      const NEGATIVE_EVENTS = new Set(['Withdraw', 'Sell', 'Liquidate', 'Redeem'])
+      const POSITIVE_EVENTS = new Set(['Deposit', 'Claim'])
+      const actionAccent = (a: IFundAction): string => {
+        if (a.kind === 'allocate') return palette.primary
+        if (a.kind === 'operate') return palette.message
+        if (a.label && NEGATIVE_EVENTS.has(a.label)) return palette.negative
+        if (a.label && POSITIVE_EVENTS.has(a.label)) return palette.positive
+        return palette.message
+      }
+      // A DeployFundAccount OFF the hub is the dest-chain account-open of a cross-chain swap, not the fund's creation
+      // — label it by its chain so it can't be mistaken for the (hub) fund genesis.
+      const actionLabel = (a: IFundAction): string =>
+        a.createdFund
+          ? 'Create fund'
+          : a.kind === 'allocate'
+            ? 'Allocate'
+          : a.kind === 'event'
+            ? a.label === 'Create fund' && a.chainId !== HUB_CHAIN_ID
+              ? `Open ${chainName(a.chainId)} account`
+              : (a.label ?? 'Event')
+            : venueDisplay(operateVenue(a.callList).venueId).name
+
+      const $activity = $panel(
+        'Activity',
+        { flex: 1, minWidth: 0 },
         $intermediatePromise({
           $display: map(async viewFuture => {
-            const { actions, baseDesc } = await viewFuture
+            const { actions, baseDesc, rowTokenDesc } = await viewFuture
             if (actions.length === 0) {
-              return $node(style({ color: palette.foreground, fontSize: text.sm }))($text('No activity yet'))
+              return $column(spacing.tiny)(
+                $node(style({ color: palette.message, fontSize: text.sm }))($text('No requests yet')),
+                $infoLabel(style({ fontSize: text.xs }))(
+                  $text('Allocations and trades relayed for this fund appear here as they settle.')
+                )
+              )
             }
             const now = getUnixTimestamp()
-            return $column(spacing.small)(
-              ...actions.map(a =>
-                $row(spacing.small, style({ alignItems: 'center' }))(
+            return $column(style({ margin: '0 -10px' }))(
+              ...actions.map(a => {
+                const accent = actionAccent(a)
+                return $row(
+                  spacing.small,
+                  style({ alignItems: 'center', padding: '9px 10px', borderRadius: '6px' }),
+                  stylePseudo(':hover', { backgroundColor: colorShade(palette.foreground, 8) })
+                )(
                   $node(
                     style({
-                      fontWeight: '600',
-                      minWidth: '76px',
-                      color: a.kind === 'allocate' ? palette.primary : palette.message
+                      width: '7px',
+                      height: '7px',
+                      borderRadius: '50%',
+                      backgroundColor: accent,
+                      flexShrink: '0'
                     })
-                  )(
-                    $text(
-                      a.kind === 'allocate'
-                        ? 'Allocate'
-                        : a.kind === 'event'
-                          ? (a.label ?? 'Event')
-                          : venueDisplay(operateVenue(a.callList).venueId).name
-                    )
-                  ),
-                  $actionDetail(a, baseDesc),
-                  $node(style({ flex: 1 }))(),
-                  a.relayFee > 0n && baseDesc
-                    ? $node(
-                        style({ fontSize: text.xs, color: colorShade(palette.foreground, 70), whiteSpace: 'nowrap' })
-                      )($text(`fee ${readableTokenAmountLabel(baseDesc, a.relayFee)}`))
-                    : empty,
-                  $node(style({ fontSize: text.sm, color: palette.foreground, whiteSpace: 'nowrap' }))(
+                  )(),
+                  $node(
+                    style({ fontWeight: '600', minWidth: '68px', color: accent, fontSize: text.sm })
+                  )($text(actionLabel(a))),
+                  $actionDetail(a, baseDesc, rowTokenDesc),
+                  $node(style({ flex: 1, minWidth: '8px' }))(),
+                  (() => {
+                    const feeDesc = a.feeToken ? rowTokenDesc(a.chainId, a.feeToken) : baseDesc
+                    // A decoded fee-bearing action (feeToken set) shows its fee even at ZERO: a free dispatch is an
+                    // anomaly worth seeing (a 0-fee recognize is how the cross-chain fee mispricing stayed invisible).
+                    return (a.relayFee > 0n || a.feeToken !== undefined) && feeDesc
+                      ? $node(
+                          style({ fontSize: text.xs, color: colorShade(palette.foreground, 70), whiteSpace: 'nowrap' })
+                        )($text(`fee ${readableTokenAmountLabel(feeDesc, a.relayFee)}`))
+                      : empty
+                  })(),
+                  $anchor(
+                    attr({ href: chainExplorerTxUrl(a.chainId, a.transactionHash), target: '_blank' }),
+                    style({ color: colorShade(palette.foreground, 70), display: 'flex', alignItems: 'center' })
+                  )($icon({ $content: $external, width: '11px' })),
+                  $node(style({ fontSize: text.xs, color: palette.foreground, whiteSpace: 'nowrap' }))(
                     $text(`${getDuration(now - a.blockTimestamp)} ago`)
                   )
                 )
-              )
+              })
             )
           }, activityViewQuery)
         })

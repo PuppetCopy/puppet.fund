@@ -1,14 +1,22 @@
 import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
 import type { IFundAccountLib__FundAccountInitParams } from '@puppet/contracts/types'
 import { predictFundAccount, predictPuppetAccount, predictShareToken } from '@puppet/sdk/account'
-import type { ChainId, IntervalTime } from '@puppet/sdk/const'
+import { type ChainId, type IntervalTime, VIEM_CHAINS } from '@puppet/sdk/const'
 import { ignoreAll, sharesFor } from '@puppet/sdk/core'
-import { accountIdentityTable, type IFund } from '@puppet/sdk/schema'
-import type { IAccountBalanceRow, ISubaccountState } from '@puppet/sdk/state'
+import { fundPositionTable, fundTable, type IFund } from '@puppet/sdk/schema'
+import {
+  composeSubaccount,
+  type IAccountBalanceRow,
+  type ISubaccountState,
+  stubSubaccountState,
+  withBalanceRows
+} from '@puppet/sdk/state'
 import {
   awaitPromises,
   combine,
+  empty,
   filter,
+  fromPromise,
   type IStream,
   just,
   map,
@@ -18,6 +26,7 @@ import {
   sampleMap,
   skip,
   skipRepeats,
+  start,
   switchLatest,
   switchMap,
   switchPromises,
@@ -37,14 +46,13 @@ import { routeSchema } from '../app/routeSchema.js'
 import { pwaUpgradeNotification } from '../app/sw/swUtils.js'
 import { $midContainer } from '../common/$common.js'
 import { $ActionDrawer, type IDraft } from '../components/$ActionDrawer.js'
-// Browser extension sunset for now; revive with the $ExtensionBanner mount below.
-// import { $ExtensionBanner } from '../components/$ExtensionBanner.js'
 import { $MainMenu } from '../components/$MainMenu.js'
 import { $PairBanner } from '../components/$PairBanner.js'
 import type { ISubscribeRule } from '../components/portfolio/$MatchingRuleEditor.js'
 import type {
   IAllocateDraft,
   IClaimDraft,
+  IClaimRouteDraft,
   IDepositDraft,
   IFundSwapDraft,
   IRecognizeFundDraft,
@@ -56,12 +64,14 @@ import type {
 import { computeSignedDelta, type IAttestation } from '../components/portfolio/runner/steps.js'
 import context from '../io/context.js'
 import { fetchUserSubscriptions } from '../io/datastore/query.js'
-import { client } from '../io/matchmaker/reads.js'
-import { readWalletState } from '../io/matchmaker/walletState.js'
+import { client } from '../io/datastore/reads.js'
 import { readSignedBalance } from '../io/onchain/account.js'
-import { setViewCacheOwner } from '../io/onchain/viewRead.js'
+import { readAccountBalances } from '../io/onchain/balances.js'
+import { discoverMasteredFunds, type IDiscoveredFund, recoverPuppetIdentity } from '../io/onchain/fundDiscovery.js'
+import { setViewCacheOwner, viewCode } from '../io/onchain/viewRead.js'
 import { enableSmoothScroll } from '../utils/smoothScroll.js'
 import { walletQuery } from '../wallet/index.js'
+import { $FundQuickstart } from './$FundQuickstart.js'
 import { $Home } from './$Home.js'
 import { $Leaderboard } from './$Leaderboard.js'
 import { $Portfolio } from './$Portfolio.js'
@@ -73,8 +83,9 @@ const FUND_ROUTED: ReadonlySet<string> = new Set(['operate', 'allocate', 'redeem
 
 const ZERO_TOKEN = '0x0000000000000000000000000000000000000000' as Address
 
-// Fund-routed requests settle against the fund account, derived from input.fundParams under
-// multi-key CREATE2; everything else settles on the puppet account.
+// The nav-per-share a fund carries before its pool is seeded (1.0 in float/share precision).
+const SEED_NAV = PRECISION.floatPrecisionExp / PRECISION.sharePrecisionExp
+
 function accountForRequest(req: IAttestation['request']): Address {
   const input = req.input as {
     params: { user: Address; signer: Address }
@@ -99,8 +110,6 @@ function stubBalanceRow(account: Address, chainId: bigint, token: Address, signe
   }
 }
 
-// The AUM a fund-routed action optimistically moves: allocate adds the base in, redeem/liquidate drain it out, operate is
-// NAV-neutral. Supply is then scaled to hold NAV, mirroring the contract's allocate/redeem math (reload reconciles exact).
 function fundAumDelta(request: IAttestation['request'], actualRelayFee: bigint, aum: bigint): bigint {
   const intent = request.intent as unknown as { assetsOut?: bigint }
   switch (request.kind) {
@@ -119,10 +128,8 @@ function applyWalletAttest(state: ISubaccountState | null, settled: IAttestation
   if (state === null) return null
   const { request, result } = settled
   const target = accountForRequest(request)
+  const lastSettled = { chainId: Number(result.chainId), block: settled.settledBlock }
   if (target !== state.account) {
-    // Fund-routed op (allocate/operate/redeem/liquidate). All run on the hub, so a successful one means the PA is now
-    // deployed there — mark it so the FA card flips off "Fund will be created" at $0.00 on the ACK (a reload reconciles
-    // exactly against the fold). The optimistic AUM nudge below keeps the card honest until then.
     const chains = state.chains.has(HUB_CHAIN_ID)
       ? state.chains
       : new Map(state.chains).set(HUB_CHAIN_ID, {
@@ -132,15 +139,12 @@ function applyWalletAttest(state: ISubaccountState | null, settled: IAttestation
           user: state.user,
           signer: state.signer
         })
-    const seedNav = PRECISION.floatPrecisionExp / PRECISION.sharePrecisionExp
     const fund = state.funds.find(f => isAddressEqual(f.fund as Address, target))
     if (!fund) {
-      // First allocation creates the fund — it is not in the root yet. Seed it (AUM = the allocated base, first-mint
-      // supply) so the card shows a real AUM. Only allocate can target a fund that does not exist yet.
       const fundParams = (request.input as { fundParams?: IFundAccountLib__FundAccountInitParams }).fundParams
       const seedAum = fundAumDelta(request, result.actualRelayFee, 0n)
       if (request.kind !== 'allocate' || !fundParams || seedAum <= 0n)
-        return { ...state, chains, lastTransactionHash: result.txHash }
+        return { ...state, chains, lastTransactionHash: result.txHash, lastSettled }
       const newFund: IFund = {
         id: getAddress(target),
         fund: getAddress(target),
@@ -155,22 +159,20 @@ function applyWalletAttest(state: ISubaccountState | null, settled: IAttestation
         accruedPerWeight: 0n,
         weight: 0n,
         liquidationRate: 0n,
-        navPerShare: seedNav,
+        navPerShare: SEED_NAV,
         seeded: true
       }
-      return { ...state, funds: [...state.funds, newFund], chains, lastTransactionHash: result.txHash }
+      return { ...state, funds: [...state.funds, newFund], chains, lastTransactionHash: result.txHash, lastSettled }
     }
-    // Existing fund (incl. one already in the root but not yet seeded): nudge supply to hold NAV across the action. Seed
-    // navPerShare when the row is unseeded (nav 0) so the AUM is non-zero and sharesFor never divides by a zero NAV.
-    const nav = fund.navPerShare > 0n ? fund.navPerShare : seedNav
+    const nav = fund.navPerShare > 0n ? fund.navPerShare : SEED_NAV
     const aum = (fund.totalShareSupply * nav) / PRECISION.floatPrecisionExp
-    if (aum === 0n && fund.totalShareSupply > 0n) return { ...state, chains, lastTransactionHash: result.txHash }
+    if (aum === 0n && fund.totalShareSupply > 0n) return { ...state, chains, lastTransactionHash: result.txHash, lastSettled }
     const minted = sharesFor(fund.totalShareSupply, aum, fundAumDelta(request, result.actualRelayFee, aum))
     const supply = fund.totalShareSupply + minted > 0n ? fund.totalShareSupply + minted : 0n
     const funds = state.funds.map(f =>
       isAddressEqual(f.fund as Address, target) ? { ...f, totalShareSupply: supply, navPerShare: nav } : f
     )
-    return { ...state, funds, chains, lastTransactionHash: result.txHash }
+    return { ...state, funds, chains, lastTransactionHash: result.txHash, lastSettled }
   }
   const chainId = (request.intent as { chainId: bigint }).chainId
   const nonce = (request.intent as { nonce: bigint }).nonce
@@ -182,13 +184,64 @@ function applyWalletAttest(state: ISubaccountState | null, settled: IAttestation
     : stubBalanceRow(state.account, chainId, token, delta)
   const balances = new Map(state.balances)
   balances.set(token, nextBalance)
-  return { ...state, balances, lastNonce: nonce, lastTransactionHash: result.txHash }
+  return { ...state, balances, lastNonce: nonce, lastTransactionHash: result.txHash, lastSettled }
 }
 
 type IBalanceRefresh = { refresh: true; token: Hex; row: IAccountBalanceRow }
-type IRootFold = IAttestation | IBalanceRefresh
+type IFundsDiscovered = { discovered: IDiscoveredFund[] }
+type IRootFold = IAttestation | IBalanceRefresh | IFundsDiscovered
+
+// A discovered fund carries its identity + the RPC-hydrated on-chain economics (supply/queued/pool/liquidationRate). It
+// does NOT carry navPerShare (attested NAV / supply) or totalAllocated (lifetime cumulative) — neither has a getter — so
+// those are never overwritten: an existing row keeps its indexer/attest values, and a fund the seed missed is added with
+// navPerShare = SEED_NAV / totalAllocated = 0n (the exact fallbacks consumers already apply) until a NAV reconstruction
+// lands. `seeded` also stays on the existing row (the indexer flag doesn't reset on full redemption; the RPC proxy does).
+function newFundRow(h: IDiscoveredFund): IFund {
+  return {
+    id: getAddress(h.fund),
+    fund: getAddress(h.fund),
+    shareToken: getAddress(h.shareToken),
+    baseToken: getAddress(h.baseToken),
+    name: h.name,
+    master: getAddress(h.master),
+    totalAllocated: 0n,
+    totalShareSupply: h.totalShareSupply,
+    queuedShares: h.queuedShares,
+    epoch: h.epoch,
+    accruedPerWeight: h.accruedPerWeight,
+    weight: h.weight,
+    liquidationRate: h.liquidationRate,
+    navPerShare: SEED_NAV,
+    seeded: h.seeded
+  }
+}
+
+function mergeDiscoveredFunds(state: ISubaccountState | null, discovered: IDiscoveredFund[]): ISubaccountState | null {
+  if (state === null || discovered.length === 0) return state
+  const byFund = new Map(state.funds.map(f => [getAddress(f.fund as Address), f]))
+  for (const h of discovered) {
+    const key = getAddress(h.fund)
+    const existing = byFund.get(key)
+    byFund.set(
+      key,
+      existing
+        ? {
+            ...existing,
+            totalShareSupply: h.totalShareSupply,
+            queuedShares: h.queuedShares,
+            epoch: h.epoch,
+            accruedPerWeight: h.accruedPerWeight,
+            weight: h.weight,
+            liquidationRate: h.liquidationRate
+          }
+        : newFundRow(h)
+    )
+  }
+  return { ...state, funds: [...byFund.values()] }
+}
 
 function applyRootFold(state: ISubaccountState | null, fold: IRootFold): ISubaccountState | null {
+  if ('discovered' in fold) return mergeDiscoveredFunds(state, fold.discovered)
   if (!('refresh' in fold)) return applyWalletAttest(state, fold)
   if (state === null) return null
   const balances = new Map(state.balances)
@@ -209,6 +262,7 @@ export const $Main = (_config: IApp = {}) =>
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
       [changeAllocateDraft, changeAllocateDraftTether]: IBehavior<IAllocateDraft>,
       [changeSwapDraft, changeSwapDraftTether]: IBehavior<IFundSwapDraft>,
+      [changeClaimDraft, changeClaimDraftTether]: IBehavior<IClaimRouteDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
       [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft | IRecognizeFundDraft>,
       [clearDrafts, clearDraftsTether]: IBehavior<null>,
@@ -226,45 +280,115 @@ export const $Main = (_config: IApp = {}) =>
       )
       const hideBalances = state(false, uiStorage.replayWrite(localStoreSchema.global.hideBalances, changeHideBalances))
 
-      const recoverDeployedSigner = async (user: Address): Promise<Address | undefined> => {
-        const rows = await client.select(accountIdentityTable, { where: { user: getAddress(user) } })
-        return rows[0]?.signer as Address | undefined
-      }
-
-      const walletState: IStream<ISubaccountState | null> = op(
+      // The root PA state as a stream of PROMISES (like walletQuery): each wallet generation first emits its in-flight
+      // seed (session read → chain identity recovery → compose), then a resolved promise per fold. Consumers handle the
+      // promise on their end — promiseState/$intermediatePromise for display (real intermediate loading, never a stale
+      // replay or finalized empty-state copy mid-seed), switchPromises where only the resolved value matters.
+      const walletState: IStream<Promise<ISubaccountState | null>> = op(
         walletQuery,
-        switchMap(async walletPromise => {
+        switchMap(walletPromise => {
+          const seeded = (async (): Promise<{ initial: ISubaccountState | null; folds: IStream<IRootFold> }> => {
           const wallet = await walletPromise
           setViewCacheOwner(wallet?.address ?? null)
-          const signer = wallet ? (wallet.session?.signer ?? (await recoverDeployedSigner(wallet.address))) : undefined
-          const initial =
-            wallet && signer
-              ? await readWalletState(await context.getTokenRegistry(), { user: wallet.address, signer })
-              : null
+          // The signer resolves without ever prompting at boot: an already-stored session first, else the chain's own
+          // DeployPuppetAccount record (hub log scan, device-cached) recovers the deployed {user, signer} so a returning
+          // wallet on a fresh device still DISPLAYS its state. Still undefined => never deployed AND no session — the
+          // account stays unresolved until the user acts, at which point the drawer (bindSession) prompts for the
+          // derivation signature, deriving the same signer deterministically.
+          let signer = wallet?.session?.signer
+          if (wallet && signer === undefined) {
+            signer = (await recoverPuppetIdentity(wallet.address).catch(() => undefined))?.signer
+          }
+          let initial: ISubaccountState | null = null
+          // Boot-time RPC discovery of the funds this wallet masters (indexer-free, chain-sourced, device-cached). It
+          // resolves independently of the indexer seed and folds in as a one-shot refresh, so first paint isn't gated on
+          // the scan and any fund the seed missed still surfaces (union-fills-gaps in mergeDiscoveredFunds).
+          let discoveryFold: IStream<IRootFold> = empty
+          if (wallet && signer) {
+            const params = { user: wallet.address, signer }
+            const puppet = predictPuppetAccount(params)
+            discoveryFold = op(
+              fromPromise(discoverMasteredFunds(puppet).catch(() => [] as IDiscoveredFund[])),
+              map((discovered): IRootFold => ({ discovered }))
+            )
+            // PA existence + per-chain presence via cache-first eth_getCode instead of the indexer identity table: the
+            // account address is deterministic from {user, signer} (already known) and isFund is always false for a PA,
+            // so the only facts the indexer added were "deployed?" and "on which chains" — both are getCode. A read that
+            // throws is excluded (unknown, not proven-absent); no code on any chain => never deployed, so stub.
+            const deployedChains = (
+              await Promise.all(
+                VIEM_CHAINS.map(chain =>
+                  viewCode(chain.id as ChainId, puppet)
+                    .then(code => (code && code !== '0x' ? (chain.id as ChainId) : null))
+                    .catch(() => null)
+                )
+              )
+            ).filter((cid): cid is ChainId => cid !== null)
+            if (deployedChains.length === 0) {
+              initial = stubSubaccountState(params)
+            } else {
+              const registry = await context.getTokenRegistry()
+              const [balanceRows, fundRows, positionRows] = await Promise.all([
+                readAccountBalances(registry, puppet),
+                client.select(fundTable, { where: { master: puppet } }),
+                client.select(fundPositionTable, { where: { holder: puppet } })
+              ])
+              const identities = deployedChains.map(chainId => ({
+                account: puppet,
+                chainId: BigInt(chainId),
+                isFund: false,
+                user: params.user,
+                signer: params.signer
+              }))
+              initial =
+                composeSubaccount(identities, balanceRows, fundRows, positionRows) ??
+                withBalanceRows({ ...stubSubaccountState(params), funds: fundRows, positions: positionRows }, balanceRows)
+            }
+          }
           const refreshFolds: IStream<IRootFold> = op(
             changeAttest,
             map(async (settled): Promise<IBalanceRefresh | null> => {
               if (initial === null) return null
-              // Reconcile the SETTLED account's token after the tx mines: re-read signedBalanceOf with the SW view-cache
-              // busted (refresh), which re-warms it to the confirmed on-chain value (incl. 0 on a full drain). The settled
-              // account is the PA for wallet actions, or the master's FUND account for fund-routed ops (operate/allocate/
-              // redeem/liquidate) — so a master operating his fund busts the FA cache too, even when the fund view isn't
-              // mounted. A failed read just skips this cycle (the optimistic overlay already applied).
               const target = accountForRequest(settled.request)
               const chainId = Number((settled.request.intent as { chainId: bigint }).chainId) as ChainId
-              // Bust the settled account's view cache (fund view freshness on fund-routed ops).
-              const targetSigned = await readSignedBalance(target, chainId, settled.token, true).catch(() => null)
-              // Only the PA's own balances live in the root state. Most actions settle on the PA (target === account).
-              // redeem/liquidate are fund-routed (target = the fund) yet PAY the master PA its claim, so the balance to
-              // fold into the root is the PA's, not the fund's — re-read it fresh too, else the received funds never
-              // surface until reload.
+              // Every settlement refresh read is PINNED at the dispatch tx's mined block: a load-balanced node lagging
+              // that block errors instead of answering pre-settlement state (which would then be CACHED as fresh — the
+              // stale-after-reload withdraw bug). A pinned failure retries briefly; still failing => skip the fold and
+              // leave the cache untouched rather than poison it.
+              const pinned = async <T>(read: () => Promise<T>): Promise<T | null> => {
+                for (let attempt = 0; attempt < 3; attempt++) {
+                  try {
+                    return await read()
+                  } catch {
+                    await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)))
+                  }
+                }
+                return null
+              }
+              const targetSigned = await pinned(() =>
+                readSignedBalance(target, chainId, settled.token, true, settled.settledBlock)
+              )
               const creditsPuppetAccount = settled.request.kind === 'redeem' || settled.request.kind === 'liquidate'
               const foldAccount = target === initial.account ? target : creditsPuppetAccount ? initial.account : null
+              // Rewarm the touched accounts' MULTICALL bundle (fire-and-forget): the single-token refresh above busts
+              // only the per-token view key, while boot-time readAccountBalances serves the per-chain aggregate3 bundle
+              // — without this, the next reload would read the pre-settlement bundle until something else busts it.
+              void context.getTokenRegistry().then(registry =>
+                Promise.all(
+                  [...new Set([target, ...(creditsPuppetAccount ? [initial.account] : [])])].map(account =>
+                    pinned(() =>
+                      readAccountBalances(registry, account, true, { chainId: chainId, block: settled.settledBlock })
+                    )
+                  )
+                )
+              )
               if (foldAccount === null) return null
               const signed =
                 foldAccount === target
                   ? targetSigned
-                  : await readSignedBalance(foldAccount, chainId, settled.token, true).catch(() => null)
+                  : await pinned(() =>
+                      readSignedBalance(foldAccount, chainId, settled.token, true, settled.settledBlock)
+                    )
               if (signed === null) return null
               const row: IAccountBalanceRow = {
                 id: `${chainId}-${foldAccount}-${settled.token}`,
@@ -280,9 +404,16 @@ export const $Main = (_config: IApp = {}) =>
             awaitPromises,
             filter((r): r is IBalanceRefresh => r !== null)
           )
-          return state(initial, reduce(applyRootFold, initial, merge(changeAttest, refreshFolds)))
+          const folds: IStream<IRootFold> = merge(changeAttest, refreshFolds, discoveryFold)
+          return { initial, folds }
+          })()
+          return op(
+            fromPromise(seeded),
+            switchMap(s => reduce(applyRootFold, s.initial, s.folds)),
+            map(v => Promise.resolve(v)),
+            start(seeded.then(s => s.initial))
+          )
         }),
-        switchLatest,
         state()
       )
 
@@ -292,20 +423,18 @@ export const $Main = (_config: IApp = {}) =>
         map(w => w?.address.toLowerCase() ?? null)
       )
 
+      const walletAccount: IStream<Address | null> = op(
+        walletState,
+        switchPromises,
+        map(root => root?.account ?? null)
+      )
       const userMatchingRuleQuery = op(
         sampleMap(
           async (account: Address | null) =>
             account ? fetchUserSubscriptions(await context.getTokenRegistry(), account) : [],
-          op(
-            walletState,
-            map(root => root?.account ?? null)
-          ),
+          walletAccount,
           merge(
-            op(
-              walletState,
-              map(root => root?.account ?? null),
-              skipRepeats
-            ),
+            op(walletAccount, skipRepeats),
             op(
               changeAttest,
               filter(settled => settled.request.kind === 'mandate')
@@ -318,6 +447,7 @@ export const $Main = (_config: IApp = {}) =>
       type DraftEvent =
         | { type: 'set-subscribes'; list: ISubscribeRule[] }
         | { type: 'upsert'; draft: IDepositDraft | IWithdrawDraft }
+        | { type: 'claimRoute'; draft: IClaimRouteDraft }
         | { type: 'allocate'; draft: IAllocateDraft }
         | { type: 'fundSwap'; draft: IFundSwapDraft }
         | { type: 'sell-claim'; draft: ISellDraft | IClaimDraft }
@@ -326,11 +456,10 @@ export const $Main = (_config: IApp = {}) =>
         | { type: 'release'; key: string }
         | { type: 'clear' }
 
-      // Execution-order priority. Deposits run first so they fund the puppet account before
-      // any fund step (which depends on puppet existing + having balance to cover fees).
       const DRAFT_SORT_KEY: Record<IDraft['kind'], number> = {
         deposit: 0,
         recognizeFund: 1,
+        claimRoute: 1,
         mandate: 2,
         allocate: 3,
         fundSwap: 4,
@@ -356,6 +485,10 @@ export const $Main = (_config: IApp = {}) =>
                 if (event.draft.masterAmount === 0n) {
                   return list.filter(d => d.id !== event.draft.id)
                 }
+                const idx = list.findIndex(d => d.id === event.draft.id)
+                return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
+              }
+              if (event.type === 'claimRoute') {
                 const idx = list.findIndex(d => d.id === event.draft.id)
                 return idx >= 0 ? [...list.slice(0, idx), event.draft, ...list.slice(idx + 1)] : [...list, event.draft]
               }
@@ -412,9 +545,6 @@ export const $Main = (_config: IApp = {}) =>
                 }
                 return [...kept, ...incomingMap.values()]
               }
-              // upsert: mutual exclusion by slot, then upsert by id.
-              // Cancel when there's nothing to credit/withdraw — deposit sweeps surplus with
-              // inputAmount.amount=0 but output.amount>0, so checking output covers both top-up and sweep.
               if (event.draft.output.amount === 0n) {
                 return list.filter(d => d.id !== event.draft.id)
               }
@@ -437,6 +567,7 @@ export const $Main = (_config: IApp = {}) =>
             map((draft): DraftEvent => ({ type: 'upsert', draft }), changeDraft),
             map((draft): DraftEvent => ({ type: 'allocate', draft }), changeAllocateDraft),
             map((draft): DraftEvent => ({ type: 'fundSwap', draft }), changeSwapDraft),
+            map((draft): DraftEvent => ({ type: 'claimRoute', draft }), changeClaimDraft),
             map((draft): DraftEvent => ({ type: 'sell-claim', draft }), changeRedeemDraft),
             map(
               (draft): DraftEvent =>
@@ -483,9 +614,6 @@ export const $Main = (_config: IApp = {}) =>
         draftList
       )
 
-      // The action drawer is fixed at the bottom and OVERLAYS the page, so it covers the tail of the scroll content.
-      // Reserve scroll space equal to its measured height (only while there are drafts) as body padding, so the user
-      // can scroll the hidden content above it; smoothScroll's content observer picks up the taller body.
       const drawerReserve = op(
         combine({ h: op(drawerSize, state(0)), list: draftList }),
         map(p => (p.list.length > 0 ? Math.ceil(p.h) : 0)),
@@ -551,12 +679,12 @@ export const $Main = (_config: IApp = {}) =>
           $MainMenu({ walletState })({}),
 
           $PairBanner({ walletQuery, walletState })({}),
-          // $ExtensionBanner({ walletQuery })({}),
 
-          match(routeSchema)(
+          match(routeSchema)($midContainer(fadeIn($Home()({})))),
+          match(routeSchema.quickstart)(
             $midContainer(
               fadeIn(
-                $Home({
+                $FundQuickstart({
                   hideBalances,
                   walletQuery,
                   walletState,
@@ -637,6 +765,7 @@ export const $Main = (_config: IApp = {}) =>
                   changeRedeemDraft: changeRedeemDraftTether(),
                   changeAllocateDraft: changeAllocateDraftTether(),
                   changeSwapDraft: changeSwapDraftTether(),
+                  changeClaimDraft: changeClaimDraftTether(),
                   changeFulfillDraft: changeFulfillDraftTether(),
                   changeMatchRuleList: changeMatchRuleListTether()
                 })
@@ -660,7 +789,7 @@ export const $Main = (_config: IApp = {}) =>
                 map(entries => entries[0]?.borderBoxSize?.[0]?.blockSize ?? entries[0]?.contentRect.height ?? 0)
               )
             )(
-              $ActionDrawer({ draftList, walletState })({
+              $ActionDrawer({ draftList, walletState, hideBalances })({
                 clearDrafts: clearDraftsTether(),
                 releaseDraft: releaseDraftTether(),
                 changeAttest: changeAttestTether(),

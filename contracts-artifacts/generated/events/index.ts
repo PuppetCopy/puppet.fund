@@ -62,6 +62,10 @@ export const CONTRACT_EVENT_MAP = {
     Swap: {
       hash: '0xbce316f0d9d2a3affa97de1d99bb2aac0538e2666d0d8545545ead241ef0ccab',
       args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple",name:"fundParams",components:[{type:"address",name:"master"},{type:"address",name:"baseToken"},{type:"bytes32",name:"name"}]},{type:"tuple",name:"swap",components:[{type:"address",name:"inputToken"},{type:"address",name:"outputToken"},{type:"address",name:"provider"},{type:"bytes",name:"providerCallData"},{type:"uint256",name:"inputAmount"},{type:"uint256",name:"outputAmount"}]},{type:"uint256",name:"destinationChainId"},{type:"bool",name:"fromRoute"}]},{type:"uint256",name:"actualRelayFee"},{type:"address",name:"account"}]
+    },
+    Wrap: {
+      hash: '0xe78acd750fb40f19105ecb9ce96d506737ece1f48b1ada0c81cb5cb3eaf2c013',
+      args: [{type:"tuple",name:"intent",components:[{type:"tuple",name:"params",components:[{type:"address",name:"user"},{type:"address",name:"signer"}]},{type:"uint256",name:"blockNumber"},{type:"uint256",name:"deadline"},{type:"uint256",name:"acceptableRelayFee"},{type:"uint256",name:"nonce"},{type:"uint256",name:"chainId"},{type:"tuple",name:"fundParams",components:[{type:"address",name:"master"},{type:"address",name:"baseToken"},{type:"bytes32",name:"name"}]},{type:"uint256",name:"amount"},{type:"bool",name:"unwrap"}]},{type:"uint256",name:"actualRelayFee"},{type:"address",name:"account"}]
     }
   },
   HubGate: {

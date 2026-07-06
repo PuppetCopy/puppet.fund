@@ -1,6 +1,15 @@
 import { empty } from 'aelea/stream'
 import type { IBehavior } from 'aelea/stream-extended'
-import { component, type I$Node, type INode, type INodeCompose, nodeEvent, style, stylePseudo } from 'aelea/ui'
+import {
+  component,
+  type I$Node,
+  type I$Slottable,
+  type INode,
+  type INodeCompose,
+  nodeEvent,
+  style,
+  stylePseudo
+} from 'aelea/ui'
 import {
   $ButtonToggle as $AeleaButtonToggle,
   $Button,
@@ -41,7 +50,7 @@ export const $ButtonToggle = <T>(config: I$ButtonToggle<T>) =>
 
 export const $defaultButtonPrimary = $defaultButtonContainer(
   style({
-    color: palette.message,
+    color: 'white',
     whiteSpace: 'nowrap',
     fill: 'white',
     borderRadius: '30px',
@@ -87,20 +96,30 @@ export const $defaultMiniButtonSecondary = $defaultButtonSecondary(
   })
 )
 
-export const $defaultMiniButtonPrimary = $defaultButtonPrimary(
+export const $defaultButtonPrimaryOutline = $defaultButtonPrimary(
+  style({
+    backgroundColor: 'transparent',
+    border: '1px solid',
+    borderColor: palette.primary,
+    color: palette.message,
+    fill: palette.message
+  }),
+  stylePseudo(':hover', { backgroundColor: palette.primary, color: 'white', fill: 'white' })
+)
+
+export const $defaultMiniButtonPrimary = $defaultButtonPrimaryOutline(
   style({
     alignSelf: 'center',
     height: '28px',
     padding: '0 10px',
-    fontSize: text.xs,
-    backgroundColor: 'transparent',
-    border: '1px solid',
-    borderColor: palette.primary
-  }),
-  stylePseudo(':hover', { backgroundColor: palette.primary })
+    fontSize: text.xs
+  })
 )
 
 export const $ButtonPrimary = (config: I$Button) => $keyboardOperableButton($Button, $defaultButtonPrimary, config)
+
+export const $ButtonPrimaryOutline = (config: I$Button) =>
+  $keyboardOperableButton($Button, $defaultButtonPrimaryOutline, config)
 
 export const $ButtonSecondary = (config: I$Button) => $keyboardOperableButton($Button, $defaultButtonSecondary, config)
 
@@ -128,36 +147,35 @@ export const $defaultButtonCircularContainer = $defaultButtonContainer(
   stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) })
 )
 
+const $clickSurfacingButton = (
+  $render: (bindClick: (container: INodeCompose<HTMLButtonElement>) => INodeCompose<HTMLButtonElement>) => I$Slottable
+) =>
+  component(([click, clickTether]: IBehavior<INode<HTMLButtonElement>, PointerEvent>) => [
+    $render((container) => container(clickTether(nodeEvent('click')))),
+    { click }
+  ])
+
 export const $ButtonCircular = ({
   $iconPath,
   disabled = empty,
   $container = $defaultButtonCircularContainer
 }: I$ButtonCircular) =>
-  // aelea's $ButtonIcon binds activation to `pointerup`, which never fires on Enter/Space.
-  // Wrap it so the exposed `click` output is driven by the native DOM `click` event instead,
-  // which fires exactly once per pointer tap AND once per Enter/Space on a native <button>.
-  component(([click, clickTether]: IBehavior<INode<HTMLButtonElement>, PointerEvent>) => [
+  $clickSurfacingButton((bindClick) =>
     $ButtonIcon({
-      $container: $container(clickTether(nodeEvent('click'))),
+      $container: bindClick($container),
       disabled,
       $content: $icon({ $content: $iconPath, viewBox: '0 0 32 32' })
-    })({}),
-    { click }
-  ])
+    })({})
+  )
 
-// Shared wrapper that restores keyboard operability for aelea's text buttons.
-// The upstream $Button binds activation to `pointerup` (never fires on Enter/Space), so we
-// discard its output and instead surface the native DOM `click` event — which a native <button>
-// emits exactly once for a pointer tap and once for keyboard Enter/Space, with no double-firing.
 const $keyboardOperableButton = (
   $base: typeof $Button,
   $defaultContainer: INodeCompose<HTMLButtonElement>,
   { $container = $defaultContainer, ...config }: I$Button
 ) =>
-  component(([click, clickTether]: IBehavior<INode<HTMLButtonElement>, PointerEvent>) => [
+  $clickSurfacingButton((bindClick) =>
     $base({
-      $container: $container(clickTether(nodeEvent('click'))),
+      $container: bindClick($container),
       ...config
-    })({}),
-    { click }
-  ])
+    })({})
+  )

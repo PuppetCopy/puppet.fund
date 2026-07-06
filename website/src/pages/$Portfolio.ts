@@ -1,7 +1,7 @@
 import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
-import { predictFundAccount, predictPuppetAccount, symbolForBaseTokenId } from '@puppet/sdk/account'
+import { predictFundAccount, predictPuppetAccount, } from '@puppet/sdk/account'
 import type { IntervalTime } from '@puppet/sdk/const'
-import { applyFactor, getDuration, getRegisteredTokenDescription, readablePercentage } from '@puppet/sdk/core'
+import { applyFactor, getDuration, readablePercentage } from '@puppet/sdk/core'
 import type { IFund } from '@puppet/sdk/schema'
 import {
   computeClaimable,
@@ -23,7 +23,6 @@ import {
   start,
   switchLatest,
   switchPromises,
-  tap
 } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, style } from 'aelea/ui'
@@ -31,7 +30,7 @@ import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { getAddress, type Hex, isAddressEqual } from 'viem'
 import type { Address } from 'viem/accounts'
-import { $arrowRight, $icon, $infoLabel, $infoTooltip, $navLink, $puppeteer, text } from '@/ui-components'
+import { $arrowRight, $icon, $infoLabel, $infoTooltip, $navLink, $puppeteer, $spinner, text } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
 import { $puppetLogo } from '../common/$icons.js'
 import { $heading3 } from '../common/$text.js'
@@ -43,11 +42,13 @@ import { $WalletConnect } from '../components/$WalletConnect.js'
 import { $usdTimeline, type ITimelinePoint } from '../components/participant/$ProfilePeformanceTimeline.js'
 import { $FundEditor } from '../components/portfolio/$FundEditor.js'
 import { $FundSell } from '../components/portfolio/$FundSell.js'
+import { $RecognizeBanner } from '../components/portfolio/$RecognizeBanner.js'
 import { $SubscribeEditor } from '../components/portfolio/$SubscribeEditor.js'
 import { $TokenBalanceEditor } from '../components/portfolio/$TokenBalanceEditor.js'
 import type {
   IAllocateDraft,
   IClaimDraft,
+  IClaimRouteDraft,
   IDepositDraft,
   IFundSwapDraft,
   IRecognizeFundDraft,
@@ -59,6 +60,7 @@ import context from '../io/context.js'
 import { fetchMasterPoolState, fetchPuppetBalanceTimeline, type ISubscribeRule } from '../io/datastore/query.js'
 import { liveTotalUsdValue } from '../io/totalValue.js'
 import type { connectWallet, IConnectedWallet } from '../wallet/index.js'
+import { $fundOrGetFundedCta } from './$FundQuickstart.js'
 import type { IPageFilterParams } from './types.js'
 
 const $timelineCard = (
@@ -92,6 +94,55 @@ const $timelineCard = (
     })({ changeActivityTimeframe: changeActivityTimeframeTether() })
   )
 
+const $sectionHeader = (
+  title: string,
+  tooltip: string,
+  opts?: { $glyph?: I$Node; $trailing?: I$Node; role?: string }
+): I$Node => {
+  const $tip = $infoTooltip(
+    $node(style({ display: 'block', maxWidth: '280px', whiteSpace: 'normal', fontSize: text.sm }))($text(tooltip)),
+    colorShade(palette.foreground, 60),
+    '20px'
+  )
+  const $inner = [
+    ...(opts?.$glyph ? [opts.$glyph] : []),
+    $heading3($text(title)),
+    ...(opts?.role
+      ? [
+          $node(
+            style({
+              fontSize: text.xs,
+              color: palette.foreground,
+              border: `1px solid ${colorShade(palette.foreground, 25)}`,
+              borderRadius: '4px',
+              padding: '1px 6px',
+              whiteSpace: 'nowrap'
+            })
+          )($text(opts.role))
+        ]
+      : []),
+    $tip
+  ]
+  return opts?.$trailing
+    ? $row(
+        spacing.small,
+        style({
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          paddingBottom: '12px',
+          borderBottom: `1px solid ${colorShade(palette.foreground, 15)}`
+        })
+      )($row(spacing.small, style({ alignItems: 'center' }))(...$inner), opts.$trailing)
+    : $row(
+        spacing.small,
+        style({
+          alignItems: 'center',
+          paddingBottom: '12px',
+          borderBottom: `1px solid ${colorShade(palette.foreground, 15)}`
+        })
+      )(...$inner)
+}
+
 interface I$Portfolio extends IPageFilterParams {
   hideBalances: IStream<boolean>
   draftDepositList: IStream<IDepositDraft[]>
@@ -101,7 +152,7 @@ interface I$Portfolio extends IPageFilterParams {
   draftRedeemList: IStream<IRedeemDraft[]>
   draftMatchingRuleList: IStream<ISubscribeRule[]>
   walletQuery: IStream<Promise<IConnectedWallet | null>>
-  walletState: IStream<ISubaccountState | null>
+  walletState: IStream<Promise<ISubaccountState | null>>
   userMatchingRuleQuery: IStream<Promise<ISubscribeRule[]>>
 }
 
@@ -110,7 +161,7 @@ export const $Portfolio = ({
   activityTimeframe,
   collateralTokenList,
   walletQuery,
-  walletState: rootState,
+  walletState: rootStateQuery,
   userMatchingRuleQuery,
   draftDepositList,
   draftWithdrawList,
@@ -127,6 +178,7 @@ export const $Portfolio = ({
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
       [changeMasterDraft, changeMasterDraftTether]: IBehavior<IAllocateDraft>,
       [changeSwapDraft, changeSwapDraftTether]: IBehavior<IFundSwapDraft>,
+      [changeClaimDraft, changeClaimDraftTether]: IBehavior<IClaimRouteDraft>,
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
       [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft | IRecognizeFundDraft>,
       [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>,
@@ -138,6 +190,7 @@ export const $Portfolio = ({
           .then(reg => [...(reg.get(HUB_CHAIN_ID)?.values() ?? [])].map(i => i.token).filter(t => t !== PROTOCOL.nativeToken))
       )
       const walletState: IStream<IConnectedWallet | null> = op(walletQuery, switchPromises, state())
+      const rootState: IStream<ISubaccountState | null> = op(rootStateQuery, switchPromises, state())
 
       interface IPortfolioSectionParams {
         root: ISubaccountState | null
@@ -160,8 +213,6 @@ export const $Portfolio = ({
 
       const balanceTimelineQuery: IStream<Promise<ITimelinePoint[]>> = op(
         combine({ tf: activityTimeframe, root: rootState, registry: tokenRegistryValue }),
-        // rootState re-emits on every optimistic attest/settlement fold; only refetch the (multi-request) timeline
-        // when an input that actually changes the series moves.
         skipRepeatsWith(
           (a, b) =>
             a.tf === b.tf &&
@@ -174,22 +225,24 @@ export const $Portfolio = ({
         map(p => fetchPuppetBalanceTimeline(p.registry, p.root ? [p.root] : [], p.tf))
       )
 
-      // Live, optimistic total that drives the chart headline so a settled withdraw tweens the value the instant
-      // rootState folds it, independent of the (slower, multi-request) timeline re-fetch behind the line.
       const liveUsd = liveTotalUsdValue(rootState, tokenRegistryValue)
 
-      const $lead = $row(style({ flex: 1 }))(
-        $SelectCollateralToken({ selectedList: collateralTokenList, tokenList: registeredCollateralList })({
-          changeCollateralTokenList: selectCollateralTokenListTether()
-        })
-      )
+      // The collateral filter acts on the BALANCES list, so it lives next to that section's header (it used to sit
+      // in the timeline chart's corner, divorced from its effect); the chart header keeps a spacer for its layout.
+      const $collateralFilter = $SelectCollateralToken({
+        selectedList: collateralTokenList,
+        tokenList: registeredCollateralList
+      })({
+        changeCollateralTokenList: selectCollateralTokenListTether()
+      })
+      const $lead = $row(style({ flex: 1 }))()
 
       const $fundProfileByAddress = (fundAddress: Address): I$Node =>
         switchLatest(
           map(
             fund =>
               fund
-                ? $fundProfile({ master: fund.master, baseToken: fund.baseToken, name: fund.name }, 36)
+                ? $fundProfile({ master: fund.master, baseToken: fund.baseToken, name: fund.name }, 36, fund)
                 : $profileDisplay({ address: fundAddress, profileSize: 36 }),
             op(just(fetchMasterPoolState(fundAddress)), switchPromises, start(undefined))
           )
@@ -207,7 +260,9 @@ export const $Portfolio = ({
           $card(spacing.big, style({ flex: 1, width: '100%' }))(
             $timelineCard(hideBalances, balanceTimelineQuery, activityTimeframe, $lead, changeActivityTimeframeTether, liveUsd),
             switchLatest(
-              map(
+              start(
+                $column(style({ alignItems: 'center', padding: '80px 0' }))($spinner),
+                map(
                 (p: IPortfolioSectionParams) => {
                   if (!p.wallet)
                     return $column(
@@ -217,14 +272,35 @@ export const $Portfolio = ({
                       $heading3($text('Connect your wallet')),
                       $infoLabel(style({ maxWidth: '420px' }))(
                         $text(
-                          'Fund top traders and let them trade your capital on GMX, or run your own fund and get funded. Connect to see your balances, funds and open positions.'
+                          'Fund top traders and let them trade your capital on GMX and beyond, or run your own fund and get funded. Connect to see your balances, funds and open positions.'
                         )
                       ),
                       $WalletConnect()({ connect: connectTether() }),
                       $navText('/leaderboard', 'Browse traders →')
                     )
                   const wallet = p.wallet
-                  const signer = wallet.session?.signer ?? p.root?.signer ?? wallet.address
+                  const sessionSigner = wallet.session?.signer ?? p.root?.signer
+                  if (sessionSigner === undefined) {
+                    // The account identity is unknowable until the session-derivation signature: PA(user, sessionSigner)
+                    // is deterministic per wallet, but only once signed. NEVER fabricate a signer here — a phantom PA's
+                    // routes read as real balances/surpluses and quotes deliver funds to them (the stranded-WMON
+                    // incident). A deployed wallet chain-recovers its signer, so this state = a brand-new account. No
+                    // inline sign prompt on an explorable page: the session signature belongs to the ACTION path (the
+                    // drawer's bind step prompts on first submit — e.g. following a trader from the leaderboard).
+                    return $column(
+                      spacing.default,
+                      style({ alignItems: 'center', textAlign: 'center', padding: '40px 16px' })
+                    )(
+                      $heading3($text('Start your account')),
+                      $infoLabel(style({ maxWidth: '420px' }))(
+                        $text(
+                          'Your account and trading session are created with your first action. Create your own fund, or browse traders and follow one.'
+                        )
+                      ),
+                      $fundOrGetFundedCta()
+                    )
+                  }
+                  const signer = sessionSigner
                   const puppetAddress = predictPuppetAccount({ user: wallet.address, signer })
                   const puppetAccount: IStream<ISubaccountState> = op(
                     rootState,
@@ -232,42 +308,13 @@ export const $Portfolio = ({
                   )
                   const registeredIds = [...(p.registry.get(HUB_CHAIN_ID)?.keys() ?? [])]
 
-                  const $balanceEditor = (token: Hex, inlineNote?: string): I$Node => {
-                    // Deep-link: a ?action=deposit-<symbol> (or withdraw-) on arrival opens this token's editor once.
-                    // Read the param fresh and clear it on open, so a re-render does not re-open and a fresh navigation
-                    // re-arms it. The symbol is derived the same way the linking row builds it.
-                    const symbol =
-                      symbolForBaseTokenId(token) ??
-                      getRegisteredTokenDescription(tokenInfoFor(p.registry, HUB_CHAIN_ID, token).token).symbol
-                    const param = new URLSearchParams(location.search).get('action')
-                    const verb =
-                      param === `deposit-${symbol}`
-                        ? ('deposit' as const)
-                        : param === `withdraw-${symbol}`
-                          ? ('withdraw' as const)
-                          : null
-                    // state() so the open signal REPLAYS: on reload the editor mounts during the init storm and the
-                    // popover's open-state subscribes after this fires; a bare one-shot (just) would be lost to that
-                    // late consumer, leaving a half-open popover (no label, dead click). state replays the verb to it.
-                    const autoOpen = verb
-                      ? op(
-                          just(verb),
-                          tap(() => {
-                            const url = new URL(location.href)
-                            url.searchParams.delete('action')
-                            window.history.replaceState(null, '', `${url.pathname}${url.search}`)
-                          }),
-                          state()
-                        )
-                      : undefined
+                  const $balanceEditor = (token: Hex): I$Node => {
                     return $TokenBalanceEditor({
                       hideBalances,
                       accountState: puppetAccount,
                       token,
                       tokenRegistry: p.registry,
                       walletAccount: wallet,
-                      inlineNote,
-                      autoOpen,
                       draft: op(
                         combine({ dep: draftDepositList, wd: draftWithdrawList }),
                         map(
@@ -302,9 +349,7 @@ export const $Portfolio = ({
                     needsDepositIds.length === 0
                       ? $node()
                       : $column(spacing.default)(
-                          ...needsDepositIds.map(tid =>
-                            $balanceEditor(tid, 'Deposit to fund your pending allocation')
-                          )
+                          ...needsDepositIds.map(tid => $balanceEditor(tid))
                         )
                   const $depositList =
                     fundedIds.length === 0 && needsDepositIds.length === 0
@@ -326,8 +371,6 @@ export const $Portfolio = ({
 
                   const fundStubBase = stubSubaccountState({ user: wallet.address, signer })
                   const $fundRows = (p.root?.funds ?? []).map(fund => {
-                    // Multi-key CREATE2: each fund's address derives from its own
-                    // {master, baseToken, name}, not the bare puppet account.
                     const fundAddress = predictFundAccount({
                       master: puppetAddress,
                       baseToken: fund.baseToken,
@@ -348,7 +391,8 @@ export const $Portfolio = ({
                               funds: root.funds,
                               positions: root.positions,
                               chains: root.chains,
-                              lastTransactionHash: root.lastTransactionHash
+                              lastTransactionHash: root.lastTransactionHash,
+                              lastSettled: root.lastSettled
                             }
                           : fundStub
                       )
@@ -357,6 +401,14 @@ export const $Portfolio = ({
                       spacing.tiny,
                       style({ flex: 1 })
                     )(
+                      $node(style({ maxWidth: '520px', width: '100%', alignSelf: 'center' }))(
+                        $RecognizeBanner({
+                          master: puppetAddress,
+                          masterAccount: fundAddress,
+                          baseToken: fund.baseToken as Address,
+                          tokenRegistry: p.registry
+                        })({ change: changeFulfillDraftTether() })
+                      ),
                       $card2(
                         style({
                           maxWidth: '520px',
@@ -384,6 +436,7 @@ export const $Portfolio = ({
                         })({
                           changeDraft: changeMasterDraftTether(),
                           changeSwapDraft: changeSwapDraftTether(),
+                          changeClaimDraft: changeClaimDraftTether(),
                           changeRedeemDraft: changeRedeemDraftTether(),
                           changeFulfillDraft: changeFulfillDraftTether()
                         })
@@ -401,7 +454,6 @@ export const $Portfolio = ({
                       $SubscribeEditor({
                         master: rule.master,
                         name: rule.name,
-                        collateralToken: rule.baseToken,
                         baseToken: rule.baseToken,
                         userMatchingRuleQuery,
                         draftMatchingRuleList,
@@ -410,7 +462,7 @@ export const $Portfolio = ({
                         mini: true
                       })({ changeMatchRuleList: changeMatchRuleListTether() }),
                       $node(style({ color: palette.foreground, fontSize: text.sm, whiteSpace: 'nowrap' }))(
-                        $text(`Allow ${readablePercentage(rule.allocationRate)}`),
+                        $text(`Up to ${readablePercentage(rule.allocationRate)}`),
                         rule.throttlePeriod > 0n
                           ? $node(style({ color: colorShade(palette.foreground, 60), fontSize: text.xs }))(
                               $text(` · max 1 / ${getDuration(Number(rule.throttlePeriod))}`)
@@ -456,8 +508,6 @@ export const $Portfolio = ({
                     )
                   )
 
-                  // Pending (cart-draft) rules carry no resolved fund address yet, so they contribute nothing to this
-                  // already-ruled exclusion set; drop them before getAddress to avoid getAddress(undefined) throwing.
                   const ruledFunds = new Set(
                     [...activeRules, ...pendingRules].filter(r => r.fund).map(r => getAddress(r.fund as Address))
                   )
@@ -500,143 +550,72 @@ export const $Portfolio = ({
 
                   return $column(spacing.big, style({ padding: '16px 0' }))(
                     $column(spacing.default)(
-                      $row(
-                        spacing.small,
-                        style({
-                          alignItems: 'center',
-                          paddingBottom: '12px',
-                          borderBottom: `1px solid ${colorShade(palette.foreground, 15)}`
-                        })
-                      )(
-                        $heading3($text('Balances')),
-                        $infoTooltip(
-                          $node(
-                            style({ display: 'block', maxWidth: '280px', whiteSpace: 'normal', fontSize: text.sm })
-                          )(
-                            $text(
-                              'Your overall balance in the app, held by your smart account. It funds the traders you follow, drawn from this balance at match time. Deposit from any token on any chain, withdraw anytime.'
-                            )
-                          ),
-                          colorShade(palette.foreground, 60),
-                          '20px'
-                        )
+                      $sectionHeader(
+                        'Balances',
+                        'Your overall balance in the app, held by your smart account. It funds the traders you follow, drawn from this balance at match time. Deposit from any token on any chain, withdraw anytime.',
+                        { $trailing: $collateralFilter }
                       ),
                       $depositList
                     ),
                     $column(spacing.default)(
-                      $row(
-                        spacing.small,
-                        style({
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          paddingBottom: '12px',
-                          borderBottom: `1px solid ${colorShade(palette.foreground, 15)}`
-                        })
-                      )(
-                        $row(spacing.small, style({ alignItems: 'center' }))(
-                          $icon({
+                      $sectionHeader(
+                        'Funds',
+                        'Funds you run as the master trader. Each is a smart account that puppets fund; you trade the pooled capital on GMX and beyond, and share in the performance.',
+                        {
+                          role: 'You master',
+                          $glyph: $icon({
                             $content: $puppeteer,
                             width: '18px',
                             viewBox: '0 0 32 32',
                             fill: palette.message,
                             svgOps: style({ display: 'block' })
                           }),
-                          $heading3($text('Funds')),
-                          $infoTooltip(
-                            $node(
-                              style({ display: 'block', maxWidth: '280px', whiteSpace: 'normal', fontSize: text.sm })
-                            )(
-                              $text(
-                                'Funds you run as the master trader. Each is a smart account that puppets fund; you trade the pooled capital on GMX and share in the performance.'
-                              )
-                            ),
-                            colorShade(palette.foreground, 60),
-                            '20px'
-                          )
-                        ),
-                        $navText('/', '+ Create a Fund', () => {
-                          let tries = 0
-                          const scrollToQuickstart = () => {
-                            const el = document.getElementById('hello-create')
-                            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                            else if (tries++ < 30) requestAnimationFrame(scrollToQuickstart)
-                          }
-                          requestAnimationFrame(scrollToQuickstart)
-                        })
+                          $trailing: $navText('/', '+ Create a Fund', () => {
+                            let tries = 0
+                            const scrollToQuickstart = () => {
+                              const el = document.getElementById('hello-create')
+                              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                              else if (tries++ < 30) requestAnimationFrame(scrollToQuickstart)
+                            }
+                            requestAnimationFrame(scrollToQuickstart)
+                          })
+                        }
                       ),
                       ...($fundRows.length > 0
                         ? $fundRows
                         : [$emptyHint('No funds yet. Create one to get funded to trade.')])
                     ),
-                    ...($subscriptionGroups.length === 0
-                      ? []
-                      : [
-                          $column(spacing.default)(
-                            $row(
-                              spacing.small,
-                              style({
-                                alignItems: 'center',
-                                paddingBottom: '12px',
-                                borderBottom: `1px solid ${colorShade(palette.foreground, 15)}`
-                              })
-                            )(
-                              $icon({
-                                $content: $puppetLogo,
-                                width: '18px',
-                                viewBox: '0 0 32 32',
-                                fill: palette.message,
-                                svgOps: style({ display: 'block' })
-                              }),
-                              $heading3($text('Puppet Account')),
-                              $infoTooltip(
-                                $node(
-                                  style({
-                                    display: 'block',
-                                    maxWidth: '280px',
-                                    whiteSpace: 'normal',
-                                    fontSize: text.sm
-                                  })
-                                )(
-                                  $text(
-                                    'Traders you fund, grouped by the token each fund trades in. Deposit that token here to fund the allocations under it; an unfunded allocation is simply skipped at match time.'
-                                  )
-                                ),
-                                colorShade(palette.foreground, 60),
-                                '20px'
-                              )
-                            ),
-                            ...$subscriptionGroups
-                          )
-                        ]),
+                    $column(spacing.default)(
+                      $sectionHeader(
+                        'Funding rules',
+                        'Traders you fund, grouped by the token each fund trades in. Deposit that token here to fund the allocations under it; an unfunded allocation is simply skipped at match time.',
+                        {
+                          role: 'You follow',
+                          $glyph: $icon({
+                            $content: $puppetLogo,
+                            width: '18px',
+                            viewBox: '0 0 32 32',
+                            fill: palette.message,
+                            svgOps: style({ display: 'block' })
+                          })
+                        }
+                      ),
+                      ...($subscriptionGroups.length > 0
+                        ? $subscriptionGroups
+                        : [
+                            $row(spacing.small, style({ alignItems: 'center' }))(
+                              $emptyHint('Not following any traders yet.'),
+                              $navText('/leaderboard', 'Browse traders →')
+                            )
+                          ])
+                    ),
                     ...(redemptionFunds.length === 0
                       ? []
                       : [
                           $column(spacing.default)(
-                            $row(
-                              spacing.small,
-                              style({
-                                alignItems: 'center',
-                                paddingBottom: '12px',
-                                borderBottom: `1px solid ${colorShade(palette.foreground, 15)}`
-                              })
-                            )(
-                              $heading3($text('Pending redemptions')),
-                              $infoTooltip(
-                                $node(
-                                  style({
-                                    display: 'block',
-                                    maxWidth: '280px',
-                                    whiteSpace: 'normal',
-                                    fontSize: text.sm
-                                  })
-                                )(
-                                  $text(
-                                    'Funds you hold shares in or have queued to redeem, outside your active funding. Claim once the manager processes the queue.'
-                                  )
-                                ),
-                                colorShade(palette.foreground, 60),
-                                '20px'
-                              )
+                            $sectionHeader(
+                              'Pending redemptions',
+                              'Funds you hold shares in or have queued to redeem, outside your active funding. Claim once the manager processes the queue.'
                             ),
                             ...redemptionFunds.map($redemptionRow)
                           )
@@ -662,6 +641,7 @@ export const $Portfolio = ({
                     draftRules: draftMatchingRuleList
                   })
                 )
+                )
               )
             )
           )
@@ -674,6 +654,7 @@ export const $Portfolio = ({
           changeRedeemDraft,
           changeAllocateDraft: changeMasterDraft,
           changeSwapDraft,
+          changeClaimDraft,
           changeFulfillDraft,
           changeMatchRuleList
         }

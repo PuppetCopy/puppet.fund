@@ -43,10 +43,6 @@ import {
   $defaultOptionContainer as $aeleaOptionContainer
 } from './$Dropdown.js'
 
-// Array utility functions (previously from @most/prelude)
-const append = <T>(item: T, array: T[]): T[] => [...array, item]
-const remove = <T>(index: number, array: T[]): T[] => array.filter((_, i) => i !== index)
-
 export const $defaultDropMultiSelectOption = $row(
   spacing.small,
   style({
@@ -61,6 +57,8 @@ export const $defaultDropMultiSelectOption = $row(
 export const $defaultOptionContainer = $row(
   style({
     backgroundColor: palette.primary,
+    color: 'white',
+    fill: 'white',
     paddingLeft: '4px',
     cursor: 'default',
     alignItems: 'center',
@@ -118,6 +116,8 @@ export const $DropMultiSelect = <T>({
         anchorEl?.click()
         anchorEl?.focus()
       }
+      const findIdx = (seed: T[], next: T) =>
+        getId ? seed.findIndex(item => getId(item) === getId(next)) : seed.indexOf(next)
       return [
         $Dropdown({
           $anchor: $row(
@@ -203,26 +203,16 @@ export const $DropMultiSelect = <T>({
           select: merge(
             sampleMap(
               (seed, next) => {
-                const matchedIndex = getId ? seed.findIndex(item => getId(item) === getId(next)) : seed.indexOf(next)
-
-                if (matchedIndex === -1) {
-                  return append(next, seed)
-                }
-
-                return remove(matchedIndex, seed)
+                const i = findIdx(seed, next)
+                return i === -1 ? [...seed, next] : seed.filter((_, x) => x !== i)
               },
               value,
               select
             ),
             sampleMap(
               (seed, next) => {
-                const matchedIndex = getId ? seed.findIndex(item => getId(item) === getId(next)) : seed.indexOf(next)
-
-                if (matchedIndex !== -1) {
-                  return remove(matchedIndex, seed)
-                }
-
-                return seed
+                const i = findIdx(seed, next)
+                return i === -1 ? seed : seed.filter((_, x) => x !== i)
               },
               value,
               pluck

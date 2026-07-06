@@ -9,7 +9,7 @@ import {
   $anchor,
   $ButtonSecondary,
   $defaultButtonPrimary,
-  $defaultButtonSecondary,
+  $defaultButtonPrimaryOutline,
   $icon,
   text
 } from '@/ui-components'
@@ -37,7 +37,7 @@ export const $enableSessionDisclaimer = (): I$Node[] => [
     $column(spacing.tiny)(
       $node(style({ fontSize: text.xs, color: palette.message, lineHeight: '1.5' }))(
         $text(
-          'Puppet is in early beta on Arbitrum mainnet. These are real funds, so only deposit what you can afford to lose, and expect rough edges while we harden it.'
+          'Puppet is in early beta on mainnet. These are real funds, so only deposit what you can afford to lose, and expect rough edges while we harden it.'
         )
       ),
       $anchor(
@@ -72,7 +72,7 @@ export const $EnableSession = (wallet: IConnectedWallet) =>
       ),
       dismiss: empty,
       $target: $ButtonSecondary({
-        $container: $defaultButtonSecondary(style({ flexShrink: '0', alignSelf: 'center' })),
+        $container: $defaultButtonPrimaryOutline(style({ flexShrink: '0', alignSelf: 'center' })),
         $content: $text('Sign session')
       })({ click: popSessionTether() })
     })({}),

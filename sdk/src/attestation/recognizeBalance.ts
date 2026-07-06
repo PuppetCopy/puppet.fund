@@ -5,7 +5,8 @@ import type {
   IFundGate__RecognizeIntent,
   IPuppetGate__RecognizeIntent
 } from '@puppet/contracts/types'
-import type { Address, TypedDataDefinition } from 'viem'
+import { type Address, isAddressEqual, type TypedDataDefinition } from 'viem'
+import { predictPuppetAccount } from '../account/index.js'
 import { CompactContractError } from '../compact/error.js'
 import * as IntentLib from './intentLib.js'
 import { fundGateDomain, type IDeployProof, type IDraftContext, puppetGateDomain } from './shared.js'
@@ -74,6 +75,11 @@ export function attestRecognizeBalanceIntent(ctx: IRecognizeBalanceAttestContext
 // FA recognize (FundGate): route → signed crediting for the fund, master-signed, creates fund if missing.
 export function attestFundRecognizeIntent(ctx: IRecognizeBalanceAttestContext, input: IFundRecognizeInput) {
   verifyRecognize(ctx, input)
+
+  const derivedMaster = predictPuppetAccount(input.params)
+  if (!isAddressEqual(derivedMaster, input.fundParams.master)) {
+    throw new CompactContractError('Share__MasterMismatch', [derivedMaster, input.fundParams.master])
+  }
 
   const intent: IFundGate__RecognizeIntent = {
     params: input.params,

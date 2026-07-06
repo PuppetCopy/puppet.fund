@@ -25,12 +25,12 @@ import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import type { Address } from 'viem'
 import {
-  $ButtonPrimary,
+  $ButtonPrimaryOutline,
   $ButtonSecondary,
-  $defaultMiniButtonSecondary,
-  $defaultDropSelectAnchor,
-  $dropSelectJoinedListContainer,
   $DropSelect,
+  $defaultDropSelectAnchor,
+  $defaultMiniButtonSecondary,
+  $dropSelectJoinedListContainer,
   $icon,
   $infoLabel,
   text
@@ -184,7 +184,7 @@ export const $RoboTraitPicker = ({ initial, auto, initialTouched = false, size =
             $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.5' }))(
               $text('Skin reflects your PnL rank and headwear your ROI rank. Climb the leaderboard to unlock rarer traits.')
             ),
-            $ButtonPrimary({ $content: $text('Done') })({ click: saveTether() })
+            $ButtonPrimaryOutline({ $content: $text('Done') })({ click: saveTether() })
           )
         ),
         { changeTraits }

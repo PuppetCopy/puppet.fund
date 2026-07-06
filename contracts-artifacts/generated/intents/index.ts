@@ -160,6 +160,31 @@ export const FUND_GATE_INTENTS = {
       { name: 'outputAmount', type: 'uint256' }
       ]
     }
+  },
+  wrap: {
+    primaryType: 'WrapIntent',
+    types: {
+      WrapIntent: [
+      { name: 'params', type: 'AccountInitParams' },
+      { name: 'blockNumber', type: 'uint256' },
+      { name: 'deadline', type: 'uint256' },
+      { name: 'acceptableRelayFee', type: 'uint256' },
+      { name: 'nonce', type: 'uint256' },
+      { name: 'chainId', type: 'uint256' },
+      { name: 'fundParams', type: 'FundAccountInitParams' },
+      { name: 'amount', type: 'uint256' },
+      { name: 'unwrap', type: 'bool' }
+      ],
+      AccountInitParams: [
+      { name: 'user', type: 'address' },
+      { name: 'signer', type: 'address' }
+      ],
+      FundAccountInitParams: [
+      { name: 'master', type: 'address' },
+      { name: 'baseToken', type: 'address' },
+      { name: 'name', type: 'bytes32' }
+      ]
+    }
   }
 } as const satisfies IntentActionMap
 

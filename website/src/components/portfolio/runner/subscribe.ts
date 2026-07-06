@@ -1,3 +1,4 @@
+import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import { predictFundAccount, predictPuppetAccount } from '@puppet/sdk/account'
 import {
@@ -19,7 +20,7 @@ export async function buildMandateInput(drafts: ISubscribeDraft[], ctx: ExecCont
   const puppet = predictPuppetAccount(params)
   const baseToken = drafts[0]!.baseToken
 
-  const acceptableRelayFee = await resolveRelayFee(ctx, 'HubGate', 'mandate', baseToken, BigInt(drafts.length))
+  const acceptableRelayFee = await resolveRelayFee(ctx, HUB_CHAIN_ID, 'HubGate', 'mandate', baseToken, BigInt(drafts.length))
 
   const built = await Promise.all(
     drafts.map(async draft => {

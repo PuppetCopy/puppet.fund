@@ -1,27 +1,23 @@
 import { HUB_CHAIN_ID, PRECISION, PROTOCOL } from '@puppet/contracts/const'
 import DEPLOYMENTS from '@puppet/contracts/deployments'
 import type { IAccountLib__AccountInitParams, IFundAccountLib__FundAccountInitParams } from '@puppet/contracts/types'
-import { predictDepositRoute, predictFundAccount, predictShareToken } from '@puppet/sdk/account'
+import { predictDepositRoute, predictFundAccount, predictPuppetAccount, predictShareToken } from '@puppet/sdk/account'
 import type { IDepositRoute, ISwapInput } from '@puppet/sdk/attestation'
-import { formatThrownError } from '@puppet/sdk/compact'
 import {
   ADDRESS_ZERO,
   BYTES32_ZERO,
   CHAIN_LIST,
-  CHAIN_MAP,
   type ChainId,
-  HUB_CHAIN,
   IntervalTime
 } from '@puppet/sdk/const'
 import {
   applyFactor,
   getAccountExplorerUrl,
-  getRegisteredTokenDescription,
+  getChainTokenDescription,
   readableAddress,
   readablePnl,
   readableTokenAmount,
   readableTokenAmountLabel,
-  readableUnitAmount,
   sharesFor
 } from '@puppet/sdk/core'
 import { USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
@@ -53,58 +49,52 @@ import {
   start,
   switchLatest,
   switchMap,
-  switchPromises
 } from 'aelea/stream'
-import { type IBehavior, state } from 'aelea/stream-extended'
-import { $element, $node, $text, attr, component, type I$Node, type INode, nodeEvent, style } from 'aelea/ui'
+import { type IBehavior, multicast, state } from 'aelea/stream-extended'
+import { $element, $node, $text, attr, component, type I$Node, type INode, nodeEvent, style, styleBehavior } from 'aelea/ui'
 import { $column, $defaultPopoverContentContainer, $Popover, $row, spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
+import { palette } from 'aelea/ui-components-theme'
 import { type Address, formatUnits, getAddress, type Hex, isAddressEqual } from 'viem'
 import {
   $amountDisplay,
   $anchor,
   $ButtonPrimary,
-  $ButtonSecondary,
+  $ButtonPrimaryOutline,
   $ButtonToggle,
-  $DropSelect,
-  $defaultDropdownContainer,
   $defaultMiniButtonPrimary,
-  $defaultMiniButtonSecondary,
-  $defaultSliderContainer,
   $fundCompositionGauge,
-  $icon,
-  $infoTooltip,
-  $intermediateText,
-  $labeledDivider, 
-  $labeledValue,
-  $loadingValue,
+  $labeledDivider,
   $navLink,
-  $noteTooltip,
   $popoverCaret,
-  $Slider,
   $TokenAmountInput,
-  $wallet,
-  NOTE_TOOLTIP_HEIGHT,
   text
 } from '@/ui-components'
 import { uiStorage } from '@/ui-storage'
 import { depositSourceKey, type IDepositSource } from '../../app/localStoreSchema.js'
 import { routeSchema } from '../../app/routeSchema.js'
-import { $jazzicon } from '../../common/$avatar.js'
-import { $chainIcon, $tokenWithChainBadge } from '../../common/$chain.js'
-import { fetchSwapQuote, type ISwapQuote } from '../../io/bridge/swapQuote.js'
+import { chainFor } from '../../common/$contract.js'
+import type { ISwapQuote, ISwapRequest } from '../../io/bridge/swapQuote.js'
 import { fetchTokenBalances } from '../../io/chain/balances.js'
-import context, { displayRelayFeeMap } from '../../io/context.js'
+import context, { relayFeeFor } from '../../io/context.js'
 import { fetchFundAccountMetricList, fetchPuppetUsers } from '../../io/datastore/query.js'
-import { formatUsd, priceFor } from '../../io/gmx/priceFeed.js'
-import { liveFundPool } from '../../io/live.js'
+import { liveFundPool, liveRedeemPosition } from '../../io/live.js'
+import { formatUsd, priceFor } from '../../io/price.js'
 import { homePublicClient, type IConnectedWallet, publicClientMap } from '../../wallet/index.js'
-import { $fundProfile } from '../$AccountProfile.js'
+import { $fundProfile, $profileDisplay } from '../$AccountProfile.js'
 import { $FulfillEditor } from './$FulfillEditor.js'
 import { $fundAllocations, $fundBalances, $fundPositions } from './$fundHoldings.js'
-import { $optionRow, $tokenIconBySymbol, decorateOptionList, type ITokenInputOption } from './$tokenOption.js'
-import type { IAllocateDraft, IClaimDraft, IFundSwapDraft, IRecognizeFundDraft, IRedeemDraft, ISellDraft } from './draft.js'
-import { createFocusState } from './editorUtils.js'
+import { $SwapProviderFeeEditor, type ISelectedRoute } from './$SwapProviderFeeEditor.js'
+import { $tokenSourcePicker, decorateOptionList, type ITokenInputOption } from './$tokenOption.js'
+import type { IAllocateDraft, IClaimDraft, IClaimRouteDraft, IFundSwapDraft, IRecognizeFundDraft, IRedeemDraft, ISellDraft } from './draft.js'
+import {
+  $editorPercentSlider,
+  $maxAmountButton,
+  $statRow,
+  $surplusAlertSlot,
+  amountUsdLabel,
+  createFocusState,
+  scaleByPercent
+} from './editorUtils.js'
 import { DEFAULT_DEADLINE_SEC, walletClientForChain } from './runner/_shared.js'
 import { gatherMatched } from './runner/allocate.js'
 
@@ -144,8 +134,10 @@ export const $FundEditor = ({
       [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
       [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft | IRecognizeFundDraft>,
       [changeSwapDraft, changeSwapDraftTether]: IBehavior<IFundSwapDraft>,
+      [changeClaimDraft, changeClaimDraftTether]: IBehavior<PointerEvent, IClaimRouteDraft>,
       [selectOption, selectOptionTether]: IBehavior<ITokenInputOption>,
-      [selectView, selectViewTether]: IBehavior<IFundView>
+      [selectView, selectViewTether]: IBehavior<IFundView>,
+      [selectedRoute, selectedRouteTether]: IBehavior<ISelectedRoute>
     ) => {
       type ISelSource = { chainId: number; isNative: boolean; token: Hex | null }
       const needsBridge = (sel: { chainId: number; token: Hex | null }, bid: Hex): boolean => {
@@ -256,13 +248,13 @@ export const $FundEditor = ({
 
       const $profile: I$Node = switchLatest(
         map(
-          f =>
+          p =>
             $navLink({
               route: routeSchema.fund.detail,
-              params: { address: predictFundAccount(f) },
-              $content: $fundProfile(f, 48)
+              params: { address: predictFundAccount(p.identity) },
+              $content: $fundProfile(p.identity, 48, p.row)
             }),
-          fund
+          combine({ identity: fund, row: fundQuery })
         )
       )
 
@@ -308,7 +300,7 @@ export const $FundEditor = ({
         switchMap((p): IStream<bigint | null> => {
           const token = p.sel.token ?? p.bid
           if (token === null) return just(null)
-          return map(fm => (fm === null ? null : fm.swap.relayFee), fromPromise(displayRelayFeeMap(token)))
+          return map(fm => (fm === null ? null : fm.swap.relayFee), relayFeeFor(token))
         }),
         skipRepeats,
         state(null)
@@ -320,7 +312,7 @@ export const $FundEditor = ({
           if (token === null) return just(null)
           // Allocate deploys the fund clone on first use (Allocate.sol), so its relay fee
           // covers both the seeded top-up and the first-time fund creation.
-          return map(fm => (fm === null ? null : fm.allocate.relayFee), fromPromise(displayRelayFeeMap(token)))
+          return map(fm => (fm === null ? null : fm.allocate.relayFee), relayFeeFor(token))
         }),
         skipRepeats,
         state(null)
@@ -343,14 +335,7 @@ export const $FundEditor = ({
         }),
         state(0n)
       )
-      const sliderAmount: IStream<bigint> = sampleMap(
-        (bal, pct) => {
-          const bp = BigInt(Math.round(Math.max(0, Math.min(1, pct)) * 10000))
-          return (bal * bp) / 10000n
-        },
-        spendableValue,
-        sliderPercent
-      )
+      const sliderAmount: IStream<bigint> = sampleMap(scaleByPercent, spendableValue, sliderPercent)
       const maxAmount: IStream<bigint> = sampleMap(bal => bal, spendableValue, clickMax)
       const draftValue: IStream<IAllocateDraft | null> = draft ?? just(null)
       const draftHydration: IStream<bigint> = map(d => d?.masterAmount ?? 0n, draftValue)
@@ -381,82 +366,60 @@ export const $FundEditor = ({
         state(0n)
       )
 
-      type IQuoteStatus =
-        | { status: 'idle'; quote: ISwapQuote | null; forInput?: bigint }
-        | { status: 'error'; quote: null; message: string }
+      // The allocate sweep reads predictDepositRoute(master PA); quote the bridge delivery to THAT route, derived
+      // from the same {user, signer} pair the runner binds (a.account/a.signer alone can drift from it).
       const quoteRouteAccount: IStream<Address> = op(
         account,
-        map(a => a.signer),
+        // user is optional on ISubaccountState (unresolved session); no user => no PA to derive, hold the quote.
+        filter(a => a.user !== undefined),
+        map(a => predictPuppetAccount({ user: a.user as Address, signer: a.signer })),
         skipRepeats
       )
-      const quoteTrigger = op(
-        combine({ sel: sourceSel, bid: baseToken, amount: value, surplus: originSurplus }),
-        skipRepeatsWith(
-          (a, b) =>
-            a.bid === b.bid &&
-            a.amount === b.amount &&
-            a.surplus === b.surplus &&
-            a.sel.chainId === b.sel.chainId &&
-            a.sel.token === b.sel.token &&
-            a.sel.isNative === b.sel.isNative
-        )
-      )
-      const quoteParams = debounce(
-        200,
-        sampleMap(
-          (snap, t) => ({ ...t, allocFee: snap.allocFee, routeAccount: snap.routeAccount, bridgeFee: snap.bridgeFee }),
-          combine({ allocFee: inputAllocateFee, routeAccount: quoteRouteAccount, bridgeFee: inputBridgeFee }),
-          quoteTrigger
-        )
-      )
-      const quoteFetch: IStream<Promise<IQuoteStatus>> = op(
-        quoteParams,
-        map(async (p): Promise<IQuoteStatus> => {
-          if (p.bid === null) return { status: 'idle', quote: null }
+      // Plain combine, never sample: a late fee/routeAccount arrival re-derives the request instead of being dropped
+      // by a sample gate that nothing re-triggers. $SwapProviderFeeEditor owns debounce + sameRequest dedupe.
+      const quoteParams = combine({
+        sel: sourceSel,
+        bid: baseToken,
+        amount: value,
+        surplus: originSurplus,
+        allocFee: inputAllocateFee,
+        routeAccount: quoteRouteAccount,
+        bridgeFee: inputBridgeFee
+      })
+      const request: IStream<ISwapRequest | null> = multicast(
+        map(p => {
+          if (p.bid === null) return null
           const token = p.sel.isNative ? wrappedNativeAddressOf(p.sel.chainId as ChainId) : (p.sel.token ?? p.bid)
-          if (!needsBridge(p.sel, p.bid) || p.amount + p.surplus === 0n) return { status: 'idle', quote: null }
+          if (!needsBridge(p.sel, p.bid) || p.amount + p.surplus === 0n) return null
           const inputToken = tokenRegistry.get(p.sel.chainId as ChainId)?.get(token)?.token
-          if (!inputToken) return { status: 'idle', quote: null }
-          // Relay fee unpriceable -> nothing to quote yet (the Save gate blocks on the same null).
-          if (p.allocFee === null || p.bridgeFee === null) return { status: 'idle', quote: null }
+          if (!inputToken) return null
+          if (p.allocFee === null || p.bridgeFee === null) return null
           const input =
             p.amount === 0n
               ? p.surplus > p.bridgeFee
                 ? p.surplus - p.bridgeFee
                 : 0n
               : p.amount + p.allocFee + p.surplus
-          if (input === 0n) return { status: 'idle', quote: null }
-          try {
-            const quote = await fetchSwapQuote({
-              originChainId: p.sel.chainId,
-              destinationChainId: HUB_CHAIN_ID,
-              inputToken,
-              outputToken: tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, p.bid).token,
-              inputAmount: input,
-              route: predictDepositRoute(p.routeAccount),
-              crossToken: token !== p.bid
-            })
-            return { status: 'idle', quote, forInput: input }
-          } catch (err) {
-            console.error('[$FundEditor.quoteFetch] quote failed', err)
-            return { status: 'error', quote: null, message: formatThrownError(err) }
+          if (input === 0n) return null
+          return {
+            originChainId: p.sel.chainId,
+            destinationChainId: HUB_CHAIN_ID,
+            inputToken,
+            outputToken: tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, p.bid).token,
+            inputAmount: input,
+            route: predictDepositRoute(p.routeAccount),
+            crossToken: token !== p.bid
           }
-        }),
-        state()
-      )
-      const quoteQuery: IStream<IQuoteStatus> = op(
-        quoteFetch,
-        switchPromises,
-        state({ status: 'idle', quote: null } as IQuoteStatus)
+        }, quoteParams)
       )
 
       const effectiveBase: IStream<bigint> = op(
-        combine({ sel: sourceSel, bid: baseToken, q: quoteQuery, value }),
+        combine({ sel: sourceSel, bid: baseToken, route: selectedRoute, value }),
         map(p => {
           if (p.bid === null) return 0n
           const needsQuote = needsBridge(p.sel, p.bid)
           if (!needsQuote) return p.value
-          return p.q.status === 'idle' ? (p.q.quote?.outputAmount ?? 0n) : 0n
+          return p.route.quote?.outputAmount ?? 0n
         }),
         state(0n)
       )
@@ -544,7 +507,7 @@ export const $FundEditor = ({
         switchMap((p): IStream<bigint | null> =>
           p.bid === null
             ? just(null)
-            : map(fm => (fm === null ? null : fm.allocate.relayFee), fromPromise(displayRelayFeeMap(p.bid)))
+            : map(fm => (fm === null ? null : fm.allocate.relayFee), relayFeeFor(p.bid))
         ),
         state(null)
       )
@@ -579,7 +542,8 @@ export const $FundEditor = ({
             (p.bridgeFee !== null && bridgedAmount * PROTOCOL.maxRelayFeeBps >= p.bridgeFee * PRECISION.basisPoints)
           const balanceOk = p.value === 0n || transferAmount <= p.balance
           const meetsFloor = p.value === 0n ? p.total > (p.relayFee ?? p.floor) : p.total >= p.floor
-          return balanceOk && bridgeRatioOk && p.total > 0n && meetsFloor && p.nameOk && p.q.status !== 'error'
+          const needsRoute = p.bid !== null && needsBridge(p.src, p.bid) && p.value + p.originSurplus > 0n
+          return balanceOk && bridgeRatioOk && p.total > 0n && meetsFloor && p.nameOk && (!needsRoute || p.route.ready)
         },
         combine({
           value,
@@ -588,7 +552,7 @@ export const $FundEditor = ({
           floor: allocationFloor,
           relayFee: relayFeeRaw,
           nameOk,
-          q: quoteQuery,
+          route: selectedRoute,
           src: sourceSel,
           bid: baseToken,
           allocFee: inputAllocateFee,
@@ -630,11 +594,16 @@ export const $FundEditor = ({
                   walletBalance,
                   spender: DEPLOYMENTS[`Deposit:${HUB_CHAIN_ID}`].address
                 }
-        if ((inputToken === bid && srcChain === HUB_CHAIN_ID) || quote === null) return { wallet, swap: null }
+        if ((inputToken === bid && srcChain === HUB_CHAIN_ID) || quote === null || quote.route.kind === 'composed') {
+          return { wallet, swap: null }
+        }
         const swap: ISwapInput = {
           params,
           inputToken,
-          outputToken: inputToken,
+          // The leg's true output is the fund BASE on the hub (what the quote was fetched for), not the input echoed
+          // back: a local hub swap forwards/caps swap.outputToken on-chain, and the runner's identity re-quote
+          // (rebindSwapLeg) derives the route from it.
+          outputToken: bid,
           blockNumber: 0n,
           deadline,
           acceptableRelayFee: bridgeFee,
@@ -668,17 +637,13 @@ export const $FundEditor = ({
                   ? p.originSurplus - p.fee
                   : 0n
                 : p.amount + p.allocFee + p.originSurplus
-            if (
-              needsQuote &&
-              p.amount + p.originSurplus > 0n &&
-              (p.q.status !== 'idle' || !p.q.quote || p.q.forInput !== expectedInput)
-            ) {
+            if (needsQuote && p.amount + p.originSurplus > 0n && !p.route.ready) {
               return null
             }
             const params: IAccountLib__AccountInitParams = { user: p.acc.user, signer: p.acc.signer }
             const baseToken = tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, p.bid).token
             const master = p.acc.account
-            const quoteOut = p.q.quote?.outputAmount ?? 0n
+            const quoteOut = p.route.quote?.outputAmount ?? 0n
             const netQuoteOut = quoteOut > p.hubFee ? quoteOut - p.hubFee : 0n
             const masterAmount = (needsQuote ? netQuoteOut : p.amount) + p.proj.surplus
             const sizing = bridgeSizing(p.amount, p.allocFee, p.fee, needsQuote, p.originSurplus)
@@ -694,7 +659,7 @@ export const $FundEditor = ({
                     transferAmount,
                     p.src,
                     p.balance,
-                    needsQuote && p.q.status === 'idle' ? p.q.quote : null,
+                    needsQuote ? p.route.quote : null,
                     p.fee,
                     p.acc.chains.has(p.src.chainId),
                     p.originSurplus
@@ -723,7 +688,7 @@ export const $FundEditor = ({
             balance: balanceValue,
             bid: baseToken,
             name: fundNameHex,
-            q: quoteQuery,
+            route: selectedRoute,
             fee: inputBridgeFee,
             allocFee: inputAllocateFee,
             hubFee: relayFeeRaw,
@@ -750,7 +715,7 @@ export const $FundEditor = ({
       return [
         switchMap(({ acc: initial, bid }: { acc: ISubaccountState; bid: Hex }) => {
           const baseToken = tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, bid).token
-          const desc = getRegisteredTokenDescription(baseToken)
+          const desc = getChainTokenDescription(HUB_CHAIN_ID, baseToken)
           const masterAccount = initial.account
           const deployed = initial.chains.has(HUB_CHAIN_ID)
           const tokenPrice = priceFor(baseToken)
@@ -772,7 +737,7 @@ export const $FundEditor = ({
                   decimals: 18
                 }
               }
-              const srcDesc = getRegisteredTokenDescription(info.token)
+              const srcDesc = getChainTokenDescription(chain.id as ChainId, info.token)
               return {
                 chainId: chain.id,
                 address: info.token,
@@ -843,65 +808,19 @@ export const $FundEditor = ({
             })
           )
 
+          // Dedupe by the PRICE key, never the token id: every chain's native source shares the SAME 0xEeee marker
+          // as its token id, so a token-keyed dedupe swallowed ETH-native -> MON-native switches and kept pricing
+          // MON input at the ETH rate (999 MON rendered as $1.7M on 2026-07-03).
           const inputPrice: IStream<bigint | null> = op(
             sourceSelection,
-            skipRepeatsWith((a, b) => a.token === b.token),
+            skipRepeatsWith((a, b) => priceAddressOf(a.chainId, a.address) === priceAddressOf(b.chainId, b.address)),
             switchMap(src => priceFor(priceAddressOf(src.chainId, src.address)))
           )
-          const amountUsd: IStream<string> = map(
-            p => (p.amt === 0n ? '' : formatUsd(p.amt, p.price)),
-            combine({ amt: value, price: inputPrice })
-          )
-          const swapFeeText: IStream<Promise<string>> = switchMap(
-            p =>
-              map(async q => {
-                const s = await q
-                if (
-                  s.status !== 'idle' ||
-                  s.quote === null ||
-                  p.inPrice === null ||
-                  p.outPrice === null ||
-                  p.bridgeFee === null ||
-                  p.allocFee === null
-                )
-                  return '-'
-                const liveInput =
-                  p.amt === 0n
-                    ? p.surplus > p.bridgeFee
-                      ? p.surplus - p.bridgeFee
-                      : 0n
-                    : p.amt + p.allocFee + p.surplus
-                if (s.forInput !== liveInput) return '…'
-                // The fee is the value the quote consumed minus what it returns; the in-side must be the SAME input the
-                // quote was fetched for (liveInput, which includes route surplus), or the fee is understated/$0 whenever
-                // a surplus is carried.
-                const feeUsd =
-                  Number(formatUnits(liveInput * p.inPrice, USD_PRICE_DECIMALS)) -
-                  Number(formatUnits(s.quote.outputAmount * p.outPrice, USD_PRICE_DECIMALS))
-                const feeText = feeUsd <= 0 ? '$0.00' : `$${readableUnitAmount(feeUsd)}`
-                return `${feeText} via ${s.quote.provider}`
-              }, quoteFetch),
-            combine({
-              amt: value,
-              allocFee: inputAllocateFee,
-              surplus: originSurplus,
-              bridgeFee: inputBridgeFee,
-              inPrice: inputPrice,
-              outPrice: tokenPrice
-            })
-          )
-          const $swapResolution: I$Node = switchLatest(
-            map(
-              p => {
-                if (!needsBridge(p.sel, bid)) return empty
-                return $labeledValue(
-                  'Swap fee',
-                  p.amt + p.surplus === 0n ? $node($text('-')) : $intermediateText(swapFeeText)
-                )
-              },
-              combine({ sel: sourceSel, amt: value, surplus: originSurplus })
-            )
-          )
+          const amountUsd: IStream<string> = amountUsdLabel(value, inputPrice)
+          const $swapResolution: I$Node = $SwapProviderFeeEditor({
+            active: map(sel => needsBridge(sel, bid), sourceSel),
+            request
+          })({ selectRoute: selectedRouteTether() })
           const pendingAllocate: IStream<bigint> = draftHydration
           const pendingRedeem: IStream<IRedeemDraft | null> = op(redeemDraft ?? just(null), start(null))
           const fundValues = op(
@@ -922,18 +841,22 @@ export const $FundEditor = ({
           )
           // Live off the account stream, not a frozen `initial` snapshot: the card's accountIdentity skip-key is
           // {account, bid, hub-deployed} and does NOT include positions/shares, so a redeem/sell that settles (changing
-          // sharesHeld but not the identity) would leave a `just(initial...)` value stale and the Redeem button's
-          // enabled state wrong. The account stream re-emits the updated positions on settlement.
+          // sharesHeld but not the identity) would leave a frozen value stale and the Redeem button's enabled state
+          // wrong. Each account re-emission (settlement) re-reads the row. The master's share position is keyed
+          // holder = the MASTER PA (this fund-state's `signer`), NOT the fund — the fund's own subaccount positions
+          // (holder = fund) never contain it, so reading account.positions here always found nothing and kept Redeem
+          // disabled for every multi-fund PA.
           const redeemPosition: IStream<IFundPosition | undefined> = op(
             account,
-            map(a => a.positions.find(p => isAddressEqual(p.fund as Address, masterAccount))),
+            switchMap(() => liveRedeemPosition(getAddress(initial.signer), getAddress(masterAccount))),
             state()
           )
-          const $usdAmount = (valueSrc: IStream<bigint>): I$Node =>
+          const $valueBlock = (amount: bigint, amountColor: string = palette.foreground): I$Node =>
             $amountDisplay({
               hideBalances,
-              usd: map(p => formatUsd(p.v, p.price), combine({ v: valueSrc, price: tokenPrice })),
-              amount: map(v => readableTokenAmountLabel(desc, v), valueSrc),
+              usd: map(price => formatUsd(amount, price), tokenPrice),
+              amount: readableTokenAmountLabel(desc, amount),
+              amountColor: just(amountColor),
               usdFontSize: text.sm,
               align: 'flex-end'
             })
@@ -1031,7 +954,7 @@ export const $FundEditor = ({
               total: totalAllocation,
               floor: allocationFloor,
               nameOk,
-              q: quoteQuery,
+              route: selectedRoute,
               sel: sourceSelection,
               bid: just(bid),
               allocFee: inputAllocateFee,
@@ -1044,12 +967,8 @@ export const $FundEditor = ({
                 return 'Fund is liquidated: every share converts at the liquidation price. Pick a new name to start a fresh fund.'
               if (p.value > p.balance)
                 return `Exceeds available ${readableTokenAmountLabel({ decimals: p.sel.decimals, symbol: p.sel.symbol }, p.balance)}`
-              if (p.value > 0n && p.q.status === 'error') return p.q.message
-              if (p.value > 0n && p.q.quote) {
-                if (p.q.quote.isAmountTooLow)
-                  return `Below bridge minimum ${readableTokenAmount(desc, p.q.quote.limits.minDeposit)}`
-                if (p.value > p.q.quote.limits.maxDeposit) return 'Amount exceeds the bridge maximum'
-              }
+              if (p.value > 0n && p.route.error) return p.route.error
+              if (p.value > 0n && p.route.limitError) return p.route.limitError
               // Fee null = unpriceable: skip the fee-ratio/floor checks (the Save gate already blocks); don't fabricate.
               const sizing = needsBridge(p.sel, p.bid)
                 ? bridgeSizing(p.value, p.allocFee, p.bridgeFee, true, p.originSurplus)
@@ -1111,42 +1030,13 @@ export const $FundEditor = ({
             )
           )
 
-          const $maxButton = switchMap(
-            p => {
-              if (p.amt !== 0n) return empty
-              const ready = p.bal > 0n
-              return $element('button')(
-                attr({ type: 'button', disabled: ready ? null : 'true' }),
-                style({
-                  background: 'transparent',
-                  border: `1px solid ${colorShade(palette.foreground, 25)}`,
-                  borderRadius: '8px',
-                  padding: '2px 8px',
-                  fontSize: text.xs,
-                  fontWeight: '600',
-                  color: palette.foreground,
-                  cursor: ready ? 'pointer' : 'not-allowed',
-                  opacity: ready ? '1' : '0.4',
-                  alignSelf: 'center',
-                  flexShrink: '0'
-                }),
-                clickMaxTether(nodeEvent('click'))
-              )($text('Max'))
-            },
-            combine({ amt: value, bal: balanceValue })
-          )
+          const $maxButton = $maxAmountButton(value, balanceValue, clickMaxTether(nodeEvent('click')))
 
-          const $percentSlider = $Slider({
+          const $percentSlider = $editorPercentSlider({
             value: sliderValue,
-            step: 0.01,
-            orientation: 'horizontal',
             ariaLabel: 'Allocation percentage',
             disabled: sliderDisabled,
-            error: hasError,
-            motion: { stiffness: 800, damping: 58 },
-            $container: $defaultSliderContainer(
-              style({ height: '14px', width: '100%', margin: '-26px 0', flexShrink: '0' })
-            )
+            error: hasError
           })({ change: sliderPercentTether() })
 
           const srcPriceStream: IStream<bigint | null> = op(
@@ -1170,7 +1060,7 @@ export const $FundEditor = ({
               }
               if (p.origin > 0n && p.sel.token !== null && p.sel.chainId !== HUB_CHAIN_ID) {
                 const srcId = p.sel.isNative ? wrappedNativeAddressOf(p.sel.chainId as ChainId) : p.sel.token
-                const srcDesc = getRegisteredTokenDescription(tokenInfoFor(tokenRegistry, p.sel.chainId as ChainId, srcId).token)
+                const srcDesc = getChainTokenDescription(p.sel.chainId as ChainId, tokenInfoFor(tokenRegistry, p.sel.chainId as ChainId, srcId).token)
                 legs.push({ chainId: p.sel.chainId, amount: p.origin, decimals: srcDesc.decimals, symbol: srcDesc.symbol })
               }
               const usdProduct =
@@ -1191,81 +1081,31 @@ export const $FundEditor = ({
             })
           )
           const surplusRoute = predictDepositRoute(initial.signer)
-          const $alertSlot = $node(style({ height: NOTE_TOOLTIP_HEIGHT, display: 'flex', alignItems: 'center' }))(
-            switchMap(
-              p =>
-                p.msg
-                  ? $noteTooltip($text(p.msg))
-                  : $row(spacing.small, style({ alignItems: 'center' }))(
-                      $node(style({ color: palette.foreground, fontSize: text.xs }))($text(p.usd)),
-                      ...(p.surplus.legs.length > 0
-                        ? [
-                            $row(spacing.tiny, style({ alignItems: 'center' }))(
-                              $node(style({ color: palette.positive, fontSize: text.xs }))($text(`+ ${p.surplus.usd}`)),
-                              $infoTooltip(
-                                $column(spacing.small)(
-                                  $node(
-                                    $text(
-                                      `A prior deposit that reached your fund's route but was never recognized. It is recovered into the fund alongside this input.`
-                                    )
-                                  ),
-                                  $column(spacing.tiny)(
-                                    ...p.surplus.legs.map(leg =>
-                                      $row(spacing.small, style({ alignItems: 'center' }))(
-                                        $chainIcon(leg.chainId, 14),
-                                        $node(style({ color: palette.positive }))(
-                                          $text(`+${readableTokenAmount(leg.decimals, leg.amount)} ${leg.symbol}`)
-                                        ),
-                                        $anchor(
-                                          attr({
-                                            href: getAccountExplorerUrl(
-                                              surplusRoute,
-                                              CHAIN_MAP[leg.chainId as keyof typeof CHAIN_MAP] ?? HUB_CHAIN
-                                            ),
-                                            target: '_blank'
-                                          })
-                                        )($text(readableAddress(surplusRoute)))
-                                      )
-                                    )
-                                  )
-                                ),
-                                palette.positive,
-                                '16px'
-                              )
-                            )
-                          ]
-                        : [])
-                    ),
-              combine({ msg: alert, usd: start('', amountUsd), surplus: surplusInfo })
-            )
-          )
-
-          const $picker = $DropSelect({
-            $container: $defaultDropdownContainer(style({ alignItems: 'flex-end', flexShrink: '0' })),
-            value: selectedOption,
-            optionList,
-            $valueLabel: map((opt: ITokenInputOption) =>
-              $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
-                $tokenWithChainBadge($tokenIconBySymbol(opt.symbol, '32px'), opt.chainId, 32, 14),
-                $column(style({ gap: '1px', minWidth: '0' }))(
-                  $node(style({ fontWeight: '600', fontSize: text.base, color: palette.message }))($text(opt.symbol)),
-                  $row(spacing.small, style({ alignItems: 'center', color: palette.foreground, fontSize: text.xs }))(
-                    $icon({
-                      $content: $wallet,
-                      viewBox: '0 0 32 32',
-                      fill: palette.foreground,
-                      size: '12px',
-                      svgOps: style({ display: 'block' })
-                    }),
-                    opt.usdValue
-                      ? $loadingValue(opt.usdValue)
-                      : $text(opt.balance === null ? '-' : readableTokenAmount(opt.decimals, opt.balance))
+          const $alertSlot = $surplusAlertSlot({
+            alert,
+            amountUsd,
+            surplus: surplusInfo,
+            $note: $legs =>
+              $column(spacing.small)(
+                $node(
+                  $text(
+                    `An earlier deposit arrived at your fund but was never counted into its balance. It is recovered into the fund alongside this input.`
                   )
-                )
-              )
-            ),
-            $$option: map((opt: ITokenInputOption) => $optionRow(hideBalances, opt))
-          })({ select: selectOptionTether() })
+                ),
+                $legs
+              ),
+            $legAddress: leg =>
+              $anchor(
+                attr({
+                  href: getAccountExplorerUrl(surplusRoute, chainFor(leg.chainId)),
+                  target: '_blank'
+                })
+              )($text(readableAddress(surplusRoute)))
+          })
+
+          const $picker = $tokenSourcePicker({ hideBalances, value: selectedOption, optionList })({
+            select: selectOptionTether()
+          })
 
           const projectionValue = start(
             {
@@ -1277,32 +1117,34 @@ export const $FundEditor = ({
             },
             projection
           )
+          const $allocatedRow = switchMap(
+            p =>
+              $row(spacing.small, style({ alignItems: 'center' }))(
+                $row(spacing.small, style({ alignItems: 'baseline' }))(
+                  $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text('Allocated')),
+                  $node(style({ fontSize: text.xs, color: palette.foreground }))(
+                    $text(`${p.matched.puppetList.length} / ${p.totalPuppets} puppets`)
+                  )
+                ),
+                $node(style({ flex: 1 }))(),
+                $valueBlock(p.matched.totalAllocated)
+              ),
+            projectionValue
+          )
           const $puppetRows = switchMap(p => {
             if (p.matched.puppetList.length === 0) return empty
             return $column(spacing.small)(
               ...p.matched.puppetList.map((puppet, i) => {
                 const user = p.userByPuppet.get(puppet) ?? puppet
+                const amount = p.matched.allocatedAmountList[i] ?? 0n
                 return $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm }))(
-                  $jazzicon(user, 20),
-                  $node(style({ color: palette.foreground, fontFamily: 'monospace' }))($text(readableAddress(user))),
+                  $profileDisplay({ address: user, isFund: false, profileSize: 20 }),
                   $node(style({ flex: 1 }))(),
-                  $node(style({ color: palette.positive, fontWeight: 'bold' }))(
-                    $text(readableTokenAmount(desc, p.matched.allocatedAmountList[i] ?? 0n))
-                  )
+                  $valueBlock(amount)
                 )
               })
             )
           }, projectionValue)
-          const $projectionRows = $column(spacing.small)(
-            $labeledValue(
-              $text(
-                map(p => `Allocated (${p.matched.puppetList.length} / ${p.totalPuppets} puppets)`, projectionValue)
-              ),
-              $text(map(p => readableTokenAmount(desc, p.matched.totalAllocated), projectionValue))
-            ),
-            $puppetRows,
-            $swapResolution
-          )
 
           const $editor = $column(spacing.default, style({ minWidth: '380px' }))(
             $row(
@@ -1331,11 +1173,30 @@ export const $FundEditor = ({
               ),
               $picker
             ),
-            $node(style({ margin: '0 -26px', display: 'flex' }))($percentSlider),
-            $projectionRows,
-            $row(spacing.small, style({ alignItems: 'center' }))(
+            $column(spacing.small)(
+              $node(style({ margin: '0 -26px', display: 'flex' }))($percentSlider),
+              $puppetRows,
+              $allocatedRow
+            ),
+            $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm }))(
+              // Visibility toggle, NEVER a mount toggle: `alert` combines the route this component's own tether
+              // feeds, so unmounting it on alert would kill the route stream, flip the alert, and remount forever.
+              $node(
+                style({ display: 'flex' }),
+                styleBehavior(
+                  map(
+                    p =>
+                      p.a !== null
+                        ? { display: 'none' }
+                        : p.req === null
+                          ? { opacity: '.45', pointerEvents: 'none' }
+                          : { opacity: '1', pointerEvents: 'auto' },
+                    combine({ a: alert, req: request })
+                  )
+                )
+              )($swapResolution),
               $node(style({ flex: 1 }))(),
-              $ButtonSecondary({ disabled, $content: $text('Save') })({ click: clickSaveTether() })
+              $ButtonPrimaryOutline({ disabled, $content: $text('Save') })({ click: clickSaveTether() })
             )
           )
 
@@ -1345,12 +1206,6 @@ export const $FundEditor = ({
             baseToken,
             tokenRegistry
           })({ changeDraft: changeFulfillDraftTether() })
-
-          const $statRowClosed = (label: string, value: string) =>
-            $row(spacing.small, style({ alignItems: 'baseline', justifyContent: 'space-between' }))(
-              $node(style({ color: palette.foreground, fontSize: text.xs }))($text(label)),
-              $node(style({ color: palette.message, fontWeight: '600' }))($text(value))
-            )
 
           const fulfillDisabled: IStream<boolean> = op(
             combine({
@@ -1364,8 +1219,8 @@ export const $FundEditor = ({
 
           const settleTrigger = op(
             account,
-            map(a => a.lastTransactionHash),
-            skipRepeats
+            skipRepeatsWith((a, b) => a.lastTransactionHash === b.lastTransactionHash),
+            map(a => a.lastSettled)
           )
           const fundAddr = op(
             account,
@@ -1381,6 +1236,7 @@ export const $FundEditor = ({
                   tokenRegistry,
                   swapDraftList ?? just([]),
                   changeSwapDraftTether,
+                  changeClaimDraftTether,
                   settleTrigger
                 ),
               fundAddr
@@ -1406,12 +1262,15 @@ export const $FundEditor = ({
             optionList: ['balances', 'positions', 'allocations'] as IFundView[],
             $$option: map((v: IFundView) => $node($text(viewLabel[v])))
           })({ select: selectViewTether() })
-          const $viewContent = switchLatest(
-            map(
-              (v: IFundView) =>
-                v === 'balances' ? $balancesView : v === 'positions' ? $positionsView : $allocationsView,
-              viewState
-            )
+          const $viewPane = (view: IFundView, $content: I$Node): I$Node =>
+            $node(
+              style({ width: '100%' }),
+              styleBehavior(map(v => (v === view ? null : { display: 'none' }), viewState))
+            )($content)
+          const $viewContent = $column(style({ width: '100%' }))(
+            $viewPane('balances', $balancesView),
+            $viewPane('positions', $positionsView),
+            $viewPane('allocations', $allocationsView)
           )
 
           // A liquidated fund cannot raise more funding (every share converts at the liquidation price); the only
@@ -1427,8 +1286,8 @@ export const $FundEditor = ({
             disabled: fundDisabled,
             $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Fund'), $popoverCaret())
           })({ click: popEditorTether(constant('allocate')) })
-          const $redeemButton = $ButtonSecondary({
-            $container: $defaultMiniButtonSecondary,
+          const $redeemButton = $ButtonPrimary({
+            $container: $defaultMiniButtonPrimary,
             disabled: fulfillDisabled,
             $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Redeem'), $popoverCaret())
           })({ click: popEditorTether(constant('fulfill')) })
@@ -1464,7 +1323,7 @@ export const $FundEditor = ({
                                     `Fund liquidated at ${readableTokenAmount(desc, applyFactor(v.liquidationRate, 10n ** BigInt(PRECISION.shareTokenDecimals)))} ${desc.symbol} per share. Every share converts at this price; outstanding claims stay open.`
                                   )
                                 ),
-                                $statRowClosed(
+                                $statRow(
                                   'Outstanding claims',
                                   `${readableTokenAmount(desc, applyFactor(v.liquidationRate, v.totalShareSupply))} ${desc.symbol}`
                                 )
@@ -1488,7 +1347,7 @@ export const $FundEditor = ({
             $open: map(which => (which === 'allocate' ? $editor : $fulfillEditor), popEditor)
           })({})
         }, accountIdentity),
-        { changeDraft, changeRedeemDraft, changeFulfillDraft, changeSwapDraft }
+        { changeDraft, changeRedeemDraft, changeFulfillDraft, changeSwapDraft, changeClaimDraft }
       ]
     }
   )

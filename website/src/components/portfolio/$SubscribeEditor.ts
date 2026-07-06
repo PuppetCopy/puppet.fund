@@ -10,16 +10,15 @@ import {
   sampleMap,
   switchMap,
   switchPromises,
-  tap
 } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
-import { $node, $text, attrBehavior, component, type INodeCompose, style, styleBehavior } from 'aelea/ui'
-import { $defaultButtonContainer, $Popover, $row, isDesktopScreen, isMobileScreen, spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
+import { $node, $text, attrBehavior, component, type I$Node, type INodeCompose, style, styleBehavior } from 'aelea/ui'
+import { $Popover, $row, isDesktopScreen, isMobileScreen, spacing } from 'aelea/ui-components'
+import { palette } from 'aelea/ui-components-theme'
 import type { Hex } from 'viem'
 import { isAddressEqual } from 'viem'
 import type { Address } from 'viem/accounts'
-import { $ButtonSecondary, $caretDown, $defaultMiniButtonSecondary, $icon, $popoverCaret, text } from '@/ui-components'
+import { $ButtonSecondary, $caretDown, $defaultMiniButtonPrimary, $icon, $popoverCaret } from '@/ui-components'
 import { $tokenIconByAddress } from '../../common/$common.js'
 import { $responsiveFlex } from '../../common/elements/$common.js'
 import { $separator2 } from '../../pages/common.js'
@@ -30,7 +29,6 @@ interface I$SubscribeEditor {
   master: Address
   name: Hex
   userMatchingRuleQuery: IStream<Promise<ISubscribeRule[]>>
-  collateralToken: Address
   baseToken: Hex
   draftMatchingRuleList: IStream<ISubscribeRule[]>
   $container?: INodeCompose
@@ -38,6 +36,9 @@ interface I$SubscribeEditor {
   label?: string
   showTokenIcon?: boolean
   mini?: boolean
+  // Rendered INSIDE the popover anchor, before the button: the open backdrop's bright cutout spans the anchor's rect,
+  // so a lead (the trader profile) stays highlighted with the button while ONLY the button click opens the editor.
+  $lead?: I$Node
 }
 
 export const $defaultSubscribeEditorContainer = $row(spacing.small, style({ alignItems: 'center' }))
@@ -48,20 +49,20 @@ export const $SubscribeEditor = (config: I$SubscribeEditor) =>
       [popRouteSubscriptionEditor, popRouteSubscriptionEditorTether]: IBehavior<PointerEvent>,
       [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>
     ) => {
-      const masterMatchingKey = getMasterMatchingKey(config.collateralToken, config.master)
+      const masterMatchingKey = getMasterMatchingKey(config.baseToken, config.master)
 
       const {
         $container = $defaultSubscribeEditorContainer,
         draftMatchingRuleList,
         master,
         name,
-        collateralToken,
         baseToken,
         userMatchingRuleQuery,
         prominent = false,
         label,
         showTokenIcon = true,
-        mini = false
+        mini = false,
+        $lead
       } = config
 
       // Own-fund check reads ONLY the live wallet's session — never lastStoredSession(): a stored session resurrects a
@@ -161,7 +162,7 @@ export const $SubscribeEditor = (config: I$SubscribeEditor) =>
                 draftMatchingRuleList,
                 model: match,
                 masterMatchingKey,
-                baseToken: collateralToken,
+                baseToken,
                 master,
                 name
               })({
@@ -170,7 +171,9 @@ export const $SubscribeEditor = (config: I$SubscribeEditor) =>
             }, matchingRule)
           ),
           dismiss: changeMatchRuleList,
-          $target: (mini
+          $target: withLead(
+            $lead,
+            (mini
             ? $ButtonSecondary({
                 disabled: isOwnFund,
                 $content: $row(spacing.tiny, style({ alignItems: 'center' }))(
@@ -178,7 +181,7 @@ export const $SubscribeEditor = (config: I$SubscribeEditor) =>
                   $text(map(state => state.label, subscriptionState)),
                   $popoverCaret()
                 ),
-                $container: $defaultMiniButtonSecondary(styleBehavior(borderColorStyle))
+                $container: $defaultMiniButtonPrimary(styleBehavior(borderColorStyle))
               })
             : $ButtonSecondary({
                 disabled: isOwnFund,
@@ -188,11 +191,15 @@ export const $SubscribeEditor = (config: I$SubscribeEditor) =>
                       ? $node(
                           style({
                             display: 'flex',
+                            alignItems: 'center',
                             position: 'relative',
                             zIndex: 1,
-                            marginLeft: isDesktopScreen ? (prominent ? '-12px' : '-14px') : '-10px'
+                            // Coin matches the 28px button height so it sits flush (no top/bottom protrusion); the
+                            // negative margin overlaps the rounded left corner by the icon's own radius so it reads as
+                            // a badge ON the edge, not poking out of it.
+                            marginLeft: isDesktopScreen ? '-14px' : '-13px'
                           })
-                        )($tokenIconByAddress(collateralToken, isDesktopScreen ? '30px' : '26px'))
+                        )($tokenIconByAddress(baseToken, isDesktopScreen ? '28px' : '26px'))
                       : empty,
                     isMobileScreen ? $statusMark : empty,
                     isMobileScreen
@@ -218,37 +225,15 @@ export const $SubscribeEditor = (config: I$SubscribeEditor) =>
                       : empty
                   )
                 ),
-                $container: $defaultButtonContainer(
+                $container: $defaultMiniButtonPrimary(
                   style({ position: 'relative', overflow: 'visible' }),
-                  style({
-                    color: palette.message,
-                    whiteSpace: 'nowrap',
-                    fill: 'white',
-                    borderStyle: 'solid',
-                    alignSelf: 'center',
-                    fontSize: prominent ? text.base : text.xs,
-                    backgroundColor: prominent ? palette.primary : palette.background,
-                    fontWeight: 'bold',
-                    borderWidth: '1px',
-                    borderColor: prominent ? palette.primary : colorShade(palette.foreground, 40)
-                  }),
-                  isDesktopScreen
-                    ? style({
-                        borderRadius: '100px',
-                        padding: prominent ? '0 8px' : '2px 10px',
-                        height: 'auto'
-                      })
-                    : style({
-                        borderRadius: '8px',
-                        padding: '4px 8px',
-                        height: 'auto'
-                      }),
                   attrBehavior(map(state => ({ 'aria-label': state.ariaLabel }), subscriptionState)),
                   styleBehavior(borderColorStyle)
                 )
               }))({
-            click: popRouteSubscriptionEditorTether()
-          })
+              click: popRouteSubscriptionEditorTether()
+            })
+          )
         })({}),
         {
           changeMatchRuleList
@@ -256,3 +241,10 @@ export const $SubscribeEditor = (config: I$SubscribeEditor) =>
       ]
     }
   )
+
+// Compose the anchor: lead (highlighted with the button by the popover backdrop, non-triggering) + the button. No lead
+// => the button IS the anchor, unchanged.
+const withLead = ($lead: I$Node | undefined, $button: I$Node): I$Node =>
+  $lead
+    ? $row(spacing.default, style({ alignItems: 'center', minWidth: '0', flex: 1 }))($lead, $button)
+    : $button

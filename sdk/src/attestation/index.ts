@@ -9,6 +9,7 @@ import type { IRedeemInput } from './redeem.js'
 import type { ISellInput } from './sell.js'
 import type { IFundSwapInput, ISwapInput } from './swap.js'
 import type { IWithdrawInput } from './withdraw.js'
+import type { IWrapInput } from './wrap.js'
 
 export type IInputByKind = {
   mandate: IMandateInput
@@ -22,6 +23,7 @@ export type IInputByKind = {
   fundRecognize: IFundRecognizeInput
   swap: ISwapInput
   fundSwap: IFundSwapInput
+  wrap: IWrapInput
   withdraw: IWithdrawInput
   walletDeposit: IDepositRoute
   walletDepositWnt: IDepositRoute
@@ -34,7 +36,8 @@ export {
   computeAllocation,
   type IAllocationPuppet,
   type IAllocationResult,
-  type IComputeAllocationContext
+  type IComputeAllocationContext,
+  permittedAllocationCap
 } from './computeAllocation.js'
 export type { IDepositMode, IDepositRoute } from './depositRoute.js'
 export { resolveDispatchChainId } from './dispatch.js'
@@ -68,3 +71,4 @@ export {
 } from './swap.js'
 export { SWAP_MAX_SLIPPAGE_BPS, verifyOutputFloor, verifyQuoteFreshness, verifySwapQuoteRatio } from './swapGuard.js'
 export { attestWithdrawIntent, type IWithdrawInput, type IWithdrawRoute } from './withdraw.js'
+export { attestWrapIntent, type IWrapInput } from './wrap.js'

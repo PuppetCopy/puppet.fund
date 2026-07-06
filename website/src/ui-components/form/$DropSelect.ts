@@ -35,16 +35,15 @@ export const $defaultDropSelectAnchor = $row(
   }),
   // Hover brightens the border, matching the icon-circular controls / choice cards.
   stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) }),
-  // While the list is open the anchor brightens to the same border the panel uses; its
-  // own radius is preserved (the panel tucks under it at rect.bottom - 1).
+  // While the list is open the anchor MERGES with the panel: same border shade, same fill, bottom corners squared
+  // so the panel (which tucks under it at rect.bottom - 1 with squared top corners and at least the anchor's width)
+  // reads as one continuous surface instead of two cut boxes.
   stylePseudo('[aria-expanded="true"]', {
-    borderColor: colorShade(palette.foreground, 60)
+    borderColor: colorShade(palette.foreground, 60),
+    borderRadius: '14px 14px 0 0',
+    background: palette.background
   })
 )
-
-// Back-compat alias — `$container` was the historical name; `$anchor` describes
-// what it actually wraps (the clickable button visual, not the outer dropdown box).
-export const $defaultDropSelectContainer = $defaultDropSelectAnchor
 
 // Panel that joins the open anchor: flush under it (the dropdown positions it overlapping
 // the anchor's 1px bottom border), top corners squared, same border as the open anchor.

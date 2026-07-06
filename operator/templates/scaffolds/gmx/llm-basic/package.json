@@ -10,7 +10,7 @@
     "start": "bun run ./src/index.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "0.100.1",
+    "@anthropic-ai/sdk": "0.106.0",
     "@puppet.fund/operator": "^0.2.0",
     "viem": "2.51.3"
   },

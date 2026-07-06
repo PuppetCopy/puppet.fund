@@ -1,5 +1,7 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
+import { platformScaleTable } from '@puppet/sdk/schema'
 import type { IChainLiveness } from '@puppet/sdk/state'
+import { PLATFORM_SCALE_ID } from '@puppet/sdk/state'
 import {
   combine,
   empty,
@@ -18,6 +20,7 @@ import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { $Tooltip, text } from '@/ui-components'
 import context from '../io/context.js'
+import { client } from '../io/datastore/reads.js'
 
 type ServiceHealth = 'ok' | 'degraded' | 'down'
 
@@ -42,7 +45,7 @@ const $serviceLine = (label: string, $desc: I$Slottable, health: ServiceHealth) 
   $row(spacing.small, style({ alignItems: 'center', justifyContent: 'space-between' }))(
     $column(style({ gap: '2px' }))(
       $node(style({ fontSize: text.sm }))($text(label)),
-      $node(style({ fontSize: text.xs, color: palette.foreground }))($desc)
+      $node(style({ fontSize: text.xs, color: palette.foreground, whiteSpace: 'nowrap' }))($desc)
     ),
     $servicePill(health)
   )
@@ -54,39 +57,25 @@ const FROZEN_AHEAD = 1000n
 type ILivenessView = { detail: string; service: ServiceHealth }
 
 const livenessView = (liveness: IChainLiveness | null, rpcHead: bigint | null | undefined): ILivenessView => {
-  if (!liveness?.reachable) return { detail: 'Unavailable · account state may be out of date', service: 'down' }
+  if (!liveness?.reachable) return { detail: 'Unavailable · account state may be stale', service: 'down' }
   const home = liveness.chains[HUB_CHAIN_ID]
   if (!home?.reachable) return { detail: 'Unavailable · hub status missing', service: 'down' }
   const frozen = typeof rpcHead === 'bigint' && rpcHead - home.block.number > FROZEN_AHEAD
-  if (frozen) return { detail: 'Out of sync · recent activity may be missing', service: 'down' }
+  if (frozen) return { detail: 'Out of sync · activity may be missing', service: 'down' }
   return { detail: 'Reachable · account state is current', service: 'ok' }
 }
 
-const $chainServiceLine = (view: ILivenessView) => $serviceLine('Chain', $text(view.detail), view.service)
-
-function originHost(origin: string): string {
-  try {
-    return new URL(origin).host
-  } catch {
-    return origin
-  }
-}
-
-// The browser extension is OPTIONAL — it lets dApps use your fund as a wallet. Its status
-// is informational only; it never drives the overall connectivity indicator.
-const $extensionServiceLine = (installed: boolean, outdated: boolean, origins: string[]) => {
-  if (outdated)
-    return $serviceLine('Puppet Wallet', $text('Update needed · the installed extension is out of date'), 'degraded')
-  if (origins.length > 0) {
-    const $desc = $column(style({ gap: '2px' }))(
-      $text(origins.length === 1 ? 'Connected to' : `Connected to ${origins.length} sites`),
-      ...origins.map(o => $node(style({ color: palette.message }))($text(originHost(o))))
-    )
-    return $serviceLine('Puppet Wallet', $desc, 'ok')
-  }
-  if (installed) return $serviceLine('Puppet Wallet', $text('Installed · no dApp connected'), 'degraded')
-  return $serviceLine('Puppet Wallet', $text('Extension not installed · optional'), 'down')
-}
+// The indexer (journal) probe: one cheap single-row query; the client throws on failure, so a downed service lands in
+// the catch below. Time-boxed so a hanging transport reads as down rather than pinning the pill on "Connecting". An
+// empty result still proves the service answered.
+const INDEXER_PROBE_TIMEOUT_MS = 5000
+const probeIndexer = (): Promise<ILivenessView> =>
+  Promise.race([
+    client
+      .select(platformScaleTable, { where: { id: PLATFORM_SCALE_ID }, limit: 1 })
+      .then((): ILivenessView => ({ detail: 'Reachable · funds and history are current', service: 'ok' })),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), INDEXER_PROBE_TIMEOUT_MS))
+  ]).catch((): ILivenessView => ({ detail: 'Unavailable · data may be out of date', service: 'down' }))
 
 export const $ServicesConnectivity = () =>
   component(([hover, hoverTether]: IBehavior<boolean>) => {
@@ -111,15 +100,21 @@ export const $ServicesConnectivity = () =>
     )
 
     const view: IStream<ILivenessView> = map(p => livenessView(p.liveness, p.rpcHead), combine({ liveness, rpcHead }))
+    // The indexer probe follows the same cadence as liveness: once on mount, refreshed on each tooltip open.
+    const indexerView: IStream<ILivenessView> = state()(
+      merge(
+        fromPromise(probeIndexer()),
+        switchMap(h => (h ? fromPromise(probeIndexer()) : empty), hoverState)
+      )
+    )
+    // At least one service down => the whole indicator reads down (red, pulsing).
+    const anyDown: IStream<boolean> = map(
+      p => p.view.service !== 'ok' || p.indexerView.service !== 'ok',
+      combine({ view, indexerView })
+    )
 
     const $tooltip: I$Node = op(
-      combine({
-        view
-        // Browser extension status sunset for now; revive with the $extensionServiceLine below.
-        // extensionInstalled: puppetExtensionInstalled,
-        // extensionOutdated: puppetExtensionOutdated,
-        // origins: puppetConnectedOrigins
-      }),
+      combine({ view, indexerView }),
       map(p =>
         $column(spacing.default, style({ minWidth: '280px', maxWidth: '320px' }))(
           $column(spacing.tiny)(
@@ -129,8 +124,8 @@ export const $ServicesConnectivity = () =>
             )
           ),
           $column(spacing.default, style({ paddingTop: '8px', borderTop: `1px solid ${palette.horizon}` }))(
-            $chainServiceLine(p.view)
-            // $extensionServiceLine(p.extensionInstalled, p.extensionOutdated, p.origins)
+            $serviceLine('Chain', $text(p.view.detail), p.view.service),
+            $serviceLine('Indexer', $text(p.indexerView.detail), p.indexerView.service)
           )
         )
       ),
@@ -150,12 +145,9 @@ export const $ServicesConnectivity = () =>
 
     const color: IStream<string> = start(
       palette.foreground,
-      map(v => (v.service === 'ok' ? palette.positive : palette.negative), view)
+      map(down => (down ? palette.negative : palette.positive), anyDown)
     )
-    const pulsing: IStream<boolean> = start(
-      true,
-      map(v => v.service !== 'ok', view)
-    )
+    const pulsing: IStream<boolean> = start(true, anyDown)
 
     return [
       $Tooltip({

@@ -1,4 +1,4 @@
-import { CHAIN_TOKEN_MAP, GMX, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import { CHAIN_NETWORK_MAP, CHAIN_TOKEN_MAP, GMX, PROTOCOL } from '@puppet/contracts/const'
 import { ARBITRUM_MARKET_LIST, GMX_V2_CONTRACT_MAP } from '@puppet/contracts/gmx'
 import type { IIAccount__Call } from '@puppet/contracts/types'
 import {
@@ -35,9 +35,18 @@ const GMX_UI_FEE_RECEIVER = getAddress('0xff000000000000000000000000000000000000
 // On-chain MAX_SWAP_PATH_LENGTH (gmx-synthetics): collateral may convert through at most 3 pools.
 const GMX_MAX_SWAP_PATH_LENGTH = 3
 
-// Hub WETH: GMX's wrapped-native (WNT). Native ETH collateral is wrapped to this, and the
+// GMX V2 lives on Arbitrum; resolve the chain id off the network slug so it tracks const.toml.
+const GMX_NETWORK = 'arbitrum' as const
+type IGmxChainId = {
+  [K in keyof typeof CHAIN_NETWORK_MAP]: (typeof CHAIN_NETWORK_MAP)[K] extends typeof GMX_NETWORK ? K : never
+}[keyof typeof CHAIN_NETWORK_MAP]
+export const GMX_V2_CHAIN_ID = Number(
+  Object.entries(CHAIN_NETWORK_MAP).find(([, network]) => network === GMX_NETWORK)![0]
+) as IGmxChainId
+
+// GMX's wrapped-native (WNT) on its chain. Native ETH collateral is wrapped to this, and the
 // execution fee is always WNT, so a fund funding with native ETH backs a WETH collateral.
-export const GMX_WNT = getAddress(CHAIN_TOKEN_MAP[HUB_CHAIN_ID].WETH as Address)
+export const GMX_WNT = getAddress(CHAIN_TOKEN_MAP[GMX_V2_CHAIN_ID].WETH as Address)
 
 export const GMX_ORDER_TYPE = {
   MarketSwap: 0,
@@ -171,27 +180,37 @@ function encodeGmxCreateOrder(
 
 // Builds the calls + per-token outflow legs for a GMX order over any registered base token.
 // The execution fee always reaches the OrderVault as WNT: a WETH base funds it (and the
-// collateral) in WETH via sendTokens (WETH IS WNT); any other ERC-20 base sends collateral via
-// sendTokens and the fee as native ETH via sendWnt. shouldUnwrapNativeToken returns WNT outputs
-// (freed collateral, fee refunds) as native ETH EXCEPT a WETH base, which keeps them as WETH so
-// they settle onto its WETH leg. The base leg is always emitted (amountOut 0 on a decrease) so a
-// close re-signs the freed collateral on the next order. Increase deposits collateral into the
-// vault (order amount 0); decrease withdraws it via the order's collateralDeltaAmount.
+// collateral) in WETH via sendTokens (WETH IS WNT); a native-ETH base funds collateral + fee
+// with ONE sendWnt value call (GMX wraps to WNT collateral); any other ERC-20 base sends
+// collateral via sendTokens and the fee as native ETH via sendWnt. shouldUnwrapNativeToken
+// returns WNT outputs (freed collateral, fee refunds) as native ETH EXCEPT a WETH base, which
+// keeps them as WETH so they settle onto its WETH leg. The base leg is always emitted (amountOut
+// 0 on a decrease) so a close re-signs the freed collateral on the next order. The fee-bearing
+// leg is FIRST: transferList[0].token is the relay-fee token on both the client and the
+// matchmaker, and native/WETH are the two fee tokens either side can price. Increase deposits
+// collateral into the vault (order amount 0); decrease withdraws it via the order's
+// collateralDeltaAmount.
 export function buildGmxOrderCalls(order: IGmxOrder, ctx: IGmxBuildContext): IGmxBuildResult {
   const { master, executionFee } = ctx
   const base = getAddress(ctx.baseToken)
-  const wethBase = isAddressEqual(base, GMX_WNT)
   const isIncrease = GMX_INCREASE_TYPES.has(order.orderType)
   if (!isIncrease && !GMX_DECREASE_TYPES.has(order.orderType)) {
     throw new Error(`unsupported GMX order type ${order.orderType} for a single-base-token operator`)
   }
-
   const deposit = isIncrease ? order.collateralDelta : 0n
-  const createOrder = gmxCall(
-    GMX_ROUTER,
-    encodeGmxCreateOrder(master, base, order, isIncrease ? 0n : order.collateralDelta, executionFee, !wethBase),
-    1_000_000n
-  )
+  const withdraw = isIncrease ? 0n : order.collateralDelta
+
+  if (isAddressEqual(base, PROTOCOL.nativeToken)) {
+    const total = deposit + executionFee
+    const createOrder = gmxCall(GMX_ROUTER, encodeGmxCreateOrder(master, GMX_WNT, order, withdraw, executionFee, true), 1_000_000n)
+    return {
+      callList: [gmxCall(GMX_ROUTER, gmxSendWnt(total), 150_000n, total), createOrder],
+      outflows: [{ token: base, amountOut: total }]
+    }
+  }
+
+  const wethBase = isAddressEqual(base, GMX_WNT)
+  const createOrder = gmxCall(GMX_ROUTER, encodeGmxCreateOrder(master, base, order, withdraw, executionFee, !wethBase), 1_000_000n)
 
   if (wethBase) {
     const total = deposit + executionFee
@@ -210,8 +229,8 @@ export function buildGmxOrderCalls(order: IGmxOrder, ctx: IGmxBuildContext): IGm
   return {
     callList: [...funding, createOrder],
     outflows: [
-      { token: base, amountOut: deposit },
-      { token: PROTOCOL.nativeToken, amountOut: executionFee }
+      { token: PROTOCOL.nativeToken, amountOut: executionFee },
+      { token: base, amountOut: deposit }
     ]
   }
 }

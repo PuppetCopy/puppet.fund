@@ -1,4 +1,4 @@
-import { CHAIN_IDS, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import { CHAIN_IDS, HUB_CHAIN_ID, PROTOCOL, SWAP_PROVIDER } from '@puppet/contracts/const'
 import { FUND_GATE_INTENTS, PUPPET_GATE_INTENTS } from '@puppet/contracts/intents'
 import type {
   IAccountLib__AccountInitParams,
@@ -74,20 +74,20 @@ function buildSwapParams(account: Address, ctx: ISwapAttestContext, input: ISwap
     relayFeeDenominator: input.inputAmount
   })
 
-  // Classify local vs cross-chain from route.kind, NOT the client-controlled destinationChainId: a 'swap' (local DEX
-  // provider call) is ALWAYS same-chain (output forwarded + credited under the strong output floor) and an 'across'
-  // bridge ALWAYS targets a different known chain. Deriving this from destinationChainId let a 'swap' carry a foreign
-  // destinationChainId to fall outside `isLocal` and dodge the output floor entirely while still executing the local
-  // provider call — the co-signer then supplied no slippage bound (sandwich/MEV drain of the route).
-  const isLocal = input.route.kind === 'swap'
+  // Local vs cross-chain is the DESTINATION, not route.kind: a local leg (destinationChainId == chainId) delivers and
+  // credits output on this chain under the strong synchronous output floor (the BaseAccount shortfall check); a
+  // cross-chain leg bridges the output to the destination route and recognizes it THERE, so it carries no synchronous
+  // floor and is bounded instead by the co-signer's mandatory in-domain oracle screen (evaluateSwapValue /
+  // evaluateCrossChainSwapValue) + the provider allowlist + the dest-side recognize. A provider-call 'swap' route may be
+  // local OR cross-chain (swap-and-bridge in one provider call); an 'across' bridge is cross-chain only. The earlier MEV
+  // vector (a local DEX 'swap' lying about destinationChainId to skip the floor) is closed by that cross-chain value
+  // screen — every cross-chain leg must clear it before this attests.
+  const isLocal = input.destinationChainId === input.chainId
   if (isLocal) {
-    if (input.destinationChainId !== input.chainId) {
-      throw new CompactContractError('Balance__InvalidDestinationChain', [input.chainId, input.destinationChainId])
+    if (input.route.kind !== 'swap') {
+      throw new CompactContractError('Balance__InvalidDestinationChain', [BigInt(HUB_CHAIN_ID), input.destinationChainId])
     }
-  } else if (
-    input.destinationChainId === input.chainId ||
-    !(CHAIN_IDS as readonly number[]).includes(Number(input.destinationChainId))
-  ) {
+  } else if (!(CHAIN_IDS as readonly number[]).includes(Number(input.destinationChainId))) {
     throw new CompactContractError('Balance__InvalidDestinationChain', [BigInt(HUB_CHAIN_ID), input.destinationChainId])
   }
   IntentLib.verifyTokenAndCap(
@@ -115,6 +115,7 @@ function buildSwapParams(account: Address, ctx: ISwapAttestContext, input: ISwap
   let providerCallData: Hex
   if (input.route.kind === 'across') {
     const built = buildRouteAcrossDeposit({
+      originChainId: Number(input.chainId),
       depositor: route,
       recipient: route,
       inputToken,
@@ -128,11 +129,28 @@ function buildSwapParams(account: Address, ctx: ISwapAttestContext, input: ISwap
     provider = built.provider
     providerCallData = built.providerCallData
   } else {
+    // A cross-chain leg delivers to whatever recipient the provider calldata encodes, and this branch's calldata is
+    // CLIENT-built and opaque (LI.FI swap-and-bridge, Across /swap periphery) — the co-signer cannot verify it targets
+    // the account's own route. Signing it would let a leaked/hostile session key bridge funds to an arbitrary address,
+    // the exact escalation the local branch (on-chain output forward + shortfall) and the 'across' branch (recipient
+    // REBUILT = route) both prevent. Only the 'across' kind is a safe cross-chain delivery; refuse the rest. Cross-chain
+    // CROSS-ASSET flows go through the composed route (same-asset 'across' bridge + a local hub swap).
+    if (!isLocal) {
+      throw new CompactError(
+        'BAD_REQUEST',
+        'cross-chain swap-and-bridge is not signable: its delivery recipient cannot be verified. Use a same-asset bridge, or bridge same-asset then swap locally.'
+      )
+    }
     if (input.route.providerCallData === '0x') {
       throw new CompactError('BAD_REQUEST', 'swap provider calldata is empty')
     }
     provider = input.route.provider
     providerCallData = input.route.providerCallData
+  }
+
+  const swapProviders = SWAP_PROVIDER[Number(ctx.chainId) as keyof typeof SWAP_PROVIDER] as Record<string, Address> | undefined
+  if (!swapProviders || !Object.values(swapProviders).some(p => isAddressEqual(getAddress(p), getAddress(provider)))) {
+    throw new CompactContractError('Intent__ProviderNotAllowed', [getAddress(provider)])
   }
 
   return {
@@ -170,6 +188,10 @@ export function attestSwapIntent(ctx: ISwapAttestContext, input: ISwapInput) {
 }
 
 export function attestFundSwapIntent(ctx: ISwapAttestContext, input: IFundSwapInput) {
+  const derivedMaster = predictPuppetAccount(input.params)
+  if (!isAddressEqual(derivedMaster, input.fundParams.master)) {
+    throw new CompactContractError('Share__MasterMismatch', [derivedMaster, input.fundParams.master])
+  }
   const swap = buildSwapParams(predictFundAccount(input.fundParams), ctx, input)
 
   const intent: IFundGate__SwapIntent = {

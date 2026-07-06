@@ -9,14 +9,18 @@ import {
 import { fromPromise, type IStream, just, op, switchMap } from 'aelea/stream'
 import { state } from 'aelea/stream-extended'
 import { type Address, getAddress, type Hex } from 'viem'
-import { client, fetchPlatformScale } from './matchmaker/reads.js'
+import { client, fetchPlatformScale } from './datastore/reads.js'
 import { readSignedBalance } from './onchain/account.js'
 
 // A single read at mount. Post-action freshness is the OPTIMISTIC overlay's job (the attest ACK is assumed to succeed),
 // not a re-query: the relay is fire-and-ACK, so the UI resolves the user's action on the ACK and a reload reconciles.
 const queryOnce = <T>(fetchFn: () => Promise<T>): IStream<T> => switchMap(() => fromPromise(fetchFn()), just(undefined))
 
-export const livePlatformScale: IStream<IPlatformScale | null> = op(queryOnce(fetchPlatformScale), state())
+// null = scale unknown (unreadable or not yet folded); fundRank(metric, null) renders unranked, never a fake rank.
+export const livePlatformScale: IStream<IPlatformScale | null> = op(
+  queryOnce(() => fetchPlatformScale().catch(() => null)),
+  state()
+)
 
 export const liveFundPool = (fund: Hex): IStream<IFund | undefined> => queryOnce(() => client.find(fundTable, { id: fund }))
 export const liveRedeemPosition = (holder: Hex, fund: Hex): IStream<IFundPosition | undefined> =>

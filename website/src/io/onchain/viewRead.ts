@@ -1,6 +1,7 @@
 import { CHAIN_NETWORK_MAP } from '@puppet/contracts/const'
 import type { ChainId } from '@puppet/sdk/const'
 import { type Abi, type Address, decodeFunctionResult, encodeFunctionData, getAddress, type Hex } from 'viem'
+import { EVICT_VIEW_OWNER, viewUrl } from '../../app/swCache.js'
 import { publicClientMap } from '../../wallet/wallet.js'
 
 // Self-state reads route through the service worker's same-origin `/api/view` GET cache: the URL (net + to + calldata)
@@ -21,11 +22,12 @@ export function setViewCacheOwner(owner: Address | null): void {
   const previous = cacheOwner
   cacheOwner = next
   if (previous && swActive()) {
-    navigator.serviceWorker.controller?.postMessage({ type: 'evict-view-owner', owner: previous })
+    navigator.serviceWorker.controller?.postMessage({ type: EVICT_VIEW_OWNER, owner: previous })
   }
 }
 
-const ownerParam = (global?: boolean): string => (!global && cacheOwner ? `&w=${cacheOwner}` : '')
+// The owner bucket a read lands in: null for global/deterministic reads (shared bucket), else the connected wallet.
+const readOwner = (global?: boolean): Address | null => (global ? null : cacheOwner)
 
 interface IViewCall {
   chainId: ChainId
@@ -36,6 +38,9 @@ interface IViewCall {
   refresh?: boolean
   // Deterministic / registry-wide state (same for every wallet): cache once in the shared bucket, not per-owner.
   global?: boolean
+  // Pin the read AT this block (settlement floor): a node lagging behind it fails loud instead of answering with —
+  // and caching — pre-settlement state. Implies refresh; the result still lands on the un-pinned cache key.
+  minBlock?: bigint
 }
 
 export async function viewCall(req: IViewCall): Promise<unknown> {
@@ -44,11 +49,19 @@ export async function viewCall(req: IViewCall): Promise<unknown> {
       address: req.address,
       abi: req.abi,
       functionName: req.functionName,
-      args: req.args as readonly unknown[]
+      args: req.args as readonly unknown[],
+      ...(req.minBlock !== undefined ? { blockNumber: req.minBlock } : {})
     })
   }
   const data = encodeFunctionData({ abi: req.abi, functionName: req.functionName, args: req.args })
-  const url = `/api/view?net=${CHAIN_NETWORK_MAP[req.chainId]}&to=${req.address}&data=${data}${ownerParam(req.global)}${req.refresh ? '&refresh=true' : ''}`
+  const url = viewUrl({
+    net: CHAIN_NETWORK_MAP[req.chainId],
+    to: req.address,
+    data,
+    owner: readOwner(req.global),
+    refresh: req.refresh,
+    block: req.minBlock !== undefined ? `0x${req.minBlock.toString(16)}` : undefined
+  })
   const body = (await (await fetch(url)).json()) as { result?: Hex; error?: string }
   if (body.error !== undefined || body.result === undefined) throw new Error(body.error ?? 'view read failed')
   return decodeFunctionResult({ abi: req.abi, functionName: req.functionName, data: body.result })
@@ -60,7 +73,7 @@ export async function viewCall(req: IViewCall): Promise<unknown> {
 // from a stale not-deployed cache entry.
 export async function viewCode(chainId: ChainId, address: Address, refresh?: boolean): Promise<Hex | undefined> {
   if (!swActive()) return publicClientMap[chainId].getCode({ address })
-  const url = `/api/view?net=${CHAIN_NETWORK_MAP[chainId]}&to=${address}&m=code${ownerParam()}${refresh ? '&refresh=true' : ''}`
+  const url = viewUrl({ net: CHAIN_NETWORK_MAP[chainId], to: address, code: true, owner: readOwner(), refresh })
   const body = (await (await fetch(url)).json()) as { result?: Hex; error?: string }
   if (body.error !== undefined || body.result === undefined) throw new Error(body.error ?? 'view code read failed')
   return body.result

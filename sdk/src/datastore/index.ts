@@ -10,21 +10,19 @@ const bigintReplacer = (_k: string, v: unknown): unknown => (typeof v === 'bigin
 // matchmaker for the MVP; a user's own local datastore later); `schema` is the tables namespace (`import * as schema`).
 // The wire `t: name` is the table's export-const key, resolved via the schema's table→name map (no name on the object).
 // Reads are methods over those tables — client.select(table, { where, orderBy, … }) for a list, client.find(table, where)
-// for a single row. Both DEGRADE to empty on failure (so callers fall back) UNLESS opts.orThrow, which rethrows so a
-// critical read (e.g. the portfolio-value timeline) surfaces `-` instead of a fabricated empty.
+// for a single row. Both THROW on failure: an unreadable datastore must never masquerade as an empty result (a downed
+// journal once rendered as a legitimately empty leaderboard). A caller that can honestly degrade catches explicitly at
+// its own call site, to a value that reads as "unknown" (`null`), never a fabricated empty.
 export interface IDigestClient {
-  select<Cols extends IColumns>(
-    table: ITable<Cols>,
-    opts?: Omit<IQuery<Cols>, 'table'> & { orThrow?: boolean }
-  ): Promise<InferRow<Cols>[]>
+  select<Cols extends IColumns>(table: ITable<Cols>, opts?: Omit<IQuery<Cols>, 'table'>): Promise<InferRow<Cols>[]>
   find<Cols extends IColumns>(table: ITable<Cols>, where: IWhere<Cols>): Promise<InferRow<Cols> | undefined>
 }
 
 interface ICreateClient {
   storageUrl: string
   schema: Record<string, unknown>
-  // Per-query deadline; on timeout the fetch aborts → the catch below degrades to []. Without it a hung datastore
-  // (stuck DB socket) never resolves and never reaches the catch.
+  // Per-query deadline; on timeout the fetch aborts and the read rejects. Without it a hung datastore (stuck DB
+  // socket) never resolves and never surfaces the failure.
   timeoutMs?: number
 }
 
@@ -36,10 +34,8 @@ export function createClient({ storageUrl, schema, timeoutMs = 10_000 }: ICreate
   )
   const exec = async <Cols extends IColumns>(
     table: ITable<Cols>,
-    q: Omit<IQuery<Cols>, 'table'> & { orThrow?: boolean }
+    q: Omit<IQuery<Cols>, 'table'>
   ): Promise<InferRow<Cols>[]> => {
-    // Resolve the name BEFORE the try: an unknown table is a programmer error (throw), not a degrade-to-empty like a
-    // network failure below.
     const t = nameOf.get(table as unknown as ITable<IColumns>)
     if (!t) throw new Error('table is not part of the client schema')
     // GET the descriptor as query params (cacheable, no body): `t` plain, `where`/`orderBy` JSON-encoded (bigints to
@@ -49,16 +45,11 @@ export function createClient({ storageUrl, schema, timeoutMs = 10_000 }: ICreate
     if (q.orderBy !== undefined) params.set('orderBy', JSON.stringify(q.orderBy))
     if (q.limit !== undefined) params.set('limit', String(q.limit))
     if (q.offset !== undefined) params.set('offset', String(q.offset))
-    try {
-      const res = await fetch(`${storageUrl}/query?${params.toString()}`, { signal: AbortSignal.timeout(timeoutMs) })
-      if (!res.ok) throw new Error(`datastore /query failed: ${res.status}`)
-      return ((await res.json()) as Record<string, unknown>[]).map(r => reviveRow(table, r))
-    } catch (err) {
-      // Degrade so the caller falls back; orThrow opts a critical read (e.g. the portfolio-value timeline) into
-      // surfacing the failure so the UI shows `-` rather than a fabricated empty.
-      if (q.orThrow) throw err
-      return []
-    }
+    const res = await fetch(`${storageUrl}/query?${params.toString()}`, { signal: AbortSignal.timeout(timeoutMs) })
+    // This message renders VERBATIM in the UI ($intermediatePromise's error card shows the throw-site phrasing, no
+    // editorializing) — phrase it for the user; the status code stays for diagnostics.
+    if (!res.ok) throw new Error(`Data is temporarily unavailable (${res.status})`)
+    return ((await res.json()) as Record<string, unknown>[]).map(r => reviveRow(table, r))
   }
   return {
     select: (table, opts = {}) => exec(table, opts),

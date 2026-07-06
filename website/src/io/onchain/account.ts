@@ -1,10 +1,10 @@
 import type { ChainId } from '@puppet/sdk/const'
-import { type Abi, type Address, getAddress, type Hex } from 'viem'
+import { type Abi, type Address, getAddress, } from 'viem'
 import { viewCall, viewCode } from './viewRead.js'
 
 // Self account-level signed-balance read, routed through the SW view-cache. signedBalanceOf lives on every Puppet/Fund
 // account (BaseAccount), keyed by token address.
-const SIGNED_BALANCE_ABI: Abi = [
+export const SIGNED_BALANCE_ABI: Abi = [
   {
     type: 'function',
     name: 'signedBalanceOf',
@@ -18,7 +18,8 @@ export function readSignedBalance(
   account: Address,
   chainId: ChainId,
   token: Address,
-  refresh?: boolean
+  refresh?: boolean,
+  minBlock?: bigint
 ): Promise<bigint> {
   return viewCall({
     chainId,
@@ -26,7 +27,8 @@ export function readSignedBalance(
     abi: SIGNED_BALANCE_ABI,
     functionName: 'signedBalanceOf',
     args: [token],
-    refresh
+    refresh,
+    minBlock
   }) as Promise<bigint>
 }
 

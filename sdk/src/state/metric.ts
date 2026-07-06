@@ -26,6 +26,9 @@ export type ISubaccountState = IAccountIdentity & {
   // (the indexer is event-sourced and keeps no per-account aggregates).
   lastNonce: bigint
   lastTransactionHash: Hex
+  // The last settle's (chain, block): the floor a post-settlement balance REFRESH must pin its reads at, so a
+  // load-balanced node lagging the settle block cannot answer with pre-settlement state and have it cached as fresh.
+  lastSettled: { chainId: number; block: bigint } | null
   // The wallet's FA graph rides the state that is already passed down everywhere: a
   // puppet row carries the funds it masters, a fund row carries its own Fund entity,
   // and positions are this account's FundPosition rows (holder-keyed).
@@ -71,7 +74,8 @@ export function composeSubaccount(
     funds: fundsForAccount(account, fundRows, positions),
     positions,
     lastNonce: 0n,
-    lastTransactionHash: ZERO_TX_HASH
+    lastTransactionHash: ZERO_TX_HASH,
+    lastSettled: null
   }
 }
 
@@ -96,6 +100,7 @@ export function stubSubaccountState(params: { user: Address; signer: Address }):
     signer: params.signer,
     lastNonce: 0n,
     lastTransactionHash: ZERO_TX_HASH,
+    lastSettled: null,
     chains: new Map(),
     balances: new Map(),
     funds: [],

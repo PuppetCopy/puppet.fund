@@ -2,7 +2,7 @@ import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
 import { CONTRACT_EVENT_MAP } from '@puppet/contracts/events'
 import type { IIAccount__Call, IIAccount__SignTransfer } from '@puppet/contracts/types'
 import { decodeRuleBody, type IAllocationPuppet } from '@puppet/sdk/attestation'
-import { ADDRESS_ZERO, BALANCE_TIMELINE_BUCKETS, type IntervalTime, USD_DECIMALS } from '@puppet/sdk/const'
+import { BALANCE_TIMELINE_BUCKETS, type IntervalTime, USD_DECIMALS } from '@puppet/sdk/const'
 import { formatFixed, getMasterMatchingKey, getUnixTimestamp, resampleTimeSeries } from '@puppet/sdk/core'
 import {
   fundLatestMetricTable,
@@ -15,6 +15,7 @@ import {
 import type { ISubaccountState, ITokenRegistryMap } from '@puppet/sdk/state'
 import { type Address, decodeAbiParameters, getAddress, type Hex } from 'viem'
 import context, { getPrice } from '../context.js'
+import { readSignedBalance } from '../onchain/account.js'
 import {
   client,
   fetchBalanceHistory,
@@ -23,9 +24,8 @@ import {
   fetchIdentitiesForAccounts,
   fetchLeaderboardMetrics,
   fetchRawActivity,
-  findDepositTx
-} from '../matchmaker/reads.js'
-import { readAccountBalances } from '../onchain/balances.js'
+  type IRawEvent
+} from './reads.js'
 
 export type { IFundLatestMetric } from '@puppet/sdk/schema'
 export type ILeaderboardView = 'masters' | 'shadow'
@@ -125,23 +125,19 @@ export async function fetchMasterPoolState(fund: Address): Promise<IFund | undef
   return client.find(fundTable, { id: getAddress(fund) })
 }
 
-export async function fetchMasterSubscribers(
-  registry: ITokenRegistryMap,
-  fund: Address,
-  baseToken: Address
-): Promise<IAllocationPuppet[]> {
+export async function fetchMasterSubscribers(fund: Address, baseToken: Address): Promise<IAllocationPuppet[]> {
   const subscribed = (await client.select(fundPositionTable, { where: { fund: getAddress(fund) } })).filter(
     p => p.body !== undefined && p.mandate !== undefined
   )
   if (subscribed.length === 0) return []
 
   const holders = [...new Set(subscribed.map(p => getAddress(p.holder)))]
+  // The mandate pulls STRICTLY from the hub-chain base-token deposit, so read exactly that one signed balance per
+  // holder — a full readAccountBalances sweep here cost chains × tokens view calls per subscriber for one used row.
   const balanceEntries = await Promise.all(
     holders.map(async holder => {
-      const row = (await readAccountBalances(registry, holder)).find(
-        x => Number(x.chainId) === HUB_CHAIN_ID && x.token === baseToken
-      )
-      return [holder, row?.signedBalance ?? 0n] as const
+      const signed = await readSignedBalance(holder, HUB_CHAIN_ID, baseToken).catch(() => 0n)
+      return [holder, signed] as const
     })
   )
   const signedBalanceByHolder = new Map(balanceEntries)
@@ -196,12 +192,21 @@ export interface IFundAction {
   masterAmount: bigint
   allocated: bigint
   relayFee: bigint
+  wrapAmount?: bigint
+  // The relay fee's denomination (a registry BASE id): a dest-chain credit charges its fee in the credited token, not
+  // the fund base. Absent = base-token fee (the hub default).
+  feeToken?: Hex
+  // The action's principal amount for kind:'event' rows that carry one (credit/swap input).
+  tokenAmount?: { token: Hex; amount: bigint }
+  // This action's tx ALSO deployed the fund (the genesis allocate): rendered as "Create fund" with the action's detail.
+  createdFund?: boolean
 }
 
 const EVENT_NAME_BY_HASH = new Map<Hex, string>([
   [CONTRACT_EVENT_MAP.Account.DeployPuppetAccount.hash, 'Open account'],
   [CONTRACT_EVENT_MAP.PuppetGate.Recognize.hash, 'Deposit'],
   [CONTRACT_EVENT_MAP.PuppetGate.Swap.hash, 'Swap'],
+  [CONTRACT_EVENT_MAP.FundGate.Wrap.hash, 'Wrap'],
   [CONTRACT_EVENT_MAP.HubGate.Withdraw.hash, 'Withdraw'],
   [CONTRACT_EVENT_MAP.Redeem.Claim.hash, 'Claim'],
   [CONTRACT_EVENT_MAP.Redeem.Sell.hash, 'Sell'],
@@ -211,96 +216,149 @@ const EVENT_NAME_BY_HASH = new Map<Hex, string>([
   [CONTRACT_EVENT_MAP.Account.DeployPuppetAccount.hash, 'Open account']
 ])
 
+// The fund lifecycle events (Redeem module) that share the FA-routed shape [intent, actualRelayFee, fund, …]: the fund
+// address sits at arg index 2, exactly like Operate.account and Allocate.fundAccount. Labelled via EVENT_NAME_BY_HASH.
+const REDEMPTION_EVENTS = [
+  CONTRACT_EVENT_MAP.Redeem.Redeem,
+  CONTRACT_EVENT_MAP.Redeem.Sell,
+  CONTRACT_EVENT_MAP.Redeem.Claim,
+  CONTRACT_EVENT_MAP.Redeem.Liquidate
+] as const
+const REDEMPTION_BY_HASH = new Map<Hex, (typeof REDEMPTION_EVENTS)[number]>(REDEMPTION_EVENTS.map(ev => [ev.hash, ev]))
+// Every remaining fee-bearing event shares the [intent, actualRelayFee, ...] head; decode the fee generically so no
+// action row renders without its relay fee.
+const FEE_EVENTS = [...REDEMPTION_EVENTS, CONTRACT_EVENT_MAP.HubGate.Withdraw] as const
+const FEE_BY_HASH = new Map<Hex, (typeof FEE_EVENTS)[number]>(FEE_EVENTS.map(ev => [ev.hash, ev]))
+
+// Every master-initiated action bound to THIS fund account: allocate, operate, and the redemptions (redeem/sell/claim/
+// liquidate), plus fund creation. The journal's /activity route returns the raw signed-domain events whose decoded
+// account/fund field equals the fund (Operate.account / Allocate.fundAccount / Redeem*.fund all sit at arg index 2), so
+// a single account=fund query covers them. We decode each event's `data` for its detail (call/transfer legs, allocated
+// amounts, relay fee); unknown/label-only events fall through to a plain row.
 export async function fetchFundActivity(fund: Address, limit = 40): Promise<IFundAction[]> {
-  const rawList = await fetchRawActivity(getAddress(fund), limit)
+  const rawList = await fetchRawActivity(getAddress(fund), limit).catch(() => [] as IRawEvent[])
+
+  const base = (e: IRawEvent) => ({
+    blockTimestamp: e.blockTimestamp,
+    blockNumber: e.blockNumber,
+    transactionHash: e.transactionHash,
+    chainId: Number(e.chainId),
+    totalMatched: 0n,
+    puppetCount: 0,
+    resultCount: 0,
+    callList: [] as readonly IIAccount__Call[],
+    transferList: [] as readonly IIAccount__SignTransfer[],
+    masterAmount: 0n,
+    allocated: 0n,
+    relayFee: 0n
+  })
+
   const actions: IFundAction[] = []
   for (const e of rawList) {
     if (e.method === CONTRACT_EVENT_MAP.FundGate.Operate.hash) {
-      const [intent, , result, actualRelayFee] = decodeAbiParameters(
+      const [intent, actualRelayFee, , result] = decodeAbiParameters(
         CONTRACT_EVENT_MAP.FundGate.Operate.args,
         e.data
       ) as unknown as [
         { callList: readonly IIAccount__Call[]; transferList: readonly IIAccount__SignTransfer[] },
+        bigint,
         Address,
-        readonly Hex[],
-        bigint
+        readonly Hex[]
       ]
       actions.push({
+        ...base(e),
         kind: 'operate',
-        blockTimestamp: e.blockTimestamp,
-        blockNumber: e.blockNumber,
-        transactionHash: e.transactionHash,
-        chainId: Number(e.chainId),
-        totalMatched: 0n,
-        puppetCount: 0,
         resultCount: result.length,
         callList: intent.callList,
         transferList: intent.transferList,
-        masterAmount: 0n,
-        allocated: 0n,
         relayFee: actualRelayFee
       })
     } else if (e.method === CONTRACT_EVENT_MAP.Allocate.Allocate.hash) {
-      const [intent, , , puppetSharesMintedList, totalAllocated, , , actualRelayFee] = decodeAbiParameters(
+      const [intent, actualRelayFee, , , puppetSharesPostList, totalAllocated] = decodeAbiParameters(
         CONTRACT_EVENT_MAP.Allocate.Allocate.args,
         e.data
-      ) as unknown as [
-        { masterAmount: bigint },
-        Address,
-        bigint,
-        readonly bigint[],
-        bigint,
-        bigint,
-        bigint,
-        bigint,
-        bigint
-      ]
+      ) as unknown as [{ masterAmount: bigint }, bigint, Address, bigint, readonly bigint[], bigint]
       const masterAmount = intent.masterAmount
       actions.push({
+        ...base(e),
         kind: 'allocate',
-        blockTimestamp: e.blockTimestamp,
-        blockNumber: e.blockNumber,
-        transactionHash: e.transactionHash,
-        chainId: Number(e.chainId),
         totalMatched: totalAllocated,
-        puppetCount: puppetSharesMintedList.filter(s => s > 0n).length,
-        resultCount: 0,
-        callList: [],
-        transferList: [],
+        puppetCount: puppetSharesPostList.filter(s => s > 0n).length,
         masterAmount,
         allocated: masterAmount + totalAllocated,
         relayFee: actualRelayFee
       })
-    } else {
+    } else if (e.method === CONTRACT_EVENT_MAP.FundGate.Wrap.hash) {
+      const [intent, actualRelayFee] = decodeAbiParameters(CONTRACT_EVENT_MAP.FundGate.Wrap.args, e.data) as unknown as [
+        { amount: bigint; unwrap: boolean },
+        bigint,
+        Address
+      ]
       actions.push({
+        ...base(e),
         kind: 'event',
-        label: EVENT_NAME_BY_HASH.get(e.method) ?? 'Event',
-        blockTimestamp: e.blockTimestamp,
-        blockNumber: e.blockNumber,
-        transactionHash: e.transactionHash,
-        chainId: Number(e.chainId),
-        totalMatched: 0n,
-        puppetCount: 0,
-        resultCount: 0,
-        callList: [],
-        transferList: [],
-        masterAmount: 0n,
-        allocated: 0n,
-        relayFee: 0n
+        label: intent.unwrap ? 'Unwrap' : 'Wrap',
+        wrapAmount: intent.amount,
+        relayFee: actualRelayFee
       })
+    } else if (e.method === CONTRACT_EVENT_MAP.FundGate.Recognize.hash) {
+      const [intent, actualRelayFee] = decodeAbiParameters(
+        CONTRACT_EVENT_MAP.FundGate.Recognize.args,
+        e.data
+      ) as unknown as [{ token: Hex; amount: bigint }, bigint]
+      actions.push({
+        ...base(e),
+        kind: 'event',
+        label: 'Credit',
+        tokenAmount: { token: intent.token, amount: intent.amount },
+        feeToken: intent.token,
+        relayFee: actualRelayFee
+      })
+    } else if (e.method === CONTRACT_EVENT_MAP.PuppetGate.Swap.hash) {
+      // FundGate.Swap and PuppetGate.Swap share the topic hash (same event name) with different arg layouts; a fund's
+      // activity is FundGate-shaped. A failed decode falls back to a label-only row rather than dropping the action.
+      try {
+        const [intent, actualRelayFee] = decodeAbiParameters(CONTRACT_EVENT_MAP.FundGate.Swap.args, e.data) as unknown as [
+          { swap: { inputToken: Hex; inputAmount: bigint } },
+          bigint
+        ]
+        actions.push({
+          ...base(e),
+          kind: 'event',
+          label: 'Swap',
+          tokenAmount: { token: intent.swap.inputToken, amount: intent.swap.inputAmount },
+          feeToken: intent.swap.inputToken,
+          relayFee: actualRelayFee
+        })
+      } catch {
+        actions.push({ ...base(e), kind: 'event', label: 'Swap', relayFee: 0n })
+      }
+    } else {
+      const feeEvent = FEE_BY_HASH.get(e.method)
+      const relayFee = feeEvent
+        ? (decodeAbiParameters(feeEvent.args, e.data) as unknown as [unknown, bigint])[1]
+        : 0n
+      actions.push({ ...base(e), kind: 'event', label: EVENT_NAME_BY_HASH.get(e.method) ?? 'Event', relayFee })
     }
   }
-  return actions
+  // A create-on-missing recognize emits DeployFundAccount + Recognize in ONE tx: coalesce them into a single row that
+  // keeps the deploy's label (the page renders it chain-aware as "Open <chain> account") and the recognize's
+  // amount/fee, instead of a bare marker row next to an orphan credit.
+  const deployTxes = new Set(actions.filter(a => a.label === 'Create fund').map(a => a.transactionHash))
+  const coalesced = actions.flatMap(a => {
+    if (a.label === 'Create fund') {
+      const sibling = actions.find(
+        c => c.transactionHash === a.transactionHash && (c.label === 'Credit' || c.kind === 'allocate')
+      )
+      if (!sibling) return [a]
+      return [sibling.kind === 'allocate' ? { ...sibling, createdFund: true } : { ...sibling, label: 'Create fund' }]
+    }
+    if ((a.label === 'Credit' || a.kind === 'allocate') && deployTxes.has(a.transactionHash)) return []
+    return [a]
+  })
+  return coalesced
     .sort((x, y) => (y.blockNumber > x.blockNumber ? 1 : y.blockNumber < x.blockNumber ? -1 : 0))
     .slice(0, limit)
-}
-
-export async function findWalletDepositTxByRecipient(
-  recipient: Address,
-  chainId: number,
-  minBlock: bigint
-): Promise<Hex | null> {
-  return findDepositTx(getAddress(recipient), chainId, minBlock)
 }
 
 export async function fetchFundAccountMetricList(params: {
@@ -429,9 +487,7 @@ export async function fetchLeaderboardPage(params: {
 
   const fundList = metricList.map(m => m.fund)
   const [positionList, fundRows] = await Promise.all([
-    Promise.all(fundList.map(f => client.select(fundPositionTable, { where: { fund: f } }))).then(lists =>
-      lists.flat()
-    ),
+    client.select(fundPositionTable, { where: { fund: { in: fundList } } }),
     fetchFundsByIds(fundList)
   ])
 

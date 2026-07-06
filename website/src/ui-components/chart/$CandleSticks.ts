@@ -58,8 +58,6 @@ export const $CandleSticks = ({ data, candlestickConfig, chartConfig, markers }:
         style: LineStyle.Solid
       },
       vertLine: {
-        // visible: false,
-        // labelVisible: false,
         labelBackgroundColor: palette.indeterminate,
         color: colorShade(palette.indeterminate, 20),
         width: 1,

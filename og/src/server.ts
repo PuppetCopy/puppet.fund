@@ -1,11 +1,12 @@
 import { Renderer } from '@takumi-rs/core'
 import { renderToImage } from 'aelea/takumi'
-import { $brand, $leaderboard, $page } from './$views.js'
+import { $brand, $fund, $leaderboard, $page, HEIGHT, WIDTH } from './$views.js'
 import fontAsset from './assets/Geist-Variable.woff2' with { type: 'file' }
 import logoAsset from './assets/logo.png' with { type: 'file' }
-import { fetchTopFunds } from './leaderboard.js'
+import { fetchFundCard, fetchTopFunds, short } from './data.js'
 
-const port = Number(Bun.env.PORT) || 4100
+const port = Number(Bun.env.PORT)
+if (!Number.isInteger(port)) throw new Error('PORT is required')
 
 const [fontData, logoData] = await Promise.all([Bun.file(fontAsset).bytes(), Bun.file(logoAsset).bytes()])
 
@@ -13,28 +14,20 @@ const renderer = new Renderer()
 renderer.loadFontSync({ name: 'Geist', data: fontData })
 await renderer.putPersistentImage({ src: 'logo', data: logoData })
 
-const SIZE = 1200
-
 const isHexAddress = (s: string): s is `0x${string}` => /^0x[0-9a-fA-F]{40}$/.test(s)
-const short = (address: string) => `${address.slice(0, 6)}…${address.slice(-4)}`
 
 const STATIC_CACHE = 'public, max-age=86400, s-maxage=86400'
 const LEADERBOARD_CACHE = 'public, max-age=3600, s-maxage=3600'
+const FUND_CACHE = 'public, max-age=300, s-maxage=300'
 
 const png = async (node: Parameters<typeof renderToImage>[0], cacheControl = STATIC_CACHE) => {
-  const bytes = await renderToImage(node, { width: SIZE, height: SIZE, format: 'png', renderer })
+  const bytes = await renderToImage(node, { width: WIDTH, height: HEIGHT, format: 'png', renderer })
   return new Response(bytes as BlobPart, {
     headers: {
       'content-type': 'image/png',
       'cache-control': cacheControl
     }
   })
-}
-
-const PAGES: Record<string, { title: string; subtitle: string }> = {
-  hello: { title: 'Get Started', subtitle: 'Open a wallet, set your funding rules, start trading' },
-  leaderboard: { title: 'Leaderboard', subtitle: 'Top funds ranked by performance' },
-  portfolio: { title: 'Portfolio', subtitle: 'Your accounts, balances and allocations' }
 }
 
 const leaderboardCard = async () => {
@@ -44,7 +37,17 @@ const leaderboardCard = async () => {
   } catch (err) {
     console.error('leaderboard og fetch failed', err)
   }
-  return $page(PAGES.leaderboard.title, PAGES.leaderboard.subtitle, '/leaderboard')
+  return $page('Leaderboard', 'Top funds ranked by performance', '/leaderboard')
+}
+
+const fundCard = async (address: `0x${string}`) => {
+  try {
+    const card = await fetchFundCard(address)
+    if (card) return $fund(card)
+  } catch (err) {
+    console.error('fund og fetch failed', err)
+  }
+  return $page('Fund', short(address), `/fund/${short(address)}`)
 }
 
 Bun.serve({
@@ -56,22 +59,12 @@ Bun.serve({
 
     '/og/leaderboard': async () => png(await leaderboardCard(), LEADERBOARD_CACHE),
 
-    '/og/:page': req => {
-      const page = PAGES[req.params.page]
-      if (!page) return new Response('not found', { status: 404 })
-      return png($page(page.title, page.subtitle, `/${req.params.page}`))
-    },
+    '/og/portfolio': () => png($page('Portfolio', 'Your accounts, balances and allocations', '/portfolio')),
 
-    '/og/portfolio/:address': req => {
+    '/og/fund/:address': async req => {
       const { address } = req.params
       if (!isHexAddress(address)) return new Response('invalid address', { status: 400 })
-      return png($page('Portfolio', short(address), '/portfolio'))
-    },
-
-    '/og/fund/:address': req => {
-      const { address } = req.params
-      if (!isHexAddress(address)) return new Response('invalid address', { status: 400 })
-      return png($page('Fund', short(address), '/fund'))
+      return png(await fundCard(address), FUND_CACHE)
     }
   },
   fetch: () => new Response('not found', { status: 404 })

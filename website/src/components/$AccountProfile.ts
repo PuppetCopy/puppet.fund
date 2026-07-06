@@ -1,6 +1,7 @@
 import type { IFundAccountLib__FundAccountInitParams } from '@puppet/contracts/types'
 import { predictFundAccount, predictShareToken, symbolForBaseTokenId } from '@puppet/sdk/account'
 import { BYTES32_ZERO } from '@puppet/sdk/const'
+import type { IFund } from '@puppet/sdk/schema'
 import {
   decodeFundName,
   type IFundRank,
@@ -8,7 +9,7 @@ import {
   roboTraitsFromNameAndAddress,
   roboTraitsFromRank
 } from '@puppet/sdk/ui-components'
-import { combine, empty, map, switchLatest } from 'aelea/stream'
+import { empty, map, switchLatest } from 'aelea/stream'
 import { $node, $text, type I$Node, type INodeCompose, style } from 'aelea/ui'
 import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
@@ -17,8 +18,8 @@ import type { Address } from 'viem/accounts'
 import { text } from '@/ui-components'
 import { $jazzicon } from '../common/$avatar.js'
 import { $roboAvatar } from '../common/$roboAvatar.js'
-import { livePlatformScale, liveFundPool } from '../io/live.js'
-import { fundRank } from '../io/matchmaker/reads.js'
+import { fundRank } from '../io/datastore/reads.js'
+import { livePlatformScale } from '../io/live.js'
 import { $tokenIconBySymbol } from './portfolio/$tokenOption.js'
 
 export const readableAccountName = (name?: Hex | null): string | undefined => {
@@ -54,6 +55,20 @@ export const accountNameToHex = (name: string): Hex => {
   return toHex(truncated, { size: 32 })
 }
 
+// Rank is decoration derived from the caller's already-fetched fund row (no read of its own): no row = unranked.
+const $liveRoboAvatar = (seed: Address, size: number, name: Hex | null | undefined, pool?: IFund): I$Node =>
+  switchLatest(
+    map(
+      scale =>
+        $roboAvatar(
+          seed,
+          size,
+          fundRankTraits(name, seed, fundRank(pool ? { navPerShare: pool.navPerShare, realisedPnlUsd: 0n } : null, scale))
+        ),
+      livePlatformScale
+    )
+  )
+
 export const $profileDisplay = ({
   $container = $row,
   address,
@@ -63,6 +78,7 @@ export const $profileDisplay = ({
   profileSize = 45,
   isFund = true,
   user,
+  fund,
   $avatar,
   $labelContainer
 }: {
@@ -74,20 +90,11 @@ export const $profileDisplay = ({
   profileSize?: number
   isFund?: boolean
   user?: Address
+  fund?: IFund
   $avatar?: I$Node
   $labelContainer?: INodeCompose
 }) => {
-  const $fundAvatar = switchLatest(
-    map(
-      ({ scale, pool }) =>
-        $roboAvatar(
-          address,
-          profileSize,
-          fundRankTraits(name, address, fundRank(pool ? { navPerShare: pool.navPerShare, realisedPnlUsd: 0n } : null, scale))
-        ),
-      combine({ scale: livePlatformScale, pool: liveFundPool(address) })
-    )
-  )
+  const $fundAvatar = $liveRoboAvatar(address, profileSize, name, fund)
   return $container(spacing.small, style({ alignItems: 'center', textDecoration: 'none' }))(
     $avatar ?? (isFund ? $fundAvatar : $jazzicon(user ?? address, profileSize)),
     showAddress
@@ -103,26 +110,12 @@ export const $profileDisplay = ({
 // THE fund identity display: rounded robo avatar seeded by the predicted ShareToken,
 // the base-token icon floated into its corner, and the fund name as the label. A fund's
 // identity IS its ShareToken (master + base token + name), so this takes the init params.
-export const $fundProfile = (share: IFundAccountLib__FundAccountInitParams, size = 36): I$Node => {
+export const $fundProfile = (share: IFundAccountLib__FundAccountInitParams, size = 36, pool?: IFund): I$Node => {
   const shareToken = predictShareToken(share)
   const traits = fundNameTraits(share.name, shareToken)
   const symbol = symbolForBaseTokenId(share.baseToken)
   const px = isDesktopScreen ? size : Math.round(size * 0.78)
-  const $avatar = switchLatest(
-    map(
-      ({ scale, pool }) =>
-        $roboAvatar(
-          shareToken,
-          px,
-          fundRankTraits(
-            share.name,
-            shareToken,
-            fundRank(pool ? { navPerShare: pool.navPerShare, realisedPnlUsd: 0n } : null, scale)
-          )
-        ),
-      combine({ scale: livePlatformScale, pool: liveFundPool(predictFundAccount(share)) })
-    )
-  )
+  const $avatar = $liveRoboAvatar(shareToken, px, share.name, pool)
   return $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
     $node(
       style({

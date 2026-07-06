@@ -15,7 +15,7 @@ const SITE_CONFIG = {
   __APP_DESC_SHORT__: 'Puppet, a fund wallet operated by humans and agents',
   __APP_DESC_LONG__:
     'Fund top traders and share their gains, or run your own fund and trade as you do today, on any EVM chain. Keep your keys; every funding runs under rules you sign.',
-  __OG_IMAGE__: `${WEBSITE}/api/og{{if eq .OriginalReq.URL.Path \`/leaderboard\`}}/leaderboard?d={{now | date \`2006-01-02-15\`}}{{end}}`,
+  __OG_IMAGE__: `${WEBSITE}/api/og{{$p := .OriginalReq.URL.Path}}{{$fund := regexFind \`^/fund/0x[0-9a-fA-F]{40}$\` $p}}{{if $fund}}{{$fund}}?{{$s := .OriginalReq.URL.Query.Get \`s\`}}{{if $s}}s={{$s}}{{else}}d={{now | date \`2006-01-02-15\`}}{{end}}{{else if eq $p \`/leaderboard\`}}/leaderboard?d={{now | date \`2006-01-02-15\`}}{{end}}`,
   __THEME_PRIMARY__: '#870B38',
   __THEME_BACKGROUND__: '#292c37'
 }

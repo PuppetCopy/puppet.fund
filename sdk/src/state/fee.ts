@@ -37,6 +37,7 @@ const PER_UNIT_GAS: Partial<Record<RelayMethod, bigint>> = {
 const KIND_DISPATCH: Partial<Record<string, { router: RelayRouter; method: RelayMethod }>> = {
   swap: { router: 'PuppetGate', method: 'swap' },
   fundSwap: { router: 'FundGate', method: 'swap' },
+  wrap: { router: 'FundGate', method: 'wrap' },
   recognize: { router: 'PuppetGate', method: 'recognize' },
   fundRecognize: { router: 'FundGate', method: 'recognize' },
   operate: { router: 'FundGate', method: 'operate' }
@@ -57,8 +58,34 @@ function relayGas(router: RelayRouter, method: RelayMethod, unitCount: bigint): 
   return base + (PER_UNIT_GAS[method] ?? 0n) * unitCount
 }
 
-// Relay gas is always paid on the hub (homeChainId), so the fee scale is the hub native's precision off the meta.
+// Methods that invoke EXTERNAL protocols (a DEX/bridge for swap, GMX for operate), whose real execution cost the
+// single-shape forge base under-reports and the per-unit estimate can't capture (one GMX createOrder is ~400-600k, a
+// deploy-on-first-use swap adds ~300k). A floor keeps a real call from OOGing while the base+perUnit shape still scales
+// past it for large batches.
+const DISPATCH_GAS_FLOOR: Partial<Record<RelayMethod, bigint>> = {
+  operate: 2_000_000n,
+  swap: 2_000_000n
+}
+
+// The gas cap for DISPATCH (writeContract), sized from the SAME scaling model the fee is quoted from
+// (base + perUnit*unitCount) so a large batch never OOGs the tx the fee was collected for — a static base*N ignored
+// unitCount and OOG'd a >~46-puppet allocate mid-loop. 2x headroom absorbs the hardcoded-estimate error; a per-method
+// floor covers external-protocol calls. Never eth_call/estimateGas (that reintroduces the node-anomaly veto the sim
+// deletion removed) — this is a pure static formula.
+export function dispatchGasLimit(router: RelayRouter, method: RelayMethod, unitCount: bigint): bigint {
+  const scaled = relayGas(router, method, unitCount) * 2n
+  const floor = DISPATCH_GAS_FLOOR[method] ?? 0n
+  return scaled > floor ? scaled : floor
+}
+
+// The fee scale: every supported chain's native is 18-decimals, so one precision constant serves all dispatch chains
+// (the RATE is what must be chain-native-keyed, see getTokenPerNativeToken).
 export const NATIVE_PRECISION = nativePrecisionOf(HUB_CHAIN_ID)
+
+// CEILING division: a real gas cost must never floor to a ZERO fee (a sub-unit quote on a cheap chain once rounded to
+// 0, was signed, co-signed and charged as 0 — the relayer worked for free and the anomaly stayed invisible). Rounding
+// up costs the user at most one token unit and keeps "fee exists" an invariant of every priced dispatch.
+const ceilByPrecision = (n: bigint): bigint => (n + NATIVE_PRECISION - 1n) / NATIVE_PRECISION
 
 // User-side ceiling buffer over the base quote. The matchmaker requotes against
 // live gas/rate at submit time; this margin absorbs drift between sign and
@@ -79,14 +106,14 @@ export function getAcceptableRelayFee(
   tokenPerNativeToken: bigint,
   unitCount = 0n
 ): bigint {
-  return withMargin((relayGas(router, method, unitCount) * gasPrice * tokenPerNativeToken) / NATIVE_PRECISION)
+  return withMargin(ceilByPrecision(relayGas(router, method, unitCount) * gasPrice * tokenPerNativeToken))
 }
 
 export function getRelayFeeQuoteSource(tokenPerNativeToken: bigint, gasPrice: bigint): RelayFeeMap {
   const map = {} as RelayFeeMap
   for (const router of ['PuppetGate', 'FundGate', 'HubGate'] as const) {
     for (const [method, gas] of Object.entries(ROUTER_GAS[router])) {
-      map[method as RelayMethod] = { relayFee: withMargin((gas * gasPrice * tokenPerNativeToken) / NATIVE_PRECISION) }
+      map[method as RelayMethod] = { relayFee: withMargin(ceilByPrecision(gas * gasPrice * tokenPerNativeToken)) }
     }
   }
   return map
@@ -100,5 +127,5 @@ export function computeRelayFee(
   tokenPerNativeToken: bigint,
   unitCount = 0n
 ): bigint {
-  return (relayGas(router, method, unitCount) * gasPrice * tokenPerNativeToken) / NATIVE_PRECISION
+  return ceilByPrecision(relayGas(router, method, unitCount) * gasPrice * tokenPerNativeToken)
 }

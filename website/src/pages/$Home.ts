@@ -1,6 +1,5 @@
-import type { ISubaccountState } from '@puppet/sdk/state'
-import { type IStream, map, nowWith, op, start } from 'aelea/stream'
-import type { IBehavior } from 'aelea/stream-extended'
+import { type IStream, map, op, start } from 'aelea/stream'
+import { state } from 'aelea/stream-extended'
 import {
   $custom,
   $element,
@@ -9,23 +8,21 @@ import {
   $wrapNativeElement,
   attr,
   component,
-  effectProp,
   fromEventTarget,
   type I$Node,
+  motion,
   style,
   styleBehavior,
   stylePseudo
 } from 'aelea/ui'
 import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $Link, type Route } from 'aelea/ui-router'
+import { colorShade, palette, theme } from 'aelea/ui-components-theme'
 import {
-  $bull,
+  $check,
   $gitbook,
   $github,
   $gmx,
   $icon,
-  $moneyBag,
   $puppeteer,
   $smartContract,
   $twitter,
@@ -34,28 +31,11 @@ import {
 } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
 import { $puppetLogo } from '../common/$icons.js'
-import { $heading1, $heading2, $heading3 } from '../common/$text.js'
+import { $heading2, $heading3 } from '../common/$text.js'
 import { $card, $mockWindow } from '../common/elements/$common.js'
-import type {
-  IAllocateDraft,
-  IClaimDraft,
-  IFundSwapDraft,
-  IRedeemDraft,
-  ISellDraft
-} from '../components/portfolio/draft.js'
 import { DOCS_URL, GITHUB_REPO_URL } from '../const/links.js'
-import type { IConnectedWallet } from '../wallet/index.js'
-import { $HelloPage } from './$HelloPage.js'
-import { $body } from './$onboarding.js'
-
-export interface I$Home {
-  hideBalances: IStream<boolean>
-  walletQuery: IStream<Promise<IConnectedWallet | null>>
-  walletState: IStream<ISubaccountState | null>
-  draftAllocateList: IStream<IAllocateDraft[]>
-  draftSwapList: IStream<IFundSwapDraft[]>
-  draftRedeemList: IStream<IRedeemDraft[]>
-}
+import { $fundOrGetFundedCta, $navPill, $pillAnchor } from './$FundQuickstart.js'
+import { $body, $terminal } from './$onboarding.js'
 
 const TWITTER_URL = 'https://twitter.com/PuppetCopy'
 
@@ -98,7 +78,7 @@ const $vortexBackground = (): I$Node => {
       vy: (Math.random() - 0.5) * 0.25,
       life: max,
       max,
-      r: 46 + Math.random() * 70,
+      r: 0.5 + Math.random() ** 2 * 2.6,
       c: hues[fromLeft ? 0 : 1]!
     }
   }
@@ -118,10 +98,14 @@ const $vortexBackground = (): I$Node => {
     if (sentinel.isConnected) everConnected = true
     else if (everConnected) return cleanup()
     t += 0.004
+    const light = theme.name === 'light'
+    canvas.style.opacity = light ? '0.8' : '0.4'
     ctx.globalCompositeOperation = 'source-over'
-    ctx.fillStyle = 'rgba(16, 18, 23, 0.07)'
+    ctx.globalAlpha = light ? 0.12 : 0.07
+    ctx.fillStyle = light ? theme.palette.horizon : '#101217'
     ctx.fillRect(0, 0, w, h)
-    ctx.globalCompositeOperation = 'lighter'
+    ctx.globalAlpha = 1
+    if (!light) ctx.globalCompositeOperation = 'lighter'
     const cx = w / 2
     const cy = h / 2
     const ringR = Math.min(300, Math.min(w, h) / 2 - 40)
@@ -141,12 +125,19 @@ const $vortexBackground = (): I$Node => {
       p.y += p.vy
       p.life -= 1
       const fade = Math.max(0, Math.min(1, p.life / p.max, (p.max - p.life) / 30))
-      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r)
-      g.addColorStop(0, `rgba(${p.c}, ${0.04 * fade})`)
-      g.addColorStop(1, `rgba(${p.c}, 0)`)
+      const r = light ? p.r * 1.8 : p.r
+      const glowR = r * 7
+      const glowC = light ? '255, 255, 255' : p.c
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, glowR)
+      g.addColorStop(0, `rgba(${glowC}, ${(light ? 0.4 : 0.18) * fade})`)
+      g.addColorStop(1, `rgba(${glowC}, 0)`)
       ctx.fillStyle = g
       ctx.beginPath()
-      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2)
+      ctx.arc(p.x, p.y, glowR, 0, Math.PI * 2)
+      ctx.fill()
+      ctx.fillStyle = light ? `rgba(${p.c}, ${0.7 * fade})` : `rgba(255, 255, 255, ${0.4 * fade})`
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, r, 0, Math.PI * 2)
       ctx.fill()
       if (p.life <= 0 || dist < 16) Object.assign(p, spawn())
     }
@@ -157,60 +148,7 @@ const $vortexBackground = (): I$Node => {
   return $wrapNativeElement(sentinel)(style({ display: 'none' }))()
 }
 
-const $pillAnchor = (filled: boolean, borderColor?: string) =>
-  $element('a')(
-    style({
-      display: 'inline-flex',
-      cursor: 'pointer',
-      alignItems: 'center',
-      height: '48px',
-      padding: '0 28px',
-      borderRadius: '30px',
-      backgroundColor: filled ? palette.primary : palette.background,
-      color: palette.message,
-      fontWeight: 'bold',
-      fontSize: text.base,
-      textDecoration: 'none',
-      whiteSpace: 'nowrap',
-      border: filled ? 'none' : `1px solid ${borderColor ?? colorShade(palette.foreground, 30)}`
-    }),
-    stylePseudo(
-      ':hover',
-      filled
-        ? { filter: 'brightness(1.1)' }
-        : borderColor
-          ? { backgroundColor: colorShade(palette.primary, 12) }
-          : { borderColor: colorShade(palette.foreground, 60) }
-    )
-  )
-
-const $pillLabel = (label: string, $glyph?: I$Node): I$Node =>
-  $row(spacing.small, style({ alignItems: 'center' }))(
-    ...($glyph ? [$icon({ $content: $glyph, width: '20px', viewBox: '0 0 32 32', fill: palette.message })] : []),
-    $text(label)
-  )
-
-const $scrollPill = (label: string, targetId: string, filled: boolean, borderColor?: string, $glyph?: I$Node): I$Node =>
-  $pillAnchor(
-    filled,
-    borderColor
-  )(
-    effectProp(
-      'onclick',
-      nowWith(() => () => document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
-    )
-  )($pillLabel(label, $glyph))
-
-const $navSecondary = (label: string, route: Route, $glyph?: I$Node): I$Node =>
-  $Link({ route, $content: $pillLabel(label, $glyph), $anchor: $pillAnchor(false) })({})
-
-const $navAccent = (label: string, route: Route, $glyph?: I$Node): I$Node =>
-  $Link({ route, $content: $pillLabel(label, $glyph), $anchor: $pillAnchor(false, palette.primary) })({})
-
-const $extSecondary = (label: string, href: string): I$Node =>
-  $pillAnchor(false)(attr({ href, target: '_blank', rel: 'noopener' }))($text(label))
-
-const $featureIcon = ($glyph: I$Node, accent: string, viewBox = '0 0 32 32'): I$Node =>
+const $featureIcon =($glyph: I$Node, accent: string, viewBox = '0 0 32 32'): I$Node =>
   $row(
     style({
       width: '56px',
@@ -345,37 +283,7 @@ const $hero = (): I$Node => {
           paddingTop: '8px'
         })
       )($text('Fund or get funded')),
-      $row(
-        spacing.default,
-        style({
-          flexDirection: isDesktopScreen ? 'row' : 'column',
-          alignItems: isDesktopScreen ? 'flex-start' : 'center',
-          justifyContent: 'center',
-          paddingTop: '4px'
-        })
-      )(
-        $column(
-          spacing.small,
-          style({ flexDirection: isDesktopScreen ? 'column' : 'column-reverse', alignItems: 'center' })
-        )(
-          $scrollPill('Create a Fund', 'hello-create', true, undefined, $puppeteer),
-          $node(style({ fontSize: text.xs, color: palette.foreground }))($text('For Traders'))
-        ),
-        $node(
-          style({
-            display: 'flex',
-            alignItems: 'center',
-            height: isDesktopScreen ? '48px' : 'auto',
-            fontSize: text.xs,
-            fontWeight: 'bold',
-            color: palette.foreground
-          })
-        )($text('OR')),
-        $column(spacing.small, style({ alignItems: 'center' }))(
-          $navAccent('Funds leaderboard', routeSchema.leaderboard, $puppetLogo),
-          $node(style({ fontSize: text.xs, color: palette.foreground }))($text('For Investors'))
-        )
-      )
+      $fundOrGetFundedCta()
     ),
     $node(
       style({ width: '100%', maxWidth: '680px', perspective: '1400px' }),
@@ -400,109 +308,704 @@ const $hero = (): I$Node => {
   )
 }
 
-const $sideCard = (
-  accent: string,
-  $glyph: I$Node,
-  viewBox: string,
-  kicker: string,
-  title: string,
-  lines: string[],
-  $cta: I$Node
-): I$Node =>
-  $card(
-    spacing.default,
-    style({ flex: '1', minWidth: '280px', border: `1px solid ${colorShade(palette.foreground, 20)}` })
+const $personaKicker = (accent: string, label: string): I$Node =>
+  $node(
+    style({
+      fontSize: text.xs,
+      textTransform: 'uppercase',
+      letterSpacing: '0.1em',
+      fontWeight: '700',
+      color: accent
+    })
+  )($text(label))
+
+const STORY_MOTION_CSS = `
+@supports (animation-timeline: view()) {
+  [data-reveal] { animation: puppetRiseC 1ms both; animation-timeline: view(); animation-range: entry 0% entry 28%; }
+  [data-reveal="l"] { animation-name: puppetRiseL; }
+  [data-reveal="r"] { animation-name: puppetRiseR; }
+}
+@keyframes puppetRiseC { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: none; } }
+@keyframes puppetRiseL { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
+@keyframes puppetRiseR { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
+[data-orb] { animation: puppetOrbPulse 2.8s ease-in-out infinite; }
+@keyframes puppetOrbPulse {
+  0%, 100% { box-shadow: 0 0 12px 2px rgba(236, 72, 130, 0.5); }
+  50% { box-shadow: 0 0 28px 8px rgba(139, 92, 246, 0.55); }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-reveal], [data-orb] { animation: none; }
+}
+`
+
+const ensureStoryStyles = () => {
+  if (document.getElementById('puppet-story-motion')) return
+  const el = document.createElement('style')
+  el.id = 'puppet-story-motion'
+  el.textContent = STORY_MOTION_CSS
+  document.head.appendChild(el)
+}
+
+const $fundChip = (label: string): I$Node =>
+  $node(
+    style({
+      fontSize: text.xs,
+      padding: '5px 12px',
+      borderRadius: '14px',
+      textAlign: 'center',
+      backgroundColor: colorShade(palette.foreground, 12),
+      color: palette.message
+    })
+  )($text(label))
+
+const MASTER_COLOR = 'rgb(139, 92, 246)'
+const PUPPET_COLOR = 'rgb(236, 72, 130)'
+type IStorySpine = { w: number; xL: number; xR: number; converge: number; amp: number }
+
+const STORY_SPINE: IStorySpine = { w: 96, xL: 28, xR: 68, converge: 200, amp: 2 }
+const STORY_SPINE_M: IStorySpine = { w: 40, xL: 12, xR: 28, converge: 150, amp: 1.5 }
+
+type IStoryVoice = { title: string; body: string; vs: string }
+type IStoryBeat = { t: number; master: IStoryVoice; puppet: IStoryVoice }
+
+const STORY_BEATS: IStoryBeat[] = [
+  {
+    t: 0.18,
+    master: {
+      title: 'Same self-custody wallet',
+      body: 'Create a fund and it becomes your trading wallet. Connect it to GMX or Hyperliquid and trade exactly as you already do, while the fund runs public: ranked on the leaderboard, every position verifiable on-chain.',
+      vs: 'Instead of skill buried in an address nobody reads.'
+    },
+    puppet: {
+      title: 'Proof, not promises',
+      body: 'Every fund is an open book: live returns, drawdown, and positions read straight from the chain. Back one by signing rules it must obey: how much of your balance per trade, how often, when to stop.',
+      vs: 'Instead of a Telegram group and a screenshot.'
+    }
+  },
+  {
+    t: 0.42,
+    master: {
+      title: 'Multiply your capital',
+      body: 'Backers subscribe under their own rules and their capital joins your trades automatically. Seed a fund with $100 and attract $500 of backing: $600 now trades as one, six times what you put in. A +20% run pays your $20 plus a 10% performance fee on backer gains, $30 instead of $20.',
+      vs: 'Instead of an edge capped at your own wallet.'
+    },
+    puppet: {
+      title: 'Money that never leaves',
+      body: 'Your deposit never leaves your own account up front. When the fund opens a trade, the protocol pulls only your matched share, checks it against your signed rules, and mints you fund shares at a price verified on-chain.',
+      vs: 'Instead of wiring funds away and hoping.'
+    }
+  },
+  {
+    t: 0.66,
+    master: {
+      title: 'A name that compounds',
+      body: 'Wins build a public, verifiable track record, and the record brings subscribers, standing, and more capital behind every trade. The protocol keeps you honest: no exiting ahead of your backers, your shares redeem together with theirs.',
+      vs: 'Instead of winning quietly, alone.'
+    },
+    puppet: {
+      title: 'Watch live, exit anytime',
+      body: 'Watch every position and the fund value live. Exit on your terms: sell your shares at the current on-chain price and claim the money straight back to your own wallet.',
+      vs: 'Instead of no dashboard, no rules, no exit.'
+    }
+  }
+]
+
+const $storyCell = (accent: string, kicker: string, voice: IStoryVoice, mirror: boolean): I$Node =>
+  $column(
+    spacing.small,
+    style({
+      flex: '1',
+      minWidth: '0',
+      alignItems: mirror ? 'flex-end' : 'flex-start',
+      textAlign: mirror ? 'right' : 'left'
+    })
   )(
-    $featureIcon($glyph, accent, viewBox),
-    $node(style({ fontSize: text.xs, textTransform: 'uppercase', letterSpacing: '0.08em', color: palette.foreground }))(
-      $text(kicker)
-    ),
-    $heading2($text(title)),
-    ...lines.map($body),
-    $row(style({ paddingTop: '6px' }))($cta)
+    $personaKicker(accent, kicker),
+    $custom('h3')(
+      style({
+        fontSize: isDesktopScreen ? text.xxl : text.xl,
+        fontWeight: '800',
+        letterSpacing: '0.01em',
+        lineHeight: '1.25',
+        margin: '0',
+        color: palette.message
+      })
+    )($text(voice.title)),
+    $node(style({ fontSize: text.base, lineHeight: '1.6', color: palette.foreground }))($text(voice.body)),
+    $node(
+      style({
+        fontSize: text.xs,
+        fontStyle: 'italic',
+        lineHeight: '1.5',
+        color: colorShade(palette.foreground, 60),
+        paddingTop: '2px'
+      })
+    )($text(voice.vs))
   )
 
-const $twoSides = (): I$Node =>
-  $section(
-    $sectionHeading('Two ways in', 'Put capital to work, or put your trading to work.'),
-    $row(spacing.big, style({ flexWrap: 'wrap', alignItems: 'stretch' }))(
-      $sideCard(
-        palette.primary,
-        $moneyBag,
-        '0 0 32 32',
-        'For puppets',
-        'Fund a trader',
-        [
-          'Fund top traders and share their gains. Browse the leaderboard, pick by track record, and fund them in a single deposit.',
-          'You keep your keys, and you set the rules: how much, how fast, how often.'
-        ],
-        $navSecondary('Puppet Funds', routeSchema.leaderboard, $puppetLogo)
-      ),
-      $sideCard(
-        palette.positive,
-        $puppeteer,
-        '0 0 32 32',
-        'For traders',
-        'Run your own fund',
-        [
-          'Trade exactly as you do today, on any chain and any dapp. Puppet capital rides your trades and pays you performance fees.',
-          'Never hold or manage anyone else’s money. The protocol does the accounting.'
-        ],
-        $scrollPill('Get started', 'hello-create', false)
+const trailWaveX = (spine: IStorySpine, side: 'left' | 'right', y: number): number => {
+  const base = spine.xL + spine.amp * Math.sin(y * 0.011 + 0.9)
+  return side === 'left' ? base : spine.w - base
+}
+
+type ITrailGeom = { h: number; len: number }
+
+const $trailMark = (
+  progress: IStream<number>,
+  t: number,
+  color: string,
+  spine: IStorySpine,
+  side: 'left' | 'right',
+  probe: HTMLElement,
+  register: (fn: () => void) => void,
+  geom: ITrailGeom
+): I$Node[] => {
+  const x0 = side === 'left' ? spine.xL : spine.xR
+  const tetherEl = document.createElement('div')
+  const dotEl = document.createElement('div')
+  const tRef = { v: t }
+  register(() => {
+    const r = dotEl.getBoundingClientRect()
+    if (r.height === 0) return
+    const y = r.top + r.height / 2 - probe.getBoundingClientRect().top
+    const x = trailWaveX(spine, side, y)
+    dotEl.style.left = `${(x - 4.5).toFixed(1)}px`
+    if (side === 'left') tetherEl.style.width = `${(x - 7).toFixed(1)}px`
+    else tetherEl.style.left = `${(x + 7).toFixed(1)}px`
+    if (geom.len > 1) tRef.v = Math.min(1, (TRAIL_REVEAL_END * y) / geom.len)
+  })
+  return [
+    $wrapNativeElement(tetherEl)(
+      style({
+        position: 'absolute',
+        top: '7px',
+        height: '1px',
+        transition: 'background-color 500ms',
+        ...(side === 'left' ? { left: '5px', width: `${x0 - 7}px` } : { left: `${x0 + 7}px`, right: '5px' })
+      }),
+      styleBehavior(
+        map(
+          p => ({ backgroundColor: p >= tRef.v ? colorShade(color, 75) : colorShade(palette.foreground, 18) }),
+          progress
+        )
       )
+    )(),
+    $wrapNativeElement(dotEl)(
+      style({
+        position: 'absolute',
+        top: '3px',
+        left: `${x0 - 4.5}px`,
+        width: '9px',
+        height: '9px',
+        borderRadius: '50%',
+        transition: 'background-color 500ms, box-shadow 500ms'
+      }),
+      styleBehavior(
+        map(
+          p =>
+            p >= tRef.v
+              ? { backgroundColor: color, boxShadow: `0 0 12px ${color}` }
+              : { backgroundColor: colorShade(palette.foreground, 35), boxShadow: 'none' },
+          progress
+        )
+      )
+    )()
+  ]
+}
+
+const TRAIL_REVEAL_END = 0.95
+
+const buildTrailPath = (spine: IStorySpine, H: number, mirror: boolean): string => {
+  const n = (v: number): string => v.toFixed(1)
+  const xC = (spine.xL + spine.xR) / 2
+  const mir = (x: number): number => (mirror ? spine.w - x : x)
+  const conv = spine.converge
+  const y0 = Math.max(40, H - conv)
+  const tailEnd = y0 + conv - 14
+  const wave = (y: number): number => mir(spine.xL + spine.amp * Math.sin(y * 0.011 + 0.9))
+  const pts: [number, number][] = [[wave(0), 0]]
+  for (let y = 170; y < y0 - 50; y += 170) pts.push([wave(y), y])
+  pts.push([mir(spine.xL), y0])
+  for (let y = y0 + 6; y < tailEnd; y += 6) {
+    const k = (y - y0) / (tailEnd - y0)
+    pts.push([mir(xC + (spine.xL - xC) * (1 - k) * Math.cos(k * Math.PI * 4)), y])
+  }
+  pts.push([mir(xC), tailEnd])
+  let d = `M ${n(pts[0]![0])} ${n(pts[0]![1])}`
+  for (let i = 1; i < pts.length - 1; i++) {
+    const [px, py] = pts[i]!
+    const [nx, ny] = pts[i + 1]!
+    d += ` Q ${n(px)} ${n(py)}, ${n((px + nx) / 2)} ${n((py + ny) / 2)}`
+  }
+  const last = pts[pts.length - 1]!
+  d += ` L ${n(last[0])} ${n(last[1])}`
+  return d
+}
+
+const $trailLayer = (
+  progress: IStream<number>,
+  spine: IStorySpine,
+  centered: boolean,
+  probe: HTMLElement,
+  geom: ITrailGeom
+): I$Node => {
+  const ns = 'http://www.w3.org/2000/svg'
+  const xC = (spine.xL + spine.xR) / 2
+  const mkLayer = (glowing: boolean): { svg: SVGSVGElement; master: SVGPathElement; puppet: SVGPathElement } => {
+    const svg = document.createElementNS(ns, 'svg')
+    svg.setAttribute('fill', 'none')
+    svg.style.cssText = 'position:absolute;top:0;left:0;overflow:visible'
+    const mk = (color: string): SVGPathElement => {
+      const path = document.createElementNS(ns, 'path')
+      path.style.stroke = color
+      path.style.strokeWidth = '2'
+      path.style.strokeLinecap = 'round'
+      if (glowing) path.style.filter = `drop-shadow(0 0 4px ${color})`
+      svg.appendChild(path)
+      return path
+    }
+    const dim = colorShade(palette.foreground, 15)
+    return { svg, master: mk(glowing ? MASTER_COLOR : dim), puppet: mk(glowing ? PUPPET_COLOR : dim) }
+  }
+  const base = mkLayer(false)
+  const lit = mkLayer(true)
+  const rebuild = (H: number): void => {
+    geom.h = H
+    for (const { svg } of [base, lit]) {
+      svg.setAttribute('width', String(spine.w))
+      svg.setAttribute('height', String(H))
+      svg.setAttribute('viewBox', `0 0 ${spine.w} ${H}`)
+    }
+    const dMaster = buildTrailPath(spine, H, false)
+    const dPuppet = buildTrailPath(spine, H, true)
+    base.master.setAttribute('d', dMaster)
+    base.puppet.setAttribute('d', dPuppet)
+    lit.master.setAttribute('d', dMaster)
+    lit.puppet.setAttribute('d', dPuppet)
+    geom.len = lit.master.getTotalLength()
+    lit.svg.style.strokeDasharray = String(geom.len)
+    window.dispatchEvent(new Event('scroll'))
+  }
+  const ro = new ResizeObserver(entries => {
+    if (!probe.isConnected && geom.h > 0) {
+      ro.disconnect()
+      return
+    }
+    const h = entries[0]?.contentRect.height ?? 0
+    if (h > 0 && Math.abs(h - geom.h) > 1) rebuild(h)
+  })
+  ro.observe(probe)
+
+  const $tip = (color: string, master: boolean): I$Node =>
+    $node(
+      style({
+        position: 'absolute',
+        top: '0',
+        left: '0',
+        width: '8px',
+        height: '8px',
+        borderRadius: '50%',
+        backgroundColor: color,
+        boxShadow: `0 0 14px ${color}`,
+        willChange: 'transform'
+      }),
+      styleBehavior(
+        map(p => {
+          const pe = Math.min(1, p / TRAIL_REVEAL_END)
+          if (geom.h === 0 || pe <= 0.004 || pe >= 0.99) return { opacity: '0' }
+          const pt = lit.master.getPointAtLength(pe * geom.len)
+          const x = master ? pt.x : spine.w - pt.x
+          return { opacity: '1', transform: `translate(${(x - 4).toFixed(1)}px, ${(pt.y - 4).toFixed(1)}px)` }
+        }, progress)
+      )
+    )()
+
+  return $node(
+    style({
+      position: 'absolute',
+      top: '0',
+      bottom: '-48px',
+      width: `${spine.w}px`,
+      pointerEvents: 'none',
+      maskImage: 'linear-gradient(to bottom, transparent, black 48px)',
+      ...(centered ? { left: '50%', transform: 'translateX(-50%)' } : { left: '0' })
+    })
+  )(
+    $wrapNativeElement(base.svg)(style({}))(),
+    $wrapNativeElement(lit.svg)(
+      styleBehavior(
+        map(p => {
+          const pe = Math.min(1, p / TRAIL_REVEAL_END)
+          return { strokeDashoffset: (geom.len * (1 - pe)).toFixed(1) }
+        }, progress)
+      )
+    )(),
+    $tip(MASTER_COLOR, true),
+    $tip(PUPPET_COLOR, false),
+    $node(
+      attr({ 'data-orb': '' }),
+      style({
+        position: 'absolute',
+        bottom: '48px',
+        left: `${xC - 14}px`,
+        width: '28px',
+        height: '28px',
+        borderRadius: '50%',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: `linear-gradient(135deg, ${PUPPET_COLOR}, ${MASTER_COLOR})`,
+        transition: 'opacity 400ms, transform 500ms cubic-bezier(0.34, 1.56, 0.64, 1)'
+      }),
+      styleBehavior(
+        map(p => {
+          const hit = p / TRAIL_REVEAL_END >= 0.99
+          return hit ? { opacity: '1', transform: 'scale(1)' } : { opacity: '0', transform: 'scale(0.5)' }
+        }, progress)
+      )
+    )($icon({ $content: $puppetLogo, width: '16px', viewBox: '0 0 32 32', fill: 'white' }))
+  )
+}
+
+const $storyRow = (
+  progress: IStream<number>,
+  beat: IStoryBeat,
+  probe: HTMLElement,
+  register: (fn: () => void) => void,
+  geom: ITrailGeom
+): I$Node =>
+  $row(style({ width: '100%', alignItems: 'flex-start' }))(
+    $node(attr({ 'data-reveal': 'l' }), style({ flex: '1', minWidth: '0', display: 'flex' }))(
+      $storyCell(MASTER_COLOR, 'Master · the trader', beat.master, true)
+    ),
+    $node(style({ position: 'relative', flex: `0 0 ${STORY_SPINE.w}px`, alignSelf: 'stretch' }))(
+      ...$trailMark(progress, beat.t, MASTER_COLOR, STORY_SPINE, 'left', probe, register, geom),
+      ...$trailMark(progress, beat.t, PUPPET_COLOR, STORY_SPINE, 'right', probe, register, geom)
+    ),
+    $node(attr({ 'data-reveal': 'r' }), style({ flex: '1', minWidth: '0', display: 'flex' }))(
+      $storyCell(PUPPET_COLOR, 'Puppet · the backer', beat.puppet, false)
     )
   )
 
-const $stepCard = (n: number, accent: string, $glyph: I$Node, viewBox: string, title: string, desc: string): I$Node =>
-  $card(
-    spacing.default,
-    style({ flex: '1', minWidth: '340px', border: `1px solid ${colorShade(palette.foreground, 18)}` })
-  )(
-    $row(spacing.default, style({ alignItems: 'center', justifyContent: 'space-between' }))(
-      $featureIcon($glyph, accent, viewBox),
-      $node(
-        style({ fontSize: text.display, fontWeight: '900', lineHeight: '1', color: colorShade(palette.foreground, 22) })
-      )($text(String(n)))
+const $storyBlockM = (
+  progress: IStream<number>,
+  t: number,
+  accent: string,
+  kicker: string,
+  side: 'left' | 'right',
+  voice: IStoryVoice,
+  probe: HTMLElement,
+  register: (fn: () => void) => void,
+  geom: ITrailGeom
+): I$Node => {
+  const spine = STORY_SPINE_M
+  const x0 = side === 'left' ? spine.xL : spine.xR
+  const dotEl = document.createElement('div')
+  const tetherEl = document.createElement('div')
+  const tRef = { v: t }
+  register(() => {
+    const r = dotEl.getBoundingClientRect()
+    if (r.height === 0) return
+    const y = r.top + r.height / 2 - probe.getBoundingClientRect().top
+    const x = trailWaveX(spine, side, y)
+    dotEl.style.left = `${(x - 52 - 4.5).toFixed(1)}px`
+    tetherEl.style.left = `${(x - 52 + 5).toFixed(1)}px`
+    tetherEl.style.width = `${(52 - x - 15).toFixed(1)}px`
+    if (geom.len > 1) tRef.v = Math.min(1, (TRAIL_REVEAL_END * y) / geom.len)
+  })
+  return $node(attr({ 'data-reveal': 'c' }), style({ position: 'relative', width: '100%' }))(
+    $wrapNativeElement(dotEl)(
+      style({
+        position: 'absolute',
+        top: '4px',
+        left: `${x0 - 52 - 4.5}px`,
+        width: '9px',
+        height: '9px',
+        borderRadius: '50%',
+        transition: 'background-color 500ms, box-shadow 500ms'
+      }),
+      styleBehavior(
+        map(
+          p =>
+            p >= tRef.v
+              ? { backgroundColor: accent, boxShadow: `0 0 12px ${accent}` }
+              : { backgroundColor: colorShade(palette.foreground, 35), boxShadow: 'none' },
+          progress
+        )
+      )
+    )(),
+    $wrapNativeElement(tetherEl)(
+      style({
+        position: 'absolute',
+        top: '8px',
+        left: `${x0 - 52 + 5}px`,
+        width: `${52 - x0 - 15}px`,
+        height: '1px',
+        transition: 'background-color 500ms'
+      }),
+      styleBehavior(
+        map(
+          p => ({ backgroundColor: p >= tRef.v ? colorShade(accent, 45) : colorShade(palette.foreground, 18) }),
+          progress
+        )
+      )
+    )(),
+    $storyCell(accent, kicker, voice, false)
+  )
+}
+
+const $storyConverge = (): I$Node =>
+  $column(spacing.default, style({ alignItems: 'center', textAlign: 'center', width: '100%' }))(
+    $heading2($text('One shared wallet.')),
+    $node(style({ fontSize: text.base, lineHeight: '1.6', color: palette.foreground, maxWidth: '520px' }))(
+      $text('One wallet between them: the Master trades it, the Puppet rules it, the chain enforces both.')
     ),
-    $heading3($text(title)),
-    $node(style({ fontSize: text.sm, lineHeight: '1.6', color: palette.foreground }))($text(desc))
+    $row(spacing.small, style({ flexWrap: 'wrap', justifyContent: 'center' }))(
+      $fundChip('$600 AUM'),
+      $fundChip('10% performance fee'),
+      $fundChip('$30 instead of $20 on a winning run')
+    )
   )
 
-const $howItWorks = (): I$Node =>
+const $storyline = (): I$Node => {
+  ensureStoryStyles()
+  const probe = document.createElement('div')
+  const scrollTarget: IStream<number> = op(
+    fromEventTarget(window, 'scroll'),
+    map(() => {
+      const r = probe.getBoundingClientRect()
+      if (r.height === 0) return 0
+      const focus = window.innerHeight * 0.62
+      return Math.min(1, Math.max(0, (focus - r.top) / r.height))
+    })
+  )
+  const progress: IStream<number> = state(0, motion({ stiffness: 26, damping: 13, precision: 0.0005 }, scrollTarget))
+  const spine = isDesktopScreen ? STORY_SPINE : STORY_SPINE_M
+  const geom: ITrailGeom = { h: 0, len: 1 }
+  const aligners: (() => void)[] = []
+  const register = (fn: () => void): void => {
+    aligners.push(fn)
+  }
+  const alignObserver = new ResizeObserver(() => {
+    if (!probe.isConnected) {
+      alignObserver.disconnect()
+      return
+    }
+    requestAnimationFrame(() => {
+      for (const align of aligners) align()
+      window.dispatchEvent(new Event('scroll'))
+    })
+  })
+  alignObserver.observe(probe)
+
+  const mobileBlocks = (): I$Node[] =>
+    STORY_BEATS.flatMap((beat, i) => [
+      $storyBlockM(
+        progress,
+        0.1 + i * 2 * 0.12,
+        MASTER_COLOR,
+        'Master · the trader',
+        'left',
+        beat.master,
+        probe,
+        register,
+        geom
+      ),
+      $storyBlockM(
+        progress,
+        0.1 + (i * 2 + 1) * 0.12,
+        PUPPET_COLOR,
+        'Puppet · the backer',
+        'right',
+        beat.puppet,
+        probe,
+        register,
+        geom
+      )
+    ])
+
+  return $section(
+    $sectionHeading('The story', 'The seamless premium.'),
+    $node(style({ position: 'relative', width: '100%' }))(
+      $wrapNativeElement(probe)(style({ position: 'absolute', inset: '0', pointerEvents: 'none' }))(),
+      $trailLayer(progress, spine, isDesktopScreen, probe, geom),
+      $column(
+        style({
+          position: 'relative',
+          width: '100%',
+          gap: isDesktopScreen ? '52px' : '36px',
+          paddingTop: '12px',
+          paddingBottom: `${spine.converge + 28}px`,
+          ...(isDesktopScreen ? {} : { paddingLeft: '52px' })
+        })
+      )(
+        ...(isDesktopScreen ? STORY_BEATS.map(b => $storyRow(progress, b, probe, register, geom)) : mobileBlocks())
+      )
+    ),
+    $storyConverge()
+  )
+}
+
+const journeySteps: { invest: [string, string]; operate: [string, string] }[] = [
+  {
+    invest: [
+      'Deposit once',
+      'Fund your own account and browse the leaderboard. Pick funds by their live on-chain record: ROI, drawdown, positions, history.'
+    ],
+    operate: [
+      'Create your fund',
+      'Name it, pick a base token, seed it with your own capital. It lands on the public leaderboard from day one.'
+    ]
+  },
+  {
+    invest: [
+      'Sign your rules',
+      'How much per trade, how often, when to stop. One signature, no capital moves yet, revoke anytime.'
+    ],
+    operate: [
+      'Get backed',
+      'Investors subscribe to your fund under their own signed rules. You never hold or manage anyone’s money.'
+    ]
+  },
+  {
+    invest: [
+      'Your capital follows',
+      'When the operator trades, your matched amount is pulled and you get shares at an attested NAV. Unfunded or throttled matches simply skip.'
+    ],
+    operate: [
+      'Trade as you always do',
+      'By hand on GMX or through an agent. Backer capital rides your position, and every action is co-signed against their rules.'
+    ]
+  },
+  {
+    invest: [
+      'Exit at NAV',
+      'Sell shares into the redeem queue and claim back to your wallet, priced by the same attested NAV.'
+    ],
+    operate: [
+      'Earn on the upside',
+      'Your capital compounds and your record is public. You can never exit ahead of your backers: your shares redeem pro-rata with theirs.'
+    ]
+  }
+]
+
+const $stepBadge = (n: number): I$Node =>
+  $row(
+    style({
+      width: '32px',
+      height: '32px',
+      borderRadius: '50%',
+      flexShrink: '0',
+      alignItems: 'center',
+      justifyContent: 'center',
+      backgroundColor: colorShade(palette.foreground, 18),
+      fontSize: text.sm,
+      fontWeight: '600',
+      color: palette.message
+    })
+  )($text(String(n)))
+
+const $spine = (n: number, first: boolean, last: boolean, center: boolean): I$Node =>
+  $column(style({ alignItems: 'center', width: center ? '56px' : '44px', flexShrink: '0', alignSelf: 'stretch' }))(
+    $node(
+      style({
+        width: '2px',
+        flex: center ? '1' : '0 0 0px',
+        backgroundColor: first ? 'transparent' : colorShade(palette.foreground, 25)
+      })
+    )(),
+    $stepBadge(n),
+    $node(
+      style({ width: '2px', flex: '1', backgroundColor: last ? 'transparent' : colorShade(palette.foreground, 25) })
+    )()
+  )
+
+const $ladderCell = (accent: string, kicker: string, title: string, body: string, pad: boolean): I$Node =>
+  $column(spacing.small, style({ flex: '1', minWidth: '0', paddingBottom: pad ? '36px' : '0' }))(
+    $personaKicker(accent, kicker),
+    $heading3($text(title)),
+    $node(style({ fontSize: text.sm, lineHeight: '1.6', color: palette.foreground }))($text(body))
+  )
+
+const $journeys = (): I$Node =>
   $section(
-    $sectionHeading('How it works', 'One deposit, bounded by your signature.'),
-    $row(spacing.big, style({ flexWrap: 'wrap', alignItems: 'stretch' }))(
-      $stepCard(
-        1,
-        palette.primary,
-        $wallet,
-        '0 0 32 32',
-        'Fund',
-        'Deposit once. Fund any trader, or your own fund. Capital is pulled only when a trade actually fires.'
+    $sectionHeading('Side by side', 'The same trade, seen from both sides.'),
+    $column(style({ width: '100%' }))(
+      ...journeySteps.map((step, i) => {
+        const first = i === 0
+        const last = i === journeySteps.length - 1
+        return isDesktopScreen
+          ? $row(style({ width: '100%' }))(
+              $ladderCell(palette.primary, 'You invest', step.invest[0], step.invest[1], !last),
+              $spine(i + 1, first, last, true),
+              $ladderCell(palette.positive, 'You operate', step.operate[0], step.operate[1], !last)
+            )
+          : $row(style({ width: '100%' }))(
+              $spine(i + 1, first, last, false),
+              $column(spacing.default, style({ flex: '1', minWidth: '0', paddingBottom: last ? '0' : '36px' }))(
+                $ladderCell(palette.primary, 'You invest', step.invest[0], step.invest[1], false),
+                $ladderCell(palette.positive, 'You operate', step.operate[0], step.operate[1], false)
+              )
+            )
+      })
+    ),
+    isDesktopScreen
+      ? $row(style({ width: '100%' }))(
+          $row(style({ flex: '1', justifyContent: 'center' }))(
+            $navPill('Puppet Funds', routeSchema.leaderboard, false, palette.primary, $puppetLogo)
+          ),
+          $node(style({ width: '56px', flexShrink: '0' }))(),
+          $row(style({ flex: '1', justifyContent: 'center' }))(
+            $navPill('Create a Fund', routeSchema.quickstart, true, undefined, $puppeteer)
+          )
+        )
+      : $column(spacing.default, style({ alignItems: 'center' }))(
+          $navPill('Puppet Funds', routeSchema.leaderboard, false, palette.primary, $puppetLogo),
+          $navPill('Create a Fund', routeSchema.quickstart, true, undefined, $puppeteer)
+        )
+  )
+
+const $tradeToday = (): I$Node =>
+  $section(
+    $sectionHeading('Run it your way', 'Trade exactly as you do today.'),
+    $row(spacing.big, style({ flexWrap: 'wrap', alignItems: 'center' }))(
+      $column(spacing.default, style({ flex: '1 1 280px', minWidth: '260px' }))(
+        $body(
+          'Connect your fund to app.gmx.io through WalletConnect and the fund itself shows up as the connected wallet. You trade by hand, exactly as before.'
+        ),
+        $body(
+          'Under the hood every order becomes a co-signed intent: screened by the attestor, bounded to GMX, executed by the fund. Backer capital rides along automatically, each pull inside the rules its owner signed.'
+        ),
+        $row(style({ paddingTop: '4px' }))($navPill('Get started', routeSchema.quickstart, false))
       ),
-      $stepCard(
-        2,
-        palette.positive,
-        $puppeteer,
-        '0 0 32 32',
-        'Operate',
-        'A human trades by hand, or an agent runs headless, on GMX perpetuals and beyond.'
+      $node(style({ flex: '1 1 320px', minWidth: '280px' }))($video('assets/video/trade-adjust.mp4'))
+    )
+  )
+
+const $agentGuard = (label: string): I$Node =>
+  $row(spacing.small, style({ alignItems: 'center' }))(
+    $icon({ $content: $check, width: '15px', viewBox: '0 0 24 24', fill: palette.positive }),
+    $node(style({ fontSize: text.sm, color: palette.message, lineHeight: '1.5' }))($text(label))
+  )
+
+const $agentSection = (): I$Node =>
+  $section(
+    $sectionHeading('Or go headless', 'The operator doesn’t have to be human.'),
+    $row(spacing.big, style({ flexWrap: 'wrap', alignItems: 'center' }))(
+      $column(spacing.default, style({ flex: '1 1 320px', minWidth: '280px' }))(
+        $terminal(['bunx @puppet.fund/templates my-operator gmx', 'bun run dev'], 'scaffold an operator'),
+        $body(
+          'One command scaffolds a running agent, and a local encrypted handshake pairs it to your fund in minutes. In the LLM template, Claude proposes long, flat, or close, and deterministic code enforces every cap. The model can never size, route, or withdraw.'
+        )
       ),
-      $stepCard(
-        3,
-        palette.indeterminate,
-        $smartContract,
-        '0 0 24 24',
-        'Co-sign',
-        'Every action is checked against the rules you signed, or it never executes.'
-      ),
-      $stepCard(
-        4,
-        palette.positive,
-        $bull,
-        '0 0 32 32',
-        'Earn',
-        'Share the gains and redeem your shares whenever you want. Traders earn performance fees.'
+      $column(spacing.default, style({ flex: '1 1 260px', minWidth: '240px' }))(
+        $agentGuard('Dry-run by default, flip to live when ready'),
+        $agentGuard('On-chain stop that fires even if the operator is offline'),
+        $agentGuard('Drawdown halt and cost budget'),
+        $agentGuard('The operator key can never withdraw'),
+        $node(style({ fontSize: text.base, fontWeight: '700', color: palette.message, paddingTop: '8px' }))(
+          $text('Fund the agent. Don’t trust it.')
+        )
       )
     )
   )
@@ -527,7 +1030,7 @@ const $trust = (): I$Node =>
       $trustCard(
         $smartContract,
         '0 0 24 24',
-        'Traders can’t withdraw',
+        'Operators can’t withdraw',
         'A trader or agent opens and manages positions for you, but can never move funds out of your account. Every action is co-signed against the rules you set, or it never executes.'
       ),
       $trustCard(
@@ -556,9 +1059,9 @@ const $finalCta = (): I$Node =>
       $text('Fund the trader, human or machine, without ever giving up your money.')
     ),
     $row(spacing.default, style({ flexWrap: 'wrap', justifyContent: 'center' }))(
-      $scrollPill('Create a Fund', 'hello-create', true, undefined, $puppeteer),
-      $navAccent('Puppet Funds', routeSchema.leaderboard, $puppetLogo),
-      $extSecondary('Read the docs', DOCS_URL)
+      $navPill('Create a Fund', routeSchema.quickstart, true, undefined, $puppeteer),
+      $navPill('Puppet Funds', routeSchema.leaderboard, false, palette.primary, $puppetLogo),
+      $pillAnchor(false)(attr({ href: DOCS_URL, target: '_blank', rel: 'noopener' }))($text('Read the docs'))
     ),
     $row(spacing.default, style({ alignItems: 'center', paddingTop: '12px' }))(
       $socialIcon($github, '0 0 32 32', GITHUB_REPO_URL),
@@ -567,57 +1070,9 @@ const $finalCta = (): I$Node =>
     )
   )
 
-export const $Home = ({
-  hideBalances,
-  walletQuery,
-  walletState,
-  draftAllocateList,
-  draftSwapList,
-  draftRedeemList
-}: I$Home) =>
-  component(
-    (
-      [changeAllocateDraft, changeAllocateDraftTether]: IBehavior<IAllocateDraft>,
-      [changeSwapDraft, changeSwapDraftTether]: IBehavior<IFundSwapDraft>,
-      [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
-      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft>
-    ) => {
-      const $create = $column(spacing.big, style({ width: '100%', scrollMarginTop: '90px' }))(
-        $column(
-          attr({ id: 'hello-create' }),
-          spacing.small,
-          style({
-            alignItems: 'center',
-            textAlign: 'center',
-            width: '100%',
-            marginTop: isDesktopScreen ? '-150px' : ''
-          })
-        )(
-          $heading1($text('Get started')),
-          $node(
-            style({ fontSize: text.xs, textTransform: 'uppercase', letterSpacing: '0.14em', color: palette.primary })
-          )($text('Create your wallet and fund it.'))
-        ),
-        $HelloPage({
-          hideBalances,
-          walletQuery,
-          walletState,
-          draftAllocateList,
-          draftSwapList,
-          draftRedeemList,
-          embedded: true
-        })({
-          changeAllocateDraft: changeAllocateDraftTether(),
-          changeSwapDraft: changeSwapDraftTether(),
-          changeRedeemDraft: changeRedeemDraftTether(),
-          changeFulfillDraft: changeFulfillDraftTether()
-        })
-      )
-      return [
-        $column(
-          style({ width: '100%', gap: isDesktopScreen ? '80px' : '56px', padding: isDesktopScreen ? '0' : '0 16px' })
-        )($vortexBackground(), $hero(), $create, $twoSides(), $howItWorks(), $trust(), $finalCta()),
-        { changeAllocateDraft, changeSwapDraft, changeRedeemDraft, changeFulfillDraft }
-      ]
-    }
-  )
+export const $Home = () =>
+  component(() => [
+    $column(
+      style({ width: '100%', gap: isDesktopScreen ? '80px' : '56px', padding: isDesktopScreen ? '0' : '0 16px' })
+    )($vortexBackground(), $hero(), $storyline(),  $tradeToday(), $agentSection(), $trust(), $finalCta())
+  ])

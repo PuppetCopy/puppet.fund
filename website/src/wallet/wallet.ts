@@ -13,7 +13,6 @@ import {
   getConnectors,
   getPublicClient,
   reconnect,
-  disconnect as wagmiDisconnect,
   watchConnection,
   watchConnectors
 } from '@wagmi/core'
@@ -54,7 +53,7 @@ export const publicClientMap: Record<number, PublicClient> = Object.fromEntries(
   })
 )
 
-export const homePublicClient = publicClientMap[HUB_CHAIN_ID]!
+export const homePublicClient: PublicClient = publicClientMap[HUB_CHAIN_ID]!
 
 export const connection: IStream<GetConnectionReturnType<typeof wagmi>> = fromCallback(cb => {
   cb(getConnection(wagmi))
@@ -73,11 +72,4 @@ export async function connectWallet(preferredConnectorId?: string): Promise<Conn
   const targetConnector = wagmi.connectors.find(c => c.id === preferredConnectorId) ?? wagmi.connectors[0]
   if (!targetConnector) throw new Error('No compatible wallet found. Please install a supported wallet.')
   return connect(wagmi, { connector: targetConnector })
-}
-
-export async function disconnect() {
-  const { hasActiveWcSession } = await import('./walletLinkState.js')
-  if (hasActiveWcSession()) await import('./walletKitConnect.js').then(m => m.teardownAllWc()).catch(() => {})
-  const current = getConnection(wagmi)
-  if (current.connector) await wagmiDisconnect(wagmi, { connector: current.connector })
 }

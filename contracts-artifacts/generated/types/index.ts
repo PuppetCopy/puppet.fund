@@ -78,6 +78,18 @@ export interface IFundGate__SwapIntent {
   fromRoute: boolean
 }
 
+export interface IFundGate__WrapIntent {
+  params: IAccountLib__AccountInitParams
+  blockNumber: bigint
+  deadline: bigint
+  acceptableRelayFee: bigint
+  nonce: bigint
+  chainId: bigint
+  fundParams: IFundAccountLib__FundAccountInitParams
+  amount: bigint
+  unwrap: boolean
+}
+
 export interface IHubGate__WithdrawIntent {
   params: IAccountLib__AccountInitParams
   blockNumber: bigint

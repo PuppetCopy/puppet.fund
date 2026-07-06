@@ -19,7 +19,7 @@ import { $WalletConnect } from './$WalletConnect.js'
 
 interface IPairBanner {
   walletQuery: IStream<Promise<IConnectedWallet | null>>
-  walletState: IStream<ISubaccountState | null>
+  walletState: IStream<Promise<ISubaccountState | null>>
 }
 
 const $hint = (message: string): I$Node => $node(style({ color: palette.foreground }))($text(message))
@@ -33,10 +33,11 @@ function readPairParams(): { port: string; token: string; epk: string } | null {
   return port && token && epk ? { port, token, epk } : null
 }
 
-export const $PairBanner = ({ walletQuery, walletState }: IPairBanner) =>
+export const $PairBanner = ({ walletQuery, walletState: rootStateQuery }: IPairBanner) =>
   component(([selectFund, selectFundTether]: IBehavior<INode, Hex>, [_connect, connectTether]: IBehavior<unknown>) => {
     const pairParams = readPairParams()
     if (!pairParams) return [empty]
+    const walletState: IStream<ISubaccountState | null> = op(rootStateQuery, switchPromises, state())
 
     const pairMessage = subject<string>()
 
@@ -74,7 +75,7 @@ export const $PairBanner = ({ walletQuery, walletState }: IPairBanner) =>
                 border: `1px solid ${selectedFund?.baseToken === f.baseToken ? palette.primary : colorShade(palette.foreground, 18)}`
               }),
               ...(onlyFund ? [] : [selectFundTether(nodeEvent('click'), constant(f.baseToken))])
-            )($fundProfile({ master: f.master, baseToken: f.baseToken, name: f.name }, 36))
+            )($fundProfile({ master: f.master, baseToken: f.baseToken, name: f.name }, 36, f))
 
           return $column(spacing.small)(
             $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text('Pair your agent')),
@@ -97,7 +98,7 @@ export const $PairBanner = ({ walletQuery, walletState }: IPairBanner) =>
                             user: wallet.address,
                             baseToken: selectedFund.baseToken,
                             name: selectedFund.name,
-                            matchmakerUrl,
+                            matchmakerUrl: new URL(matchmakerUrl, location.origin).href,
                             tokenRegistry: tokenRegistryRows(registry)
                           }
                           return sealPairingPayload(pairParams.epk, payload)

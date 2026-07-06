@@ -1,19 +1,18 @@
 import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
 import DEPLOYMENTS from '@puppet/contracts/deployments'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
-import { predictDepositRoute } from '@puppet/sdk/account'
+import { predictDepositRoute, predictPuppetAccount } from '@puppet/sdk/account'
 import { type IDepositRoute, resolveDispatchChainId } from '@puppet/sdk/attestation'
-import { formatThrownError } from '@puppet/sdk/compact'
 import { ADDRESS_ZERO, CHAIN_LIST, type ChainId } from '@puppet/sdk/const'
-import { getRegisteredTokenDescription, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { getChainTokenDescription, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
 import {
   chainHeadBlock,
   fetchDepositRouteBalance,
   type ISubaccountState,
   type ITokenRegistryMap,
-  type RelayFeeMap,
   nativeSymbolOf,
+  type RelayFeeMap,
   randomNonce,
   tokenInfoFor,
   wrappedNativeAddressOf
@@ -23,10 +22,7 @@ import {
   awaitPromises,
   combine,
   constant,
-  debounce,
-  empty,
   filter,
-  fromPromise,
   type IStream,
   just,
   map,
@@ -35,49 +31,43 @@ import {
   sample,
   sampleMap,
   skipRepeats,
-  skipRepeatsWith,
   start,
-  switchLatest,
   switchMap,
-  switchPromises,
   take,
   until
 } from 'aelea/stream'
 import { type IBehavior, multicast, state } from 'aelea/stream-extended'
-import { $element, $node, $text, attr, component, type INode, nodeEvent, style } from 'aelea/ui'
+import { $element, $node, $text, component, type INode, nodeEvent, style, styleBehavior } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
+import { palette } from 'aelea/ui-components-theme'
 import { type Address, erc20Abi, formatUnits, getAddress, type Hex, isAddressEqual } from 'viem'
 import { readContract } from 'viem/actions'
 import {
-  $ButtonSecondary,
-  $DropSelect,
-  $defaultDropdownContainer,
-  $defaultSliderContainer,
-  $icon,
-  $infoTooltip,
-  $labeledValue,
-  $loadingValue,
-  $noteTooltip,
-  $Slider,
+  $ButtonPrimaryOutline,
   $TokenAmountInput,
-  $wallet,
-  NOTE_TOOLTIP_HEIGHT,
   text
 } from '@/ui-components'
 import { uiStorage } from '@/ui-storage'
 import { depositSourceKey, type IDepositSource } from '../../app/localStoreSchema.js'
-import { $chainIcon, $tokenWithChainBadge, chainName } from '../../common/$chain.js'
+import { chainName } from '../../common/$chain.js'
 import { $contractIdentity } from '../../common/$contract.js'
-import { fetchSwapQuote, type ISwapQuote } from '../../io/bridge/swapQuote.js'
+import { depositSwapQuoteAttempts, type ISwapRequest } from '../../io/bridge/swapQuote.js'
 import { fetchTokenBalances } from '../../io/chain/balances.js'
-import context, { displayRelayFeeMap } from '../../io/context.js'
-import { formatUsd, priceFor } from '../../io/gmx/priceFeed.js'
+import context, { relayFeeFor } from '../../io/context.js'
+import { formatUsd, priceFor } from '../../io/price.js'
 import { homePublicClient, type IConnectedWallet, wagmi } from '../../wallet/index.js'
 import { walletChainId as walletChainIdStream } from '../../wallet/state.js'
-import { $optionRow, $tokenIconBySymbol, decorateOptionList, type ITokenInputOption } from './$tokenOption.js'
+import { $SwapProviderFeeEditor, type ISelectedRoute } from './$SwapProviderFeeEditor.js'
+import { $tokenSourcePicker, decorateOptionList, type ITokenInputOption } from './$tokenOption.js'
 import type { IDepositDraft } from './draft.js'
-import { createFocusState } from './editorUtils.js'
+import {
+  $editorPercentSlider,
+  $maxAmountButton,
+  $surplusAlertSlot,
+  amountUsdLabel,
+  createFocusState,
+  scaleByPercent
+} from './editorUtils.js'
 import { DEFAULT_DEADLINE_SEC, walletClientForChain } from './runner/_shared.js'
 
 export interface I$DepositEditor {
@@ -93,7 +83,7 @@ export const $DepositEditor = ({
   hideBalances,
   accountState,
   token,
-  tokenRegistry: _tokenRegistry,
+  tokenRegistry,
   walletAccount,
   existingDraft
 }: I$DepositEditor) =>
@@ -106,13 +96,25 @@ export const $DepositEditor = ({
       [blurEvt, blurEvtTether]: IBehavior<FocusEvent>,
       [sliderPercent, sliderPercentTether]: IBehavior<number>,
       [clickMax, clickMaxTether]: IBehavior<INode<HTMLButtonElement>, MouseEvent>,
-      [enterPress, enterPressTether]: IBehavior<KeyboardEvent>
+      [enterPress, enterPressTether]: IBehavior<KeyboardEvent>,
+      [selectedRoute, selectedRouteTether]: IBehavior<ISelectedRoute>
     ) => {
-      const tokenRegistry = _tokenRegistry
       const outputToken = tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, token).token
-      const recipient = accountState.account
-      const outputTokenDesc = getRegisteredTokenDescription(outputToken)
-      const relayFeeMapQuery: IStream<RelayFeeMap | null> = fromPromise(displayRelayFeeMap(token))
+      // The delivery route MUST derive from the same {user, signer} identity the signed intent binds (the runner
+      // watches predictDepositRoute(predictPuppetAccount(params))). accountState.account can drift from that pair
+      // (a pre-session stub once fabricated signer=wallet, quoting delivery to a phantom PA's route) — deriving
+      // locally makes quote target and runner watcher consistent by construction.
+      const accountParams: IAccountLib__AccountInitParams = {
+        user: accountState.user ?? walletAccount.address,
+        signer: accountState.signer
+      }
+      const recipient = predictPuppetAccount(accountParams)
+      // Pre-session the signer is the zero-address sentinel: that placeholder PA can never hold funds, so its route
+      // reads are skipped as trivially empty. Every source stays open for exploration — quotes are estimates for the
+      // placeholder and the runner re-quotes the swap leg for the live session at submit (rebindSwapLeg).
+      const placeholderIdentity = isAddressEqual(accountParams.signer, ADDRESS_ZERO)
+      const outputTokenDesc = getChainTokenDescription(HUB_CHAIN_ID, outputToken)
+      const relayFeeMapQuery: IStream<RelayFeeMap | null> = relayFeeFor(token)
 
       type SourceRef = {
         chainId: number
@@ -159,7 +161,7 @@ export const $DepositEditor = ({
             pushSource(ADDRESS_ZERO, nativeSymbolOf(chain.id as ChainId), wrapped, wrapped, 18, true)
             continue
           }
-          const desc = getRegisteredTokenDescription(info.token)
+          const desc = getChainTokenDescription(chain.id as ChainId, info.token)
           pushSource(info.token, desc.symbol, info.token, info.token, desc.decimals, false)
         }
         return entries
@@ -268,13 +270,11 @@ export const $DepositEditor = ({
       const inputPrice: IStream<bigint | null> = op(selectedSourceRef, switchMap(priceForSource), state())
       const inputFeeMap: IStream<RelayFeeMap | null> = op(
         selectedSourceRef,
-        switchMap(s => fromPromise(displayRelayFeeMap(s.routeTokenId))),
+        switchMap(s => relayFeeFor(s.routeTokenId)),
         state()
       )
       const feeMapByTokenId: IStream<Record<string, RelayFeeMap | null>> = combine(
-        Object.fromEntries(
-          [...new Set(sources.map(s => s.routeTokenId))].map(addr => [addr, fromPromise(displayRelayFeeMap(addr))])
-        )
+        Object.fromEntries([...new Set(sources.map(s => s.routeTokenId))].map(addr => [addr, relayFeeFor(addr)]))
       )
       // null = the route token's relay fee is unpriceable (oracle has no rate yet) -> the option/action is gated, not
       // a fabricated 0 (a 0 reads as "free" and would zero the signed ceiling).
@@ -328,6 +328,7 @@ export const $DepositEditor = ({
       const transientRouteBalance: IStream<bigint> = op(
         selectedSourceRef,
         switchMap(async sel => {
+          if (placeholderIdentity) return 0n
           const token = tokenInfoFor(tokenRegistry, sel.chainId as ChainId, sel.routeTokenId).token
           const publicClient =
             sel.chainId === HUB_CHAIN_ID ? homePublicClient : getPublicClient(wagmi, { chainId: sel.chainId })
@@ -350,7 +351,7 @@ export const $DepositEditor = ({
       const hubRouteBalance: IStream<bigint> = op(
         selectedSourceRef,
         switchMap(async sel => {
-          if (sel.chainId === HUB_CHAIN_ID) return 0n
+          if (placeholderIdentity || sel.chainId === HUB_CHAIN_ID) return 0n
           try {
             return await fetchDepositRouteBalance(homePublicClient, outputToken, recipient)
           } catch {
@@ -365,6 +366,46 @@ export const $DepositEditor = ({
           return p.raw * p.price < DUST_USD_30DEC ? 0n : p.raw
         },
         combine({ raw: hubRouteBalance, price: tokenPrice })
+      )
+      // A cross-chain SWAP whose DESTINATION leg reverts (e.g. thin hub-DEX liquidity) has Across deliver the INPUT
+      // token to the hub route instead of the base. hubRouteBalance only watches the base, so that stranded input sits
+      // unseen. Watch the input token on the hub too (cross-token deposits only; a same-asset bridge lands as the base
+      // and is already covered above), so it surfaces as recoverable surplus.
+      // The hub-chain SourceRef carrying the same asset as the selected cross-chain source (the registry is keyed by
+      // per-chain ADDRESS, so resolve by SYMBOL; isSwap excludes the base — a same-asset landing is the base, already
+      // covered by hubRouteBalance). This is both the watcher target and the recovery identity: a hub-stranded input
+      // surplus is recovered by an ordinary hub-source swap deposit of this ref.
+      const hubInputSource: IStream<SourceRef | null> = op(
+        selectedSourceRef,
+        map(sel => {
+          if (sel.chainId === HUB_CHAIN_ID || !sel.isSwap) return null
+          return sources.find(s => s.chainId === HUB_CHAIN_ID && !s.isNative && s.isSwap && s.symbol === sel.symbol) ?? null
+        }),
+        state()
+      )
+      const hubInputRouteBalance: IStream<bigint> = op(
+        hubInputSource,
+        switchMap(async src => {
+          if (placeholderIdentity || src === null) return 0n
+          try {
+            return await fetchDepositRouteBalance(homePublicClient, src.routeToken, recipient)
+          } catch {
+            return 0n
+          }
+        }),
+        state()
+      )
+      const hubInputSurplus: IStream<bigint> = map(
+        p => {
+          if (p.raw === 0n || p.price === null) return 0n
+          return p.raw * p.price < DUST_USD_30DEC ? 0n : p.raw
+        },
+        combine({ raw: hubInputRouteBalance, price: inputPrice })
+      )
+      const hubInputFeeMap: IStream<RelayFeeMap | null> = op(
+        hubInputSource,
+        switchMap((src): IStream<RelayFeeMap | null> => (src === null ? just(null) : relayFeeFor(src.routeTokenId))),
+        state()
       )
 
       const toOption = (source: SourceRef, balance: bigint | null): ITokenInputOption => ({
@@ -412,10 +453,7 @@ export const $DepositEditor = ({
       )
 
       const sliderAmount: IStream<bigint> = sampleMap(
-        (opt, pct) => {
-          const bp = BigInt(Math.round(Math.max(0, Math.min(1, pct)) * 10000))
-          return ((opt.balance ?? 0n) * bp) / 10000n
-        },
+        (opt, pct) => scaleByPercent(opt.balance ?? 0n, pct),
         selectedOption,
         sliderPercent
       )
@@ -445,10 +483,6 @@ export const $DepositEditor = ({
 
       const focused = createFocusState(focusEvt, blurEvt)
 
-      type QuoteStatus =
-        | { status: 'idle'; quote: ISwapQuote | null; forInput?: bigint }
-        | { status: 'error'; quote: null; message: string }
-
       // null = "not ready": a non-swap top-up needs the recognize fee, and an unpriceable fee must not be substituted
       // with 0 (that would size the bridge/sign against a fake fee). The submit gate disables while this is null.
       const bridgeAmountStream: IStream<bigint | null> = map(
@@ -472,34 +506,17 @@ export const $DepositEditor = ({
         skipRepeats
       )
 
-      // Quotes fire only on user-driven changes (source, amount, sweep surplus); the
-      // fee-adjusted bridge input is SAMPLED at trigger time as a gas snapshot.
-      const quoteTrigger = op(
-        combine({ source: selectedSourceRef, value, surplus: depositSurplus }),
-        skipRepeatsWith(
-          (a, b) =>
-            a.source.chainId === b.source.chainId &&
-            a.source.address === b.source.address &&
-            a.value === b.value &&
-            a.surplus === b.surplus
-        )
-      )
-      const quoteParams = debounce(
-        200,
-        sampleMap((bridgeInput, t) => ({ source: t.source, bridgeInput }), bridgeQuoteInput, quoteTrigger)
-      )
-      const quoteFetch: IStream<Promise<QuoteStatus>> = op(
-        map(async (params): Promise<QuoteStatus> => {
+      // Declarative request derivation: a plain combine, never sample. A sample gate here silently DROPPED the trigger
+      // whenever the async fee side hadn't resolved yet and nothing ever re-fired (fee arrival was not a trigger) —
+      // the "no quote fetched, fee row stuck at -" dead-end. With combine, a late fee/surplus arrival re-derives the
+      // request naturally; $SwapProviderFeeEditor owns debounce + sameRequest dedupe so unrelated re-emissions don't refetch.
+      const request: IStream<ISwapRequest | null> = multicast(
+        map(params => {
           const source = params.source
-          if (source.chainId === HUB_CHAIN_ID && !source.isSwap) return { status: 'idle', quote: null }
-          // Quote whenever there is anything to bridge (value OR a carried surplus): a cross-chain surplus must be bridged
-          // to recover it, which incurs a real swap cost, so it gets a quote and a shown fee. A hub source returns idle
-          // above (no swap). bridgeInput already folds in the surplus.
+          if (source.chainId === HUB_CHAIN_ID && !source.isSwap) return null
           const bridgeInput = params.bridgeInput
-          // null bridgeInput = relay fee unpriceable -> nothing to quote yet (submit is gated on the same null).
-          if (bridgeInput === null || bridgeInput <= 0n) return { status: 'idle', quote: null }
-          try {
-            const quote = await fetchSwapQuote({
+          if (bridgeInput !== null && bridgeInput > 0n) {
+            return {
               originChainId: source.chainId,
               destinationChainId: HUB_CHAIN_ID,
               inputToken: source.routeToken,
@@ -507,21 +524,33 @@ export const $DepositEditor = ({
               inputAmount: bridgeInput,
               route: predictDepositRoute(recipient),
               crossToken: source.isSwap
-            })
-            return { status: 'idle', quote, forInput: bridgeInput }
-          } catch (err) {
-            console.error('[$DepositEditor.quoteFetch] fetchSwapQuote failed', err)
-            return { status: 'error', quote: null, message: formatThrownError(err) }
+            }
           }
-        }, quoteParams),
-        state()
+          // Nothing on the origin side: quote the recovery of a symbol-matched input surplus stranded on the HUB
+          // route (a failed destination swap delivered the input token there) as a hub-LOCAL swap to the base.
+          if (params.value !== 0n || params.surplus !== 0n) return null
+          if (params.hubSrc === null || params.hubInput === 0n || params.hubFee === null) return null
+          const fee = params.hubFee.swap.relayFee
+          if (params.hubInput <= fee) return null
+          return {
+            originChainId: HUB_CHAIN_ID,
+            destinationChainId: HUB_CHAIN_ID,
+            inputToken: params.hubSrc.routeToken,
+            outputToken,
+            inputAmount: params.hubInput - fee,
+            route: predictDepositRoute(recipient),
+            crossToken: true
+          }
+        }, combine({
+          source: selectedSourceRef,
+          bridgeInput: bridgeQuoteInput,
+          value,
+          surplus: depositSurplus,
+          hubSrc: hubInputSource,
+          hubInput: hubInputSurplus,
+          hubFee: hubInputFeeMap
+        }))
       )
-      const quoteQuery: IStream<QuoteStatus> = multicast(switchPromises(quoteFetch))
-
-      const accountParams: IAccountLib__AccountInitParams = {
-        user: accountState.user ?? walletAccount.address,
-        signer: accountState.signer
-      }
 
       // Leaf-local validation only: input-shape concerns the parent has no view into.
       // Protocol-level checks (verifyTokenAndCap, verifyRelayFee, verifyBridgeHubInput, etc.)
@@ -539,22 +568,15 @@ export const $DepositEditor = ({
           const needsQuote = params.chainId !== HUB_CHAIN_ID || params.source.isSwap
           // bridgeAmount null = relay fee unpriceable: nothing to bridge-validate (the submit gate already blocks).
           if (needsQuote && bridgeAmount !== null && bridgeAmount > 0n) {
-            if (params.q.status === 'error') return params.q.message
-            if (params.q.quote) {
-              if (params.q.quote.isAmountTooLow) {
-                return `Below bridge minimum ${readableTokenAmount(outputTokenDesc, params.q.quote.limits.minDeposit)}`
-              }
-              if (bridgeAmount > params.q.quote.limits.maxDeposit) {
-                return `Exceeds bridge max ${readableTokenAmount(outputTokenDesc, params.q.quote.limits.maxDeposit)}`
-              }
-            }
+            if (params.route.error) return params.route.error
+            if (params.route.limitError) return params.route.limitError
           }
           return null
         },
         combine({
           balance: selectedBalance,
           value,
-          q: quoteQuery,
+          route: selectedRoute,
           chainId: chainSelection,
           surplus: depositSurplus,
           bridgeAmount: bridgeAmountStream,
@@ -567,59 +589,18 @@ export const $DepositEditor = ({
 
       const alert: IStream<string | null> = op(validation, awaitPromises, state(null))
 
-      // The swap/bridge cost = value lost from input to output (USD), plus its share of the input so an outsized cut can
-      // be flagged. This is the routing provider's fee (e.g. LI.FI), never Puppet's.
-      const HIGH_SWAP_FEE_PCT = 1
-      const swapFeeMeta: IStream<Promise<{ text: string; high: boolean }>> = switchMap(
-        p => {
-          const total = p.value + p.surplus
-          // Recovering a carried CROSS-CHAIN surplus bridges it, which incurs a real swap cost — so show the fee whenever
-          // there is anything to bridge, not only on a freshly typed amount. The $quoteInline wrapper already limits this
-          // row to a cross-chain/swap source; a hub surplus needs no swap.
-          if (total === 0n) return just(Promise.resolve({ text: '-', high: false }))
-          return map(async pQuote => {
-            const s = await pQuote
-            if (!s.quote || p.inPrice === null || p.outPrice === null) return { text: '-', high: false }
-            if (s.forInput !== p.qInput) return { text: '…', high: false }
-            const inUsd = Number(formatUnits(total * p.inPrice, USD_PRICE_DECIMALS))
-            const outUsd = Number(formatUnits(s.quote.outputAmount * p.outPrice, USD_PRICE_DECIMALS))
-            const fee = inUsd - outUsd
-            const feeText = fee <= 0 ? '$0.00' : fee < 0.01 ? '< $0.01' : `$${fee.toFixed(2)}`
-            const pct = inUsd > 0 ? (fee / inUsd) * 100 : 0
-            const high = pct > HIGH_SWAP_FEE_PCT
-            return { text: `${feeText}${high ? ` (${pct.toFixed(1)}%)` : ''} via ${s.quote.provider}`, high }
-          }, quoteFetch)
-        },
-        combine({ value, surplus: depositSurplus, inPrice: inputPrice, outPrice: tokenPrice, qInput: bridgeQuoteInput })
-      )
-
-      // Value node: red when the cut exceeds the threshold, otherwise the default inline color (unchanged appearance).
-      const $swapFeeValue = switchLatest(
-        map(
-          (pMeta: Promise<{ text: string; high: boolean }>) =>
-            switchLatest(
-              map(
-                (m: { text: string; high: boolean }) =>
-                  $node(style(m.high ? { color: palette.negative } : {}))($text(m.text)),
-                start({ text: '…', high: false }, fromPromise(pMeta))
-              )
-            ),
-          swapFeeMeta
-        )
-      )
-
-      // Always-on disclaimer on the label: the cut belongs to the third-party router, never Puppet, and depositing the
-      // base token directly avoids the swap.
       const $swapFeeDisclaimer = $node(style({ maxWidth: '240px', lineHeight: '1.4' }))(
         $text(
-          'This swap fee goes to the third-party router (such as LI.FI), not to Puppet. Consider finding a better rate, or deposit the base token directly to skip the swap.'
+          'The all-in cost of converting your deposit: what you send minus the guaranteed minimum received (routing fee + slippage). It goes to the third-party route, not to Puppet — deposit the base token directly to skip it. Each route shows its estimated arrival; without an estimate a cross-chain transfer can take up to its fill deadline (the ≤ time shown) before it is treated as failed and the funds surface back as recoverable balance.'
         )
       )
 
-      const $quoteInline = switchMap(
-        s => (s.chainId === HUB_CHAIN_ID && !s.isSwap ? empty : $labeledValue('Swap fee', $swapFeeValue, $swapFeeDisclaimer)),
-        selectedSourceRef
-      )
+      const $swapProviderFee = $SwapProviderFeeEditor({
+        active: map(s => !(s.chainId === HUB_CHAIN_ID && !s.isSwap), selectedSourceRef),
+        request,
+        attempts: depositSwapQuoteAttempts,
+        $disclaimer: $swapFeeDisclaimer
+      })({ selectRoute: selectedRouteTether() })
 
       const surplusRoute = predictDepositRoute(recipient)
       const surplusInfo: IStream<{
@@ -639,9 +620,13 @@ export const $DepositEditor = ({
               symbol: outputTokenDesc.symbol
             })
           }
+          if (p.sel.chainId !== HUB_CHAIN_ID && p.hubInput > 0n) {
+            legs.push({ chainId: HUB_CHAIN_ID, amount: p.hubInput, decimals: p.sel.decimals, symbol: p.sel.symbol })
+          }
           const usdProduct =
             (p.inPrice === null ? 0n : p.source * p.inPrice) +
-            (p.sel.chainId === HUB_CHAIN_ID || p.outPrice === null ? 0n : p.hub * p.outPrice)
+            (p.sel.chainId === HUB_CHAIN_ID || p.outPrice === null ? 0n : p.hub * p.outPrice) +
+            (p.sel.chainId === HUB_CHAIN_ID || p.inPrice === null ? 0n : p.hubInput * p.inPrice)
           const num = Number(formatUnits(usdProduct, USD_PRICE_DECIMALS))
           const usd = usdProduct === 0n ? '' : num > 0 && num < 0.01 ? '< $0.01' : `$${num.toFixed(2)}`
           return { usd, legs }
@@ -649,6 +634,7 @@ export const $DepositEditor = ({
         combine({
           source: depositSurplus,
           hub: hubSurplus,
+          hubInput: hubInputSurplus,
           sel: selectedSourceRef,
           inPrice: inputPrice,
           outPrice: tokenPrice
@@ -659,18 +645,18 @@ export const $DepositEditor = ({
         combine({
           alert,
           value,
-          q: quoteQuery,
+          route: selectedRoute,
           sel: sourceSelection,
           existing: draftStream,
           surplus: depositSurplus,
           hubSurplus,
+          hubInput: hubInputSurplus,
           feeMap: relayFeeMapQuery,
-          isSwap: isSwapStream,
-          qInput: bridgeQuoteInput
+          isSwap: isSwapStream
         }),
         map(p => {
           if (p.alert !== null) return true
-          if (p.value + p.surplus + p.hubSurplus === 0n) return true
+          if (p.value + p.surplus + p.hubSurplus + p.hubInput === 0n) return true
           // Relay fee unpriceable (oracle has no rate yet) -> can't size/sign the deposit; block until it prices.
           if (p.feeMap === null) return true
           // A prior cross-chain deposit whose output already landed on the HUB route (bridge done, source route empty):
@@ -694,11 +680,9 @@ export const $DepositEditor = ({
             return true
           }
           if (p.sel.chainId === HUB_CHAIN_ID && !p.isSwap) return false
-          // The bridge/swap quote must be present AND computed for the CURRENT input; a quote still lagging the live
-          // input (forInput !== qInput, the same staleness the 'Swap fee' row shows as '…') would bake an output floor
-          // for a different amount into the signed intent. Block submit until it catches up.
-          if (p.q.status !== 'idle' || p.q.quote === null) return true
-          return p.q.forInput !== p.qInput
+          // route.ready = a fresh quote matching the LIVE request (not one lagging a just-changed amount/source),
+          // within bridge limits — the one gate that prevents baking a stale output floor into the signed intent.
+          return !p.route.ready
         }),
         state(true)
       )
@@ -722,45 +706,32 @@ export const $DepositEditor = ({
       const submitParams: IStream<{
         value: bigint
         source: SourceRef
-        q: QuoteStatus
+        route: ISelectedRoute
         surplus: bigint
         hubSurplus: bigint
+        hubSrc: SourceRef | null
+        hubInput: bigint
         bridgeAmount: bigint
         balance: bigint | null
         allowance: bigint
       }> = combine({
         value,
         source: selectedSourceRef,
-        q: quoteQuery,
+        route: selectedRoute,
         surplus: depositSurplus,
         hubSurplus,
+        hubSrc: hubInputSource,
+        hubInput: hubInputSurplus,
         bridgeAmount: bridgeAmountStream,
         balance: selectedBalance,
         allowance: walletAllowance
       })
-      // Snapshot the inputs on a Save click and resolve the bridge quote ONCE here. When the user typed an amount the
-      // editor already fired the quote (base.q.quote present); when recovering a carried surplus with no new input the
-      // editor stayed quiet, so it is fetched now, on Save. multicast so `saving` and `changeDraft` share this single
-      // resolution (one fetch). The runner does not re-quote the cross-chain deposit path, so this route must be real.
+      // Snapshot the inputs on a Save click. Every quote-needing path gates Save on route.ready, so the snapshot
+      // already carries the quote it will bake (hub-only deposits and the recognize-only recovery carry none).
       const submitResolved = multicast(
         op(
           sample(submitParams, submitTrigger),
-          map(async base => {
-            if (base.q.quote || base.source.chainId === HUB_CHAIN_ID) return { base, quote: base.q.quote }
-            const inputAmount = base.source.isSwap ? base.value + base.surplus : base.bridgeAmount
-            if (inputAmount <= 0n) return { base, quote: null as ISwapQuote | null }
-            const quote = await fetchSwapQuote({
-              originChainId: base.source.chainId,
-              destinationChainId: HUB_CHAIN_ID,
-              inputToken: base.source.routeToken,
-              outputToken,
-              inputAmount,
-              route: predictDepositRoute(recipient),
-              crossToken: base.source.isSwap
-            })
-            return { base, quote }
-          }),
-          awaitPromises
+          map(base => ({ base, quote: base.route.quote }))
         )
       )
       // Pending from the Save click until that resolution (incl. the on-demand quote, the slow part) completes —
@@ -787,120 +758,41 @@ export const $DepositEditor = ({
       )
       const hasError: IStream<boolean> = map(a => a !== null, alert)
       const sliderDisabled: IStream<boolean> = map(b => b === null || b === 0n, selectedBalance)
-      const $percentSlider = $Slider({
+      const $percentSlider = $editorPercentSlider({
         value: sliderValue,
-        step: 0.01,
-        orientation: 'horizontal',
         ariaLabel: 'Deposit percentage',
         disabled: sliderDisabled,
-        error: hasError,
-        motion: { stiffness: 800, damping: 58 },
-        $container: $defaultSliderContainer(
-          style({ height: '14px', width: '100%', margin: '-26px 0', flexShrink: '0' })
-        )
+        error: hasError
       })({ change: sliderPercentTether() })
 
-      const $picker = $DropSelect({
-        $container: $defaultDropdownContainer(style({ alignItems: 'flex-end', flexShrink: '0' })),
-        value: selectedOption,
-        optionList,
-        $valueLabel: map((opt: ITokenInputOption) =>
-          $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
-            $tokenWithChainBadge($tokenIconBySymbol(opt.symbol, '32px'), opt.chainId, 32, 14),
-            $column(style({ gap: '1px', minWidth: '0' }))(
-              $node(style({ fontWeight: '600', fontSize: text.base, color: palette.message }))($text(opt.symbol)),
-              $row(spacing.small, style({ alignItems: 'center', color: palette.foreground, fontSize: text.xs }))(
-                $icon({
-                  $content: $wallet,
-                  viewBox: '0 0 32 32',
-                  fill: palette.foreground,
-                  size: '12px',
-                  svgOps: style({ display: 'block' })
-                }),
-                opt.usdValue
-                  ? $loadingValue(opt.usdValue)
-                  : $text(opt.balance === null ? '-' : readableTokenAmount(opt.decimals, opt.balance))
+      const $picker = $tokenSourcePicker({ hideBalances, value: selectedOption, optionList })({
+        select: selectOptionTether()
+      })
+
+      const amountUsd: IStream<string> = amountUsdLabel(value, inputPrice)
+      const $alert = $surplusAlertSlot({
+        alert,
+        amountUsd,
+        surplus: surplusInfo,
+        $note: $legs =>
+          $column(spacing.small, style({ maxWidth: '260px', whiteSpace: 'normal' }))(
+            $node(
+              $text(
+                'An earlier deposit reached your route but was never recognized. It is recovered into your account alongside this input.'
               )
-            )
-          )
-        ),
-        $$option: map((opt: ITokenInputOption) => $optionRow(hideBalances, opt))
-      })({ select: selectOptionTether() })
+            ),
+            $legs
+          ),
+        $legAddress: leg =>
+          $contractIdentity({
+            address: surplusRoute,
+            chainId: leg.chainId,
+            name: 'Deposit route',
+            showAddress: true
+          })
+      })
 
-      const amountUsd: IStream<string> = map(
-        p => (p.amt === 0n ? '' : formatUsd(p.amt, p.price)),
-        combine({ amt: value, price: inputPrice })
-      )
-      const $alert = $node(style({ height: NOTE_TOOLTIP_HEIGHT, display: 'flex', alignItems: 'center' }))(
-        switchMap(
-          p =>
-            p.msg
-              ? $noteTooltip($text(p.msg))
-              : $row(spacing.small, style({ alignItems: 'center' }))(
-                  $node(style({ color: palette.foreground, fontSize: text.xs }))($text(p.usd)),
-                  ...(p.surplus.legs.length > 0
-                    ? [
-                        $row(spacing.tiny, style({ alignItems: 'center' }))(
-                          $node(style({ color: palette.positive, fontSize: text.xs }))($text(`+ ${p.surplus.usd}`)),
-                          $infoTooltip(
-                            $column(spacing.small, style({ maxWidth: '260px', whiteSpace: 'normal' }))(
-                              $node(
-                                $text(
-                                  'An earlier deposit reached your route but was never recognized. It is recovered into your account alongside this input.'
-                                )
-                              ),
-                              $column(spacing.tiny)(
-                                ...p.surplus.legs.map(leg =>
-                                  $row(spacing.small, style({ alignItems: 'center' }))(
-                                    $chainIcon(leg.chainId, 14),
-                                    $node(style({ color: palette.positive }))(
-                                      $text(`+${readableTokenAmount(leg.decimals, leg.amount)} ${leg.symbol}`)
-                                    ),
-                                    $contractIdentity({
-                                      address: surplusRoute,
-                                      chainId: leg.chainId,
-                                      name: 'Deposit route',
-                                      showAddress: true
-                                    })
-                                  )
-                                )
-                              )
-                            ),
-                            palette.positive,
-                            '16px'
-                          )
-                        )
-                      ]
-                    : [])
-                ),
-          combine({ msg: alert, usd: start('', amountUsd), surplus: surplusInfo })
-        )
-      )
-
-      const $maxButton = switchMap(
-        p => {
-          if (p.amt !== 0n) return empty
-          const ready = p.bal !== null && p.bal > 0n
-          return $element('button')(
-            attr({ type: 'button', disabled: ready ? null : 'true' }),
-            style({
-              background: 'transparent',
-              border: `1px solid ${colorShade(palette.foreground, 25)}`,
-              borderRadius: '8px',
-              padding: '2px 8px',
-              fontSize: text.xs,
-              fontWeight: '600',
-              color: palette.foreground,
-              cursor: ready ? 'pointer' : 'not-allowed',
-              opacity: ready ? '1' : '0.4',
-              alignSelf: 'center',
-              flexShrink: '0'
-            }),
-            clickMaxTether(nodeEvent('click'))
-          )($text('Max'))
-        },
-        combine({ amt: value, bal: selectedBalance })
-      )
+      const $maxButton = $maxAmountButton(value, selectedBalance, clickMaxTether(nodeEvent('click')))
 
       return [
         $column(spacing.default, style({ minWidth: '380px' }))(
@@ -934,9 +826,24 @@ export const $DepositEditor = ({
           $node(style({ margin: '0 -28px', display: 'flex' }))($percentSlider),
 
           $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm }))(
-            $quoteInline,
+            // Swap fee shares the Save row: hidden when a blocking alert shows (the alert already displays under the
+            // input), dimmed when there's no route to quote. Visibility only, never a mount toggle.
+            $node(
+              style({ display: 'flex' }),
+              styleBehavior(
+                map(
+                  p =>
+                    p.a !== null
+                      ? { display: 'none' }
+                      : p.req === null
+                        ? { opacity: '.45', pointerEvents: 'none' }
+                        : { opacity: '1', pointerEvents: 'auto' },
+                  combine({ a: alert, req: request })
+                )
+              )
+            )($swapProviderFee),
             $node(style({ flex: 1 }))(),
-            $ButtonSecondary({
+            $ButtonPrimaryOutline({
               disabled: map(p => p.d || p.s, combine({ d: disabled, s: saving })),
               $content: $text(map(s => (s ? 'Saving…' : 'Save'), saving))
             })({ click: clickAddDraftTether() })
@@ -946,12 +853,25 @@ export const $DepositEditor = ({
           const changeDraft: IStream<IDepositDraft> = op(
             submitResolved,
             map(async ({ base, quote }): Promise<IDepositDraft> => {
+              // Hub-local recovery pivot: nothing on the origin side, but a symbol-matched input surplus sits on the
+              // HUB route (a failed destination swap delivered the input token there). Substituting the hub source
+              // makes the ordinary swap-deposit build below produce the hub-local recovery swap — no wallet leg
+              // (value is 0), the swap consumes the stranded route surplus.
+              const pivotToHub =
+                base.value === 0n &&
+                base.surplus === 0n &&
+                base.hubInput > 0n &&
+                base.hubSrc !== null &&
+                base.source.isSwap &&
+                base.source.chainId !== HUB_CHAIN_ID
+              const source = pivotToHub && base.hubSrc !== null ? base.hubSrc : base.source
+              const surplus = pivotToHub ? base.hubInput : base.surplus
               const [feeMap, inputFeeMap, chainLiveness] = await Promise.all([
-                context.getRelayFeeMap(token),
-                context.getRelayFeeMap(base.source.routeTokenId),
+                context.getRelayFeeMap(HUB_CHAIN_ID, token),
+                context.getRelayFeeMap(HUB_CHAIN_ID, source.routeTokenId),
                 context.getChainLiveness()
               ])
-              const originChainId = base.source.chainId
+              const originChainId = source.chainId
               const isHome = originChainId === HUB_CHAIN_ID
               const bridgeFee = feeMap.swap.relayFee
               const homeRecognizeFee = feeMap.recognize.relayFee
@@ -983,22 +903,24 @@ export const $DepositEditor = ({
                 }
               }
 
-              if (base.source.isSwap) {
-                const swapToken = base.source.routeToken
+              if (source.isSwap) {
+                const swapToken = source.routeToken
                 // Wallet sends only the new amount; the swap consumes that plus any
                 // unprocessed input-token surplus already sitting on the route.
                 const walletSend = base.value
-                const swapInput = base.value + base.surplus
+                const swapInput = base.value + surplus
+                // Composed route: leg 1 is the SAME-ASSET bridge (an ordinary swap intent delivering the input's
+                // hub twin to the route); leg 2 converts it to the base locally on the hub, signed at execution.
+                const composed = quote !== null && quote.provider === 'Composed' ? quote : null
+                const legQuote = composed !== null ? composed.bridge : quote
                 const swapOutputAmount = quote?.outputAmount ?? 0n
                 const swapRelayFee =
-                  base.q.status === 'idle' && base.q.forInput !== undefined
-                    ? swapInput - base.q.forInput
-                    : inputFeeMap.swap.relayFee
+                  base.route.forInput !== null ? swapInput - base.route.forInput : inputFeeMap.swap.relayFee
                 const originBlockNumber = chainHeadBlock(chainLiveness, resolveDispatchChainId(originChainId))
                 const swapWalletStep: { kind: 'walletTransfer'; input: IDepositRoute } | null =
                   walletSend === 0n
                     ? null
-                    : base.source.isNative
+                    : source.isNative
                       ? {
                           kind: 'walletTransfer',
                           input: {
@@ -1030,7 +952,7 @@ export const $DepositEditor = ({
                   params: accountParams,
                   title: 'Swap & Deposit',
                   alert: null,
-                  inputAmount: { amount: swapInput, baseToken: base.source.routeTokenId },
+                  inputAmount: { amount: swapInput, baseToken: source.routeTokenId },
                   output: {
                     receiver: recipient,
                     chainId: HUB_CHAIN_ID,
@@ -1041,8 +963,8 @@ export const $DepositEditor = ({
                   wallet: swapWalletStep?.input ?? null,
                   swap: {
                     params: accountParams,
-                    inputToken: base.source.routeTokenId,
-                    outputToken: token,
+                    inputToken: source.routeTokenId,
+                    outputToken: composed !== null ? composed.hubToken : token,
                     blockNumber: originBlockNumber,
                     deadline,
                     acceptableRelayFee: swapRelayFee,
@@ -1050,23 +972,27 @@ export const $DepositEditor = ({
                     chainId: BigInt(originChainId),
                     inputAmount: swapInput,
                     destinationChainId: BigInt(HUB_CHAIN_ID),
-                    route: quote?.route ?? { kind: 'swap', provider: ADDRESS_ZERO, providerCallData: '0x' },
-                    outputAmount: swapOutputAmount,
-                    fillDeadline: quote?.fillDeadline ?? 0,
+                    route:
+                      legQuote !== null && legQuote.route.kind !== 'composed'
+                        ? legQuote.route
+                        : { kind: 'swap', provider: ADDRESS_ZERO, providerCallData: '0x' },
+                    outputAmount: legQuote?.outputAmount ?? 0n,
+                    fillDeadline: legQuote?.fillDeadline ?? 0,
                     userDeploySig: '0x',
                     userSignerProof: '0x'
                   },
-                  surplus: base.surplus
+                  hubSwap: composed !== null ? { inputToken: composed.hubToken, estimateOut: composed.outputAmount } : null,
+                  surplus
                 }
               }
 
               const topUp = base.value > 0n ? base.value + homeRecognizeFee : 0n
-              const inputToken = base.source.routeToken
+              const inputToken = source.routeToken
 
               const walletStep: { kind: 'walletTransfer'; input: IDepositRoute } | null =
                 topUp === 0n
                   ? null
-                  : base.source.isNative
+                  : source.isNative
                     ? {
                         kind: 'walletTransfer',
                         input: {
@@ -1092,7 +1018,7 @@ export const $DepositEditor = ({
                         }
                       }
 
-              const recognizeAmount = topUp + base.surplus
+              const recognizeAmount = topUp + surplus
 
               if (isHome) {
                 return {
@@ -1144,12 +1070,15 @@ export const $DepositEditor = ({
                   chainId: BigInt(originChainId),
                   inputAmount: base.bridgeAmount,
                   destinationChainId: BigInt(HUB_CHAIN_ID),
-                  route: quote?.route ?? {
-                    kind: 'across',
-                    exclusiveRelayer: ADDRESS_ZERO,
-                    quoteTimestamp: 0,
-                    exclusivityParameter: 0
-                  },
+                  route:
+                    quote !== null && quote.route.kind !== 'composed'
+                      ? quote.route
+                      : {
+                          kind: 'across',
+                          exclusiveRelayer: ADDRESS_ZERO,
+                          quoteTimestamp: 0,
+                          exclusivityParameter: 0
+                        },
                   outputAmount: quote?.outputAmount ?? 0n,
                   fillDeadline: quote?.fillDeadline ?? 0,
                   userDeploySig: '0x',

@@ -1,12 +1,13 @@
+import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { predictFundAccount, predictPuppetAccount } from '@puppet/sdk/account'
 import { computeAllocation, type IAllocateInput } from '@puppet/sdk/attestation'
-import { assertNavSignable, composeCashLeg, evaluateAccountNav } from '@puppet/sdk/evaluate'
+import { assertNavSignable, composeCashLeg, composeHoldings, evaluateAccountNav } from '@puppet/sdk/evaluate'
 import type { IChainLiveness, ISubaccountState, ITokenRegistryMap } from '@puppet/sdk/state'
-import type { Address, Hex } from 'viem'
+import type { Address, } from 'viem'
 import { getRate } from '../../../io/context.js'
 import { fetchMasterPoolState, fetchMasterSubscribers } from '../../../io/datastore/query.js'
+import { readSubaccountState } from '../../../io/datastore/walletState.js'
 import {  gmxPositionProvider } from '../../../io/gmx/navProviders.js'
-import { readSubaccountState } from '../../../io/matchmaker/walletState.js'
 import type { IAllocateDraft } from '../draft.js'
 import { type ExecContext, resolveRelayFee, stepMetadata } from './_shared.js'
 
@@ -26,7 +27,7 @@ export async function gatherMatched(
   subaccount?: ISubaccountState
 ): Promise<IGatheredAllocation> {
   const [puppets, pool] = await Promise.all([
-    fetchMasterSubscribers(registry, fund, baseToken),
+    fetchMasterSubscribers(fund, baseToken),
     fetchMasterPoolState(fund)
   ])
 
@@ -41,6 +42,7 @@ export async function gatherMatched(
       baseToken,
       kind: 'allocate',
       cashLeg: composeCashLeg(sub, chainLiveness, baseToken),
+      holdings: composeHoldings(sub, baseToken),
       getRate,
       positions: await gmxPositionProvider(fund, baseToken)
     })
@@ -76,6 +78,7 @@ export async function buildAllocateInput(draft: IAllocateDraft, ctx: ExecContext
   )
   const acceptableRelayFee = await resolveRelayFee(
     ctx,
+    HUB_CHAIN_ID,
     'HubGate',
     'allocate',
     draft.baseToken,

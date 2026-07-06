@@ -11,10 +11,11 @@ import {
   o,
   op,
   start,
+  switchLatest,
   switchPromises,
   tap
 } from 'aelea/stream'
-import { type IBehavior, state } from 'aelea/stream-extended'
+import { type IBehavior, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
 import {
   $element,
   $node,
@@ -23,9 +24,7 @@ import {
   attrBehavior,
   component,
   effectRun,
-  type I$Slottable,
   type INode,
-  type INodeCompose,
   type ISlottable,
   nodeEvent,
   style,
@@ -42,7 +41,7 @@ import {
   spacing
 } from 'aelea/ui-components'
 import { colorShade, palette, type Theme, theme } from 'aelea/ui-components-theme'
-import { $defaultAnchor, $Link, locationChange, type Route } from 'aelea/ui-router'
+import { $defaultAnchor, $Link, locationChange } from 'aelea/ui-router'
 import type { Address, } from 'viem'
 import {
   $alertIntermediateSpinnerContainer,
@@ -74,7 +73,7 @@ import { $WalletConnect } from './$WalletConnect.js'
 import { $WalletLink } from './$WalletLink.js'
 
 interface I$MainMenu {
-  walletState: IStream<ISubaccountState | null>
+  walletState: IStream<Promise<ISubaccountState | null>>
 }
 
 export const $MainMenu = ({ walletState }: I$MainMenu) =>
@@ -93,6 +92,8 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
       // operator chain. Without it, button clicks don't fire connect. Value is unused here.
       [_connect, connectTether]: IBehavior<ReturnType<typeof connectWallet>>
     ) => {
+      // The resolved root for compute paths (totals, wallet-link); display paths read the promise stream directly.
+      const rootState: IStream<ISubaccountState | null> = op(walletState, switchPromises, state())
       // Trigger handle for returning focus when Escape closes the extra menu.
       let extraTriggerEl: HTMLElement | null = null
       // Open/closed stream: true on trigger click, false on the popover's dismiss event.
@@ -309,7 +310,10 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
                 // at fund NAV) + mastered-fund AUM. Shared with the wallet-page chart headline via liveTotalUsdValue.
                 const totalUsdText: IStream<string> = map(
                   v => (v === null ? '-' : `$${v.toFixed(2)}`),
-                  liveTotalUsdValue(walletState, registryState)
+                  liveTotalUsdValue(rootState, registryState)
+                )
+                const $totalUsd = $node(style({ fontSize: text.xs, fontWeight: '600', color: palette.message, lineHeight: '1.1' }))(
+                  $loadingValue(totalUsdText)
                 )
 
                 return $element('a')(
@@ -320,6 +324,7 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
                     borderRadius: '50px',
                     border: `1px solid ${colorShade(palette.foreground, 40)}`,
                     padding: '0',
+                    minWidth: '165px',
                     cursor: 'pointer',
                     color: palette.message,
                     textDecoration: 'none'
@@ -329,21 +334,27 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
                 )(
                   $row(
                     spacing.small,
-                    style({ alignItems: 'center', alignSelf: 'stretch', pointerEvents: 'none', paddingRight: '16px' })
+                    style({ alignItems: 'center', alignSelf: 'stretch', pointerEvents: 'none', paddingRight: '16px', flex: 1 })
                   )(
                     $node($circle)($jazzicon(connection.address)),
-                    $column(spacing.tiny, style({ minWidth: '0' }))(
+                    $column(spacing.tiny, style({ minWidth: '0', flex: 1 }))(
                       $accountLabel({ address: connection.address, primarySize: 0.75 }),
                       $separator2,
-                      $node(style({ fontSize: text.xs, fontWeight: '600', color: palette.message, lineHeight: '1.1' }))(
-                        $loadingValue(totalUsdText)
+                      // The root promise drives the display: the USD total renders only once the seed resolved to a
+                      // real account; anything else (still resolving, or no on-chain identity — the signer is chain
+                      // -recovered, so no session gate applies) stays the dim intermediate dash.
+                      switchLatest(
+                        map(root => {
+                          if (root.status === PromiseStatus.DONE && root.value !== null) return $totalUsd
+                          return $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.1' }))($text('-'))
+                        }, promiseState(walletState))
                       )
                     )
                   )
                 )
               }, walletQuery)
             }),
-            $WalletLink({ walletState: op(walletQuery, switchPromises, state()), rootState: walletState })({})
+            $WalletLink({ walletState: op(walletQuery, switchPromises, state()), rootState })({})
           ),
 
           $row(spacing.big, style({ flex: 1, placeContent: 'flex-end', alignItems: 'center' }))(
@@ -355,19 +366,3 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
     }
   )
 
-interface I$PageLink {
-  route: Route
-  params?: Record<string, string>
-  $container?: INodeCompose<HTMLAnchorElement>
-  $content: I$Slottable
-}
-
-const $pageLink = (config: I$PageLink) =>
-  $Link({
-    route: config.route,
-    params: config.params,
-    $anchor: (config.$container ?? $defaultAnchor(style({ padding: '11px 22px' })))(
-      style({ borderRadius: '50px', border: `1px solid ${colorShade(palette.foreground, 40)}` })
-    ),
-    $content: config.$content
-  })

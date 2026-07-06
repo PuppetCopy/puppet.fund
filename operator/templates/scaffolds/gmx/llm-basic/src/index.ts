@@ -1,6 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { createOperatorCore, pairOverBrowser, runOperator } from '@puppet.fund/operator'
-import { acceptablePrice, formatWeth, GMX_V2_CHAIN_ID, gmxOperator, gmxTokenPerNativeToken, usd, weth } from '@puppet.fund/operator/gmx'
+import { createConnector, runOperator } from '@puppet.fund/operator'
+import { acceptablePrice, formatWeth, gmxOperator, usd, weth } from '@puppet.fund/operator/gmx'
 import { type Address, isAddressEqual } from 'viem'
 
 // A basic LLM (Claude) agent: same perceive / size / execute as a deterministic bot, but the
@@ -10,8 +10,12 @@ import { type Address, isAddressEqual } from 'viem'
 // hard caps around it. Requires ANTHROPIC_API_KEY in .env.
 
 const ETH = '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1' as Address
+const MODEL = 'claude-opus-4-8'
 const PARAMS = { riskPerTradeBps: 100, stopLossPct: 3, leverage: 2, maxPositionUsd: 250, minPositionUsd: 25 }
 const SLIPPAGE_BPS = 30
+// DRY-RUN IS THE DEFAULT (set DRY_RUN=0 in .env to trade live): the model still decides every
+// tick and the full order pipeline runs, but nothing dispatches.
+const DRY = Bun.env.DRY_RUN !== '0'
 const TICK_MS = 5 * 60_000
 // Keep >= the intent deadline (5min) and arm it on ATTEMPT: a dispatch that times out can
 // still land until its deadline, so a re-fire inside that window risks a doubled position.
@@ -23,14 +27,13 @@ if (!Bun.env.ANTHROPIC_API_KEY) {
   throw new Error('set ANTHROPIC_API_KEY in .env (cp .env.example .env) — get a key at https://console.anthropic.com')
 }
 const anthropic = new Anthropic() // reads ANTHROPIC_API_KEY
-const session = await pairOverBrowser(Bun.env.PAIR_URL)
-const core = await createOperatorCore(session, { chainId: GMX_V2_CHAIN_ID, getTokenPerNativeToken: gmxTokenPerNativeToken, rpcUrl: Bun.env.ARBITRUM_RPC_URL })
-const gmx = gmxOperator(core)
+const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, dryRun: DRY })
+const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
 const market = gmx.getMarket(ETH)
 let lastTradeAt = 0
 
 const SYSTEM = `You are a disciplined crypto trading agent managing ONE ETH perpetual position on GMX.
-You may only go long or be flat — no shorts. Bias toward capital preservation: when trend and
+You may only go long or be flat, no shorts. Bias toward capital preservation: when trend and
 momentum do not clearly agree, choose "hold". You do not size positions (the host enforces risk
 limits); you only choose the action and explain it in one sentence.`
 
@@ -44,9 +47,9 @@ async function decide(ctx: {
   inLong: boolean
 }): Promise<{ action: IAction; reason: string }> {
   const res = await anthropic.messages.create({
-    model: 'claude-sonnet-4-6',
+    model: MODEL,
     max_tokens: 512,
-    system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } }], // cache the static prompt
+    system: SYSTEM,
     tools: [
       {
         name: 'decide',
@@ -74,8 +77,8 @@ async function decide(ctx: {
   return block.input as { action: IAction; reason: string }
 }
 
-await runOperator(core, async signal => {
-  console.log(`LLM agent live on ${market} (claude-sonnet-4-6) · Ctrl-C to stop`)
+await runOperator(connector, async signal => {
+  console.log(`LLM agent live on ${market} (${MODEL}) · ${DRY ? 'DRY-RUN (no dispatch; set DRY_RUN=0 to go live) · ' : ''}Ctrl-C to stop`)
   while (!signal.aborted) {
     try {
       await tick()
@@ -90,7 +93,7 @@ async function tick(): Promise<void> {
 
   const closes = (await fetchCandles('ETHUSDT', '5m', 200)).map(c => c.close)
   const price = closes[closes.length - 1]
-  const freeWeth = Number(formatWeth(await core.getFundBalance()))
+  const freeWeth = Number(formatWeth(await gmx.operator.getFundBalance()))
   const longPos = (await gmx.getPositions()).find(p => isAddressEqual(p.addresses.market, market) && p.flags.isLong)
   const inLong = !!longPos && longPos.numbers.sizeInUsd > 0n
 

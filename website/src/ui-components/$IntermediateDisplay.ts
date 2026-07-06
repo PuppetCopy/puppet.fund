@@ -8,12 +8,26 @@ import { $alertTooltip } from './$alert.js'
 import { $icon } from './$common.js'
 import { $alertIcon } from './$icons.js'
 
-export const $loadingDash: I$Node = $node(
-  style({ display: 'inline-block', color: palette.foreground, animation: 'pulse 1.4s ease-in-out infinite' })
-)($text('-'))
+export const $inlineSpinner: I$Node = $node(
+  style({
+    display: 'inline-block',
+    verticalAlign: 'middle',
+    width: '15px',
+    height: '15px',
+    flexShrink: '0',
+    boxSizing: 'border-box',
+    borderStyle: 'dotted',
+    borderWidth: '2px',
+    borderColor: `${palette.foreground} transparent ${colorShade(palette.foreground, 30)} transparent`,
+    borderRadius: '50%',
+    transformOrigin: '50% 50%',
+    willChange: 'transform',
+    animation: 'rotate 0.7s cubic-bezier(0.68, -0.35, 0.265, 1.35) infinite'
+  })
+)()
 
 export const $loadingValue = (valueSrc: IStream<string>): I$Node =>
-  switchLatest(map(v => (v === '-' ? $loadingDash : $node($text(v))), valueSrc))
+  switchLatest(map(v => (v === '…' ? $inlineSpinner : $node($text(v))), valueSrc))
 
 export const intermediateText = (querySrc: IStream<Promise<string>>, hint = '-'): IStream<string> =>
   switchMap(res => start(hint, fromPromise(res.then(v => v, () => hint))), querySrc)

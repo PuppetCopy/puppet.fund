@@ -6,6 +6,7 @@ import type {
   INavChainBalance,
   INavKind,
   INavPosition,
+  INavValuedHolding,
   IPlatformInFlight,
   IPlatformValuation
 } from './types.js'
@@ -14,9 +15,16 @@ function haircutGain(pnlBase: bigint, gainHaircutBps: bigint): bigint {
   return pnlBase > 0n ? applyBasisPoints(pnlBase, PRECISION.basisPoints - gainHaircutBps) : pnlBase
 }
 
-export function composeBreakdown(chains: INavChainBalance[], valuations: IPlatformValuation[]): INavBreakdown {
+export function composeBreakdown(
+  chains: INavChainBalance[],
+  valuations: IPlatformValuation[],
+  holdings: INavValuedHolding[] = []
+): INavBreakdown {
   let unitedSignedBalance = 0n
   for (const c of chains) unitedSignedBalance += c.signedBalance
+
+  let holdingMarkBase = 0n
+  for (const h of holdings) holdingMarkBase += h.valueBase
 
   const positions: INavPosition[] = []
   const inFlight: IPlatformInFlight[] = []
@@ -37,7 +45,9 @@ export function composeBreakdown(chains: INavChainBalance[], valuations: IPlatfo
     unitedSignedBalance,
     positionMarkBase,
     positionFloorBase,
+    holdingMarkBase,
     perChain: chains,
+    holdings,
     positions,
     inFlight,
     unavailablePlatforms
@@ -49,8 +59,9 @@ export function computeNavValues(
   kind: INavKind,
   config: IEvaluationConfig
 ): { navMark: bigint; navFloor: bigint; navSigned: bigint } {
-  const navMark = breakdown.unitedSignedBalance + breakdown.positionMarkBase
-  const navFloor = breakdown.unitedSignedBalance + breakdown.positionFloorBase
+  const spotBase = breakdown.unitedSignedBalance + breakdown.holdingMarkBase
+  const navMark = spotBase + breakdown.positionMarkBase
+  const navFloor = spotBase + breakdown.positionFloorBase
 
   let navSigned: bigint
   if (kind === 'view') {
@@ -62,7 +73,7 @@ export function computeNavValues(
     for (const p of breakdown.positions) {
       positionAllocBase += max(0n, p.collateralBase + haircutGain(p.pnlBase, config.allocateGainHaircutBps))
     }
-    navSigned = breakdown.unitedSignedBalance + positionAllocBase
+    navSigned = spotBase + positionAllocBase
   }
 
   return { navMark, navFloor, navSigned }

@@ -2,7 +2,7 @@ import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
 import type { IAccountLib__AccountInitParams, IFundAccountLib__FundAccountInitParams } from '@puppet/contracts/types'
 import { predictFundAccount, predictPuppetAccount, predictShareToken } from '@puppet/sdk/account'
 import { BYTES32_ZERO } from '@puppet/sdk/const'
-import { getRegisteredTokenDescription } from '@puppet/sdk/core'
+import { getChainTokenDescription } from '@puppet/sdk/core'
 import { type ISubaccountState, type ITokenRegistryMap, stubSubaccountState } from '@puppet/sdk/state'
 import {
   encodeFundName,
@@ -50,7 +50,7 @@ import {
   $ButtonSecondary,
   $ButtonToggle,
   $defaultButtonPrimary,
-  $defaultButtonSecondary,
+  $defaultButtonPrimaryOutline,
   $defaultTextFieldContainer,
   $FieldLabeled,
   $icon,
@@ -112,7 +112,7 @@ const TEMPLATE_DESC: Record<ITemplate, string> = {
 export interface I$HelloPage {
   hideBalances: IStream<boolean>
   walletQuery: IStream<Promise<IConnectedWallet | null>>
-  walletState: IStream<ISubaccountState | null>
+  walletState: IStream<Promise<ISubaccountState | null>>
   draftAllocateList: IStream<IAllocateDraft[]>
   draftSwapList: IStream<IFundSwapDraft[]>
   draftRedeemList: IStream<IRedeemDraft[]>
@@ -122,7 +122,7 @@ export interface I$HelloPage {
 export const $HelloPage = ({
   hideBalances,
   walletQuery,
-  walletState: rootState,
+  walletState: rootStateQuery,
   draftAllocateList,
   draftSwapList,
   draftRedeemList,
@@ -143,6 +143,7 @@ export const $HelloPage = ({
       [_connect, connectTether]: IBehavior<unknown>
     ) => {
       const walletState: IStream<IConnectedWallet | null> = op(walletQuery, switchPromises, state())
+      const rootState: IStream<ISubaccountState | null> = op(rootStateQuery, switchPromises, state())
       const tokenRegistryValue = fromPromise(context.getTokenRegistry())
       const baseToken: IStream<Hex> = state(zeroAddress, selectBaseToken)
       const modeState: IStream<IMasterMode> = state('human', selectMode)
@@ -157,8 +158,6 @@ export const $HelloPage = ({
         root: ISubaccountState | null
       }
 
-      // Typed name survives section rebuilds (base-token switch re-keys the section,
-      // but the user's input is component state, not section state). null = untouched.
       const typedName: IStream<string | null> = state(null, changeName)
       const traitsState: IStream<number[] | null> = state(null, changeTraits)
 
@@ -177,13 +176,8 @@ export const $HelloPage = ({
                 )($WalletConnect()({ connect: connectTether() }))
               )
             const wallet = p.wallet
-            // Gate on a session actually signed in this browser, not the signer of a PA merely
-            // fetched from the datastore (re-signing is deterministic, so it resolves to the same fund).
             const signer: Address | null = wallet.session?.signer ?? null
             const homeTokens = p.registry.get(HUB_CHAIN_ID)
-            // A fund's base token must be an ERC20: deposit routes, allocate sweeps and
-            // redeem drains all move it with token transfers. Native (token 0) is a
-            // holdable balance, not a base.
             const registeredIds = [...(homeTokens?.entries() ?? [])]
               .filter(([, info]) => info.token !== PROTOCOL.nativeToken)
               .map(([id]) => id)
@@ -194,7 +188,7 @@ export const $HelloPage = ({
               optionList: registeredIds,
               $$option: map((id: Hex) => {
                 const info = homeTokens?.get(id)
-                return $node(info ? $tokenLabelFromSummary(getRegisteredTokenDescription(info.token)) : $text(id))
+                return $node(info ? $tokenLabelFromSummary(getChainTokenDescription(HUB_CHAIN_ID, info.token)) : $text(id))
               })
             })({ select: selectBaseTokenTether() })
             const $baseTokenField = $defaultTextFieldContainer(
@@ -224,7 +218,7 @@ export const $HelloPage = ({
                 )(),
                 $column(style({ minWidth: '0', gap: '2px' }))(
                   $node(style({ fontWeight: '600', fontSize: text.lg, color: palette.foreground }))($text('Your fund')),
-                  baseInfo ? $node($tokenLabelFromSummary(getRegisteredTokenDescription(baseInfo.token))) : empty
+                  baseInfo ? $node($tokenLabelFromSummary(getChainTokenDescription(HUB_CHAIN_ID, baseInfo.token))) : empty
                 )
               )
               return $column(spacing.big)(
@@ -271,13 +265,7 @@ export const $HelloPage = ({
 
             const fundParams: IAccountLib__AccountInitParams = { user: wallet.address, signer }
             const fundMaster = predictPuppetAccount(fundParams)
-            // The preview fund's CREATE2 identity: this puppet masters it, scoped to the
-            // selected base token, with the default (empty) name until the user names it.
             const previewFundParams = { master: fundMaster, baseToken: effectiveBid, name: BYTES32_ZERO }
-            // An empty name resolves to the EXISTING fund for this base token when one
-            // exists (the card shows it, no fresh preview); only without one does it
-            // generate the token-scoped default, so a token switch regenerates name and
-            // avatar together.
             const existingFund = p.root?.funds.find(
               f => f.baseToken === effectiveBid && getAddress(f.master as Address) === fundMaster
             )
@@ -296,9 +284,6 @@ export const $HelloPage = ({
               change: changeNameTether()
             })
 
-            // The reactive fund identity: master + selected base token + the RESOLVED name
-            // (the same name the allocate creates it with). Base token, name, profile and the
-            // CREATE2 address all derive from this one stream, so nothing can drift.
             const fund: IStream<IFundAccountLib__FundAccountInitParams> = map(
               ({ name, traits }) => {
                 const display = name.trim() || defaultName
@@ -350,7 +335,7 @@ export const $HelloPage = ({
                   height: '20px',
                   borderRadius: '50%',
                   backgroundColor: palette.primary,
-                  color: palette.message,
+                  color: 'white',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -454,9 +439,6 @@ export const $HelloPage = ({
               )
             )
           },
-          // Identity-keyed rebuild: wallet/root re-emissions (attest folds, wagmi events)
-          // must NOT remount the section, or an open allocate popover gets torn down.
-          // Live values inside read their own streams; only these change the layout.
           skipRepeatsWith<ISectionParams>(
             (a, b) =>
               a.wallet?.address === b.wallet?.address &&
@@ -515,8 +497,6 @@ export const $HelloPage = ({
           $node(style({ color: palette.foreground, fontSize: text.sm, lineHeight: '1.6' }))($text(desc))
         )
 
-      // Template picker for the agent path: the four templates are alternatives (you scaffold one), so
-      // pick one and its description + command render in a single terminal below.
       const templateState: IStream<ITemplate> = state('base', selectTemplate)
       const $templatePicker: I$Node = $ButtonToggle({
         value: templateState,
@@ -546,9 +526,6 @@ export const $HelloPage = ({
           palette.primary
         )
       )
-
-      // Setup comes first (fund creation inputs, then the wallet card); the path choice
-      // follows as step 2 so it reads as part of the same flow, not an orthogonal pick.
 
       const $separator = (): I$Node => $node(style({ height: '48px', width: '100%' }))()
 
@@ -625,7 +602,7 @@ const $EnableSession = (wallet: IConnectedWallet) =>
       ),
       dismiss: empty,
       $target: $ButtonSecondary({
-        $container: $defaultButtonSecondary(style({ flexShrink: '0', alignSelf: 'center' })),
+        $container: $defaultButtonPrimaryOutline(style({ flexShrink: '0', alignSelf: 'center' })),
         $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Sign session'), $popoverCaret())
       })({ click: popSessionTether() })
     })({}),
@@ -693,8 +670,6 @@ const $tradeStep = ({
     $callout(
       'Your session key allows any operation on approved venues within the rules you set, but it can never move funds out of your fund.'
     ),
-    // App-install is offered only when a one-click install is available; this is false both
-    // when already installed and on browsers that can't prompt, so the section stays hidden.
     switchLatest(
       map(
         can =>
@@ -728,7 +703,7 @@ const $humanNextStep = (): I$Node =>
     $bulletList([
       [
         'Watch your first trade settle',
-        'Every action lands on Arbitrum and on the leaderboard the moment it executes.'
+        'Every action lands on-chain and on the leaderboard the moment it executes.'
       ],
       [
         'Build a track record',
@@ -859,7 +834,7 @@ const $agentNextStep = (): I$Node =>
     $bulletList([
       [
         'Watch your first trade settle',
-        'Every action lands on Arbitrum and on the leaderboard the moment your strategy executes.'
+        'Every action lands on-chain and on the leaderboard the moment your strategy executes.'
       ],
       [
         'Build a track record',

@@ -1,13 +1,5 @@
-import { type Address, type Hex, isAddressEqual } from 'viem'
-import { PROTOCOL } from '@puppet/contracts/const'
-import { type ChainId } from '@puppet/sdk/const'
-import { wrappedNativeAddressOf } from '@puppet/sdk/state'
-
-// An external swap API resolves tokens by ERC20 address; the EIP-7528 native sentinel has no tokenDetails, so a native
-// leg is quoted (and executed) as its wrapped-native ERC20. The route is WETH-funded and the gate forwards value:0, so
-// the wrapped form is also what runs on-chain.
-const providerToken = (token: Address, chainId: number): Address =>
-  isAddressEqual(token, PROTOCOL.nativeToken) ? wrappedNativeAddressOf(chainId as ChainId) : token
+import type { Address, Hex } from 'viem'
+import { providerToken } from './swapCommon.js'
 
 const QUOTE_PATH = '/api/swap/lifi/v1/quote'
 // A LI.FI route may be cross-chain (it bridges, like Across), so the fill window must cover the bridge-fill latency:
@@ -28,11 +20,15 @@ interface ILifiSwapParams {
   fromAddress: Address
   toAddress: Address
   slippage?: number
+  signal?: AbortSignal
 }
+
+export const quoteAbortSignal = (external: AbortSignal | undefined, timeoutMs: number): AbortSignal =>
+  external ? AbortSignal.any([external, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs)
 
 interface ILifiQuoteResponse {
   toolDetails?: { name?: string }
-  estimate: { toAmount: string; toAmountMin: string; approvalAddress?: Address }
+  estimate: { toAmount: string; toAmountMin: string; approvalAddress?: Address; executionDuration?: number }
   transactionRequest: { to: Address; data: Hex; value?: string }
 }
 
@@ -49,7 +45,7 @@ async function fetchLifiQuote(params: ILifiSwapParams): Promise<ILifiQuoteRespon
     slippage: String(params.slippage ?? DEFAULT_SLIPPAGE)
   })
   const attempt = () =>
-    fetch(`${window.location.origin}${QUOTE_PATH}?${query.toString()}`, { signal: AbortSignal.timeout(10_000) })
+    fetch(`${window.location.origin}${QUOTE_PATH}?${query.toString()}`, { signal: quoteAbortSignal(params.signal, 10_000) })
   // One retry absorbs transient rejections (timeout, connection blip); a rejection here
   // is a transport failure, not a route verdict, and the message says so.
   const res = await attempt()
@@ -93,6 +89,7 @@ export async function fetchLifiSwapQuote(params: ILifiSwapParams) {
     txValue,
     tool: quote.toolDetails?.name ?? 'LI.FI',
     outputAmount,
+    etaSec: quote.estimate.executionDuration,
     fillDeadline: now + FILL_WINDOW_SEC,
     expires: now + EXPIRE_WINDOW_SEC,
     isAmountTooLow: outputAmount === 0n,

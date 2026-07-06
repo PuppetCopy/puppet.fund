@@ -2,8 +2,8 @@ import { ARBITRUM_MARKET_LIST, ARBITRUM_TOKEN_LIST } from '@puppet/contracts/gmx
 import type { Address } from 'viem'
 import { getAddress } from 'viem'
 import { ADDRESS_ZERO } from '../const/common.js'
-import type { IMarketDescription, ITokenDescription } from '../core/types.js'
 import { getRegisteredTokenDescription } from '../core/token.js'
+import type { IMarketDescription, ITokenDescription } from '../core/types.js'
 import { getMappedValue, getMappedValueFallback, groupList } from '../core/utils.js'
 
 const SUPPLEMENTAL_ARBITRUM_TOKENS: readonly ITokenDescription[] = [

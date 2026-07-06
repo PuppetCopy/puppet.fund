@@ -31,10 +31,13 @@ const BLOCKSCOUT_BASE: Record<number, string> = {
   11155420: 'https://optimism-sepolia.blockscout.com'
 }
 
-export const chainExplorerAddressUrl = (chainId: number, address: string): string => {
-  const explorerBase = BLOCKSCOUT_BASE[chainId] ?? VIEM_CHAINS.find(c => c.id === chainId)?.blockExplorers?.default.url
-  return explorerBase ? `${explorerBase}/address/${address}` : `https://blockscout.com/address/${address}`
-}
+const explorerBaseUrl = (chainId: number): string =>
+  BLOCKSCOUT_BASE[chainId] ?? VIEM_CHAINS.find(c => c.id === chainId)?.blockExplorers?.default.url ?? 'https://blockscout.com'
+
+export const chainExplorerAddressUrl = (chainId: number, address: string): string =>
+  `${explorerBaseUrl(chainId)}/address/${address}`
+
+export const chainExplorerTxUrl = (chainId: number, txHash: string): string => `${explorerBaseUrl(chainId)}/tx/${txHash}`
 
 const chainAssetSrc = (chainId: number): string => `/assets/chain/${chainId}.svg`
 

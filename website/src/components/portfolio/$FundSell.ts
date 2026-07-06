@@ -1,15 +1,15 @@
 import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
-import { getRegisteredTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { applyFactor, getChainTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
 import type { IFundPosition } from '@puppet/sdk/schema'
-import { type ITokenRegistryMap, tokenInfoFor } from '@puppet/sdk/state'
+import { computeClaimable, computeQueuedShares, type ITokenRegistryMap, tokenInfoFor } from '@puppet/sdk/state'
 import { combine, constant, type IStream, map, op } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $text, component, style } from 'aelea/ui'
 import { $Popover, $row, spacing } from 'aelea/ui-components'
-import { type Address, getAddress, type Hex } from 'viem'
-import { $amountDisplay, $ButtonSecondary, $defaultMiniButtonSecondary, $popoverCaret, text } from '@/ui-components'
-import { formatUsd, priceFor } from '../../io/gmx/priceFeed.js'
+import { type Address, getAddress, } from 'viem'
+import { $amountDisplay, $ButtonPrimary, $defaultMiniButtonPrimary, $popoverCaret, text } from '@/ui-components'
 import { liveFundPool } from '../../io/live.js'
+import { formatUsd, priceFor } from '../../io/price.js'
 import { $FundSellEditor } from './$FundSellEditor.js'
 import type { IClaimDraft, ISellDraft } from './draft.js'
 
@@ -36,7 +36,7 @@ export const $FundSell = ({
       [popManage, popManageTether]: IBehavior<PointerEvent>
     ) => {
       const editorProps = { puppet, masterAccount, baseToken, tokenRegistry }
-      const desc = getRegisteredTokenDescription(tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseToken).token)
+      const desc = getChainTokenDescription(HUB_CHAIN_ID, tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseToken).token)
 
       const pool = op(liveFundPool(getAddress(masterAccount)), state())
       const settle = combine({ position, pool })
@@ -49,6 +49,13 @@ export const $FundSell = ({
         p => (p.position?.sharesHeld ?? 0n) > 0n && (p.pool?.liquidationRate ?? 0n) === 0n,
         settle
       )
+      const disabled: IStream<boolean> = map(p => {
+        const held = p.position?.sharesHeld ?? 0n
+        const liquidationRate = p.pool?.liquidationRate ?? 0n
+        if (held > 0n && liquidationRate === 0n) return false
+        const surrender = liquidationRate !== 0n ? applyFactor(liquidationRate, held) : 0n
+        return computeClaimable(p.position, p.pool) + surrender + computeQueuedShares(p.position, p.pool) === 0n
+      }, settle)
 
       const $value = $amountDisplay({
         hideBalances,
@@ -59,8 +66,9 @@ export const $FundSell = ({
       })
 
       const $managePopover = $Popover({
-        $target: $ButtonSecondary({
-          $container: $defaultMiniButtonSecondary,
+        $target: $ButtonPrimary({
+          $container: $defaultMiniButtonPrimary,
+          disabled,
           $content: $row(spacing.tiny, style({ alignItems: 'center' }))(
             $text(map(s => (s ? 'Sell' : 'Claim'), sellable)),
             $popoverCaret()

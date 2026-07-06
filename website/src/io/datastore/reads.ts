@@ -19,7 +19,7 @@ import {
 import { PLATFORM_SCALE_ID, scalePercentile } from '@puppet/sdk/state'
 import type { IFundRank } from '@puppet/sdk/ui-components'
 import type { IAccountPosition, IAccountPositionStatus } from '@puppet/sdk/venue'
-import type { Hex } from 'viem'
+import { type Address, getAddress, type Hex } from 'viem'
 
 // The datastore read client, used directly at call sites: client.select(table, { where, orderBy, … }) / client.find(
 // table, where) execute against journal's /query (filter + sort + page server-side via the shared runRows engine). The
@@ -81,8 +81,7 @@ export const fetchBalanceHistory = (accounts: Hex[]): Promise<IAccountBalanceHis
   selectWithEmptyGuard(accounts, () =>
     client.select(accountBalanceHistoryTable, {
       where: { account: { in: accounts } },
-      orderBy: { col: 'blockTimestamp', dir: 'asc' },
-      orThrow: true
+      orderBy: { col: 'blockTimestamp', dir: 'asc' }
     })
   )
 
@@ -90,8 +89,7 @@ export const fetchFundCheckpointsForFunds = (funds: Hex[]): Promise<IFundCheckpo
   selectWithEmptyGuard(funds, () =>
     client.select(fundCheckpointTable, {
       where: { fund: { in: funds } },
-      orderBy: { col: 'blockTimestamp', dir: 'asc' },
-      orThrow: true
+      orderBy: { col: 'blockTimestamp', dir: 'asc' }
     })
   )
 
@@ -125,11 +123,12 @@ export async function fetchRawActivity(account: Hex, limit = 40): Promise<IRawEv
   }))
 }
 
-// Open GMX positions for an account, from the journal's folded gmxPositionTable (status='open'). orThrow so a
-// safety/signing caller never mistakes an unreadable position set for "no positions"; display callers catch and
-// degrade explicitly. (The matchmaker is attest-only post-split; folded reads live on the journal's /query.)
+// Open GMX positions for an account, from the journal's folded gmxPositionTable (status='open'). Throws (like every
+// client read) so a safety/signing caller never mistakes an unreadable position set for "no positions"; display
+// callers catch and degrade explicitly. (The matchmaker is attest-only post-split; folded reads live on the journal's
+// /query.)
 export async function fetchOpenPositions(account: Hex): Promise<IAccountPosition[]> {
-  const rows = await client.select(gmxPositionTable, { where: { account, status: 'open' }, orThrow: true })
+  const rows = await client.select(gmxPositionTable, { where: { account, status: 'open' } })
   return rows.map(r => ({
     positionId: r.id as Hex,
     account: r.account,
@@ -150,9 +149,11 @@ export async function fetchOpenPositions(account: Hex): Promise<IAccountPosition
   }))
 }
 
-export async function findDepositTx(recipient: Hex, chainId: number, minBlock: bigint): Promise<Hex | null> {
+export async function findDepositTx(recipient: Address, chainId: number, minBlock: bigint): Promise<Hex | null> {
   try {
-    const res = await fetch(`/api/journal/deposit-tx?${qs({ recipient, chainId, minBlock: minBlock.toString() })}`)
+    const res = await fetch(
+      `/api/journal/deposit-tx?${qs({ recipient: getAddress(recipient), chainId, minBlock: minBlock.toString() })}`
+    )
     if (!res.ok) return null
     return ((await res.json()) as { transactionHash: Hex | null }).transactionHash
   } catch {

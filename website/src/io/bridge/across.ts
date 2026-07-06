@@ -1,13 +1,6 @@
-import { type Address, getAddress, type Hex, isAddressEqual } from 'viem'
-import { PROTOCOL } from '@puppet/contracts/const'
-import { type ChainId } from '@puppet/sdk/const'
-import { wrappedNativeAddressOf } from '@puppet/sdk/state'
-
-// Across resolves tokens by ERC20 address; the EIP-7528 native sentinel has no tokenDetails (the API 404s on it), so a
-// native leg is quoted as its wrapped-native ERC20. The route is WETH-funded and the gate forwards value:0, so the
-// wrapped form is also what runs on-chain.
-const providerToken = (token: Address, chainId: number): Address =>
-  isAddressEqual(token, PROTOCOL.nativeToken) ? wrappedNativeAddressOf(chainId as ChainId) : token
+import { type Address, getAddress, type Hex } from 'viem'
+import { quoteAbortSignal } from './lifiSwap.js'
+import { providerToken } from './swapCommon.js'
 
 const SUGGESTED_FEES_PATH = '/api/swap/across/suggested-fees'
 const SWAP_APPROVAL_PATH = '/api/swap/across/swap/approval'
@@ -30,12 +23,18 @@ interface IAcrossSuggestedFees {
   exclusivityDeadline: number
   isAmountTooLow: boolean
   outputAmount: string
+  estimatedFillTimeSec?: number
   limits: { minDeposit: string; maxDeposit: string }
 }
 
-async function fetchAcrossJson<T>(path: string, params: Record<string, string>, errorLabel: string): Promise<T> {
+async function fetchAcrossJson<T>(
+  path: string,
+  params: Record<string, string>,
+  errorLabel: string,
+  signal?: AbortSignal
+): Promise<T> {
   const res = await fetch(`${window.location.origin}${path}?${new URLSearchParams(params).toString()}`, {
-    signal: AbortSignal.timeout(10_000)
+    signal: quoteAbortSignal(signal, 10_000)
   }).catch(() => {
     throw new Error(errorLabel)
   })
@@ -48,7 +47,7 @@ async function fetchAcrossJson<T>(path: string, params: Record<string, string>, 
   })) as T
 }
 
-export async function fetchAcrossBridgeQuote(params: IAcrossBridgeQuoteParams) {
+export async function fetchAcrossBridgeQuote(params: IAcrossBridgeQuoteParams, signal?: AbortSignal) {
   const nowSec = Math.floor(Date.now() / 1000)
   const data = await fetchAcrossJson<IAcrossSuggestedFees>(
     SUGGESTED_FEES_PATH,
@@ -60,7 +59,8 @@ export async function fetchAcrossBridgeQuote(params: IAcrossBridgeQuoteParams) {
       destinationChainId: String(params.destinationChainId),
       recipient: params.recipient
     },
-    'Across quote unavailable for this route'
+    'Across quote unavailable for this route',
+    signal
   )
   const outputAmount = BigInt(data.outputAmount)
   return {
@@ -72,6 +72,7 @@ export async function fetchAcrossBridgeQuote(params: IAcrossBridgeQuoteParams) {
       exclusivityParameter: data.exclusivityDeadline
     },
     outputAmount,
+    etaSec: data.estimatedFillTimeSec,
     fillDeadline: nowSec + FILL_WINDOW_SEC,
     expires: nowSec + EXPIRE_WINDOW_SEC,
     isAmountTooLow: data.isAmountTooLow || outputAmount === 0n,
@@ -92,6 +93,7 @@ export type AcrossSwapQuote = Awaited<ReturnType<typeof fetchAcrossSwapQuote>>
 interface IAcrossSwapApproval {
   minOutputAmount?: string
   expectedOutputAmount?: string
+  expectedFillTime?: number
   approvalTxns?: Array<{ to: Address; data: Hex }>
   swapTx?: { to: Address; data: Hex; value?: string }
 }
@@ -105,16 +107,19 @@ const decodeApproveSpender = (data: Hex): Address | null => {
   }
 }
 
-export async function fetchAcrossSwapQuote(params: {
-  originChainId: number
-  destinationChainId: number
-  inputToken: Address
-  outputToken: Address
-  inputAmount: bigint
-  depositor: Address
-  recipient: Address
-  slippage?: number | 'auto'
-}) {
+export async function fetchAcrossSwapQuote(
+  params: {
+    originChainId: number
+    destinationChainId: number
+    inputToken: Address
+    outputToken: Address
+    inputAmount: bigint
+    depositor: Address
+    recipient: Address
+    slippage?: number | 'auto'
+  },
+  signal?: AbortSignal
+) {
   const nowSec = Math.floor(Date.now() / 1000)
   const data = await fetchAcrossJson<IAcrossSwapApproval>(
     SWAP_APPROVAL_PATH,
@@ -129,7 +134,8 @@ export async function fetchAcrossSwapQuote(params: {
       recipient: params.recipient,
       slippage: String(params.slippage ?? 'auto')
     },
-    'Across swap quote unavailable for this route'
+    'Across swap quote unavailable for this route',
+    signal
   )
   const swapTx = data.swapTx
   if (!swapTx?.to || !swapTx.data || swapTx.data === '0x') {
@@ -157,6 +163,7 @@ export async function fetchAcrossSwapQuote(params: {
     txValue,
     tool: 'Across',
     outputAmount,
+    etaSec: data.expectedFillTime,
     fillDeadline: nowSec + FILL_WINDOW_SEC,
     expires: nowSec + EXPIRE_WINDOW_SEC,
     isAmountTooLow: outputAmount === 0n,

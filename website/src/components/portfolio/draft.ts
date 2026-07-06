@@ -47,7 +47,7 @@ export const STEP_LABEL: Record<StepKind, string> = {
 export const STEP_DESCRIPTION: Record<StepKind, string> = {
   walletTransfer: 'Sends funds from your wallet to your account. The next step confirms them into your balance.',
   swap:
-    'Moves funds to your account on Arbitrum, usually within seconds. Your funds stay in transit and settle on-chain even if you wait. If it fails, they reappear in the deposit editor to recover.',
+    'Converts and moves funds to your account on the destination chain, usually within seconds. Your funds stay in transit and settle on-chain even if you wait. If it fails, they reappear in the deposit editor to recover.',
   recognize: 'Confirms the tokens you just sent so they show up in your balance.',
   withdraw:
     'Moves funds from your account to your wallet, optionally bridging to another chain. Cross-chain transfers usually settle within seconds and stay in transit on-chain even if you wait.',
@@ -90,6 +90,11 @@ export interface IDepositDraft extends IDraftBase {
   output: IDraftOutput
   wallet: IDepositRoute | null
   swap: ISwapInput | null
+  // Composed two-leg delivery: `swap` above is then a SAME-ASSET bridge to the hub, and this leg converts the
+  // bridged token to the base LOCALLY on the hub — signed by the session at execution time, sized from the live
+  // route balance, and floor-checked against estimateOut. A local PA swap credits the signed balance directly,
+  // so a composed deposit runs no recognize step.
+  hubSwap?: { inputToken: Hex; estimateOut: bigint } | null
   surplus: bigint
 }
 
@@ -153,6 +158,9 @@ export interface IFundSwapDraft extends IDraftBase {
   tokenOut: Address
   amountIn: bigint
   minOut: bigint
+  // The composed route's chosen bridge asset (on the ORIGIN chain), baked by the editor so the runner executes the same
+  // intermediate the quote priced. Absent for direct (non-composed) swaps.
+  bridgeToken?: Address
 }
 
 // Recognize a closed position's return: the funds landed in the fund account as raw ERC-20 (no signed-domain event),
@@ -166,6 +174,16 @@ export interface IRecognizeFundDraft extends IDraftBase {
   surplus: bigint
 }
 
+// Claim funds sitting at the fund's cross-chain deposit route (a bridge delivery whose recognize never ran, or any
+// direct transfer to the route): one dest-chain FundGate.recognize sweeps the FULL route balance into the fund's
+// signed balance, creating the fund account (and master PA) on that chain when absent.
+export interface IClaimRouteDraft extends IDraftBase {
+  kind: 'claimRoute'
+  chainId: number
+  token: Hex
+  amount: bigint
+}
+
 // Public discriminated union — any draft kind.
 export type IDraft =
   | IDepositDraft
@@ -175,6 +193,7 @@ export type IDraft =
   | IFundSwapDraft
   | ISellDraft
   | IClaimDraft
+  | IClaimRouteDraft
   | IRedeemDraft
   | IRecognizeFundDraft
 

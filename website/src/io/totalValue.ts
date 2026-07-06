@@ -4,7 +4,7 @@ import { USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
 import { computeClaimable, computeQueuedShares, type ISubaccountState, type ITokenRegistryMap } from '@puppet/sdk/state'
 import { combine, combineMap, type IStream, just, op, start, switchMap } from 'aelea/stream'
 import { type Address, formatUnits, getAddress, type Hex } from 'viem'
-import { priceFor } from './gmx/priceFeed.js'
+import { priceFor } from './price.js'
 
 // Live total account value in USD, lensed off the root PA state: cash balances (signedBalance) + per-position value
 // (claimable + held shares at fund NAV) + mastered-fund AUM, each leg priced by its OWN token's live price. Emits null

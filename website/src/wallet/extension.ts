@@ -1,21 +1,10 @@
 import {
-  type IConnectionsResponse,
-  // Wallet extension sunset: the session handoff requires an active-fund selection
-  // (baseToken + name) the site no longer surfaces. Handoff usage is commented below.
-  // type IHandoffSessionRequest,
-  // type IHandoffSessionResponse,
   type IRejectConnectRequest,
   PUPPET_EXTENSION_RDNS,
-  WALLET_EVENT,
   WALLET_MESSAGE,
-  WALLET_PROTOCOL_VERSION,
   WALLET_TARGET
 } from '@puppet/sdk/wallet'
-import { fromPromise, type IStream, map, merge, op, skipRepeats, switchMap } from 'aelea/stream'
-import { fromCallback, state } from 'aelea/stream-extended'
-import { type Address, getAddress, type Hex } from 'viem'
-
-// import { lastStoredSession } from './sessionKey.js'
+import type { Address, Hex } from 'viem'
 
 export { PUPPET_EXTENSION_RDNS }
 export const PUPPET_EXTENSION_INSTALL_URL = 'https://puppet.fund/wallet'
@@ -38,17 +27,6 @@ if (typeof window !== 'undefined') {
     if (response?.success === false) entry.reject(new Error(response.error ?? 'extension error'))
     else entry.resolve(response?.result)
   })
-
-  // The extension holds the signer key in MEMORY only; when an MV3 worker recycle drops
-  // it, the extension asks any open puppet tab to re-hand the session. The site is the
-  // wallet — the stored session answers without needing a live EOA connection.
-  // Wallet extension sunset: re-arm handoff disabled (needs active-fund selection).
-  // window.addEventListener('message', e => {
-  //   if (e.source !== window || e.data?.target !== WALLET_TARGET.WEBSITE_EVENT) return
-  //   if (e.data.payload?.event !== WALLET_EVENT.SESSION_REQUEST) return
-  //   const session = lastStoredSession()
-  //   if (session) rearmActiveAccount(session).catch(() => {})
-  // })
 }
 
 function send<T>(type: string, payload?: unknown): Promise<T> {
@@ -70,33 +48,6 @@ function send<T>(type: string, payload?: unknown): Promise<T> {
     })
     window.postMessage({ target: WALLET_TARGET.EXTENSION, id, type, payload }, '*')
   })
-}
-
-export interface IExtensionConnection {
-  fund: Address | null
-  origins: string[]
-  // true when the installed extension speaks an older protocol than this site build.
-  outdated: boolean
-}
-
-const NO_CONNECTION: IExtensionConnection = { fund: null, origins: [], outdated: false }
-
-async function readConnection(): Promise<IExtensionConnection> {
-  const raw = await send<IConnectionsResponse>(WALLET_MESSAGE.GET_CONNECTIONS)
-  return {
-    fund: raw.fund ? getAddress(raw.fund) : null,
-    origins: raw.origins ?? [],
-    outdated: raw.version !== WALLET_PROTOCOL_VERSION
-  }
-}
-
-// Re-arm after an MV3 worker recycle: refill the in-memory signer key. The extension
-// derives the fund from the pair and keeps its origin grants.
-// Wallet extension sunset: handoff now needs an active-fund selection (baseToken + name)
-// the site no longer provides. Kept as a no-op; revive with a fund picker (see $ExtensionBanner).
-export async function rearmActiveAccount(_session: { user: Address; privateKey: Hex }): Promise<void> {
-  // const payload: IHandoffSessionRequest = { user: session.user, signerKey: session.privateKey }
-  // await send(WALLET_MESSAGE.HANDOFF_SESSION, payload)
 }
 
 // User approves a pending dApp connection: HANDOFF_SESSION carrying the session +
@@ -121,53 +72,3 @@ export async function rejectConnection(origin: string): Promise<void> {
 export async function clearExtensionStorage(): Promise<void> {
   await send(WALLET_MESSAGE.CLEAR_ALL)
 }
-
-// Re-read the full connection (fund + approved origins) whenever the extension broadcasts a
-// change — the accountsChanged event itself only carries the account, not the origin list.
-const connectionTick: IStream<number> = fromCallback<number, [number]>(cb => {
-  const handler = (e: MessageEvent) => {
-    if (e.source !== window || e.data?.target !== WALLET_TARGET.WEBSITE_EVENT) return
-    if (e.data.payload?.event !== WALLET_EVENT.ACCOUNTS_CHANGED) return
-    cb(performance.now())
-  }
-  window.addEventListener('message', handler)
-  return () => window.removeEventListener('message', handler)
-})
-
-export const puppetConnection: IStream<IExtensionConnection> = op(
-  merge(
-    fromPromise(readConnection().catch(() => NO_CONNECTION)),
-    switchMap(() => fromPromise(readConnection().catch(() => NO_CONNECTION)), connectionTick)
-  ),
-  state(NO_CONNECTION)
-)
-
-export const puppetActiveAccount: IStream<Address | null> = op(
-  puppetConnection,
-  map(c => c.fund),
-  skipRepeats,
-  state(null)
-)
-
-export const puppetConnectedOrigins: IStream<string[]> = op(
-  puppetConnection,
-  map(c => c.origins),
-  state([])
-)
-
-// The installed extension speaks an older protocol than this site build — prompt an update.
-export const puppetExtensionOutdated: IStream<boolean> = op(
-  puppetConnection,
-  map(c => c.outdated),
-  skipRepeats,
-  state(false)
-)
-
-export const puppetExtensionInstalled: IStream<boolean> = op(
-  fromPromise(
-    send(WALLET_MESSAGE.GET_CONNECTIONS)
-      .then(() => true)
-      .catch(() => false)
-  ),
-  state()
-)

@@ -3,7 +3,7 @@ import { USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
 import { type IStream, map, op, skipRepeats } from 'aelea/stream'
 import { recover, state } from 'aelea/stream-extended'
 import { type Address, formatUnits, getAddress } from 'viem'
-import { getPrice } from '../context.js'
+import { getPrice } from './context.js'
 
 const PRICE_REFRESH_MS = 10_000
 
@@ -35,6 +35,10 @@ export function formatUsd(amount: bigint, price: bigint | null): string {
   if (price === null) return '-'
   if (amount === 0n) return '$0.00'
   const num = Number(formatUnits(amount * price, USD_PRICE_DECIMALS))
-  if (num > 0 && num < 0.01) return '< $0.01'
+  const magnitude = Math.abs(num)
+  if (magnitude > 0 && magnitude < 0.01) {
+    const decimals = Math.min(-Math.floor(Math.log10(magnitude)) + 1, 18)
+    return `$${num.toFixed(decimals)}`
+  }
   return `$${num.toFixed(2)}`
 }

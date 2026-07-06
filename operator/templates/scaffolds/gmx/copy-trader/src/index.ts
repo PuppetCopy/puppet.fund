@@ -1,5 +1,5 @@
-import { createOperatorCore, pairOverBrowser, runOperator } from '@puppet.fund/operator'
-import { acceptablePrice, dominantPosition, formatWeth, GMX_V2_CHAIN_ID, gmxOperator, gmxPrice, gmxTokenPerNativeToken, positionMetrics, usd, weth } from '@puppet.fund/operator/gmx'
+import { createConnector, runOperator } from '@puppet.fund/operator'
+import { acceptablePrice, dominantPosition, formatWeth, gmxOperator, gmxPrice, positionMetrics, usd, weth } from '@puppet.fund/operator/gmx'
 import { type Address, isAddressEqual } from 'viem'
 
 // COPY-TRADER bot. Mirror a chosen GMX trader's position on one market — same direction and
@@ -19,6 +19,9 @@ import { type Address, isAddressEqual } from 'viem'
 const ETH = '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1' as Address
 const TRADER = Bun.env.TRADER_ACCOUNT as Address | undefined
 if (!TRADER) throw new Error('set TRADER_ACCOUNT=0x... (the GMX account to copy) in .env')
+// DRY-RUN IS THE DEFAULT (set DRY_RUN=0 in .env to trade live): the full mirror + guard
+// pipeline runs and logs every order it would place, but nothing dispatches.
+const DRY = Bun.env.DRY_RUN !== '0'
 
 const RISK = {
   copyCollateralFraction: 0.2, // commit at most 20% of our free WETH as the copy's collateral
@@ -38,9 +41,8 @@ const COOLDOWN_MS = 60_000
 // action until the deadline has passed, otherwise a re-fire can double the position.
 const INTENT_DEADLINE_MS = 5 * 60_000
 
-const session = await pairOverBrowser(Bun.env.PAIR_URL)
-const core = await createOperatorCore(session, { chainId: GMX_V2_CHAIN_ID, getTokenPerNativeToken: gmxTokenPerNativeToken, rpcUrl: Bun.env.ARBITRUM_RPC_URL })
-const gmx = gmxOperator(core)
+const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, dryRun: DRY })
+const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
 const market = gmx.getMarket(ETH)
 const marketInfo = gmx.markets.find(m => isAddressEqual(m.marketToken as Address, market))
 if (!marketInfo) throw new Error(`market ${market} not in the GMX market list`)
@@ -49,8 +51,10 @@ type Position = Awaited<ReturnType<typeof gmx.getPositions>>[number]
 let lastActionAt = 0
 let holdUntil = 0
 
-await runOperator(core, async signal => {
-  console.log(`copy-trader live on ${market} · following ${TRADER} · ${RISK.maxLeverage}x max · Ctrl-C to stop`)
+await runOperator(connector, async signal => {
+  console.log(
+    `copy-trader live on ${market} · ${DRY ? 'DRY-RUN (no dispatch; set DRY_RUN=0 to go live) · ' : ''}following ${TRADER} · ${RISK.maxLeverage}x max · Ctrl-C to stop`
+  )
   while (!signal.aborted) {
     try {
       await tick()
@@ -67,33 +71,40 @@ async function tick(): Promise<void> {
   const markPrice = gmxPrice(price, 18)
   // Fund balance = deployable base; collateral freed by closes/reduces returns to the
   // fund on its own and shows up here next tick.
-  const freeWeth = Number(formatWeth(await core.getFundBalance()))
+  const freeWeth = Number(formatWeth(await gmx.operator.getFundBalance()))
   const ourPos = dominantPosition(await gmx.getPositions(), market)
   const traderPos = dominantPosition(await gmx.getPositions(TRADER), market)
 
-  if (Date.now() - lastActionAt < COOLDOWN_MS || Date.now() < holdUntil) return
+  const throttled = Date.now() - lastActionAt < COOLDOWN_MS || Date.now() < holdUntil
 
-  // 1) LIQUIDATION GUARD — our position only, before anything trader-driven.
+  // 1) LIQUIDATION GUARD — our position only, before anything trader-driven, and checked even
+  // during cooldown/limbo. While throttled, only the collateral-add branch may fire: adding
+  // collateral cannot double exposure the way a re-fired resize can, and skipping the guard
+  // for the whole limbo window is how positions get liquidated.
   if (ourPos) {
     const m = metrics(ourPos, markPrice)
     if (m.marginUsd <= 0 || m.effLeverage >= RISK.liqGuardLeverage) {
       const addUsd = m.sizeUsd / RISK.maxLeverage - m.marginUsd
       if (m.marginUsd > 0 && addUsd > RISK.minActionUsd && freeWeth * price >= addUsd) {
-        console.log(`LIQ-GUARD: effLev ${m.effLeverage.toFixed(1)}x — adding $${addUsd.toFixed(0)} collateral`)
+        console.log(`LIQ-GUARD: effLev ${m.effLeverage.toFixed(1)}x, adding $${addUsd.toFixed(0)} collateral`)
         await order(m.isLong, 'increase', { collateralWeth: addUsd / price }, price)
-      } else {
+      } else if (!throttled) {
         const reduceUsd = m.marginUsd > 0 ? m.sizeUsd - m.marginUsd * RISK.maxLeverage : m.sizeUsd
-        console.log(`LIQ-GUARD: effLev ${m.effLeverage.toFixed(1)}x — reducing $${reduceUsd.toFixed(0)} size`)
+        console.log(`LIQ-GUARD: effLev ${m.effLeverage.toFixed(1)}x, reducing $${reduceUsd.toFixed(0)} size`)
         await order(m.isLong, 'decrease', { sizeUsd: Math.min(reduceUsd, m.sizeUsd) }, price)
+      } else {
+        console.log(`LIQ-GUARD: effLev ${m.effLeverage.toFixed(1)}x but throttled and cannot add collateral, waiting`)
       }
       return
     }
   }
 
+  if (throttled) return
+
   // 2-5) MIRROR the trader.
   if (!traderPos && !ourPos) return
   if (!traderPos && ourPos) {
-    console.log('trader closed — closing our copy')
+    console.log('trader closed: closing our copy')
     await closePosition(ourPos, price)
     return
   }
@@ -106,7 +117,7 @@ async function tick(): Promise<void> {
   }
   if (traderPos && ourPos) {
     if (traderPos.flags.isLong !== ourPos.flags.isLong) {
-      console.log('trader flipped side — closing our copy (re-opens opposite next tick)')
+      console.log('trader flipped side: closing our copy (re-opens opposite next tick)')
       await closePosition(ourPos, price)
       return
     }

@@ -1,10 +1,10 @@
 import type { IClaimInput, ILiquidateInput, IRedeemInput, ISellInput } from '@puppet/sdk/attestation'
-import { assertNavSignable, composeCashLeg, evaluateAccountNav } from '@puppet/sdk/evaluate'
+import { assertNavSignable, composeCashLeg, composeHoldings, evaluateAccountNav } from '@puppet/sdk/evaluate'
 import { fundTable } from '@puppet/sdk/schema'
 import { getAddress } from 'viem'
 import { getRate } from '../../../io/context.js'
+import { client } from '../../../io/datastore/reads.js'
 import {  gmxPositionProvider } from '../../../io/gmx/navProviders.js'
-import { client } from '../../../io/matchmaker/reads.js'
 import type { IClaimDraft, IRedeemDraft, ISellDraft } from '../draft.js'
 import { buildFundIntentEnvelope, type ExecContext } from './_shared.js'
 
@@ -30,6 +30,7 @@ export async function buildRedeemInput(draft: IRedeemDraft, ctx: ExecContext): P
       baseToken: draft.baseToken,
       kind: 'redeem',
       cashLeg: composeCashLeg(fund, ctx.chainLiveness, draft.baseToken),
+      holdings: composeHoldings(fund, draft.baseToken),
       getRate,
       positions: await gmxPositionProvider(draft.masterAccount, draft.baseToken)
     })
@@ -63,6 +64,7 @@ export async function buildLiquidateInput(draft: IRedeemDraft, ctx: ExecContext)
     baseToken: draft.baseToken,
     kind: 'liquidate',
     cashLeg: composeCashLeg(fund, ctx.chainLiveness, draft.baseToken),
+    holdings: composeHoldings(fund, draft.baseToken),
     getRate,
     positions: await gmxPositionProvider(draft.masterAccount, draft.baseToken)
   })

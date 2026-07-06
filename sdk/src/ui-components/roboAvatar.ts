@@ -2,10 +2,10 @@ import type { Address } from 'viem/accounts'
 import {
   type IGradientArt,
   INK,
-  MYSTERY,
-  MYSTERY_SKIN,
   type IRoboCategory,
   type ITraitArt,
+  MYSTERY,
+  MYSTERY_SKIN,
   ROBO_LAYERS,
   ROLLED_CATEGORIES,
   shade

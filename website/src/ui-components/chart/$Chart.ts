@@ -69,7 +69,6 @@ export const $Chart = <TSeriesType extends keyof ISeriesType>({
 }: I$Chart<TSeriesType>) =>
   component(
     (
-      // [sampleCrosshairMove, crosshairMove]: IBehavior<MouseEventParams, MouseEventParams>,
       [containerDimension, sampleContainerDimension]: IBehavior<INode, ResizeObserverEntry[]>
     ) => {
       const containerEl = chartApi.chartElement()
@@ -183,31 +182,6 @@ export const $Chart = <TSeriesType extends keyof ISeriesType>({
         ),
 
         {
-          // yAxisCoords: yAxisState
-          //   ? merge([
-          //       map(
-          //         (coords) => {
-          //           if (coords.isFocused) {
-          //             return null
-          //           }
-
-          //           return coords.crosshairMove?.point?.y || null
-          //         },
-          //         combine({ crosshairMove, isFocused: yAxisState.isFocused })
-          //       ),
-          //       sampleMap(
-          //         (params) => {
-          //           if (params.isFocused && params.price) {
-          //             return seriesApi.priceToCoordinate(params.price)
-          //           }
-
-          //           return null
-          //         },
-          //         combine(yAxisState),
-          //         visibleLogicalRangeChange
-          //       )
-          //     ])
-          //   : empty,
           focusPrice: yAxisState
             ? filterNull(
                 merge(
@@ -280,9 +254,7 @@ export const defaultChartConfig: DeepPartial<ChartOptions> = {
   crosshair: {
     mode: CrosshairMode.Magnet,
     horzLine: {
-      // visible: false,
       labelBackgroundColor: palette.background,
-      // labelVisible: false,
       color: palette.indeterminate,
       width: 1,
       style: LineStyle.Dotted

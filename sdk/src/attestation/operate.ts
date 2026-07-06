@@ -6,7 +6,16 @@ import type {
   IIAccount__Call,
   IIAccount__SignTransfer
 } from '@puppet/contracts/types'
-import { type Address, encodeAbiParameters, getAddress, type Hex, keccak256, type TypedDataDefinition } from 'viem'
+import {
+  type Address,
+  encodeAbiParameters,
+  getAddress,
+  isAddressEqual,
+  keccak256,
+  type TypedDataDefinition
+} from 'viem'
+import { predictPuppetAccount } from '../account/index.js'
+import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
 import * as IntentLib from './intentLib.js'
 import { FUND_GATE_DOMAIN_MAP, type IDraftContext } from './shared.js'
@@ -54,6 +63,11 @@ interface IOperateAttestContext extends IDraftContext {
 export function attestOperateIntent(ctx: IOperateAttestContext, input: IOperateInput) {
   IntentLib.verifyChainId(input.chainId, BigInt(ctx.chainId))
   IntentLib.verifyTimeBounds(input.blockNumber, input.deadline, ctx.currentBlock, ctx.chainId)
+
+  const derivedMaster = predictPuppetAccount(input.params)
+  if (!isAddressEqual(derivedMaster, input.fundParams.master)) {
+    throw new CompactContractError('Share__MasterMismatch', [derivedMaster, input.fundParams.master])
+  }
 
   for (const leg of input.transferList) {
     IntentLib.assertOutflowCovered(

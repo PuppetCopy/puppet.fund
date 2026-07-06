@@ -22,7 +22,7 @@ export function createSdkContext(
     // matchmaker omits it — its attestation reads the per-intent request-chain head directly, no global liveness
     // snapshot. Defaulted to a thrower so a consumer that DOES read it without providing one fails loudly.
     getChainLiveness?: () => Promise<IChainLiveness>
-    getTokenPerNativeToken: (tokenId: Hex) => Promise<bigint>
+    getTokenPerNativeToken: (chainId: number, tokenId: Hex) => Promise<bigint>
   },
   homeChainId = HUB_CHAIN_ID
 ) {
@@ -44,7 +44,17 @@ export function createSdkContext(
   // arrives, so adding chains costs nothing until they see traffic). Off-chain mirror of the
   // contract's block.number for the maxBlockDelay / StaleSignature anchor-freshness check.
   const getBlockNumber = ttlCachedByKey(350, (chainId: number) => fetchBlockNumber(clientFor(chainId)))
-  const getTokenPerNativeToken = ttlCachedByKey(60_000, tokenPerNativeTokenProvider)
+  // Keyed by (dispatch chain, token): the fee's rate is token per the DISPATCH chain's native (the coin the relayer
+  // actually burns), not the hub's — pricing an Arbitrum dispatch with a token-per-MON rate under-quotes ~ETH/MON x
+  // and floors small fees to zero.
+  const tokenPerNativeByKey = ttlCachedByKey(60_000, (key: string) => {
+    const sep = key.indexOf('|')
+    return tokenPerNativeTokenProvider(Number(key.slice(0, sep)), key.slice(sep + 1) as Hex)
+  })
+  // chainId is REQUIRED (no hub default): a fee rate is meaningless without the chain whose native the relayer burns —
+  // an optional chain is a buried hub assumption, the exact shape of the misdenomination bug.
+  const getTokenPerNativeToken = (chainId: number, tokenId: Hex, maxAgeMs?: number) =>
+    tokenPerNativeByKey(`${chainId}|${tokenId}`, maxAgeMs)
 
   // Mirrors the contract's nonce replay guard (Account.dispatch consumes the nonce keyed by the executing account;
   // reverts NonceLib__InvalidNonceForAccount on reuse). isNonceConsumed lives on the shared Account module, keyed per
@@ -60,8 +70,11 @@ export function createSdkContext(
       args: [account, nonce]
     })
 
-  const getRelayFeeMap = async (tokenId: Hex, ttlMs = 350) => {
-    const [gas, rate] = await Promise.all([getChainGasPrice(homeChainId, ttlMs), getTokenPerNativeToken(tokenId, ttlMs)])
+  const getRelayFeeMap = async (chainId: number, tokenId: Hex, ttlMs = 350) => {
+    const [gas, rate] = await Promise.all([
+      getChainGasPrice(chainId, ttlMs),
+      getTokenPerNativeToken(chainId, tokenId, ttlMs)
+    ])
     return getRelayFeeQuoteSource(rate, gas)
   }
 

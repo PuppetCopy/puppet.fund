@@ -74,6 +74,7 @@ export function attestWithdrawIntent(ctx: IWithdrawAttestContext, input: IWithdr
     if (input.route.kind === 'across') {
       const account = predictPuppetAccount(input.params)
       const built = buildRouteAcrossDeposit({
+        originChainId: Number(input.chainId),
         depositor: predictRoute(account),
         recipient: input.params.user,
         inputToken,

@@ -1,13 +1,13 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import DEPLOYMENTS from '@puppet/contracts/deployments'
-import { getRegisteredTokenDescription, readableTokenAmount } from '@puppet/sdk/core'
+import { getChainTokenDescription, readableTokenAmount } from '@puppet/sdk/core'
 import { type ITokenRegistryMap, tokenInfoFor } from '@puppet/sdk/state'
 import { empty, fromPromise, type IStream, map, op, sampleMap, switchLatest } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $node, $text, component, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
-import { type Address, erc20Abi, getAddress, type Hex } from 'viem'
+import { type Address, erc20Abi, getAddress, } from 'viem'
 import { readContract } from 'viem/actions'
 import { $ButtonSecondary, text } from '@/ui-components'
 import { homePublicClient } from '../../wallet/index.js'
@@ -44,7 +44,7 @@ async function readSurplus(fund: Address, baseToken: Address): Promise<bigint> {
 
 export const $RecognizeBanner = ({ master, masterAccount, baseToken, tokenRegistry }: I$RecognizeBanner) =>
   component(([clickRecognize, clickRecognizeTether]: IBehavior<PointerEvent>) => {
-    const desc = getRegisteredTokenDescription(tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseToken).token)
+    const desc = getChainTokenDescription(HUB_CHAIN_ID, tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseToken).token)
     const surplus: IStream<bigint> = op(
       fromPromise(readSurplus(getAddress(masterAccount), getAddress(baseToken))),
       state(0n)
@@ -87,7 +87,7 @@ export const $RecognizeBanner = ({ master, masterAccount, baseToken, tokenRegist
                       $text(`${readableTokenAmount(desc, amount)} ${desc.symbol} to recognize`)
                     ),
                     $node(style({ color: palette.foreground, fontSize: text.xs }))(
-                      $text('A closed position returned funds. Recognize them to count toward NAV and redeem.')
+                      $text('A closed position returned funds. Count them into your fund so they add to its value and can be redeemed.')
                     )
                   ),
                   $ButtonSecondary({ $content: $text('Recognize') })({ click: clickRecognizeTether() })

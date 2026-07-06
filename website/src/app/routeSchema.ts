@@ -6,6 +6,7 @@ export const routeSchema = createRouteSchema({
   title: 'Puppet',
   children: {
     leaderboard: { fragment: 'leaderboard', title: 'Leaderboard' },
+    quickstart: { fragment: 'quickstart', title: 'Create a Fund' },
     fund: {
       fragment: 'fund',
       children: {

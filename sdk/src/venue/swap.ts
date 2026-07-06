@@ -1,6 +1,6 @@
 import { HUB_CHAIN_ID, SWAP_PROVIDER } from '@puppet/contracts/const'
 import { type Address, decodeFunctionData, erc20Abi, getAddress, type Hex, isAddressEqual } from 'viem'
-import { ACROSS_PERIPHERY, decodeAcrossDeposit } from '../attestation/acrossDeposit.js'
+import { acrossSpokePoolOf, decodeAcrossDeposit } from '../attestation/acrossDeposit.js'
 import { ADDRESS_ZERO } from '../const/common.js'
 import type { IOperateCall, IOperateTransfer } from './operate.js'
 import type { IGuardReason, IGuardResult } from './types.js'
@@ -141,7 +141,7 @@ export function screenCrossChainSwap(input: IScreenSwapInput): {
   result: IGuardResult | null
   decoded: ReturnType<typeof decodeAcrossDeposit>
 } {
-  const provider = ACROSS_PERIPHERY
+  const provider = acrossSpokePoolOf(input.chainId)
   if (!input.callList.some(c => isAddressEqual(getAddress(c.target), provider))) {
     return { result: null, decoded: null }
   }

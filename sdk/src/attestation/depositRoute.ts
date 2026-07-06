@@ -1,5 +1,5 @@
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
-import type { Address, Hex } from 'viem'
+import type { Address, } from 'viem'
 
 export type IDepositMode = 'erc20Gate' | 'native' | 'erc20Transfer'
 

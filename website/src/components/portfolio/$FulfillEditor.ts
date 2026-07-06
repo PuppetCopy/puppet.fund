@@ -1,7 +1,7 @@
 import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
 import { WEIGHT_RATIO_CAP } from '@puppet/sdk/attestation'
 import { HUB_CHAIN } from '@puppet/sdk/const'
-import { getRegisteredTokenDescription, readableTokenAmount } from '@puppet/sdk/core'
+import { getChainTokenDescription, readableTokenAmount } from '@puppet/sdk/core'
 import {
   computeClaimable,
   computeQueuedShares,
@@ -28,22 +28,14 @@ import { type IBehavior, state } from 'aelea/stream-extended'
 import { $element, $node, $text, attr, component, type INode, nodeEvent, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { type Address, getAddress, type Hex } from 'viem'
-import {
-  $ButtonSecondary,
-  $Checkbox,
-  $defaultSliderContainer,
-  $infoTooltip,
-  $Slider,
-  $TokenAmountInput,
-  text
-} from '@/ui-components'
-import { formatUsd, priceFor } from '../../io/gmx/priceFeed.js'
+import { type Address, getAddress, } from 'viem'
+import { $ButtonPrimaryOutline, $Checkbox, $infoTooltip, $TokenAmountInput, text } from '@/ui-components'
+import { fetchOpenPositions } from '../../io/datastore/reads.js'
 import { liveBalance, liveFundPool, liveRedeemPosition } from '../../io/live.js'
-import { fetchOpenPositions } from '../../io/matchmaker/reads.js'
 import { readAccountBalances } from '../../io/onchain/balances.js'
+import { formatUsd, priceFor } from '../../io/price.js'
 import type { IRedeemDraft } from './draft.js'
-import { createFocusState } from './editorUtils.js'
+import { $editorPercentSlider, $statRow, createFocusState, scaleByPercent } from './editorUtils.js'
 
 export interface I$FulfillEditor {
   master: Address
@@ -111,7 +103,7 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, tokenRegistry
       [toggleSelfExit, toggleSelfExitTether]: IBehavior<boolean>,
       [clickSubmit, clickSubmitTether]: IBehavior<PointerEvent>
     ) => {
-      const desc = getRegisteredTokenDescription(tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseToken).token)
+      const desc = getChainTokenDescription(HUB_CHAIN_ID, tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseToken).token)
 
       const poolStream: IStream<IFund | undefined> = op(liveFundPool(getAddress(masterAccount)), state())
       const navStream: IStream<bigint> = op(
@@ -177,8 +169,7 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, tokenRegistry
       // clamps at the queue's worth, and only liquidate reaches the rest of the track.
       const sliderAssets: IStream<bigint> = sampleMap(
         (bounds, pct) => {
-          const bp = BigInt(Math.round(Math.max(0, Math.min(1, pct)) * 10000))
-          const scaled = (bounds.nav * bp) / 10000n
+          const scaled = scaleByPercent(bounds.nav, pct)
           return scaled < bounds.queueValue ? scaled : bounds.queueValue
         },
         combine({ nav: navStream, queueValue: queueValueStream }),
@@ -295,12 +286,6 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, tokenRegistry
               tether(nodeEvent('click'))
             )($text(label))
 
-          const $statRow = (label: string, value: string | IStream<string>) =>
-            $row(spacing.small, style({ alignItems: 'baseline', justifyContent: 'space-between' }))(
-              $node(style({ color: palette.foreground, fontSize: text.xs }))($text(label)),
-              $node(style({ color: palette.message, fontWeight: '600' }))($text(value))
-            )
-
           return $column(spacing.default, style({ minWidth: '380px' }))(
             $row(
               style({
@@ -354,17 +339,11 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, tokenRegistry
               )
             ),
             $node(style({ margin: '0 -26px', display: 'flex' }))(
-              $Slider({
+              $editorPercentSlider({
                 value: sliderValue,
-                step: 0.01,
-                orientation: 'horizontal',
                 ariaLabel: 'Redemption amount',
                 disabled: map(() => p.queueValue === 0n, assetsValue),
-                error: map(() => false, assetsValue),
-                motion: { stiffness: 800, damping: 58 },
-                $container: $defaultSliderContainer(
-                  style({ height: '14px', width: '100%', margin: '-26px 0', flexShrink: '0' })
-                )
+                error: map(() => false, assetsValue)
               })({ change: sliderPercentTether() })
             ),
             $column(spacing.small)(
@@ -459,7 +438,7 @@ export const $FulfillEditor = ({ master, masterAccount, baseToken, tokenRegistry
               switchLatest(
                 map(
                   mode =>
-                    $ButtonSecondary({
+                    $ButtonPrimaryOutline({
                       disabled: submitDisabled,
                       $content:
                         mode === 'liquidate'

@@ -1,8 +1,21 @@
-import { predictPuppetAccount } from '@puppet/sdk/account'
 import type { IFund } from '@puppet/sdk/schema'
 import type { ISubaccountState } from '@puppet/sdk/state'
-import { combine, constant, empty, filter, type IStream, map, merge, op, skip, switchLatest, tap } from 'aelea/stream'
-import { type IBehavior, state } from 'aelea/stream-extended'
+import {
+  combine,
+  constant,
+  empty,
+  filter,
+  type IStream,
+  just,
+  map,
+  merge,
+  op,
+  skip,
+  switchLatest,
+  switchMap,
+  tap
+} from 'aelea/stream'
+import { type IBehavior, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
 import {
   $element,
   $node,
@@ -17,28 +30,30 @@ import {
 } from 'aelea/ui'
 import { $column, $Popover, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { type Address, isAddressEqual } from 'viem'
-import { $icon, $infoTooltip, $labeledDivider, text } from '@/ui-components'
+import { isAddressEqual } from 'viem'
+import { $FieldLabeled, $icon, $infoTooltip, $labeledDivider, text } from '@/ui-components'
 import { $walletConnectLogo } from '../common/$icons.js'
 import { $navText } from '../common/elements/$common.js'
 import type { IConnectedWallet } from '../wallet/index.js'
+import { disconnectDapp, initWalletLink, pairDapp, startWalletConnect } from '../wallet/walletKitConnect.js'
 import {
   blockedRequest,
-  hasPersistedWalletLink,
   type IActiveFund,
   type IPendingSign,
   type IWalletLinkSession,
-  peekActiveFund,
+  masterOf,
   pendingSign,
+  resolveActiveFund,
   resolveSignApproval,
+  sameFund,
   setActiveFund,
   setLinkWallet,
   walletLinkConnected,
   walletLinkSessions
 } from '../wallet/walletLinkState.js'
-import { wcUriFromLocation } from '../wallet/wcUri.js'
+import { isWcLink } from '../wallet/wcUri.js'
 import { $fundProfile } from './$AccountProfile.js'
-import { $WalletTunnel } from './$WalletTunnel.js'
+import { $EnableSession } from './$enableSession.js'
 
 export interface I$WalletLink {
   walletState: IStream<IConnectedWallet | null>
@@ -60,19 +75,65 @@ const prettyUrl = (url: string): string => url.replace(/^https?:\/\//, '').repla
 const $dot = (color: string): I$Node =>
   $node(style({ width: '7px', height: '7px', borderRadius: '50%', flexShrink: 0, backgroundColor: color }))()
 
-const sameFund = (a: IActiveFund | null, b: { baseToken: Address; name: string }): boolean =>
-  !!a && a.baseToken === b.baseToken && a.name === b.name
+initWalletLink()
 
-void hasPersistedWalletLink().then(has => {
-  if (has) {
-    console.info('[wc] restoring persisted session')
-    void import('../wallet/walletKitConnect.js').then(m => m.startWalletConnect())
-  }
-})
+// The "paste a wc: link" tunnel: gated behind an enabled session, it starts the WC engine and
+// pairs the dApp. Kept a self-contained component so its pair-status lives beside its input.
+type IPairStatus = { kind: 'pending' } | { kind: 'error'; text: string }
 
-if (wcUriFromLocation()) {
-  void import('../wallet/walletKitConnect.js').then(m => m.pairFromUrl())
-}
+const $linkTunnel = (walletState: IStream<IConnectedWallet | null>) =>
+  component(([changeUri, changeUriTether]: IBehavior<string>) => {
+    const uri = state('', changeUri)
+    const pairTrigger: IStream<string> = op(
+      changeUri,
+      map(u => u.trim()),
+      filter(isWcLink)
+    )
+    const connectStatus: IStream<IPairStatus | null> = state(
+      null as IPairStatus | null,
+      switchMap((link: string) => {
+        const paired = startWalletConnect().then(() => pairDapp(link))
+        return map((res): IPairStatus | null => {
+          if (res.status === PromiseStatus.PENDING) return { kind: 'pending' }
+          if (res.status === PromiseStatus.ERROR) {
+            console.error('[wc] connect failed', res.error)
+            return { kind: 'error', text: 'Could not link the dApp. Paste a fresh link and try again.' }
+          }
+          return null
+        }, promiseState(just(paired)))
+      }, pairTrigger)
+    )
+    const inputError: IStream<string | null> = map(({ input, status }) => {
+      const link = input.trim()
+      if (link.length > 0 && !isWcLink(link))
+        return 'That is not a valid WalletConnect link. Copy a fresh one from the dApp.'
+      return status?.kind === 'error' ? status.text : null
+    }, combine({ input: uri, status: connectStatus }))
+    return [
+      switchLatest(
+        map(w => {
+          if (!w) return empty
+          if (!w.session)
+            return $row(spacing.small, style({ alignItems: 'center' }))(
+              $EnableSession(w)({}),
+              $infoTooltip(
+                'A session key signs your trades automatically, with no wallet popup per action. It only acts within the rules you sign, can never move funds out, and you can revoke it anytime.',
+                palette.foreground,
+                '16px'
+              )
+            )
+          return $FieldLabeled({
+            label: null,
+            placeholder: 'Paste wc: link',
+            value: uri,
+            hint: map(s => (s?.kind === 'pending' ? 'Connecting…' : ''), connectStatus),
+            validation: inputError
+          })({ change: changeUriTether() })
+        }, walletState)
+      ),
+      {}
+    ]
+  })
 
 export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink) =>
   component(
@@ -83,37 +144,23 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
       [selectFund, selectFundTether]: IBehavior<INode, IActiveFund>,
       [createFundNav, createFundNavTether]: IBehavior<INode, PointerEvent>
     ) => {
-      const masterFor = (wallet: IConnectedWallet | null): Address | null =>
-        wallet?.session ? predictPuppetAccount({ user: wallet.session.user, signer: wallet.session.signer }) : null
-
       const funds$: IStream<IFund[]> = op(
         combine({ wallet: walletState, root: rootState }),
         map(({ wallet, root }) => {
-          const master = masterFor(wallet)
+          const master = masterOf(wallet)
           return master ? (root?.funds ?? []).filter(f => isAddressEqual(f.master, master)) : []
         }),
         state()
       )
-      // Active fund priority: an explicit in-session selection (still in the list) wins, else the
-      // per-master remembered fund persisted in localStorage (survives refresh), else the first
-      // fund. A wallet with no funds resolves to null so no account is exposed to a linked dApp.
-      // The tap persists the choice per master for the wallet-responder; it never writes null, so a
-      // transient empty list while the root state loads can't wipe a remembered selection.
+      // The chosen fund follows resolveActiveFund (selection, else remembered, else first). The tap
+      // persists the choice per master for the WC engine; it never writes null, so a transient empty
+      // list while the root state loads can't wipe a remembered selection.
       const selection: IStream<IActiveFund | null> = state(null, selectFund)
       const active$: IStream<IActiveFund | null> = op(
         combine({ wallet: walletState, funds: funds$, selection }),
         map(({ wallet, funds, selection }) => {
-          const master = masterFor(wallet)
-          const valid = (f: IActiveFund | null) => !!f && funds.some(x => sameFund(f, x))
-          const remembered = master ? peekActiveFund(master) : null
-          const chosen = valid(selection)
-            ? selection
-            : valid(remembered)
-              ? remembered
-              : funds[0]
-                ? { baseToken: funds[0].baseToken, name: funds[0].name }
-                : null
-          return { master, chosen }
+          const master = masterOf(wallet)
+          return { master, chosen: resolveActiveFund(master, funds, selection) }
         }),
         tap(({ master, chosen }) => {
           if (master && chosen) setActiveFund(master, chosen)
@@ -180,7 +227,7 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
         $row(
           spacing.small,
           style({ alignItems: 'center', minWidth: '0', flex: 1 })
-        )($fundProfile({ master: f.master, baseToken: f.baseToken, name: f.name }, 30))
+        )($fundProfile({ master: f.master, baseToken: f.baseToken, name: f.name }, 30, f))
 
       const $selectableFund = (i: ILinkInfo, f: IFund): I$Node => {
         const isActive = sameFund(i.selected, f)
@@ -274,7 +321,7 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
               style({
                 cursor: 'pointer',
                 fontSize: text.sm,
-                color: palette.message,
+                color: 'white',
                 padding: '6px 14px',
                 borderRadius: '100px',
                 backgroundColor: palette.primary
@@ -295,7 +342,7 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
               $column(spacing.default, style({ minWidth: '300px', maxWidth: '340px' }))(
                 switchLatest(
                   map(topic => {
-                    void import('../wallet/walletKitConnect.js').then(m => m.disconnectDapp(topic))
+                    void disconnectDapp(topic)
                     return empty
                   }, disconnect)
                 ),
@@ -348,7 +395,7 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
                                 )
                               ]
                             : [
-                                $WalletTunnel({ walletState })({}),
+                                $linkTunnel(walletState)({}),
                                 ...(i.ownSessions.length > 0
                                   ? [$column(spacing.small)(...i.ownSessions.map($connectionRow))]
                                   : []),

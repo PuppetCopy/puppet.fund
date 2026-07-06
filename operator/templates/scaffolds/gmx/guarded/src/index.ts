@@ -1,5 +1,5 @@
-import { createOperatorCore, pairOverBrowser, runOperator } from '@puppet.fund/operator'
-import { acceptablePrice, dominantPosition, GMX_V2_CHAIN_ID, gmxOperator, gmxPrice, gmxTokenPerNativeToken, positionMetrics, usd, weth } from '@puppet.fund/operator/gmx'
+import { createConnector, runOperator } from '@puppet.fund/operator'
+import { acceptablePrice, dominantPosition, gmxOperator, gmxPrice, positionMetrics, usd, weth } from '@puppet.fund/operator/gmx'
 import { type Address, isAddressEqual } from 'viem'
 
 // GUARDED — the reference risk-managed operator. The guards are the product; the signal is
@@ -47,9 +47,8 @@ const PARAMS = {
 // still land it until the intent's deadline. Acting during limbo is how positions double.
 const INTENT_DEADLINE_MS = 5 * 60_000
 
-const session = await pairOverBrowser(Bun.env.PAIR_URL)
-const core = await createOperatorCore(session, { chainId: GMX_V2_CHAIN_ID, getTokenPerNativeToken: gmxTokenPerNativeToken, rpcUrl: Bun.env.ARBITRUM_RPC_URL, dryRun: DRY })
-const gmx = gmxOperator(core)
+const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, dryRun: DRY })
+const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
 const market = gmx.getMarket(ETH)
 const marketInfo = gmx.markets.find(m => isAddressEqual(m.marketToken as Address, market))
 if (!marketInfo) throw new Error(`market ${market} not in the GMX market list`)
@@ -184,7 +183,7 @@ const GUARDS: Guard[] = [
   escalateHardDrawdown
 ]
 
-await runOperator(core, async signal => {
+await runOperator(connector, async signal => {
   console.log(
     `guarded live on ${market} · ${DRY ? 'DRY-RUN (no dispatch; set DRY_RUN=0 to go live) · ' : ''}risk ${PARAMS.riskPerTradeBps / 100}%/trade · stop ${PARAMS.stopLossPct}% on-chain · halt at -${PARAMS.hardDrawdownPct}% · Ctrl-C to stop`
   )
@@ -229,7 +228,7 @@ async function tick(): Promise<void> {
   // halted — a halt stops TRADING, never the protection of what is already open.
   if (await reconcile(snap, orders)) return
   if (state.halted) {
-    console.log('[guarded] HALTED (hard drawdown) — review, then edit state.json (halted:false) to resume')
+    console.log('[guarded] HALTED (hard drawdown): review, then edit state.json (halted:false) to resume')
     return
   }
 
@@ -250,7 +249,7 @@ async function perceive(): Promise<ISnapshot> {
   const closes = (await fetchCandles('ETHUSDT', '1h', PARAMS.smaHours + 8)).map(c => c.close)
   const price = closes[closes.length - 1]
   const sma = closes.slice(-PARAMS.smaHours).reduce((a, b) => a + b, 0) / PARAMS.smaHours
-  const freeWeth = Number(await core.getFundBalance()) / 1e18
+  const freeWeth = Number(await gmx.operator.getFundBalance()) / 1e18
   const raw = dominantPosition(await gmx.getPositions(), market)
   const pos = raw ? positionMetrics(raw, gmxPrice(price, 18), longToken) : null
   // Equity in WETH vs a persisted high-water mark: a WETH fund holding WETH is the benchmark,
@@ -317,21 +316,21 @@ async function reconcile(snap: ISnapshot, orders: Order[]): Promise<boolean> {
     return !DRY
   }
   if (snap.pos && snap.pos.effLeverage >= PARAMS.liqGuardLeverage) {
-    console.log(`[guarded] LIQ-GUARD: effective leverage ${snap.pos.effLeverage.toFixed(1)}x — closing`)
+    console.log(`[guarded] LIQ-GUARD: effective leverage ${snap.pos.effLeverage.toFixed(1)}x, closing`)
     await execute({ kind: 'close', reasons: ['liq-guard'] }, snap, true)
     return !DRY
   }
   return false
 }
 
-async function recordCancel(cancel: () => Promise<{ actualRelayFee: bigint }>): Promise<void> {
+async function recordCancel(cancel: () => Promise<{ actualRelayFee: bigint } | null>): Promise<void> {
   if (!DRY) {
     state.daySafetyOrders++
     await persist()
   }
   const result = await intoLimboOnFailure(cancel)
   if (!DRY) {
-    state.dayCostWeth += Number(result.actualRelayFee) / 1e18
+    state.dayCostWeth += Number(result?.actualRelayFee ?? 0n) / 1e18
     await persist()
   }
 }
@@ -359,11 +358,11 @@ async function execute(
   intent: IIntent,
   snap: ISnapshot,
   safety: boolean,
-  place?: () => Promise<{ actualRelayFee: bigint }>
+  place?: () => Promise<{ actualRelayFee: bigint } | null>
 ): Promise<void> {
   if (intent.kind === 'hold' && !place) return
   if (!underHardCap()) {
-    console.log('[guarded] hard order ceiling reached for the day — skipping')
+    console.log('[guarded] hard order ceiling reached for the day, skipping')
     return
   }
   if (!DRY) {
@@ -374,7 +373,7 @@ async function execute(
     }
     await persist()
   }
-  const before = await core.getFundBalance()
+  const before = await gmx.operator.getFundBalance()
   const intendedOutWeth = intent.kind === 'open' ? intent.collateralWeth! : 0
   const result = await intoLimboOnFailure(() =>
     place
@@ -398,9 +397,9 @@ async function execute(
           })
   )
   if (DRY) return
-  const after = await core.getFundBalance()
+  const after = await gmx.operator.getFundBalance()
   const spent = Number(before - after) / 1e18 - intendedOutWeth
-  state.dayCostWeth += Number(result.actualRelayFee) / 1e18 + Math.min(Math.max(0, spent), PARAMS.maxOrderCostWeth)
+  state.dayCostWeth += Number(result?.actualRelayFee ?? 0n) / 1e18 + Math.min(Math.max(0, spent), PARAMS.maxOrderCostWeth)
   await persist()
 }
 

@@ -3,13 +3,9 @@ export {
   CompactContractError,
   CompactError,
   createCompact,
-  formatThrownError,
-  humanizeContractError,
-  humanizeErrorCode,
   type ICompact,
-  type ICompactOpts,
   type IDispatchedFrame
 } from '@puppet/sdk/compact'
-export { createOperatorCore, type IOperatorConfig, type IOperatorCore, type IOperatorSwap } from './core.js'
+export { buildSession, createConnector, type IConnector, type IConnectorConfig, pairOverBrowser } from './connector.js'
 export { type IClosable, runOperator } from './lifecycle.js'
-export { buildSession, pairOverBrowser } from './pair.js'
+export { createOperator, type IOperator, type IOperatorConfig, type IOperatorSwap } from './operator.js'

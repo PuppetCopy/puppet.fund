@@ -1,7 +1,7 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { getRegisteredTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
-import { type ISubaccountState, type ITokenRegistryMap, tokenInfoFor } from '@puppet/sdk/state'
-import { combine, constant, empty, type IStream, just, map, merge, op, skipRepeatsWith, switchLatest } from 'aelea/stream'
+import { getChainTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
+import type { ISubaccountState, ITokenRegistryMap, } from '@puppet/sdk/state'
+import { combine, constant, type IStream, just, map, op, skipRepeatsWith, switchLatest } from 'aelea/stream'
 import { type IBehavior, multicast } from 'aelea/stream-extended'
 import { $node, $text, component, style } from 'aelea/ui'
 import { $Popover, $row, spacing } from 'aelea/ui-components'
@@ -10,16 +10,11 @@ import type { Hex } from 'viem'
 import {
   $amountDisplay,
   $ButtonPrimary,
-  $ButtonSecondary,
   $defaultMiniButtonPrimary,
-  $defaultMiniButtonSecondary,
-  $icon,
-  $info,
   $popoverCaret,
-  text
 } from '@/ui-components'
 import { $route } from '../../common/$common.js'
-import { formatUsd, priceFor } from '../../io/gmx/priceFeed.js'
+import { formatUsd, priceFor } from '../../io/price.js'
 import type { IConnectedWallet } from '../../wallet/index.js'
 import { $DepositEditor } from './$DepositEditor.js'
 import { $WithdrawEditor } from './$WithdrawEditor.js'
@@ -34,10 +29,6 @@ export interface I$TokenBalanceEditor {
   tokenRegistry: ITokenRegistryMap
   walletAccount: IConnectedWallet
   draft: IStream<IEditorDraft | null>
-  inlineNote?: string
-  // Deep-link trigger: emits 'deposit'/'withdraw' to open that editor's popover without a click (e.g. arriving from a
-  // ?action=deposit-<symbol> link), merged with the button-driven popEditor.
-  autoOpen?: IStream<'deposit' | 'withdraw'>
 }
 
 export const $TokenBalanceEditor = ({
@@ -46,9 +37,7 @@ export const $TokenBalanceEditor = ({
   token,
   tokenRegistry,
   walletAccount,
-  draft,
-  inlineNote,
-  autoOpen
+  draft
 }: I$TokenBalanceEditor) =>
   component(
     (
@@ -63,7 +52,7 @@ export const $TokenBalanceEditor = ({
             (a.balances.get(token)?.signedBalance ?? 0n) === (b.balances.get(token)?.signedBalance ?? 0n)
         ),
         map(metric => {
-          const tokenDescription = getRegisteredTokenDescription(token)
+          const tokenDescription = getChainTokenDescription(HUB_CHAIN_ID, token)
           const balance = metric.balances.get(token)?.signedBalance ?? 0n
           const usdValue: IStream<string> = map(price => formatUsd(balance, price), priceFor(token))
 
@@ -131,32 +120,18 @@ export const $TokenBalanceEditor = ({
                   $container: $defaultMiniButtonPrimary,
                   $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Deposit'), $popoverCaret())
                 })({ click: popEditorTether(constant('deposit')) }),
-                $ButtonSecondary({
-                  $container: $defaultMiniButtonSecondary,
+                $ButtonPrimary({
+                  $container: $defaultMiniButtonPrimary,
                   $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Withdraw'), $popoverCaret()),
                   disabled: just(withdrawDisabled)
                 })({ click: popEditorTether(constant('withdraw')) })
               ),
-              balance === 0n && inlineNote
-                ? $row(spacing.small, style({ alignItems: 'center', flex: 1, minWidth: '0' }))(
-                    $icon({ $content: $info, width: '12px', fill: palette.indeterminate }),
-                    $node(
-                      style({
-                        color: palette.foreground,
-                        fontSize: text.xs,
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        minWidth: '0'
-                      })
-                    )($text(inlineNote))
-                  )
-                : $node(style({ flex: 1 }))(),
+              $node(style({ flex: 1 }))(),
               $balanceDisplay
             ),
             $open: map(
               action => (action === 'deposit' ? $depositEditor : $withdrawEditor),
-              merge(popEditor, autoOpen ?? empty)
+              popEditor
             ),
             dismiss: changeDraft
           })({})

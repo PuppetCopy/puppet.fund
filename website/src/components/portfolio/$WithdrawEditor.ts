@@ -1,26 +1,22 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import { type IWithdrawInput, resolveDispatchChainId } from '@puppet/sdk/attestation'
-import { formatThrownError } from '@puppet/sdk/compact'
 import { ADDRESS_ZERO, CHAIN_LIST, type ChainId } from '@puppet/sdk/const'
-import { getRegisteredTokenDescription, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { getChainTokenDescription, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
 import {
   chainHeadBlock,
   type IChainLiveness,
   type ISubaccountState,
   type ITokenRegistryMap,
   type RelayFeeMap,
-  type RelayMethod,
   randomNonce,
   tokenInfoFor
 } from '@puppet/sdk/state'
 import {
   awaitPromises,
   combine,
-  debounce,
   empty,
   filter,
-  fromPromise,
   type IStream,
   just,
   map,
@@ -28,38 +24,38 @@ import {
   op,
   sampleMap,
   skipRepeats,
-  skipRepeatsWith,
   start,
   switchMap,
-  switchPromises
 } from 'aelea/stream'
 import { type IBehavior, multicast, state } from 'aelea/stream-extended'
-import { $element, $node, $text, attr, component, type INode, nodeEvent, style } from 'aelea/ui'
+import { $element, $node, $text, component, type INode, nodeEvent, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
+import { palette } from 'aelea/ui-components-theme'
 import type { Hex } from 'viem'
 import {
-  $ButtonSecondary,
+  $ButtonPrimaryOutline,
   $DropSelect,
-  $defaultDropdownContainer,
-  $defaultSliderContainer,
-  $intermediateText,
-  $labeledValue,
   $noteTooltip,
-  $Slider,
   $TokenAmountInput,
-  NOTE_TOOLTIP_HEIGHT,
   text
 } from '@/ui-components'
 import { uiStorage } from '@/ui-storage'
 import { originChainKey } from '../../app/localStoreSchema.js'
 import { $chainIcon, $chainLabel, chainName } from '../../common/$chain.js'
-import { type AcrossBridgeQuote, fetchAcrossBridgeQuote } from '../../io/bridge/across.js'
-import context, { displayRelayFeeMap } from '../../io/context.js'
-import { formatUsd, priceFor } from '../../io/gmx/priceFeed.js'
+import type { ISwapRequest } from '../../io/bridge/swapQuote.js'
+import context, { relayFeeFor } from '../../io/context.js'
+import { priceFor } from '../../io/price.js'
 import type { IConnectedWallet } from '../../wallet/index.js'
+import { $SwapProviderFeeEditor, type ISelectedRoute } from './$SwapProviderFeeEditor.js'
 import type { IWithdrawDraft } from './draft.js'
-import { createFocusState } from './editorUtils.js'
+import {
+  $editorDropdownContainer,
+  $editorPercentSlider,
+  $maxAmountButton,
+  $noteSlot,
+  createFocusState,
+  scaleByPercent
+} from './editorUtils.js'
 import { DEFAULT_DEADLINE_SEC, walletClientForChain } from './runner/_shared.js'
 
 export interface I$WithdrawEditor {
@@ -80,14 +76,15 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       [blurEvt, blurEvtTether]: IBehavior<FocusEvent>,
       [sliderPercent, sliderPercentTether]: IBehavior<number>,
       [clickMax, clickMaxTether]: IBehavior<INode<HTMLButtonElement>, MouseEvent>,
-      [enterPress, enterPressTether]: IBehavior<KeyboardEvent>
+      [enterPress, enterPressTether]: IBehavior<KeyboardEvent>,
+      [selectedRoute, selectedRouteTether]: IBehavior<ISelectedRoute>
     ) => {
       const { accountState, token, tokenRegistry, walletAccount, existingDraft } = config
       const from = accountState.account
       const to = accountState.user ?? walletAccount.address
-      const tokenDescription = getRegisteredTokenDescription(token)
+      const tokenDescription = getChainTokenDescription(HUB_CHAIN_ID, token)
       const decimals = tokenDescription.decimals
-      const relayFeeMapQuery: IStream<RelayFeeMap | null> = fromPromise(displayRelayFeeMap(token))
+      const relayFeeMapQuery: IStream<RelayFeeMap | null> = relayFeeFor(token)
 
       const balance: IStream<bigint | null> = just(accountState.balances.get(token)?.signedBalance ?? 0n)
 
@@ -127,12 +124,10 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       const sliderAmount: IStream<bigint> = sampleMap(
         (s, pct) => {
           const bal = s.balance ?? 0n
-          const clamped = Math.max(0, Math.min(1, pct))
-          if (clamped >= 1) return bal
+          if (Math.max(0, Math.min(1, pct)) >= 1) return bal
           if (s.fee === null) return 0n
           const available = bal > s.fee ? bal - s.fee : 0n
-          const bp = BigInt(Math.round(clamped * 10000))
-          return (available * bp) / 10000n
+          return scaleByPercent(available, pct)
         },
         combine({ balance, fee: sliderFee }),
         sliderPercent
@@ -152,48 +147,25 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
         combine({ amount: amountValue, balance })
       )
 
-      type QuoteStatus =
-        | { status: 'idle'; quote: AcrossBridgeQuote | null; forAmount?: bigint; inputAmount?: bigint }
-        | { status: 'error'; quote: null; message: string }
-      // Quotes fire only on user-driven changes (destination chain, amount); the relay fee
-      // is SAMPLED at trigger time as a gas snapshot.
-      const quoteTrigger = op(
-        combine({ balance, chainId: chainSelection, draft: draftAmount, raw: amountValue }),
-        skipRepeatsWith(
-          (a, b) => a.chainId === b.chainId && a.draft === b.draft && a.raw === b.raw && a.balance === b.balance
-        )
-      )
-      const quoteParams = debounce(
-        200,
-        sampleMap((fee, t) => ({ ...t, fee }), relayFee, quoteTrigger)
-      )
-      const acrossQuoteFetch: IStream<Promise<QuoteStatus>> = op(
-        map(async (params): Promise<QuoteStatus> => {
-          if (params.chainId === HUB_CHAIN_ID) return { status: 'idle', quote: null }
-          if (params.raw === 0n) return { status: 'idle', quote: null }
-          if (params.balance === null) return { status: 'idle', quote: null }
-          if (params.fee === null) return { status: 'idle', quote: null }
+      // Plain combine, never sample: the relay fee arrives async (retrying relayFeeFor); a late arrival re-derives
+      // the request. $SwapProviderFeeEditor owns debounce + dedupe + abort + the periodic re-quote.
+      const request: IStream<ISwapRequest | null> = multicast(
+        map(params => {
+          if (params.chainId === HUB_CHAIN_ID) return null
+          if (params.raw === 0n || params.balance === null || params.fee === null) return null
           const input = params.draft === 0n ? params.balance - params.fee : params.draft
-          if (input <= 0n) return { status: 'idle', quote: null }
-          const outputToken = tokenInfoFor(tokenRegistry, params.chainId as ChainId, token).token
-          try {
-            const quote = await fetchAcrossBridgeQuote({
-              originChainId: HUB_CHAIN_ID,
-              destinationChainId: params.chainId,
-              inputToken: token,
-              outputToken,
-              inputAmount: input,
-              recipient: to
-            })
-            return { status: 'idle', quote, forAmount: params.raw, inputAmount: input }
-          } catch (err) {
-            console.error('[$WithdrawEditor.acrossQuoteFetch] fetchAcrossBridgeQuote failed', err)
-            return { status: 'error', quote: null, message: formatThrownError(err) }
+          if (input <= 0n) return null
+          return {
+            originChainId: HUB_CHAIN_ID,
+            destinationChainId: params.chainId,
+            inputToken: token,
+            outputToken: tokenInfoFor(tokenRegistry, params.chainId as ChainId, token).token,
+            inputAmount: input,
+            route: to,
+            crossToken: false
           }
-        }, quoteParams),
-        state()
+        }, combine({ balance, chainId: chainSelection, draft: draftAmount, raw: amountValue, fee: relayFee }))
       )
-      const acrossQuoteQuery: IStream<QuoteStatus> = multicast(switchPromises(acrossQuoteFetch))
 
       const accountParams: IAccountLib__AccountInitParams = {
         user: to,
@@ -211,17 +183,9 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
           if (fee === null) return null
           // The amount actually sent to the bridge: the net partial, or balance - fee on a sweep (matches the quote
           // input at acrossQuoteFetch). Validate the bridge limits against THIS, not the full balance.
-          const bridged = params.amount === 0n ? params.balance - fee : params.amount
           if (params.chainId !== HUB_CHAIN_ID) {
-            if (params.q.status === 'error') return params.q.message
-            if (params.q.quote) {
-              if (params.q.quote.isAmountTooLow) {
-                return `Below bridge minimum ${readableTokenAmount(tokenDescription, params.q.quote.limits.minDeposit)}`
-              }
-              if (bridged > params.q.quote.limits.maxDeposit) {
-                return `Exceeds bridge max ${readableTokenAmount(tokenDescription, params.q.quote.limits.maxDeposit)}`
-              }
-            }
+            if (params.route.error) return params.route.error
+            if (params.route.limitError) return params.route.limitError
           }
           // Balance-must-exceed-fee guards the sweep case too, so it runs BEFORE the amount === 0n (sweep) short-circuit
           // (otherwise a dust sweep with balance <= fee signs a zero-output withdraw).
@@ -238,7 +202,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
         combine({
           balance,
           chainId: chainSelection,
-          q: acrossQuoteQuery,
+          route: selectedRoute,
           amount: draftAmount
         })
       )
@@ -249,7 +213,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
         combine({
           alert,
           balance,
-          q: acrossQuoteQuery,
+          route: selectedRoute,
           chainId: chainSelection,
           amount: draftAmount,
           rawAmount: amountValue,
@@ -262,10 +226,9 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
           // Withdraw relay fee unpriceable -> can't size/sign; block Save until it prices.
           if (p.feeMap === null) return true
           if (p.chainId === HUB_CHAIN_ID) return false
-          // The Across quote must be present AND computed for the CURRENT amount; a quote that still lags a just-typed
-          // amount (forAmount !== rawAmount) would sign an output floor for a different input. Block until it catches up.
-          if (p.q.status !== 'idle' || p.q.quote === null) return true
-          return p.q.forAmount !== p.rawAmount
+          // route.ready = a fresh quote matching the LIVE request (amount/chain/fee-netted input), within bridge
+          // limits; anything else would sign an output floor for a different input.
+          return !p.route.ready
         }),
         state(true)
       )
@@ -282,27 +245,15 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
 
       const tokenPrice = priceFor(token)
 
-      const bridgeFeeText: IStream<Promise<string>> = switchMap(
-        p => {
-          if (p.raw === 0n) return just(Promise.resolve('-'))
-          return map(async pQuote => {
-            const status = await pQuote
-            if (status.status === 'error') return 'unavailable'
-            if (!status.quote) return '-'
-            if (status.forAmount !== p.raw) return '…'
-            // Subtract against the amount the quote was actually fetched for (= balance - fee on a sweep), not the raw
-            // balance, so the relay fee is not double-counted on top of the separate 'Relay fee' row.
-            const quotedInput = status.inputAmount ?? p.raw
-            return formatUsd(quotedInput - status.quote.outputAmount, p.price)
-          }, acrossQuoteFetch)
-        },
-        combine({ raw: amountValue, price: tokenPrice })
-      )
-
-      const $bridgeFeeRow = switchMap(
-        chainId => (chainId === HUB_CHAIN_ID ? empty : $labeledValue('Bridge Fee', $intermediateText(bridgeFeeText))),
-        chainSelection
-      )
+      // HubGate.withdraw accepts any provider route (ISwapRoute, approve+call), not only the Across bridge — the
+      // attestation already enforces quote freshness + the output floor for both kinds. So the withdraw races the
+      // full provider set like every other editor; same-asset bridging needs no destination call, so routes that
+      // are structurally unavailable for cross-asset deposits can still serve withdrawals.
+      const $bridgeFeeRow = $SwapProviderFeeEditor({
+        active: map(chainId => chainId !== HUB_CHAIN_ID, chainSelection),
+        request,
+        label: 'Bridge Fee'
+      })({ selectRoute: selectedRouteTether() })
 
       const valueToShow: IStream<string> = map(
         (p: { amt: bigint; focused: boolean }) => (p.amt === 0n ? '' : readableTokenAmount(decimals, p.amt)),
@@ -328,50 +279,19 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       )
       const hasError: IStream<boolean> = map(a => a !== null, alert)
       const sliderDisabled: IStream<boolean> = map(b => b === null || b === 0n, balance)
-      const $percentSlider = $Slider({
+      const $percentSlider = $editorPercentSlider({
         value: sliderValue,
-        step: 0.01,
-        orientation: 'horizontal',
         ariaLabel: 'Amount percentage',
         disabled: sliderDisabled,
-        error: hasError,
-        motion: { stiffness: 800, damping: 58 },
-        $container: $defaultSliderContainer(
-          style({ height: '14px', width: '100%', margin: '-26px 0', flexShrink: '0' })
-        )
+        error: hasError
       })({ change: sliderPercentTether() })
 
-      const $alert = $node(style({ height: NOTE_TOOLTIP_HEIGHT, display: 'flex', alignItems: 'center' }))(
-        switchMap(msg => (msg ? $noteTooltip($text(msg)) : empty), alert)
-      )
+      const $alert = $noteSlot(switchMap(msg => (msg ? $noteTooltip($text(msg)) : empty), alert))
 
-      const $maxButton = switchMap(
-        p => {
-          if (p.amt !== 0n) return empty
-          const ready = p.bal !== null && p.bal > 0n
-          return $element('button')(
-            attr({ type: 'button', disabled: ready ? null : 'true' }),
-            style({
-              background: 'transparent',
-              border: `1px solid ${colorShade(palette.foreground, 25)}`,
-              borderRadius: '8px',
-              padding: '2px 8px',
-              fontSize: text.xs,
-              fontWeight: '600',
-              color: palette.foreground,
-              cursor: ready ? 'pointer' : 'not-allowed',
-              opacity: ready ? '1' : '0.4',
-              alignSelf: 'center',
-              flexShrink: '0'
-            }),
-            clickMaxTether(nodeEvent('click'))
-          )($text('Max'))
-        },
-        combine({ amt: amountValue, bal: balance })
-      )
+      const $maxButton = $maxAmountButton(amountValue, balance, clickMaxTether(nodeEvent('click')))
 
       const $picker = $DropSelect({
-        $container: $defaultDropdownContainer(style({ alignItems: 'flex-end', flexShrink: '0' })),
+        $container: $editorDropdownContainer,
         value: chainSelection,
         optionList: destChainIds,
         $valueLabel: map((id: number) =>
@@ -417,10 +337,10 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
           ),
           $node(style({ margin: '0 -26px', display: 'flex' }))($percentSlider),
 
-          $row(spacing.default, style({ alignItems: 'center', fontSize: text.sm }))(
-            $bridgeFeeRow,
+          $row(style({ fontSize: text.sm }))($bridgeFeeRow),
+          $row(spacing.default, style({ alignItems: 'center' }))(
             $node(style({ flex: 1 }))(),
-            $ButtonSecondary({ disabled, $content: $text('Save') })({ click: clickAddDraftTether() })
+            $ButtonPrimaryOutline({ disabled, $content: $text('Save') })({ click: clickAddDraftTether() })
           )
         ),
         (() => {
@@ -428,7 +348,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
             balance: bigint | null
             chainId: number
             amount: bigint
-            q: QuoteStatus
+            route: ISelectedRoute
             existing: IWithdrawDraft | null
           }
           const buildDraft = (params: IDraftSnapshot & { fee: bigint; chainLiveness: IChainLiveness }): IWithdrawDraft => {
@@ -481,7 +401,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
               }
 
               const grossAmount = isSweep ? liveBalance : params.amount + params.fee
-              const quote = params.q.quote
+              const quote = params.route.quote
               const input: IWithdrawInput = {
                 params: accountParams,
                 inputToken: token,
@@ -494,14 +414,17 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
                 inputAmount: grossAmount,
                 outputAmount: quote?.outputAmount ?? 0n,
                 destinationChainId: BigInt(params.chainId),
-                route: quote?.route ?? {
-                  kind: 'across',
-                  exclusiveRelayer: ADDRESS_ZERO,
-                  quoteTimestamp: 0,
-                  exclusivityParameter: 0
-                },
-                expires: quote?.expires ?? 0,
-                fillDeadline: quote?.fillDeadline ?? 0
+                route:
+                  quote !== null && quote.route.kind !== 'composed'
+                    ? quote.route
+                    : {
+                        kind: 'across',
+                        exclusiveRelayer: ADDRESS_ZERO,
+                        quoteTimestamp: 0,
+                        exclusivityParameter: 0
+                      },
+                expires: Math.floor(quote?.expires ?? 0),
+                fillDeadline: Math.floor(quote?.fillDeadline ?? 0)
               }
               return {
                 kind: 'withdraw',
@@ -527,14 +450,14 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
                 balance,
                 chainId: chainSelection,
                 amount: draftAmount,
-                q: acrossQuoteQuery,
+                route: selectedRoute,
                 existing: existingDraft
               }),
               submitTrigger
             ),
             map(async (snap): Promise<IWithdrawDraft> => {
               const [feeMap, chainLiveness] = await Promise.all([
-                context.getRelayFeeMap(token),
+                context.getRelayFeeMap(HUB_CHAIN_ID, token),
                 context.getChainLiveness()
               ])
               return buildDraft({ ...snap, fee: feeMap.withdraw.relayFee, chainLiveness })

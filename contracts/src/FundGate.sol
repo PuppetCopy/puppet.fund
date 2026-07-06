@@ -33,6 +33,10 @@ bytes32 constant SWAP_INTENT_TYPEHASH = keccak256(
     "SwapIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,FundAccountInitParams fundParams,SwapParams swap,uint256 destinationChainId,bool fromRoute)AccountInitParams(address user,address signer)FundAccountInitParams(address master,address baseToken,bytes32 name)SwapParams(address inputToken,address outputToken,address provider,bytes providerCallData,uint256 inputAmount,uint256 outputAmount)"
 );
 
+bytes32 constant WRAP_INTENT_TYPEHASH = keccak256(
+    "WrapIntent(AccountInitParams params,uint256 blockNumber,uint256 deadline,uint256 acceptableRelayFee,uint256 nonce,uint256 chainId,FundAccountInitParams fundParams,uint256 amount,bool unwrap)AccountInitParams(address user,address signer)FundAccountInitParams(address master,address baseToken,bytes32 name)"
+);
+
 contract FundGate is BaseGate, EIP712 {
     struct OperateIntent {
         AccountLib.AccountInitParams params;
@@ -69,6 +73,21 @@ contract FundGate is BaseGate, EIP712 {
         FundAccountLib.FundAccountInitParams fundParams;
         address token;
         uint amount;
+    }
+
+    // Atomic native <-> wrapped-native conversion of a fund's signed balance (native accrues from GMX execution-fee
+    // refunds). A fixed WNT.deposit/withdraw call + a 1:1 signed-domain re-key — no DEX, no provider calldata to
+    // screen, deterministic. `unwrap` false: native -> WNT; true: WNT -> native.
+    struct WrapIntent {
+        AccountLib.AccountInitParams params;
+        uint blockNumber;
+        uint deadline;
+        uint acceptableRelayFee;
+        uint nonce;
+        uint chainId;
+        FundAccountLib.FundAccountInitParams fundParams;
+        uint amount;
+        bool unwrap;
     }
 
     constructor(
@@ -318,6 +337,89 @@ contract FundGate is BaseGate, EIP712 {
                     FundAccountLib.hashFundAccount(_intent.fundParams),
                     _intent.token,
                     _intent.amount
+                )
+            )
+        );
+    }
+
+    function wrap(
+        WrapIntent calldata _intent,
+        bytes calldata _userSignature,
+        bytes calldata _attestorSignature,
+        uint _actualRelayFee
+    ) external {
+        if (_intent.amount == 0) revert Error.Balance__NothingToRecord();
+        IntentLib.verifyChainId(_intent.chainId);
+        IntentLib.verifyTimeBounds(_intent.blockNumber, _intent.deadline, _blockNumber(), maxBlockDelay);
+        IntentLib.verifyRelayFee(_actualRelayFee, _intent.acceptableRelayFee);
+
+        address _master = address(accountModule.verifyPuppetAccount(_intent.params));
+        if (_master != _intent.fundParams.master) revert Error.Share__MasterMismatch(_master, _intent.fundParams.master);
+        address _fundAddr = accountModule.predictFundAccount(_intent.fundParams);
+        if (_fundAddr.code.length == 0) revert Error.Account__NotDeployed(_fundAddr);
+        FundAccount _account = FundAccount(payable(_fundAddr));
+
+        address _wnt = address(registerModule.getWnt());
+        // The wrapped-native token must be a registered, capped token (a valid signed asset); the native marker needs
+        // no registration (its signed balance is the account's own native holding).
+        IntentLib.verifyTokenAndCap(registerModule, _wnt, _intent.amount);
+
+        IAccount.Call[] memory _callList = new IAccount.Call[](1);
+        IAccount.SignTransfer[] memory _transferList = new IAccount.SignTransfer[](2);
+        if (_intent.unwrap) {
+            // WNT -> native: withdraw burns WNT and returns native to the fund; credit signed native, debit signed WNT.
+            _callList[0] = IAccount.Call({
+                target: _wnt,
+                value: 0,
+                gasLimit: 0,
+                callData: abi.encodeWithSignature("withdraw(uint256)", _intent.amount)
+            });
+            _transferList[0] = IAccount.SignTransfer({token: NATIVE_TOKEN, amountIn: _intent.amount, amountOut: 0});
+            _transferList[1] = IAccount.SignTransfer({token: _wnt, amountIn: 0, amountOut: _intent.amount});
+        } else {
+            // native -> WNT: deposit mints WNT 1:1 to the fund; credit signed WNT, debit signed native.
+            _callList[0] = IAccount.Call({
+                target: _wnt,
+                value: _intent.amount,
+                gasLimit: 0,
+                callData: abi.encodeWithSignature("deposit()")
+            });
+            _transferList[0] = IAccount.SignTransfer({token: _wnt, amountIn: _intent.amount, amountOut: 0});
+            _transferList[1] = IAccount.SignTransfer({token: NATIVE_TOKEN, amountIn: 0, amountOut: _intent.amount});
+        }
+
+        // The on-chain shortfall check (address(this).balance for NATIVE, balanceOf(WNT) for the wrapped) makes the
+        // 1:1 re-key EXACT: the fund must actually hold the produced side, so nothing can be skimmed.
+        accountModule.dispatch(
+            IAccount(address(_account)),
+            _callList,
+            _transferList,
+            _hashWrap(_intent),
+            _userSignature,
+            _attestorSignature,
+            attestor,
+            _intent.nonce
+        );
+
+        _logEvent("Wrap", abi.encode(_intent, _actualRelayFee, address(_account)));
+    }
+
+    function _hashWrap(
+        WrapIntent calldata _intent
+    ) internal view returns (bytes32) {
+        return _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    WRAP_INTENT_TYPEHASH,
+                    AccountLib.hashAccount(_intent.params),
+                    _intent.blockNumber,
+                    _intent.deadline,
+                    _intent.acceptableRelayFee,
+                    _intent.nonce,
+                    _intent.chainId,
+                    FundAccountLib.hashFundAccount(_intent.fundParams),
+                    _intent.amount,
+                    _intent.unwrap
                 )
             )
         );

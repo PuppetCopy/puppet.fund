@@ -177,7 +177,7 @@ export function createStoreDefinition<TStore extends Record<string, Record<strin
   return result as IStoreDefinition<TStore>
 }
 
-export function readStoreKey<T>(storeKey: IStreamStoreKey<T>): IStream<T> {
+function readStoreKey<T>(storeKey: IStreamStoreKey<T>): IStream<T> {
   return awaitPromises(
     just(
       getValue(storeKey).catch(err => {
@@ -188,7 +188,7 @@ export function readStoreKey<T>(storeKey: IStreamStoreKey<T>): IStream<T> {
   )
 }
 
-export function writeStoreKey<T>(storeKey: IStreamStoreKey<T>, source: IStream<T>): IStream<T> {
+function writeStoreKey<T>(storeKey: IStreamStoreKey<T>, source: IStream<T>): IStream<T> {
   return awaitPromises(
     map(async (value: T) => {
       try {

@@ -10,6 +10,24 @@ export interface INavChainBalance {
   reachable: boolean
 }
 
+// A non-base spot holding in the fund's signed domain, priced into base by the evaluation. The CALLER builds the
+// list (website via composeHoldings() from its fold subaccount; the relay from its per-token on-chain reads) and
+// resolves `symbol` chain-aware to the PRICED asset (WMON -> MON): the native marker is the same address on every
+// chain, so it cannot be address-keyed.
+export interface INavHolding {
+  chainId: ChainId
+  token: Address
+  symbol: string
+  signedBalance: bigint
+  unrecognized: bigint
+}
+
+export interface INavValuedHolding extends INavHolding {
+  valueBase: bigint
+  unrecognizedBase: bigint
+  priceAgeSec: number | undefined
+}
+
 
 export type IPriceSource = { readonly price: bigint; readonly time: number }
 
@@ -89,7 +107,9 @@ export interface INavBreakdown {
   unitedSignedBalance: bigint
   positionMarkBase: bigint
   positionFloorBase: bigint
+  holdingMarkBase: bigint
   perChain: INavChainBalance[]
+  holdings: INavValuedHolding[]
   positions: INavPosition[]
   inFlight: IPlatformInFlight[]
   unavailablePlatforms: string[]
@@ -152,6 +172,8 @@ export interface IEvaluateAccountParams {
   // The base-token cash leg per chain (signedBalance, unrecognized = held − signed, reachable). The CALLER builds it — the
   // website via composeCashLeg() from its fold subaccount; the relay directly from its on-chain reads (no synthetic fold).
   cashLeg: INavChainBalance[]
+  // Non-base spot holdings to price into base (same caller-built contract as cashLeg). Omitted = none.
+  holdings?: INavHolding[]
 }
 
 export interface INavResult {

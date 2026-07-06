@@ -108,17 +108,12 @@ export const $Baseline = ({ data, baselineOptions, chartConfig, markers }: I$Bas
       price: 0
     },
     baseLineWidth: 1,
-    // baseLineColor: 'yellow',
-    // priceLineColor: 'yellow',
     baseLineVisible: true,
-    // lastValueVisible: false,
     priceLineVisible: false,
     ...baselineOptions
   })
 
-  // setTimeout(() => {
   series.setData(data)
-  // }, 100)
 
   return $Chart({
     chartApi,

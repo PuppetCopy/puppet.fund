@@ -27,6 +27,7 @@ export function checkNavGate(
 
   let unitedUnrecognized = 0n
   for (const c of breakdown.perChain) unitedUnrecognized += c.unrecognized
+  for (const h of breakdown.holdings) unitedUnrecognized += h.unrecognizedBase
   if (unitedUnrecognized > config.maxUnrecognizedBaseWei) {
     reasons.push({
       code: 'UNRECOGNIZED_BALANCE',
@@ -52,6 +53,20 @@ export function checkNavGate(
     }
   }
 
+  for (const h of breakdown.holdings) {
+    if (h.priceAgeSec === undefined) {
+      reasons.push({
+        code: 'STALE_ORACLE',
+        detail: `holding ${h.symbol} (${h.token}) on chain ${h.chainId} is unvaluable`
+      })
+    } else if (h.priceAgeSec > config.maxPriceAgeSec) {
+      reasons.push({
+        code: 'STALE_ORACLE',
+        detail: `holding ${h.symbol} on chain ${h.chainId} priced ${h.priceAgeSec}s old (max ${config.maxPriceAgeSec}s)`
+      })
+    }
+  }
+
   for (const f of breakdown.inFlight) {
     reasons.push({
       code: f.kind === 'transfer' ? 'PENDING_BRIDGE' : 'PENDING_ORDER',
@@ -65,6 +80,12 @@ export function checkNavGate(
     reasons.push({
       code: 'OPEN_POSITIONS',
       detail: `${breakdown.positions.length} venue position(s) still open; unwind to base before liquidating`
+    })
+  }
+  if (opts?.kind === 'liquidate' && breakdown.holdings.some(h => h.signedBalance > 0n)) {
+    reasons.push({
+      code: 'OPEN_POSITIONS',
+      detail: 'non-base holdings still open; swap to base before liquidating'
     })
   }
 

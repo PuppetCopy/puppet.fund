@@ -11,6 +11,7 @@ import {
 import {
   combine,
   empty,
+  filterNull,
   type IStream,
   just,
   map,
@@ -84,10 +85,15 @@ export const $usdTimeline = ({
         start([] as ITimelinePoint[]),
         multicast
       )
-      const seriesLastValue = map(tl => (tl.length ? (tl[tl.length - 1].value ?? 0) : 0), resolvedTimeline)
+      // An empty series (fresh account OR a FAILED timeline query — both land here via the catch above) has NO known
+      // value: emit null so the headline renders '-' instead of a fabricated $0.
+      const seriesLastValue: IStream<number | null> = map(
+        tl => (tl.length ? (tl[tl.length - 1].value ?? null) : null),
+        resolvedTimeline
+      )
       // Prefer the live total when supplied (optimistic, base-token-priced) and fall back to the series' last point
       // while it is still loading; the series alone catches up only when the timeline re-fetches.
-      const baseValue: IStream<number> = liveUsd
+      const baseValue: IStream<number | null> = liveUsd
         ? map(p => p.live ?? p.series, combine({ live: liveUsd, series: seriesLastValue }))
         : seriesLastValue
 
@@ -108,33 +114,39 @@ export const $usdTimeline = ({
         map(cross => (cross?.point && cross.time != null ? readableDate(Number(cross.time)) : null), crossTimeChange)
       )
 
+      const knownValue: IStream<number> = filterNull(hoverValue)
       const $headerValue = $column(style({ flex: 1, alignItems: 'flex-end' }))(
         switchLatest(
           map(
-            hide =>
-              hide
+            (p: { hide: boolean; known: boolean }) =>
+              p.hide
                 ? $node(style({ fontSize: text.xxl, fontWeight: '900', color: palette.message }))($text('••••'))
-                : $row(style({ alignItems: 'flex-end' }))(
-                    $node(
-                      style({
-                        fontSize: text.base,
-                        fontWeight: '900',
-                        color: palette.foreground,
-                        lineHeight: '1.6',
-                        marginRight: '2px'
+                : p.known
+                  ? $row(style({ alignItems: 'flex-end' }))(
+                      $node(
+                        style({
+                          fontSize: text.base,
+                          fontWeight: '900',
+                          color: palette.foreground,
+                          lineHeight: '1.6',
+                          marginRight: '2px'
+                        })
+                      )($text('$')),
+                      $NumberTicker({
+                        $slot: $defaultNumberTickerSlot(style({ fontSize: text.xxl, fontWeight: '900' })),
+                        value: map(
+                          v => parseReadableNumber(readableUnitAmount(v)),
+                          motion({ damping: 26, precision: 15, stiffness: 210 }, knownValue)
+                        ),
+                        incrementColor: palette.positive,
+                        decrementColor: palette.negative
                       })
-                    )($text('$')),
-                    $NumberTicker({
-                      $slot: $defaultNumberTickerSlot(style({ fontSize: text.xxl, fontWeight: '900' })),
-                      value: map(
-                        v => parseReadableNumber(readableUnitAmount(v)),
-                        motion({ damping: 26, precision: 15, stiffness: 210 }, hoverValue)
-                      ),
-                      incrementColor: palette.positive,
-                      decrementColor: palette.negative
-                    })
-                  ),
-            hideBalances
+                    )
+                  : $node(style({ fontSize: text.xxl, fontWeight: '900', color: palette.message }))($text('-')),
+            skipRepeatsWith(
+              (a, b) => a.hide === b.hide && a.known === b.known,
+              combine({ hide: hideBalances, known: map(v => v !== null, hoverValue) })
+            )
           )
         ),
         switchLatest(

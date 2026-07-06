@@ -726,10 +726,125 @@ export default [
     "stateMutability": "nonpayable"
   },
   {
+    "type": "function",
+    "name": "wrap",
+    "inputs": [
+      {
+        "name": "_intent",
+        "type": "tuple",
+        "internalType": "struct FundGate.WrapIntent",
+        "components": [
+          {
+            "name": "params",
+            "type": "tuple",
+            "internalType": "struct AccountLib.AccountInitParams",
+            "components": [
+              {
+                "name": "user",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "signer",
+                "type": "address",
+                "internalType": "address"
+              }
+            ]
+          },
+          {
+            "name": "blockNumber",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "deadline",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "acceptableRelayFee",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "nonce",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "chainId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "fundParams",
+            "type": "tuple",
+            "internalType": "struct FundAccountLib.FundAccountInitParams",
+            "components": [
+              {
+                "name": "master",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "baseToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "name",
+                "type": "bytes32",
+                "internalType": "bytes32"
+              }
+            ]
+          },
+          {
+            "name": "amount",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "unwrap",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
+      },
+      {
+        "name": "_userSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_attestorSignature",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_actualRelayFee",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
     "type": "event",
     "name": "EIP712DomainChanged",
     "inputs": [],
     "anonymous": false
+  },
+  {
+    "type": "error",
+    "name": "Account__NotDeployed",
+    "inputs": [
+      {
+        "name": "predicted",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",

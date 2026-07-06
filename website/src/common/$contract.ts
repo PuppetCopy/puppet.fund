@@ -13,6 +13,8 @@ const CONTRACT_NAME_BY_ADDRESS: Record<string, string> = Object.fromEntries(
 
 export const contractNameFor = (address: Address): string | undefined => CONTRACT_NAME_BY_ADDRESS[getAddress(address)]
 
+export const chainFor = (chainId: number) => CHAIN_MAP[chainId as keyof typeof CHAIN_MAP] ?? HUB_CHAIN
+
 export const $contractIdentity = ({
   address,
   chainId,
@@ -28,7 +30,7 @@ export const $contractIdentity = ({
   const short = readableAddress(address)
   return $anchor(
     attr({
-      href: getAccountExplorerUrl(address, CHAIN_MAP[chainId as keyof typeof CHAIN_MAP] ?? HUB_CHAIN),
+      href: getAccountExplorerUrl(address, chainFor(chainId)),
       target: '_blank'
     }),
     style({ display: 'inline-flex', alignItems: 'baseline', gap: '4px', minWidth: '0' })

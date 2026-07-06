@@ -1,8 +1,11 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import type { ChainId } from '@puppet/sdk/const'
+import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import { predictDepositRoute, predictPuppetAccount } from '@puppet/sdk/account'
-import { nativeSymbolOf, symbolByAddress, type ITokenRegistryMap } from '@puppet/sdk/state'
-import type { Address, Hex } from 'viem'
+import type { IDepositRoute, ISwapInput } from '@puppet/sdk/attestation'
+import { ADDRESS_ZERO, type ChainId } from '@puppet/sdk/const'
+import { type ITokenRegistryMap, nativeSymbolOf, symbolByAddress } from '@puppet/sdk/state'
+import { type Address, getAddress, type Hex, isAddressEqual } from 'viem'
+import { chainName } from '../../../common/$chain.js'
 import type { IDraft, ISubscribeDraft, StepKind } from '../draft.js'
 
 export type PlannedStep = { kind: 'bind' } | { kind: 'draft'; draft: IDraft }
@@ -58,93 +61,149 @@ export function planExecution(planned: PlannedStep[]): PlanEntry[] {
   })
 }
 
-export function planShape(draft: IDraft, registry: ITokenRegistryMap, recognize: boolean): IStepShape[] {
-  const symbolFor = (token: Hex): string =>
-    symbolByAddress(token)
+export function planShape(
+  draft: IDraft,
+  registry: ITokenRegistryMap,
+  recognize: boolean,
+  liveSigner: Address | null = null
+): IStepShape[] {
+  // The DISPLAYED route must mirror what the runner will EXECUTE against: it rebinds the draft's params to the live
+  // session at submit, so the draft's baked signer (a pre-session zero-address placeholder, or a stale prior session)
+  // must never be the one shown. Prefer the live signer; with none known yet the address is simply withheld — the
+  // real route appears the moment the session is signed.
+  const routeOf = (params: IAccountLib__AccountInitParams, chainId: number): IStepShape['recipient'] => {
+    const signer =
+      liveSigner ?? (isAddressEqual(getAddress(params.signer), ADDRESS_ZERO) ? null : getAddress(params.signer))
+    if (signer === null) return null
+    return { address: predictDepositRoute(predictPuppetAccount({ user: params.user, signer })), chainId }
+  }
+  const walletLeg = (wallet: IDepositRoute, erc20Symbol: string): IStepShape => ({
+    kind: 'walletTransfer',
+    nonce: null,
+    label: `Deposit ${wallet.mode === 'native' ? nativeSymbolOf(wallet.chainId as ChainId) : erc20Symbol}`,
+    recipient: routeOf(wallet.params, wallet.chainId)
+  })
+  const swapLeg = (swap: ISwapInput, destSymbol: string): IStepShape => ({
+    kind: 'swap',
+    nonce: swap.nonce,
+    label: swap.chainId !== swap.destinationChainId ? `Crosschain ${destSymbol}` : `Swap ${destSymbol}`,
+    // The linked contract is where the funds ARRIVE: the deposit route on the DESTINATION chain (same CREATE2
+    // address on every chain, so only the explorer chain differs for a cross-chain leg).
+    recipient: routeOf(swap.params, Number(swap.destinationChainId))
+  })
 
   if (draft.kind === 'allocate') {
     const depositTokenId = draft.swap ? draft.swap.inputToken : draft.baseToken
     const shapes: IStepShape[] = []
-    if (draft.wallet) {
-      const symbol =
-        draft.wallet.mode === 'native' ? nativeSymbolOf(draft.wallet.chainId as ChainId) : symbolFor(depositTokenId)
-      shapes.push({
-        kind: 'walletTransfer',
-        nonce: null,
-        label: `Deposit ${symbol}`,
-        recipient: { address: predictDepositRoute(predictPuppetAccount(draft.wallet.params)), chainId: draft.wallet.chainId }
-      })
-    }
-    if (draft.swap) {
-      const destSymbol = symbolFor(draft.baseToken)
-      shapes.push({
-        kind: 'swap',
-        nonce: draft.swap.nonce,
-        label:
-          draft.swap.chainId !== draft.swap.destinationChainId ? `Crosschain ${destSymbol}` : `Swap ${destSymbol}`,
-        recipient: { address: predictDepositRoute(predictPuppetAccount(draft.swap.params)), chainId: Number(draft.swap.chainId) }
-      })
-    }
+    if (draft.wallet) shapes.push(walletLeg(draft.wallet, symbolByAddress(depositTokenId)))
+    if (draft.swap) shapes.push(swapLeg(draft.swap, symbolByAddress(draft.baseToken)))
     shapes.push({ kind: 'allocate' as StepKind, nonce: null, recipient: null })
     return shapes
   }
 
   if (draft.kind === 'deposit') {
     const base = draft.inputAmount.baseToken
-    const destSymbol = symbolFor(base)
+    const destSymbol = symbolByAddress(base)
     const shapes: IStepShape[] = []
-    if (draft.wallet) {
-      shapes.push({
-        kind: 'walletTransfer',
-        nonce: null,
-        recipient: {
-          address: predictDepositRoute(predictPuppetAccount(draft.wallet.params)),
-          chainId: Number(draft.wallet.chainId)
-        },
-        label:
-          draft.wallet.mode === 'native'
-            ? `Deposit ${nativeSymbolOf(Number(draft.wallet.chainId) as ChainId)}`
-            : `Deposit ${symbolFor(base)}`
-      })
-    }
-    if (draft.swap) {
+    if (draft.wallet) shapes.push(walletLeg(draft.wallet, destSymbol))
+    if (draft.swap) shapes.push(swapLeg(draft.swap, destSymbol))
+    // Composed delivery: the bridged hub-side twin converts to the base in a second, locally-signed swap; a local
+    // PA swap credits the signed balance directly, so no recognize step follows it.
+    if (draft.hubSwap) {
       shapes.push({
         kind: 'swap',
-        nonce: draft.swap.nonce,
-        recipient: {
-          address: predictDepositRoute(predictPuppetAccount(draft.swap.params)),
-          chainId: Number(draft.swap.chainId)
-        },
-        label: draft.swap.chainId !== draft.swap.destinationChainId ? `Crosschain ${destSymbol}` : `Swap ${destSymbol}`
+        nonce: null,
+        label: `Swap ${symbolByAddress(draft.output.baseToken)}`,
+        recipient: routeOf(draft.params, HUB_CHAIN_ID)
       })
     }
-    if (recognize) {
+    if (recognize && !draft.hubSwap) {
       shapes.push({
         kind: 'recognize',
         nonce: null,
-        recipient: { address: predictDepositRoute(predictPuppetAccount(draft.params)), chainId: HUB_CHAIN_ID }
+        recipient: routeOf(draft.params, HUB_CHAIN_ID)
       })
     }
     return shapes
   }
 
+  if (draft.kind === 'claimRoute') {
+    return [
+      {
+        kind: 'recognize',
+        nonce: null,
+        recipient: { address: predictDepositRoute(draft.account), chainId: draft.chainId },
+        label: 'Claim'
+      }
+    ]
+  }
+
   if (draft.kind === 'fundSwap') {
     const destChainId = draft.destinationChainId ?? draft.chainId
     const isLocal = destChainId === draft.chainId
-    const destSymbol = symbolFor(draft.tokenOut)
-    const shapes: IStepShape[] = [
-      {
+    const destSymbol = symbolByAddress(draft.tokenOut)
+    const shapes: IStepShape[] = []
+    // Native input is wrapped (native -> WMON, a FundGate.operate) before the DEX can swap it; surface that leg.
+    const wrapNative = isAddressEqual(getAddress(draft.tokenIn), getAddress(PROTOCOL.nativeToken))
+    const unwrapNative =
+      destChainId === draft.chainId && isAddressEqual(getAddress(draft.tokenOut), getAddress(PROTOCOL.nativeToken))
+    if (unwrapNative) {
+      return [
+        {
+          kind: 'swap',
+          nonce: null,
+          recipient: { address: draft.account, chainId: draft.chainId },
+          label: `Unwrap ${nativeSymbolOf(draft.chainId as ChainId)}`
+        }
+      ]
+    }
+    if (wrapNative) {
+      shapes.push({
         kind: 'swap',
         nonce: null,
-        recipient: { address: predictDepositRoute(draft.account), chainId: draft.chainId },
-        label: isLocal ? `Swap ${destSymbol}` : `Crosschain ${destSymbol}`
-      }
-    ]
-    if (!isLocal) {
+        recipient: { address: draft.account, chainId: draft.chainId },
+        label: `Wrap ${nativeSymbolOf(draft.chainId as ChainId)}`
+      })
+    }
+    if (isLocal) {
       shapes.push({
-        kind: 'recognize',
+        kind: 'swap',
         nonce: null,
-        recipient: { address: predictDepositRoute(draft.account), chainId: destChainId }
+        recipient: { address: draft.account, chainId: draft.chainId },
+        label: `Swap ${destSymbol}`
+      })
+      return shapes
+    }
+    // Cross-chain: same-asset is a single bridge; cross-token composes through an intermediate X (the baked bridgeToken)
+    // — a local swap to X on the origin (unless the input already IS X), the X bridge, then a local swap X -> output on
+    // the destination (unless the bridge already delivered the output asset).
+    const route = predictDepositRoute(draft.account)
+    const inSymbol = wrapNative ? nativeSymbolOf(draft.chainId as ChainId) : symbolByAddress(draft.tokenIn)
+    const xSymbol = draft.bridgeToken ? symbolByAddress(draft.bridgeToken) : destSymbol
+    if (inSymbol !== xSymbol) {
+      shapes.push({
+        kind: 'swap',
+        nonce: null,
+        recipient: { address: draft.account, chainId: draft.chainId },
+        label: `Swap ${xSymbol}`
+      })
+    }
+    shapes.push({ kind: 'swap', nonce: null, recipient: { address: route, chainId: destChainId }, label: `Crosschain ${xSymbol}` })
+    // The dest-chain recognize carries the fund's deploy proofs, so on a chain the fund hasn't touched it CREATES the
+    // fund account (and master PA) and credits the bridged balance in one tx — that IS the onboarding step. Label it as
+    // account creation rather than a bare "Credit"; the create is a no-op when the account already exists.
+    shapes.push({
+      kind: 'recognize',
+      nonce: null,
+      recipient: { address: route, chainId: destChainId },
+      label: `Open ${chainName(destChainId)} account`
+    })
+    if (xSymbol !== destSymbol) {
+      shapes.push({
+        kind: 'swap',
+        nonce: null,
+        recipient: { address: draft.account, chainId: destChainId },
+        label: `Swap ${destSymbol}`
       })
     }
     return shapes
@@ -161,10 +220,7 @@ export function planShape(draft: IDraft, registry: ITokenRegistryMap, recognize:
     {
       kind: 'withdraw',
       nonce: draft.input.nonce,
-      recipient: {
-        address: predictDepositRoute(predictPuppetAccount(draft.input.params)),
-        chainId: Number(draft.input.chainId)
-      }
+      recipient: { address: draft.output.receiver, chainId: draft.output.chainId }
     }
   ]
 }

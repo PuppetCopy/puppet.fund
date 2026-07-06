@@ -9,6 +9,7 @@ export enum IntervalTime {
   HR4 = 14400,
   HR6 = 21600,
   HR8 = 28800,
+  HR12 = 43200,
   DAY = 86400,
   WEEK = 604800,
   MONTH = 2628000,
@@ -38,7 +39,7 @@ export const BALANCE_TIMELINE_BUCKETS = 200
 
 export const DEFAULT_DEADLINE_SEC = IntervalTime.MIN5
 
-export const DEFAULT_MATCHMAKER_URL = 'wss://puppet.fund/api/matchmaker'
+export const DEFAULT_MATCHMAKER_URL = 'https://puppet.fund/api/matchmaker'
 
 // Editors tolerate live network fees within this fraction above the saved
 // `acceptableRelayFee` before surfacing a "fee has risen" alert. Below this

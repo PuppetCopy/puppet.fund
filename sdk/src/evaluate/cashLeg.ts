@@ -1,9 +1,11 @@
-import type { Address } from 'viem'
+import { type Address, getAddress } from 'viem'
 import type { ChainId } from '../const/index.js'
 import { max } from '../core/math.js'
+import { isNativeToken } from '../core/token.js'
 import type { IChainLiveness } from '../state/health.js'
 import type { ISubaccountState } from '../state/metric.js'
-import type { INavChainBalance } from './types.js'
+import { nativeSymbolOf, symbolByAddress } from '../state/tokenRegistry.js'
+import type { INavChainBalance, INavHolding } from './types.js'
 
 export function composeCashLeg(
   subaccount: ISubaccountState | undefined,
@@ -34,4 +36,26 @@ export function composeCashLeg(
     })
   }
   return chains
+}
+
+// Every non-base signed holding of the fold subaccount, as the holdings leg evaluateAccountNav prices into base.
+// Symbol resolves chain-aware to the PRICED asset: the native marker is the same address on every chain so it must
+// go through nativeSymbolOf (MON, not the address-keyed ETH); ERC-20s use symbolByAddress (WMON -> MON).
+export function composeHoldings(subaccount: ISubaccountState | undefined, baseToken: Address): INavHolding[] {
+  if (!subaccount) return []
+  const base = getAddress(baseToken)
+  const holdings: INavHolding[] = []
+  for (const balance of subaccount.balances.values()) {
+    const token = getAddress(balance.token)
+    if (token === base || balance.signedBalance === 0n) continue
+    const chainId = Number(balance.chainId) as ChainId
+    holdings.push({
+      chainId,
+      token,
+      symbol: isNativeToken(token) ? nativeSymbolOf(chainId) : symbolByAddress(token),
+      signedBalance: balance.signedBalance,
+      unrecognized: 0n
+    })
+  }
+  return holdings
 }

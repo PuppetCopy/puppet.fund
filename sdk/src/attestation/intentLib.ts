@@ -1,5 +1,5 @@
 import { CHAIN_META, PRECISION, PROTOCOL } from '@puppet/contracts/const'
-import type { Address, Hex } from 'viem'
+import type { Address, } from 'viem'
 import { CompactContractError } from '../compact/error.js'
 import type { ChainId } from '../const/index.js'
 import { type ITokenRegistryMap, tokenInfoFor } from '../state/tokenRegistry.js'

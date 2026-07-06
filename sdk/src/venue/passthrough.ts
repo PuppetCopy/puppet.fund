@@ -1,4 +1,4 @@
-import { CHAIN_TOKEN_MAP, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import { PROTOCOL } from '@puppet/contracts/const'
 import DEPLOYMENTS from '@puppet/contracts/deployments'
 import type {
   IFundAccountLib__FundAccountInitParams,
@@ -13,9 +13,10 @@ import { DEFAULT_DEADLINE_SEC } from '../const/index.js'
 import { getAcceptableRelayFee, relayDispatch } from '../state/fee.js'
 import { randomNonce } from '../state/nonce.js'
 import { type ITokenRegistryMap, registeredTokenAddresses, tokenInfoFor } from '../state/tokenRegistry.js'
+import { GMX_V2_CHAIN_ID, GMX_WNT } from './gmx.js'
 import { assertOperateSignable, deriveGmxOutflow, screenGmxOperate } from './operate.js'
 
-const FUND_ACCOUNT = DEPLOYMENTS[`FundAccount:${HUB_CHAIN_ID}`]
+const FUND_ACCOUNT = DEPLOYMENTS[`FundAccount:${GMX_V2_CHAIN_ID}`]
 
 export interface IPassthroughTransaction {
   to?: string
@@ -40,7 +41,7 @@ export interface IPassthroughDeps {
   compact: ICompact
   publicClient: PublicClient
   tokenRegistry: ITokenRegistryMap
-  getTokenPerNativeToken: (token: Address) => Promise<bigint>
+  getTokenPerNativeToken: (chainId: number, token: Address) => Promise<bigint>
 }
 
 const DEFAULT_CALL_GAS_LIMIT = 2_000_000n
@@ -78,7 +79,7 @@ export async function sendOperatePassthrough(deps: IPassthroughDeps, tx: IPassth
   const outflows = deriveGmxOutflow(callList)
   const legs = outflows.map(o => {
     const token = getAddress(o.token)
-    tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, token)
+    tokenInfoFor(tokenRegistry, GMX_V2_CHAIN_ID, token)
     return { token, amountOut: o.amountOut }
   })
 
@@ -87,7 +88,7 @@ export async function sendOperatePassthrough(deps: IPassthroughDeps, tx: IPassth
       callList,
       account: fund,
       baseTokens: legs.map(l => l.token),
-      registeredTokens: registeredTokenAddresses(tokenRegistry, HUB_CHAIN_ID)
+      registeredTokens: registeredTokenAddresses(tokenRegistry, GMX_V2_CHAIN_ID)
     })
   )
 
@@ -120,13 +121,13 @@ export async function sendOperatePassthrough(deps: IPassthroughDeps, tx: IPassth
   // The relay quotes its fee against transferList[0].token (handlers.ts signAndQuote), so
   // the signed acceptableRelayFee MUST be denominated in that same token or the off-chain
   // RELAY_FEE_EXCEEDED check compares mismatched units. getTokenPerNativeToken prices native as 1e18.
-  const feeToken = enriched[0]?.token ?? getAddress(CHAIN_TOKEN_MAP[HUB_CHAIN_ID].WETH)
+  const feeToken = enriched[0]?.token ?? GMX_WNT
 
   // The intent block anchor is the live RPC head, read from our own client: the relay validates the intent's blockNumber
   // against its own live head (verifyTimeBounds ± maxBlockDelay), so both sides see live heads within tolerance.
   const blockNumber = await publicClient.getBlockNumber()
   const gasPrice = await publicClient.getGasPrice()
-  const tokenPerNativeToken = await getTokenPerNativeToken(feeToken)
+  const tokenPerNativeToken = await getTokenPerNativeToken(GMX_V2_CHAIN_ID, feeToken)
   const acceptableRelayFee = getAcceptableRelayFee(
     gasPrice,
     relayDispatch('operate').router,
@@ -141,13 +142,13 @@ export async function sendOperatePassthrough(deps: IPassthroughDeps, tx: IPassth
     deadline: BigInt(Math.floor(Date.now() / 1000) + DEFAULT_DEADLINE_SEC),
     acceptableRelayFee,
     nonce: randomNonce(),
-    chainId: BigInt(HUB_CHAIN_ID),
+    chainId: BigInt(GMX_V2_CHAIN_ID),
     fundParams,
     callList,
     transferList
   }
   const { intent, typedData } = attestOperateIntent(
-    { chainId: HUB_CHAIN_ID, tokenRegistry, currentBlock: blockNumber, signedBalanceByToken },
+    { chainId: GMX_V2_CHAIN_ID, tokenRegistry, currentBlock: blockNumber, signedBalanceByToken },
     input
   )
   const signature = await signer.signTypedData(typedData)

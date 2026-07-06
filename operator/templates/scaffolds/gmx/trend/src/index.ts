@@ -1,5 +1,5 @@
-import { createOperatorCore, pairOverBrowser, runOperator } from '@puppet.fund/operator'
-import { acceptablePrice, formatUsd, formatWeth, GMX_V2_CHAIN_ID, gmxOperator, gmxTokenPerNativeToken, usd, weth } from '@puppet.fund/operator/gmx'
+import { createConnector, runOperator } from '@puppet.fund/operator'
+import { acceptablePrice, formatUsd, formatWeth, gmxOperator, usd, weth } from '@puppet.fund/operator/gmx'
 import { type Address, isAddressEqual } from 'viem'
 
 // A complete autonomous, long/flat trend-following agent on ETH (no LLM). Perceive (price +
@@ -17,20 +17,22 @@ const PARAMS = {
   minPositionUsd: 25
 }
 const SLIPPAGE_BPS = 30
+// DRY-RUN IS THE DEFAULT (set DRY_RUN=0 in .env to trade live): the full signal + sizing +
+// order pipeline runs and logs, but nothing dispatches.
+const DRY = Bun.env.DRY_RUN !== '0'
 const TICK_MS = 60_000
 // Keep >= the intent deadline (5min) and arm it on ATTEMPT: a dispatch that times out can
 // still land until its deadline, so a re-fire inside that window risks a doubled position.
 const COOLDOWN_MS = 5 * 60_000
 
-const session = await pairOverBrowser(Bun.env.PAIR_URL)
-const core = await createOperatorCore(session, { chainId: GMX_V2_CHAIN_ID, getTokenPerNativeToken: gmxTokenPerNativeToken, rpcUrl: Bun.env.ARBITRUM_RPC_URL })
-const gmx = gmxOperator(core)
+const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, dryRun: DRY })
+const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
 const market = gmx.getMarket(ETH)
 let lastTradeAt = 0
 
-await runOperator(core, async signal => {
+await runOperator(connector, async signal => {
   console.log(
-    `trend agent live on ${market} · risk ${PARAMS.riskPerTradeBps / 100}%/trade · ${PARAMS.leverage}x · Ctrl-C to stop`
+    `trend agent live on ${market} · ${DRY ? 'DRY-RUN (no dispatch; set DRY_RUN=0 to go live) · ' : ''}risk ${PARAMS.riskPerTradeBps / 100}%/trade · ${PARAMS.leverage}x · Ctrl-C to stop`
   )
   while (!signal.aborted) {
     try {
@@ -48,7 +50,7 @@ async function tick(): Promise<void> {
   // to the fund on its own and shows up here next tick)
   const closes = (await fetchCandles('ETHUSDT', '5m', 200)).map(c => c.close)
   const price = closes[closes.length - 1]
-  const freeWeth = Number(formatWeth(await core.getFundBalance()))
+  const freeWeth = Number(formatWeth(await gmx.operator.getFundBalance()))
   const longPos = (await gmx.getPositions()).find(p => isAddressEqual(p.addresses.market, market) && p.flags.isLong)
   const inLong = !!longPos && longPos.numbers.sizeInUsd > 0n
 

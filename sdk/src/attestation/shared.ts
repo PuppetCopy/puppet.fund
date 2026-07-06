@@ -5,6 +5,7 @@ import type {
   IFundGate__OperateIntent,
   IFundGate__RecognizeIntent,
   IFundGate__SwapIntent,
+  IFundGate__WrapIntent,
   IHubGate__WithdrawIntent,
   IMandate__MandateIntent,
   IPuppetGate__RecognizeIntent,
@@ -55,6 +56,7 @@ export interface IIntentByKind {
   fundRecognize: IFundGate__RecognizeIntent
   swap: IPuppetGate__SwapIntent
   fundSwap: IFundGate__SwapIntent
+  wrap: IFundGate__WrapIntent
   withdraw: IHubGate__WithdrawIntent
 }
 
