@@ -11,6 +11,7 @@ import {
 import {
   combine,
   empty,
+  filter,
   filterNull,
   type IStream,
   just,
@@ -21,7 +22,7 @@ import {
   switchLatest,
   switchPromises
 } from 'aelea/stream'
-import { type IBehavior, multicast } from 'aelea/stream-extended'
+import { type IBehavior, multicast, PromiseStatus, promiseState } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, motion, style } from 'aelea/ui'
 import { $column, $defaultNumberTickerSlot, $NumberTicker, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
@@ -29,9 +30,11 @@ import { type BaselineData, LineType, type MouseEventParams } from 'lightweight-
 import type { Address } from 'viem/accounts'
 import {
   $Baseline,
+  $errorCard,
   $infoLabel,
   $infoTooltip,
   $intermediatePromise,
+  $spinner,
   floorAutoscaleByAum,
   type ISeriesTime,
   text
@@ -80,7 +83,14 @@ export const $usdTimeline = ({
       // The headline value is mounted ONCE and fed by a persistent stream, so an update (e.g. a settled withdraw moving
       // the live total) tweens old→new through motion instead of remounting the ticker on every query swap.
       const resolvedTimeline: IStream<ITimelinePoint[]> = op(
-        map(q => q.catch(() => [] as ITimelinePoint[]), timelineQuery),
+        map(
+          q =>
+            q.catch((err: unknown) => {
+              console.error('balance timeline read failed', err)
+              return [] as ITimelinePoint[]
+            }),
+          timelineQuery
+        ),
         switchPromises,
         start([] as ITimelinePoint[]),
         multicast
@@ -192,54 +202,70 @@ export const $usdTimeline = ({
             ),
             $header
           ),
-          $intermediatePromise({
-            $display: map(
-              async p => {
-                const timeline = await p.query
+          switchLatest(
+            start(
+              $column(style({ flex: 1, alignItems: 'center', placeContent: 'center' }))($spinner),
+              op(
+                combine({ query: timelineQuery, aum: aumUsd ?? just(0) }),
+                map(async p => ({ timeline: await p.query, aum: p.aum })),
+                promiseState,
+                filter(s => s.status !== PromiseStatus.PENDING),
+                skipRepeatsWith((a, b) => {
+                  if (a.status !== PromiseStatus.DONE || b.status !== PromiseStatus.DONE) return false
+                  const ta = a.value.timeline
+                  const tb = b.value.timeline
+                  return (
+                    a.value.aum === b.value.aum &&
+                    ta.length === tb.length &&
+                    (ta.length === 0 ||
+                      (ta[ta.length - 1].time === tb[tb.length - 1].time &&
+                        ta[ta.length - 1].value === tb[tb.length - 1].value))
+                  )
+                }),
+                map(s => {
+                  if (s.status === PromiseStatus.ERROR) return $errorCard(s.error)
+                  const { timeline, aum } = s.value
+                  if (timeline.length === 0) return $empty
 
-                if (timeline.length === 0) {
-                  return $empty
-                }
-
-                return $Baseline({
-                  chartConfig: {
-                    rightPriceScale: {
-                      visible: false,
-                      scaleMargins: {
-                        top: 0.41
+                  return $Baseline({
+                    chartConfig: {
+                      rightPriceScale: {
+                        visible: false,
+                        scaleMargins: {
+                          top: 0.41
+                        }
+                      },
+                      leftPriceScale: {
+                        autoScale: true,
+                        ticksVisible: true,
+                        scaleMargins: {
+                          top: 0.61,
+                          bottom: 0.1
+                        }
+                      },
+                      timeScale: {
+                        visible: true
                       }
                     },
-                    leftPriceScale: {
-                      autoScale: true,
-                      ticksVisible: true,
-                      scaleMargins: {
-                        top: 0.61,
-                        bottom: 0.1
-                      }
+                    baselineOptions: {
+                      baseLineColor: palette.message,
+                      baseLineVisible: true,
+                      lineWidth: 2,
+                      lineType: LineType.Simple,
+                      baseValue: {
+                        price: 0,
+                        type: 'price'
+                      },
+                      autoscaleInfoProvider: floorAutoscaleByAum(aum)
                     },
-                    timeScale: {
-                      visible: true
-                    }
-                  },
-                  baselineOptions: {
-                    baseLineColor: palette.message,
-                    baseLineVisible: true,
-                    lineWidth: 2,
-                    lineType: LineType.Simple,
-                    baseValue: {
-                      price: 0,
-                      type: 'price'
-                    },
-                    autoscaleInfoProvider: floorAutoscaleByAum(p.aum)
-                  },
-                  data: timeline as any as BaselineData<ISeriesTime>[]
-                })({
-                  crosshairMove: crosshairMoveTether()
+                    data: timeline as any as BaselineData<ISeriesTime>[]
+                  })({
+                    crosshairMove: crosshairMoveTether()
+                  })
                 })
-              },
-              combine({ query: timelineQuery, aum: aumUsd ?? just(0) })
+              )
             )
-          })
+          )
         ),
 
         { changeActivityTimeframe }

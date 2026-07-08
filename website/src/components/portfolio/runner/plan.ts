@@ -3,9 +3,8 @@ import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
 import { predictDepositRoute, predictPuppetAccount } from '@puppet/sdk/account'
 import type { IDepositRoute, ISwapInput } from '@puppet/sdk/attestation'
 import { ADDRESS_ZERO, type ChainId } from '@puppet/sdk/const'
-import { type ITokenRegistryMap, nativeSymbolOf, symbolByAddress } from '@puppet/sdk/state'
+import { type ITokenRegistryMap, nativeSymbolOf, symbolByAddress, wrappedNativeAddressOf } from '@puppet/sdk/state'
 import { type Address, getAddress, type Hex, isAddressEqual } from 'viem'
-import { chainName } from '../../../common/$chain.js'
 import type { IDraft, ISubscribeDraft, StepKind } from '../draft.js'
 
 export type PlannedStep = { kind: 'bind' } | { kind: 'draft'; draft: IDraft }
@@ -141,45 +140,48 @@ export function planShape(
   if (draft.kind === 'fundSwap') {
     const destChainId = draft.destinationChainId ?? draft.chainId
     const isLocal = destChainId === draft.chainId
-    const destSymbol = symbolByAddress(draft.tokenOut)
-    const shapes: IStepShape[] = []
-    // Native input is wrapped (native -> WMON, a FundGate.operate) before the DEX can swap it; surface that leg.
-    const wrapNative = isAddressEqual(getAddress(draft.tokenIn), getAddress(PROTOCOL.nativeToken))
-    const unwrapNative =
-      destChainId === draft.chainId && isAddressEqual(getAddress(draft.tokenOut), getAddress(PROTOCOL.nativeToken))
-    if (unwrapNative) {
+    const destSymbol = isAddressEqual(getAddress(draft.tokenOut), getAddress(PROTOCOL.nativeToken))
+      ? nativeSymbolOf(destChainId as ChainId)
+      : symbolByAddress(draft.tokenOut)
+    // Wrap/unwrap PAIRS route to the dedicated 1:1 FundGate.wrap action; a native INPUT to a real swap wraps INSIDE
+    // the swap dispatch, so no separate wrap pill exists anymore.
+    const wrapPair =
+      isLocal &&
+      ((isAddressEqual(getAddress(draft.tokenIn), getAddress(PROTOCOL.nativeToken)) &&
+        isAddressEqual(getAddress(draft.tokenOut), getAddress(wrappedNativeAddressOf(draft.chainId as ChainId)))) ||
+        (isAddressEqual(getAddress(draft.tokenOut), getAddress(PROTOCOL.nativeToken)) &&
+          isAddressEqual(getAddress(draft.tokenIn), getAddress(wrappedNativeAddressOf(draft.chainId as ChainId)))))
+    if (wrapPair) {
+      const unwrap = isAddressEqual(getAddress(draft.tokenOut), getAddress(PROTOCOL.nativeToken))
       return [
         {
           kind: 'swap',
           nonce: null,
           recipient: { address: draft.account, chainId: draft.chainId },
-          label: `Unwrap ${nativeSymbolOf(draft.chainId as ChainId)}`
+          label: `${unwrap ? 'Unwrap' : 'Wrap'} ${nativeSymbolOf(draft.chainId as ChainId)}`
         }
       ]
     }
-    if (wrapNative) {
-      shapes.push({
-        kind: 'swap',
-        nonce: null,
-        recipient: { address: draft.account, chainId: draft.chainId },
-        label: `Wrap ${nativeSymbolOf(draft.chainId as ChainId)}`
-      })
-    }
     if (isLocal) {
-      shapes.push({
-        kind: 'swap',
-        nonce: null,
-        recipient: { address: draft.account, chainId: draft.chainId },
-        label: `Swap ${destSymbol}`
-      })
-      return shapes
+      return [
+        {
+          kind: 'swap',
+          nonce: null,
+          recipient: { address: draft.account, chainId: draft.chainId },
+          label: `Swap ${destSymbol}`
+        }
+      ]
     }
-    // Cross-chain: same-asset is a single bridge; cross-token composes through an intermediate X (the baked bridgeToken)
-    // — a local swap to X on the origin (unless the input already IS X), the X bridge, then a local swap X -> output on
-    // the destination (unless the bridge already delivered the output asset).
+    // Cross-chain: same-asset is a single bridge; cross-token composes through an intermediate X (the baked
+    // bridgeToken) — a local swap to X on the origin (unless the input already IS X), the same-asset X bridge, then a
+    // local swap X -> output on the destination (unless the bridge already delivered the output asset). A native input
+    // wraps in-dispatch, so no separate wrap pill.
     const route = predictDepositRoute(draft.account)
-    const inSymbol = wrapNative ? nativeSymbolOf(draft.chainId as ChainId) : symbolByAddress(draft.tokenIn)
+    const inSymbol = isAddressEqual(getAddress(draft.tokenIn), getAddress(PROTOCOL.nativeToken))
+      ? symbolByAddress(wrappedNativeAddressOf(draft.chainId as ChainId))
+      : symbolByAddress(draft.tokenIn)
     const xSymbol = draft.bridgeToken ? symbolByAddress(draft.bridgeToken) : destSymbol
+    const shapes: IStepShape[] = []
     if (inSymbol !== xSymbol) {
       shapes.push({
         kind: 'swap',
@@ -189,21 +191,24 @@ export function planShape(
       })
     }
     shapes.push({ kind: 'swap', nonce: null, recipient: { address: route, chainId: destChainId }, label: `Crosschain ${xSymbol}` })
-    // The dest-chain recognize carries the fund's deploy proofs, so on a chain the fund hasn't touched it CREATES the
-    // fund account (and master PA) and credits the bridged balance in one tx — that IS the onboarding step. Label it as
-    // account creation rather than a bare "Credit"; the create is a no-op when the account already exists.
+    // The dest-chain recognize is the CREDIT of the bridged balance; it carries the fund's deploy proofs, so on a
+    // chain the fund hasn't touched it also creates the fund account (and master PA) in the same tx — but that is
+    // lazy onboarding inside the credit, not a step of its own, so it is labeled as the credit.
     shapes.push({
       kind: 'recognize',
       nonce: null,
       recipient: { address: route, chainId: destChainId },
-      label: `Open ${chainName(destChainId)} account`
+      label: `Credit ${xSymbol}`
     })
-    if (xSymbol !== destSymbol) {
+    // A native output always takes a final local leg: an UNWRAP when the wrapped twin bridged (symbols match), a
+    // DEX swap otherwise.
+    const outNative = isAddressEqual(getAddress(draft.tokenOut), getAddress(PROTOCOL.nativeToken))
+    if (xSymbol !== destSymbol || outNative) {
       shapes.push({
         kind: 'swap',
         nonce: null,
         recipient: { address: draft.account, chainId: destChainId },
-        label: `Swap ${destSymbol}`
+        label: outNative && xSymbol === destSymbol ? `Unwrap ${destSymbol}` : `Swap ${destSymbol}`
       })
     }
     return shapes

@@ -1,13 +1,20 @@
 import { PRECISION } from '@puppet/contracts/const'
+import { ADDRESS_ZERO } from '@puppet/sdk/const'
 import { createClient } from '@puppet/sdk/datastore'
 import * as schema from '@puppet/sdk/schema'
+import {
+  type IGmxClaimableRow,
+  type IGmxOrderRow,
+  makeOnchainGmxClaimableProvider,
+  makeOnchainGmxOrderProvider,
+  makeOnchainGmxPositionProvider
+} from '@puppet/sdk/gmx'
 import {
   accountBalanceHistoryTable,
   accountIdentityTable,
   fundCheckpointTable,
   fundLatestMetricTable,
   fundTable,
-  gmxPositionTable,
   type IAccountBalanceHistory,
   type IAccountIdentityRow,
   type IFund,
@@ -18,8 +25,12 @@ import {
 } from '@puppet/sdk/schema'
 import { PLATFORM_SCALE_ID, scalePercentile } from '@puppet/sdk/state'
 import type { IFundRank } from '@puppet/sdk/ui-components'
+import { GMX_V2_CHAIN_ID } from '@puppet/sdk/venue'
 import type { IAccountPosition, IAccountPositionStatus } from '@puppet/sdk/venue'
-import { type Address, getAddress, type Hex } from 'viem'
+import { getPublicClient } from '@wagmi/core'
+import { type Address, getAddress, type Hex, type PublicClient } from 'viem'
+import { wagmi } from '../../wallet/index.js'
+import { getRate } from '../context.js'
 
 // The datastore read client, used directly at call sites: client.select(table, { where, orderBy, … }) / client.find(
 // table, where) execute against journal's /query (filter + sort + page server-side via the shared runRows engine). The
@@ -123,30 +134,52 @@ export async function fetchRawActivity(account: Hex, limit = 40): Promise<IRawEv
   }))
 }
 
-// Open GMX positions for an account, from the journal's folded gmxPositionTable (status='open'). Throws (like every
-// client read) so a safety/signing caller never mistakes an unreadable position set for "no positions"; display
-// callers catch and degrade explicitly. (The matchmaker is attest-only post-split; folded reads live on the journal's
-// /query.)
+// Open GMX positions for an account, read ON-CHAIN (GmxReaderV2 over RPC) — the exact provider the relay's co-sign
+// path uses. An account's own positions are SELF data (RPC, never the indexer), and the journal carries no
+// gmxPositionTable fold — the old /query read returned a permanently empty set that rendered as "No open positions"
+// and silently zeroed browser-side NAV. Throws (like every client read) so a safety/signing caller never mistakes an
+// unreadable position set for "no positions"; display callers catch and degrade explicitly. History-only fields the
+// chain doesn't carry (realized pnl, timestamps) return zero-values; open-row consumers don't render them.
 export async function fetchOpenPositions(account: Hex): Promise<IAccountPosition[]> {
-  const rows = await client.select(gmxPositionTable, { where: { account, status: 'open' } })
+  const publicClient = getPublicClient(wagmi, { chainId: GMX_V2_CHAIN_ID })
+  if (!publicClient) throw new Error(`no public client for chain ${GMX_V2_CHAIN_ID}`)
+  // The provider signature carries the fund's numeraire for implementations that need it; the on-chain reader prices
+  // collateral through its own rate getter and ignores it.
+  const rows = await makeOnchainGmxPositionProvider(publicClient as PublicClient, getRate)(
+    getAddress(account),
+    ADDRESS_ZERO
+  )
   return rows.map(r => ({
-    positionId: r.id as Hex,
-    account: r.account,
-    venueId: r.venueId,
+    positionId: r.positionKey as Hex,
+    account: getAddress(account),
+    venueId: 'gmx',
     market: r.market,
     collateralToken: r.collateralToken,
     isLong: r.isLong,
-    status: r.status as IAccountPositionStatus,
+    status: 'open' as IAccountPositionStatus,
     sizeInUsd: r.sizeInUsd,
     sizeInTokens: r.sizeInTokens,
-    collateralInUsd: r.collateralInUsd,
-    pnl: r.pnl,
-    realizedPnlUsd: r.realizedPnlUsd,
-    cumulativeSizeInUsd: r.cumulativeSizeInUsd,
-    openedAt: r.openedAt,
-    closedAt: r.closedAt,
-    lastUpdatedAt: r.lastUpdatedAt
+    collateralInUsd: r.collateralUsd,
+    collateralAmount: r.collateralAmount,
+    pnl: r.storedPnlUsd,
+    realizedPnlUsd: 0n,
+    cumulativeSizeInUsd: r.sizeInUsd,
+    openedAt: 0,
+    closedAt: 0,
+    lastUpdatedAt: 0
   }))
+}
+
+export async function fetchOpenOrders(account: Hex): Promise<IGmxOrderRow[]> {
+  const publicClient = getPublicClient(wagmi, { chainId: GMX_V2_CHAIN_ID })
+  if (!publicClient) throw new Error(`no public client for chain ${GMX_V2_CHAIN_ID}`)
+  return makeOnchainGmxOrderProvider(publicClient as PublicClient)(getAddress(account))
+}
+
+export async function fetchClaimableFunding(account: Hex): Promise<IGmxClaimableRow[]> {
+  const publicClient = getPublicClient(wagmi, { chainId: GMX_V2_CHAIN_ID })
+  if (!publicClient) throw new Error(`no public client for chain ${GMX_V2_CHAIN_ID}`)
+  return makeOnchainGmxClaimableProvider(publicClient as PublicClient)(getAddress(account))
 }
 
 export async function findDepositTx(recipient: Address, chainId: number, minBlock: bigint): Promise<Hex | null> {

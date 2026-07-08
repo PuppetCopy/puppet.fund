@@ -7,13 +7,19 @@ import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
 import { ADDRESS_ZERO } from '../const/common.js'
 import type { ChainId } from '../const/index.js'
-import { buildRouteAcrossDeposit } from './acrossDeposit.js'
+import { ACROSS_PERIPHERY, buildRouteAcrossDeposit } from './acrossDeposit.js'
+import { verifyAcrossSwapAndBridge } from './acrossSwapAndBridge.js'
 import * as IntentLib from './intentLib.js'
 import { HUB_DOMAIN, type IDraftContext } from './shared.js'
 import type { ISwapRoute } from './swap.js'
 import { verifyOutputFloor, verifyQuoteFreshness } from './swapGuard.js'
 
-export type IWithdrawRoute = { kind: 'transfer' } | ISwapRoute
+// The fused Across swap-and-bridge (origin swap -> bridge -> optional destination swap, delivered to the user's
+// wallet). WITHDRAW-ONLY: fund-side swaps must return value to the ACCOUNT, which this route structurally cannot
+// guarantee, so ISwapRoute deliberately does not carry it.
+export type IAcrossSwapRoute = { kind: 'acrossSwap'; providerCallData: Hex }
+
+export type IWithdrawRoute = { kind: 'transfer' } | ISwapRoute | IAcrossSwapRoute
 
 export interface IWithdrawInput {
   params: IAccountLib__AccountInitParams
@@ -87,7 +93,38 @@ export function attestWithdrawIntent(ctx: IWithdrawAttestContext, input: IWithdr
       })
       provider = built.provider
       providerCallData = built.providerCallData
+    } else if (input.route.kind === 'acrossSwap') {
+      // Cross-asset cross-chain delivery to the WALLET: field-pinned rather than rebuilt — every structurally
+      // decodable field (refund depositor, canonical SpokePool, destination, amounts, recipient/fallback/drains)
+      // must match the intent; the route internals (exchange + router calldata) carry the same user-signed trust
+      // as a local swap's opaque calldata and stay bounded by the relay's oracle value screen.
+      verifyAcrossSwapAndBridge(
+        {
+          originChainId: Number(input.chainId),
+          user: input.params.user,
+          inputToken,
+          inputAmount: input.inputAmount,
+          acceptableRelayFee: input.acceptableRelayFee,
+          outputToken,
+          destinationChainId: input.destinationChainId,
+          fillDeadline: input.fillDeadline
+        },
+        input.route.providerCallData
+      )
+      provider = ACROSS_PERIPHERY
+      providerCallData = input.route.providerCallData
     } else {
+      // Only a LOCAL swap-and-deliver is signable through opaque provider calldata: HubGate.withdraw forwards its
+      // output on-chain to the pinned receiver (the synchronous shortfall floor). A 'swap' whose destination is off-hub
+      // delivers through provider calldata whose recipient the co-signer cannot verify, the exact escalation
+      // buildSwapParams refuses. Same-asset cross-chain withdraws take the 'across' branch above (recipient REBUILT =
+      // the user).
+      if (input.destinationChainId !== BigInt(HUB_CHAIN_ID)) {
+        throw new CompactError(
+          'BAD_REQUEST',
+          'cross-chain swap-and-bridge withdraw is not signable: its delivery recipient cannot be verified. Use a same-asset bridge.'
+        )
+      }
       if (input.route.providerCallData === '0x') {
         throw new CompactError('BAD_REQUEST', 'swap provider calldata is empty')
       }

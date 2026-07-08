@@ -123,6 +123,23 @@ library CallLib {
         _list[4] = _e;
     }
 
+    function compose(
+        IAccount.Call memory _a,
+        IAccount.Call memory _b,
+        IAccount.Call memory _c,
+        IAccount.Call memory _d,
+        IAccount.Call memory _e,
+        IAccount.Call memory _f
+    ) internal pure returns (IAccount.Call[] memory _list) {
+        _list = new IAccount.Call[](6);
+        _list[0] = _a;
+        _list[1] = _b;
+        _list[2] = _c;
+        _list[3] = _d;
+        _list[4] = _e;
+        _list[5] = _f;
+    }
+
     function empty() internal pure returns (IAccount.Call[] memory) {
         return new IAccount.Call[](0);
     }

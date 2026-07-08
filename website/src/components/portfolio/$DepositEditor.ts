@@ -51,14 +51,14 @@ import { uiStorage } from '@/ui-storage'
 import { depositSourceKey, type IDepositSource } from '../../app/localStoreSchema.js'
 import { chainName } from '../../common/$chain.js'
 import { $contractIdentity } from '../../common/$contract.js'
-import { depositSwapQuoteAttempts, type ISwapRequest } from '../../io/bridge/swapQuote.js'
+import { depositSwapQuoteAttempts, type ISwapRequest, isExecutableSwapRoute } from '../../io/bridge/swapQuote.js'
 import { fetchTokenBalances } from '../../io/chain/balances.js'
 import context, { relayFeeFor } from '../../io/context.js'
 import { formatUsd, priceFor } from '../../io/price.js'
 import { homePublicClient, type IConnectedWallet, wagmi } from '../../wallet/index.js'
 import { walletChainId as walletChainIdStream } from '../../wallet/state.js'
 import { $SwapProviderFeeEditor, type ISelectedRoute } from './$SwapProviderFeeEditor.js'
-import { $tokenSourcePicker, decorateOptionList, type ITokenInputOption } from './$tokenOption.js'
+import { $TokenSelectFlow, decorateOptionList, type ITokenInputOption } from './$tokenOption.js'
 import type { IDepositDraft } from './draft.js'
 import {
   $editorPercentSlider,
@@ -91,6 +91,7 @@ export const $DepositEditor = ({
     (
       [clickAddDraft, clickAddDraftTether]: IBehavior<PointerEvent>,
       [selectOption, selectOptionTether]: IBehavior<ITokenInputOption>,
+      [selectingSource, selectingSourceTether]: IBehavior<boolean>,
       [inputAmount, inputAmountTether]: IBehavior<bigint>,
       [focusEvt, focusEvtTether]: IBehavior<FocusEvent>,
       [blurEvt, blurEvtTether]: IBehavior<FocusEvent>,
@@ -765,9 +766,6 @@ export const $DepositEditor = ({
         error: hasError
       })({ change: sliderPercentTether() })
 
-      const $picker = $tokenSourcePicker({ hideBalances, value: selectedOption, optionList })({
-        select: selectOptionTether()
-      })
 
       const amountUsd: IStream<string> = amountUsdLabel(value, inputPrice)
       const $alert = $surplusAlertSlot({
@@ -794,19 +792,23 @@ export const $DepositEditor = ({
 
       const $maxButton = $maxAmountButton(value, selectedBalance, clickMaxTether(nodeEvent('click')))
 
-      return [
-        $column(spacing.default, style({ minWidth: '380px' }))(
-          $row(
-            style({
-              padding: '18px 28px',
-              borderRadius: '22px 22px 0 0',
-              background: palette.background,
-              margin: '-28px -28px 0px',
-              width: '450px',
-              gap: '12px',
-              alignItems: 'center'
-            })
-          )(
+      const $topSection = $TokenSelectFlow({
+        hideBalances,
+        value: selectedOption,
+        optionList,
+        $container: $row(
+          style({
+            padding: '18px 28px',
+            borderRadius: '22px 22px 0 0',
+            background: palette.background,
+            margin: '-28px -28px 0px',
+            width: '450px',
+            gap: '12px',
+            alignItems: 'center'
+          })
+        ),
+        $inputContent: $anchor =>
+          $node(style({ display: 'contents' }))(
             $element('label')(
               style({
                 display: 'flex',
@@ -821,8 +823,19 @@ export const $DepositEditor = ({
               $row(spacing.small, style({ alignItems: 'center' }))($field, $maxButton),
               $alert
             ),
-            $picker
-          ),
+            $anchor
+          )
+      })({ select: selectOptionTether(), selecting: selectingSourceTether() })
+
+      return [
+        $column(spacing.default, style({ minWidth: '380px' }))(
+          $topSection,
+          // The selection list owns the WHOLE popover: everything below the top section hides while selecting.
+          // Visibility only, never a mount toggle — the fee editor's route stream is tethered in here.
+          $node(
+            style({ display: 'contents' }),
+            styleBehavior(map(s => (s ? { display: 'none' } : { display: 'contents' }), selectingSource))
+          )(
           $node(style({ margin: '0 -28px', display: 'flex' }))($percentSlider),
 
           $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm }))(
@@ -847,6 +860,7 @@ export const $DepositEditor = ({
               disabled: map(p => p.d || p.s, combine({ d: disabled, s: saving })),
               $content: $text(map(s => (s ? 'Saving…' : 'Save'), saving))
             })({ click: clickAddDraftTether() })
+          )
           )
         ),
         (() => {
@@ -973,7 +987,7 @@ export const $DepositEditor = ({
                     inputAmount: swapInput,
                     destinationChainId: BigInt(HUB_CHAIN_ID),
                     route:
-                      legQuote !== null && legQuote.route.kind !== 'composed'
+                      legQuote !== null && isExecutableSwapRoute(legQuote.route)
                         ? legQuote.route
                         : { kind: 'swap', provider: ADDRESS_ZERO, providerCallData: '0x' },
                     outputAmount: legQuote?.outputAmount ?? 0n,
@@ -1071,7 +1085,7 @@ export const $DepositEditor = ({
                   inputAmount: base.bridgeAmount,
                   destinationChainId: BigInt(HUB_CHAIN_ID),
                   route:
-                    quote !== null && quote.route.kind !== 'composed'
+                    quote !== null && isExecutableSwapRoute(quote.route)
                       ? quote.route
                       : {
                           kind: 'across',

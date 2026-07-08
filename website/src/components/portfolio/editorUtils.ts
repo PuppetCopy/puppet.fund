@@ -1,8 +1,8 @@
 import { readableTokenAmount } from '@puppet/sdk/core'
-import { combine, constant, empty, type IStream, map, merge, start, switchMap } from 'aelea/stream'
+import { combine, constant, empty, type IStream, just, map, merge, start, switchMap } from 'aelea/stream'
 import { state } from 'aelea/stream-extended'
-import { $element, $node, $text, attr, type I$Node, type I$Op, style } from 'aelea/ui'
-import { $column, $row, spacing } from 'aelea/ui-components'
+import { $element, $node, $text, attr, type I$Node, type I$Op, style, styleInline } from 'aelea/ui'
+import { $column, $defaultPopoverContentContainer, $row, designSheet, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import {
   $defaultDropdownContainer,
@@ -20,6 +20,15 @@ export const createFocusState = (focusEvt: IStream<unknown>, blurEvt: IStream<un
   state(false, merge(constant(true, focusEvt), constant(false, blurEvt)))
 
 export const $editorDropdownContainer = $defaultDropdownContainer(style({ alignItems: 'flex-end', flexShrink: '0' }))
+
+// Editor popovers own their scroll: content flows at natural height and overflow scrolls INSIDE the rounded
+// container (the radius clips the bar) instead of spilling to the page scroll.
+export const $editorPopoverContentContainer = $defaultPopoverContentContainer(
+  designSheet.customScroll,
+  style({ scrollbarWidth: 'thin' }),
+  // Inline so it beats the popover's own class-level `overflow: visible` (its ops apply after these).
+  styleInline(just({ maxHeight: 'calc(100vh - 40px)', overflowY: 'auto' }))
+)
 
 export const $noteSlot = $node(style({ height: NOTE_TOOLTIP_HEIGHT, display: 'flex', alignItems: 'center' }))
 

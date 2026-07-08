@@ -57,9 +57,30 @@ export interface IGmxPositionRow {
   sizeInUsd: bigint
   sizeInTokens: bigint
   collateralUsd: bigint
+  collateralAmount: bigint
   storedPnlUsd: bigint
 }
 export type IGmxPositionProvider = (account: Address, baseToken: Address) => Promise<IGmxPositionRow[]>
+
+export interface IGmxOrderRow {
+  orderKey: Hex
+  market: Address
+  collateralToken: Address
+  isLong: boolean
+  orderType: number
+  sizeDeltaUsd: bigint
+  collateralDeltaAmount: bigint
+  triggerPrice: bigint
+  isFrozen: boolean
+}
+export type IGmxOrderProvider = (account: Address) => Promise<IGmxOrderRow[]>
+
+export interface IGmxClaimableRow {
+  market: Address
+  token: Address
+  amount: bigint
+}
+export type IGmxClaimableProvider = (account: Address) => Promise<IGmxClaimableRow[]>
 
 export type IVenueFacets = Record<string, string | number | bigint | boolean | undefined>
 
@@ -96,6 +117,8 @@ export interface IPlatformEvalParams {
   publicClient?: PublicClient
   getRate: IGetRate
   positions: IGmxPositionRow[]
+  orders: IGmxOrderRow[]
+  claimables: IGmxClaimableRow[]
 }
 
 export interface IPlatformEvaluator {
@@ -166,6 +189,8 @@ export interface IEvaluateAccountParams {
   publicClient?: PublicClient
   getRate: IGetRate
   positions: IGmxPositionRow[]
+  orders: IGmxOrderRow[]
+  claimables: IGmxClaimableRow[]
   nowSec?: number
   config?: Partial<IEvaluationConfig>
   clientNav?: bigint

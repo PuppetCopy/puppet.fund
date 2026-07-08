@@ -112,10 +112,13 @@ export const $FundQuickstart = (config: I$FundQuickstart) =>
     ) => [
       $column(spacing.big, style({ width: '100%' }))(
         $column(spacing.small, style({ alignItems: 'center', textAlign: 'center', width: '100%' }))(
-          $heading1($text('Get started')),
+          $heading1($text('Start your fund')),
+          $node(
+            style({ fontSize: text.base, lineHeight: '1.6', color: palette.message, maxWidth: '560px' })
+          )($text('Trade exactly as you do today, and earn more: backer capital rides your trades and pays you performance fees.')),
           $node(
             style({ fontSize: text.xs, textTransform: 'uppercase', letterSpacing: '0.14em', color: palette.primary })
-          )($text('Create your wallet and fund it.'))
+          )($text('No seed phrase · You keep your keys · Agents welcome'))
         ),
         $HelloPage({ ...config, embedded: true })({
           changeAllocateDraft: changeAllocateDraftTether(),

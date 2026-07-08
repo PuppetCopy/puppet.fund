@@ -29,7 +29,13 @@ export type IInputByKind = {
   walletDepositWnt: IDepositRoute
 }
 
-export { ACROSS_PERIPHERY, buildAcrossDeposit, decodeAcrossDeposit } from './acrossDeposit.js'
+export { ACROSS_PERIPHERY, acrossSpokePoolOf, buildAcrossDeposit, decodeAcrossDeposit } from './acrossDeposit.js'
+export {
+  decodeAcrossSwapAndBridge,
+  type IAcrossSwapAndBridgeData,
+  type IAcrossSwapPin,
+  verifyAcrossSwapAndBridge
+} from './acrossSwapAndBridge.js'
 export { attestAllocateIntent, type IAllocateInput, type IAllocateRulePosition } from './allocate.js'
 export { attestClaimIntent, type IClaimInput } from './claim.js'
 export {
@@ -70,5 +76,5 @@ export {
   type ISwapRoute
 } from './swap.js'
 export { SWAP_MAX_SLIPPAGE_BPS, verifyOutputFloor, verifyQuoteFreshness, verifySwapQuoteRatio } from './swapGuard.js'
-export { attestWithdrawIntent, type IWithdrawInput, type IWithdrawRoute } from './withdraw.js'
+export { attestWithdrawIntent, type IAcrossSwapRoute, type IWithdrawInput, type IWithdrawRoute } from './withdraw.js'
 export { attestWrapIntent, type IWrapInput } from './wrap.js'

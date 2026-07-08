@@ -1,14 +1,15 @@
-import { CHAIN_TOKEN_MAP, HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { symbolByAddress } from '@puppet/sdk/state'
+import { CHAIN_META, CHAIN_TOKEN_MAP, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import { symbolByAddress, tokenMetaByAddress } from '@puppet/sdk/state'
 import type { Address } from 'viem'
-import { getAddress } from 'viem'
-import { type AcrossBridgeQuote, type AcrossSwapQuote, fetchAcrossBridgeQuote } from './across.js'
+import { getAddress, isAddressEqual } from 'viem'
+import { type AcrossBridgeQuote, fetchAcrossBridgeQuote } from './across.js'
+import type { AcrossWithdrawSwapQuote } from './acrossSwap.js'
 import { fetchLifiSwapQuote, type LifiSwapQuote } from './lifiSwap.js'
 
 // Quotes whose route executes as ONE signed swap intent. The composed quote is a planned TWO-LEG delivery (same-asset
 // bridge, then a hub-local swap signed by the session at execution time) and is deliberately outside this type: the
 // runner's single-intent paths (fundSwap re-quote) must never receive it.
-export type IExecutableSwapQuote = AcrossBridgeQuote | AcrossSwapQuote | LifiSwapQuote
+export type IExecutableSwapQuote = AcrossBridgeQuote | LifiSwapQuote
 
 export interface IComposedQuote {
   provider: 'Composed'
@@ -36,8 +37,15 @@ export interface IComposedQuote {
   limits: { minDeposit: bigint; maxDeposit: bigint }
 }
 
-export type ISwapQuote = IExecutableSwapQuote | IComposedQuote
+// The fused withdraw swap-and-bridge joins the QUOTE union only — never IExecutableSwapQuote: it delivers to the
+// user's wallet, so no fund-side single-intent path may ever receive it.
+export type ISwapQuote = IExecutableSwapQuote | IComposedQuote | AcrossWithdrawSwapQuote
 export type ISwapProvider = ISwapQuote['provider']
+
+// Routes a fund-side SWAP INTENT may carry: 'composed' is a plan (not a route) and 'acrossSwap' delivers to the
+// user's wallet, so both are excluded — value from these intents must land back in the account system.
+export const isExecutableSwapRoute = (route: ISwapQuote['route']): route is IExecutableSwapQuote['route'] =>
+  route.kind === 'swap' || route.kind === 'across'
 
 export interface ISwapRequest {
   originChainId: number
@@ -96,13 +104,18 @@ export function swapQuoteAttempts(p: ISwapRequest, signal?: AbortSignal): ISwapA
 // Raced alongside the fused provider routes for cross-asset deposits; wins when its net output is better or when no
 // fused route exists (e.g. LI.FI has same-asset lanes to the hub but no destination-call support).
 export async function fetchComposedSwapQuote(p: ISwapRequest, signal?: AbortSignal): Promise<IComposedQuote> {
-  const symbol = symbolByAddress(p.inputToken)
   const hubTokens = CHAIN_TOKEN_MAP[p.destinationChainId as keyof typeof CHAIN_TOKEN_MAP] as
     | Record<string, Address>
     | undefined
-  const hubToken = hubTokens?.[symbol]
+  // The hub twin resolves by TOKEN KEY (WETH -> hub WETH), never the priced symbol — the priced symbol collapses the
+  // WETH family onto the 'ETH' key, which the hub map doesn't even carry (its gas coin is MON), killing every
+  // ETH-family cross-asset deposit. A native input keys its ORIGIN chain's wrapped twin.
+  const inputKey = isAddressEqual(getAddress(p.inputToken), getAddress(PROTOCOL.nativeToken))
+    ? CHAIN_META[p.originChainId as keyof typeof CHAIN_META].wnt
+    : tokenMetaByAddress.get(getAddress(p.inputToken))?.tokenKey
+  const hubToken = inputKey ? hubTokens?.[inputKey] : undefined
   if (!hubToken || getAddress(hubToken) === getAddress(p.outputToken)) {
-    throw new Error(`no same-asset hub lane for ${symbol}`)
+    throw new Error(`no same-asset hub lane for ${inputKey ?? p.inputToken}`)
   }
   const bridgeLeg = { ...p, outputToken: getAddress(hubToken), crossToken: false }
   // Leg 1 is the Across bridge ONLY (kind 'across'): the co-signer rebuilds its calldata with recipient=route, so the
@@ -225,12 +238,27 @@ export async function fetchComposedFundSwapQuote(p: ISwapRequest, signal?: Abort
   const destTokens = CHAIN_TOKEN_MAP[p.destinationChainId as keyof typeof CHAIN_TOKEN_MAP] as
     | Record<string, Address>
     | undefined
+  // A NATIVE output can't cross a bridge (the marker is codeless): it rides as the destination's wrapped twin
+  // (token KEY, e.g. WETH) and the runner converts in a final local leg — a 1:1 unwrap when the twin bridged, so
+  // no dest-leg quote is needed and the bridged amount IS the native estimate.
+  const outNative = isAddressEqual(getAddress(p.outputToken), getAddress(PROTOCOL.nativeToken))
+  const wntKey = CHAIN_META[p.destinationChainId as keyof typeof CHAIN_META].wnt
   // Prefer the 2-leg shape: bridge the OUTPUT asset itself (X = its origin twin), so no destination swap is needed. This
-  // wins whenever Across supports that asset from the origin.
-  const outputTwin = originTokens?.[symbolByAddress(p.outputToken)]
-  if (outputTwin && symbolByAddress(outputTwin) !== symbolByAddress(p.inputToken)) {
+  // wins whenever Across supports that asset from the origin. The twin resolves by TOKEN KEY, never the priced symbol:
+  // the priced symbol collapses the WETH family onto the 'ETH' key = the native MARKER, which cannot be an X.
+  const outKey = outNative
+    ? wntKey
+    : (tokenMetaByAddress.get(getAddress(p.outputToken))?.tokenKey ?? symbolByAddress(p.outputToken))
+  const outputTwin = originTokens?.[outKey]
+  const twinDest = outNative ? (destTokens?.[wntKey] as Address | undefined) : p.outputToken
+  if (
+    outputTwin &&
+    !isAddressEqual(getAddress(outputTwin), getAddress(PROTOCOL.nativeToken)) &&
+    twinDest &&
+    symbolByAddress(outputTwin) !== symbolByAddress(p.inputToken)
+  ) {
     try {
-      return await buildComposedFundRoute(p, getAddress(outputTwin), p.outputToken, null, signal)
+      return await buildComposedFundRoute(p, getAddress(outputTwin), getAddress(twinDest), null, signal)
     } catch {
       // The output asset is not Across-bridgeable from the origin (e.g. WETH from Monad): fall through to the stablecoin
       // intermediate, which every supported chain bridges.
@@ -239,7 +267,7 @@ export async function fetchComposedFundSwapQuote(p: ISwapRequest, signal?: Abort
   const usdcOrigin = originTokens?.USDC
   const usdcDest = destTokens?.USDC
   if (!usdcOrigin || !usdcDest) {
-    throw new Error(`no bridgeable intermediate to reach ${symbolByAddress(p.outputToken)} on chain ${p.destinationChainId}`)
+    throw new Error(`no bridgeable intermediate to reach the requested output on chain ${p.destinationChainId}`)
   }
   return buildComposedFundRoute(p, getAddress(usdcOrigin), getAddress(usdcDest), p.outputToken, signal)
 }

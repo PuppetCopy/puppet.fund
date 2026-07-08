@@ -39,23 +39,22 @@ import { type Address, getAddress, type Hex, isAddressEqual } from 'viem'
 import {
   $ButtonPrimary,
   $ButtonPrimaryOutline,
-  $DropSelect,
   $defaultMiniButtonPrimary,
   $noteTooltip,
   $popoverCaret,
   $TokenAmountInput,
   text
 } from '@/ui-components'
-import { $chainIcon, $chainLabel, chainName } from '../../common/$chain.js'
 import { fundSwapQuoteAttempts, type ISwapRequest } from '../../io/bridge/swapQuote.js'
 import { relayFeeFor } from '../../io/context.js'
 import { formatUsd, priceFor } from '../../io/price.js'
 import { $SwapProviderFeeEditor, type ISelectedRoute } from './$SwapProviderFeeEditor.js'
-import { $tokenBalanceRow, $tokenIconBySymbol } from './$tokenOption.js'
+import { $SwapTargetFlow, type ISwapTargetOption } from './$SwapTargetFlow.js'
+import { $tokenBalanceRow } from './$tokenOption.js'
 import type { IFundSwapDraft } from './draft.js'
 import {
-  $editorDropdownContainer,
   $editorPercentSlider,
+  $editorPopoverContentContainer,
   $maxAmountButton,
   $noteSlot,
   amountUsdLabel,
@@ -86,12 +85,6 @@ interface ISource {
   balance: bigint
 }
 
-// Receive-token option: the id plus its per-chain display symbol (the native marker resolves to MON/ETH by chain).
-interface ITargetOption {
-  id: Hex
-  symbol: string
-}
-
 // Per-holding fund rebalance popover: swap one token the fund holds (signed balance) into another registered token, on
 // the same chain (single guarded FundGate.swap, fromRoute=false) or to a destination chain (swap-bridge then a
 // destination recognize). Opened from a holding row's Swap button; the TO + chain pickers choose the destination.
@@ -103,8 +96,8 @@ export const $FundSwapEditor = ({ hideBalances, fundAddress, holdings, tokenRegi
     (
       [popEditor, popEditorTether]: IBehavior<PointerEvent, ISource>,
       [clickSave, clickSaveTether]: IBehavior<PointerEvent>,
-      [selectTarget, selectTargetTether]: IBehavior<ITargetOption, Hex>,
-      [selectChain, selectChainTether]: IBehavior<number>,
+      [pickReceive, pickReceiveTether]: IBehavior<ISwapTargetOption>,
+      [selectingReceive, selectingReceiveTether]: IBehavior<boolean>,
       [inputAmount, inputAmountTether]: IBehavior<bigint>,
       [focusEvt, focusEvtTether]: IBehavior<FocusEvent>,
       [blurEvt, blurEvtTether]: IBehavior<FocusEvent>,
@@ -114,6 +107,10 @@ export const $FundSwapEditor = ({ hideBalances, fundAddress, holdings, tokenRegi
       [selectedRoute, selectedRouteTether]: IBehavior<ISelectedRoute>
     ) => {
       const isNativeId = (id: Hex): boolean => isAddressEqual(getAddress(id), PROTOCOL.nativeToken)
+      // One receive pick carries BOTH halves of the destination; the split keeps the existing chain/target state
+      // machines (reset-on-input, draft hydration, twin defaulting) untouched.
+      const selectChain: IStream<number> = map(p => p.chainId, pickReceive)
+      const selectTarget: IStream<Hex> = map(p => p.id, pickReceive)
       // Every holding with a signed balance is a swap source, except a raw-native (marker) balance: the gate's swap path
       // A raw-native holding is quoted + swapped through its wrapped-native ERC-20 (the DEX can't pull the codeless
       // marker); the runner prepends a 1:1 wrap (native -> WMON) before the swap. Wrapped-native holdings (WETH/WMON,
@@ -146,15 +143,16 @@ export const $FundSwapEditor = ({ hideBalances, fundAddress, holdings, tokenRegi
       const isDestChainId = (id: number): boolean => destChainIds.includes(id)
       // Same-chain swap can target any registered token but the input itself. Native OUTPUT is allowed for a NON-native
       // local input (FundGate.swap's local branch forwards native via CallLib.payout, crediting the marker balance);
-      // cross-chain native output is excluded (the bridge delivers the wrapped ERC-20). A NATIVE input is wrapped to its
-      // twin before swapping, so both the native marker (no MON->MON self-swap) and that wrapped twin (the effective
-      // input) are excluded as targets — its options are the OTHER assets.
+      // cross-chain native output composes (the bridge delivers the wrapped ERC-20; a final local leg unwraps it).
+      // A NATIVE input is wrapped to its twin before swapping, so both the native marker (no MON->MON self-swap) and
+      // that wrapped twin (the effective input) are excluded as local targets — its options are the OTHER assets.
       const targetIdsAt = (dc: number, input: ISource): Hex[] => {
         const inputNative = isNativeId(input.token)
         return [...(tokenRegistry.get(dc as ChainId)?.keys() ?? [])].filter(t => {
           // No MON->MON self-swap. A native input keeps its wrapped twin as a target (MON->WMON = wrap to base); native
-          // OUTPUT stays available for a non-native local input (the gate forwards native on delivery).
-          if (isNativeId(t)) return dc === input.chainId && !inputNative
+          // OUTPUT is available locally for a non-native input (the gate forwards native on delivery) and on OTHER
+          // chains for any input (the composed route bridges the wrapped twin and unwraps in the final local leg).
+          if (isNativeId(t)) return dc === input.chainId ? !inputNative : true
           return dc === input.chainId ? t !== input.token : true
         })
       }
@@ -237,11 +235,15 @@ export const $FundSwapEditor = ({ hideBalances, fundAddress, holdings, tokenRegi
       )
 
       // ---- target token (TO) ---------------------------------------------------------------------------------------
-      // Options carry the per-chain symbol so the native marker shows the destination chain's gas-coin symbol (MON/ETH)
-      // rather than the ambiguous address-keyed one.
-      const targetOptions: IStream<readonly ITargetOption[]> = map(
-        p => targetIdsAt(p.dc, p.input).map(id => ({ id, symbol: displaySymbol(p.dc, id) })),
-        combine({ dc: destChain, input: selectedInput })
+      // Every receivable target across every destination chain (the receive flow groups them by symbol, then narrows
+      // to a chain). Options carry the per-chain symbol so the native marker shows the destination chain's gas-coin
+      // symbol (MON/ETH) rather than the ambiguous address-keyed one.
+      const receiveOptions: IStream<readonly ISwapTargetOption[]> = map(
+        input =>
+          destChainIds.flatMap(dc =>
+            targetIdsAt(dc, input).map(id => ({ chainId: dc, id, symbol: displaySymbol(dc, id) }))
+          ),
+        selectedInput
       )
       const draftTarget: IStream<Hex> = op(
         existingDraft,
@@ -271,8 +273,8 @@ export const $FundSwapEditor = ({ hideBalances, fundAddress, holdings, tokenRegi
         ({ input, dc, target }) => target !== null && isWrapPair(input, dc, target),
         route
       )
-      const targetValue: IStream<ITargetOption | null> = map(
-        r => (r.target === null ? null : { id: r.target, symbol: displaySymbol(r.dc, r.target) }),
+      const targetValue: IStream<ISwapTargetOption | null> = map(
+        r => (r.target === null ? null : { chainId: r.dc, id: r.target, symbol: displaySymbol(r.dc, r.target) }),
         route
       )
 
@@ -330,7 +332,7 @@ export const $FundSwapEditor = ({ hideBalances, fundAddress, holdings, tokenRegi
           return {
             originChainId: input.chainId,
             destinationChainId: dc,
-            inputToken: input.address,
+            inputToken: isNativeId(input.token) ? wrappedNativeAddressOf(input.chainId as ChainId) : input.address,
             outputToken: targetTokenOn(dc, target),
             inputAmount: amount,
             route: isLocal ? fundAddress : predictDepositRoute(fundAddress),
@@ -453,45 +455,33 @@ export const $FundSwapEditor = ({ hideBalances, fundAddress, holdings, tokenRegi
         )
       )
 
-      // ---- TO / chain pickers --------------------------------------------------------------------------------------
-      const $tokenLabelContent = (symbol: string, hint: string | null): I$Node =>
-        $row(spacing.small, style({ alignItems: 'center', ...(hint ? {} : { padding: '8px 10px' }) }))(
-          $tokenIconBySymbol(symbol),
-          hint
-            ? $column(style({ gap: '0' }))(
-                $node(style({ fontWeight: '600', fontSize: text.base }))($text(symbol)),
-                $node(style({ color: palette.foreground, fontSize: text.xs }))($text(hint))
-              )
-            : $text(symbol)
-        )
-      const $receiveControl = $DropSelect({
-        $container: $editorDropdownContainer,
+      // ---- TO / chain picker (one two-step flow: asset, then receive chain) -----------------------------------------
+      const $topSection = $SwapTargetFlow({
         value: targetValue,
-        optionList: targetOptions,
-        $valueLabel: map((o: ITargetOption | null) =>
-          o === null
-            ? $node(style({ padding: '8px 12px', color: palette.foreground }))($text('Select token'))
-            : $tokenLabelContent(o.symbol, 'Receive')
+        optionList: receiveOptions,
+        $container: $row(
+          style({
+            padding: '18px 28px',
+            borderRadius: '22px 22px 0 0',
+            background: palette.background,
+            margin: '-28px -28px 0px',
+            width: '450px',
+            gap: '12px',
+            alignItems: 'center'
+          })
         ),
-        $$option: map((o: ITargetOption) => $tokenLabelContent(o.symbol, null))
-      })({ select: selectTargetTether(map(o => o.id)) })
-
-      const $chainOption = (id: number) => $node(style({ display: 'flex', padding: '8px 10px' }))($chainLabel(id, 20))
-      const $chainControl = $DropSelect({
-        $container: $editorDropdownContainer,
-        value: destChain,
-        optionList: destChainIds,
-        $valueLabel: map((id: number) =>
-          $row(spacing.small, style({ alignItems: 'center' }))(
-            $chainIcon(id, 24),
-            $column(style({ gap: '0' }))(
-              $node(style({ fontWeight: '600', fontSize: text.sm }))($text(chainName(id))),
-              $node(style({ color: palette.foreground, fontSize: text.xs }))($text('Receive on'))
-            )
+        $inputContent: $anchor =>
+          $node(style({ display: 'contents' }))(
+            $element('label')(
+              style({ display: 'flex', flexDirection: 'column', cursor: 'text', flex: '1', minWidth: '0', gap: '4px' })
+            )(
+              $inputLabel,
+              $row(spacing.small, style({ alignItems: 'center' }))($field, $maxButton),
+              $alert
+            ),
+            $anchor
           )
-        ),
-        $$option: map((id: number) => $chainOption(id))
-      })({ select: selectChainTether() })
+      })({ select: pickReceiveTether(), selecting: selectingReceiveTether() })
 
       // Output-token USD price for the selected route (native resolves to its wrapped-native price); the fee row's out side.
 
@@ -503,26 +493,13 @@ export const $FundSwapEditor = ({ hideBalances, fundAddress, holdings, tokenRegi
 
       // ---- editor body (header + slider + Swap-fee row, matching $DepositEditor / $FundEditor) ----------------------
       const $editor = $column(spacing.default, style({ minWidth: '380px' }))(
-        $row(
-          style({
-            padding: '18px 28px',
-            borderRadius: '22px 22px 0 0',
-            background: palette.background,
-            margin: '-28px -28px 0px',
-            width: '450px',
-            gap: '12px',
-            alignItems: 'center'
-          })
+        $topSection,
+        // The selection list owns the WHOLE popover: everything below the top section hides while selecting.
+        // Visibility only, never a mount toggle — the fee editor's route stream is tethered in here.
+        $node(
+          style({ display: 'contents' }),
+          styleBehavior(map(s => (s ? { display: 'none' } : { display: 'contents' }), selectingReceive))
         )(
-          $element('label')(
-            style({ display: 'flex', flexDirection: 'column', cursor: 'text', flex: '1', minWidth: '0', gap: '4px' })
-          )(
-            $inputLabel,
-            $row(spacing.small, style({ alignItems: 'center' }))($field, $maxButton),
-            $alert
-          ),
-          $column(spacing.small, style({ alignItems: 'flex-end' }))($chainControl, $receiveControl)
-        ),
         $node(style({ margin: '0 -26px', display: 'flex' }))($percentSlider),
         $row(spacing.default, style({ alignItems: 'center', fontSize: text.sm }))(
           // Swap fee shares the Save row: hidden when a blocking alert shows (the alert already displays under the
@@ -543,6 +520,7 @@ export const $FundSwapEditor = ({ hideBalances, fundAddress, holdings, tokenRegi
           )($routeFee),
           $node(style({ flex: 1 }))(),
           $ButtonPrimaryOutline({ disabled, $content: $text('Save') })({ click: clickSaveTether() })
+        )
         )
       )
 
@@ -566,7 +544,7 @@ export const $FundSwapEditor = ({ hideBalances, fundAddress, holdings, tokenRegi
             amountIn: params.amount,
             // A wrap is 1:1, so the whole input is the floor; a swap floors on its reviewed quote output.
             minOut: wrap ? params.amount : (params.sel.quote?.outputAmount ?? 0n),
-            // Carry the composed route's chosen bridge asset so the runner executes the SAME intermediate priced here.
+            // Bake the composed route's bridge intermediate so the runner executes the same X the quote priced.
             bridgeToken:
               params.sel.quote && 'hubToken' in params.sel.quote ? params.sel.quote.hubToken : undefined
           }
@@ -628,6 +606,7 @@ export const $FundSwapEditor = ({ hideBalances, fundAddress, holdings, tokenRegi
         // Each swappable row owns its popover ANCHORED TO THAT ROW (the backdrop cuts out the row's rect, not the whole
         // list). One editor exists; its $open fires only for the clicked row (backdrop-dismiss keeps one open at a time).
         return $Popover({
+          $contentContainer: $editorPopoverContentContainer,
           $target: $rowNode,
           $open: constant(
             $editor,

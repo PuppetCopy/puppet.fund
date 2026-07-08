@@ -59,7 +59,9 @@ export async function evaluateAccountNav(params: IEvaluateAccountParams): Promis
           nowSec,
           publicClient: params.publicClient,
           getRate: params.getRate,
-          positions: params.positions
+          positions: params.positions,
+          orders: params.orders,
+          claimables: params.claimables
         })
       )
     ),

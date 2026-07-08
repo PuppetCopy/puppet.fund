@@ -12,7 +12,15 @@ import {
   keccak256,
   zeroAddress
 } from 'viem'
-import { gmxEvaluator, resolveIndexToken } from '../evaluate/platform/gmx.js'
+import {
+  GMX_DECREASE_TYPES,
+  GMX_INCREASE_TYPES,
+  GMX_ORDER_TYPE,
+  gmxEvaluator,
+  resolveIndexToken
+} from '../evaluate/platform/gmx.js'
+
+export { GMX_DECREASE_TYPES, GMX_INCREASE_TYPES, GMX_ORDER_CUSTODY_TYPES, GMX_ORDER_TYPE } from '../evaluate/platform/gmx.js'
 import type { IPlatformEvalParams, IPlatformValuation } from '../evaluate/types.js'
 import type { IGuardReason, IGuardResult, IVenue, IVenueAction } from './types.js'
 
@@ -48,16 +56,6 @@ export const GMX_V2_CHAIN_ID = Number(
 // execution fee is always WNT, so a fund funding with native ETH backs a WETH collateral.
 export const GMX_WNT = getAddress(CHAIN_TOKEN_MAP[GMX_V2_CHAIN_ID].WETH as Address)
 
-export const GMX_ORDER_TYPE = {
-  MarketSwap: 0,
-  LimitSwap: 1,
-  MarketIncrease: 2,
-  LimitIncrease: 3,
-  MarketDecrease: 4,
-  LimitDecrease: 5,
-  StopLossDecrease: 6,
-  StopIncrease: 8
-} as const
 
 export const GMX_DECREASE_SWAP_TYPE = {
   NoSwap: 0,
@@ -65,17 +63,6 @@ export const GMX_DECREASE_SWAP_TYPE = {
   SwapCollateralTokenToPnlToken: 2
 } as const
 
-export const GMX_INCREASE_TYPES: ReadonlySet<number> = new Set([
-  GMX_ORDER_TYPE.MarketIncrease,
-  GMX_ORDER_TYPE.LimitIncrease,
-  GMX_ORDER_TYPE.StopIncrease
-])
-
-export const GMX_DECREASE_TYPES: ReadonlySet<number> = new Set([
-  GMX_ORDER_TYPE.MarketDecrease,
-  GMX_ORDER_TYPE.LimitDecrease,
-  GMX_ORDER_TYPE.StopLossDecrease
-])
 
 const ALLOWED_ORDER_TYPES: ReadonlySet<number> = new Set([...GMX_INCREASE_TYPES, ...GMX_DECREASE_TYPES])
 

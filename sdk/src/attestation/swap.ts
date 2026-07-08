@@ -12,6 +12,7 @@ import { predictFundAccount, predictPuppetAccount, predictRoute } from '../accou
 import { CompactContractError } from '../compact/error.js'
 import { CompactError } from '../compact/index.js'
 import type { ChainId } from '../const/index.js'
+import { wrappedNativeAddressOf } from '../state/tokenRegistry.js'
 import { buildRouteAcrossDeposit, type IAcrossRouteFields } from './acrossDeposit.js'
 import * as IntentLib from './intentLib.js'
 import { fundGateDomain, type IDeployProof, type IDraftContext, puppetGateDomain } from './shared.js'
@@ -60,7 +61,12 @@ interface ISwapAttestContext extends IDraftContext {
 // output bounds (strong output floor LOCAL only — cross-chain relies on SpokePool minOutput + the dest-side
 // recognize + the provider allowlist), then resolve provider/providerCallData. `account` (PA or FA) owns the
 // route that funds the swap and receives the output (M2: recipient is always that route).
-function buildSwapParams(account: Address, ctx: ISwapAttestContext, input: ISwapCommon): ISwapLib__SwapParams {
+function buildSwapParams(
+  account: Address,
+  ctx: ISwapAttestContext,
+  input: ISwapCommon,
+  allowNativeInput = false
+): ISwapLib__SwapParams {
   if (input.inputAmount === 0n) throw new CompactContractError('Balance__NothingToSwap', [])
 
   const inputToken = IntentLib.verifyCommonIntent(ctx, {
@@ -98,9 +104,14 @@ function buildSwapParams(account: Address, ctx: ISwapAttestContext, input: ISwap
   )
   const outputToken = input.outputToken
 
-  if (isAddressEqual(getAddress(inputToken), PROTOCOL.nativeToken)) {
+  // FundGate.swap wraps a native input INSIDE the dispatch (a WNT.deposit leg precedes the sandwich), so a fund swap
+  // signs the native marker directly and the provider-facing token is its wrapped twin. PuppetGate has no such branch —
+  // PA swaps keep refusing native.
+  const nativeIn = isAddressEqual(getAddress(inputToken), PROTOCOL.nativeToken)
+  if (nativeIn && !allowNativeInput) {
     throw new CompactError('BAD_REQUEST', 'native input swaps are not supported; wrap to WETH first')
   }
+  const swapIn = nativeIn ? wrappedNativeAddressOf(Number(ctx.chainId) as ChainId) : getAddress(inputToken)
   if (!isLocal && isAddressEqual(getAddress(outputToken), PROTOCOL.nativeToken)) {
     throw new CompactError('BAD_REQUEST', 'cross-chain swap to native output is not supported')
   }
@@ -118,7 +129,9 @@ function buildSwapParams(account: Address, ctx: ISwapAttestContext, input: ISwap
       originChainId: Number(input.chainId),
       depositor: route,
       recipient: route,
-      inputToken,
+      // The provider-facing token is the wrapped twin: FundGate.swap wraps a native input in-dispatch, so the
+      // SpokePool deposit pulls WNT, not the native marker the intent signs.
+      inputToken: swapIn,
       outputToken,
       inputAmount: input.inputAmount - input.acceptableRelayFee,
       outputAmount: input.outputAmount,
@@ -134,7 +147,7 @@ function buildSwapParams(account: Address, ctx: ISwapAttestContext, input: ISwap
     // the account's own route. Signing it would let a leaked/hostile session key bridge funds to an arbitrary address,
     // the exact escalation the local branch (on-chain output forward + shortfall) and the 'across' branch (recipient
     // REBUILT = route) both prevent. Only the 'across' kind is a safe cross-chain delivery; refuse the rest. Cross-chain
-    // CROSS-ASSET flows go through the composed route (same-asset 'across' bridge + a local hub swap).
+    // CROSS-ASSET flows go through the composed route (local swap to a bridgeable asset + a same-asset 'across' bridge).
     if (!isLocal) {
       throw new CompactError(
         'BAD_REQUEST',
@@ -192,7 +205,7 @@ export function attestFundSwapIntent(ctx: ISwapAttestContext, input: IFundSwapIn
   if (!isAddressEqual(derivedMaster, input.fundParams.master)) {
     throw new CompactContractError('Share__MasterMismatch', [derivedMaster, input.fundParams.master])
   }
-  const swap = buildSwapParams(predictFundAccount(input.fundParams), ctx, input)
+  const swap = buildSwapParams(predictFundAccount(input.fundParams), ctx, input, true)
 
   const intent: IFundGate__SwapIntent = {
     params: input.params,

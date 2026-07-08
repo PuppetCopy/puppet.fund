@@ -4,9 +4,13 @@ import { state } from 'aelea/stream-extended'
 import { subject } from '../utils/subject.js'
 import type { IConnectedWallet } from './connectedWallet.js'
 import { getStoredSessionKey } from './sessionKey.js'
-import { connection, wagmi } from './wallet.js'
+import { connection, wagmi, walletReconnected } from './wallet.js'
 
 async function buildWallet(conn: GetConnectionReturnType): Promise<IConnectedWallet | null> {
+  if (conn.status !== 'connected') {
+    await walletReconnected
+    conn = getConnection(wagmi)
+  }
   if (conn.status !== 'connected' || !conn.connector || !conn.chainId) return null
   if (typeof conn.connector.getChainId !== 'function') return null
 

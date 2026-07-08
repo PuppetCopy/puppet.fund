@@ -19,6 +19,7 @@ import type { IConnectedWallet } from '../../wallet/index.js'
 import { $DepositEditor } from './$DepositEditor.js'
 import { $WithdrawEditor } from './$WithdrawEditor.js'
 import type { IDepositDraft, IWithdrawDraft } from './draft.js'
+import { $editorPopoverContentContainer } from './editorUtils.js'
 
 export type IEditorDraft = IDepositDraft | IWithdrawDraft
 
@@ -110,6 +111,7 @@ export const $TokenBalanceEditor = ({
           const withdrawDisabled = balance === 0n
 
           return $Popover({
+            $contentContainer: $editorPopoverContentContainer,
             $target: $row(
               spacing.default,
               style({ padding: '4px', borderRadius: '4px', alignItems: 'center', flex: 1 })

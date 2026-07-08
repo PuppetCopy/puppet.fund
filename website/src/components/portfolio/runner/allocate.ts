@@ -7,7 +7,7 @@ import type { Address, } from 'viem'
 import { getRate } from '../../../io/context.js'
 import { fetchMasterPoolState, fetchMasterSubscribers } from '../../../io/datastore/query.js'
 import { readSubaccountState } from '../../../io/datastore/walletState.js'
-import {  gmxPositionProvider } from '../../../io/gmx/navProviders.js'
+import { gmxClaimableProvider, gmxOrderProvider, gmxPositionProvider } from '../../../io/gmx/navProviders.js'
 import type { IAllocateDraft } from '../draft.js'
 import { type ExecContext, resolveRelayFee, stepMetadata } from './_shared.js'
 
@@ -44,7 +44,9 @@ export async function gatherMatched(
       cashLeg: composeCashLeg(sub, chainLiveness, baseToken),
       holdings: composeHoldings(sub, baseToken),
       getRate,
-      positions: await gmxPositionProvider(fund, baseToken)
+      positions: await gmxPositionProvider(fund, baseToken),
+      orders: await gmxOrderProvider(fund),
+      claimables: await gmxClaimableProvider(fund)
     })
     assertNavSignable(allocateEval.gate)
     acceptableNetAssetValue = allocateEval.navSigned

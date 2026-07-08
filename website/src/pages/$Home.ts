@@ -271,7 +271,7 @@ const $hero = (): I$Node => {
       )($text('A fund wallet, operated by humans and agents.')),
       $node(style({ fontSize: text.lg, lineHeight: '1.6', color: palette.message, maxWidth: '660px' }))(
         $text(
-          'Fund top traders and share their gains, or run your own fund and trade/invest exactly as you do today, universally across any EVM chain, against any verifiable contract. You keep your keys. Every funding runs under rules you sign.'
+          'Fund top traders and share their gains, or run your own fund and trade exactly as you do today. You keep your keys. Your capital moves only under rules you sign, and the chain enforces them on every action.'
         )
       ),
       $node(
@@ -373,7 +373,7 @@ const STORY_BEATS: IStoryBeat[] = [
     t: 0.18,
     master: {
       title: 'Same self-custody wallet',
-      body: 'Create a fund and it becomes your trading wallet. Connect it to GMX or Hyperliquid and trade exactly as you already do, while the fund runs public: ranked on the leaderboard, every position verifiable on-chain.',
+      body: 'Create a fund and it becomes your trading wallet. Connect it to GMX and trade exactly as you already do, while the fund runs public: ranked on the leaderboard, every position verifiable on-chain.',
       vs: 'Instead of skill buried in an address nobody reads.'
     },
     puppet: {
@@ -676,14 +676,14 @@ const $storyRow = (
 ): I$Node =>
   $row(style({ width: '100%', alignItems: 'flex-start' }))(
     $node(attr({ 'data-reveal': 'l' }), style({ flex: '1', minWidth: '0', display: 'flex' }))(
-      $storyCell(MASTER_COLOR, 'Master · the trader', beat.master, true)
+      $storyCell(MASTER_COLOR, 'The trader', beat.master, true)
     ),
     $node(style({ position: 'relative', flex: `0 0 ${STORY_SPINE.w}px`, alignSelf: 'stretch' }))(
       ...$trailMark(progress, beat.t, MASTER_COLOR, STORY_SPINE, 'left', probe, register, geom),
       ...$trailMark(progress, beat.t, PUPPET_COLOR, STORY_SPINE, 'right', probe, register, geom)
     ),
     $node(attr({ 'data-reveal': 'r' }), style({ flex: '1', minWidth: '0', display: 'flex' }))(
-      $storyCell(PUPPET_COLOR, 'Puppet · the backer', beat.puppet, false)
+      $storyCell(PUPPET_COLOR, 'The backer', beat.puppet, false)
     )
   )
 
@@ -758,7 +758,7 @@ const $storyConverge = (): I$Node =>
   $column(spacing.default, style({ alignItems: 'center', textAlign: 'center', width: '100%' }))(
     $heading2($text('One shared wallet.')),
     $node(style({ fontSize: text.base, lineHeight: '1.6', color: palette.foreground, maxWidth: '520px' }))(
-      $text('One wallet between them: the Master trades it, the Puppet rules it, the chain enforces both.')
+      $text('One wallet between them: the trader operates it, the backer rules it, the chain enforces both.')
     ),
     $row(spacing.small, style({ flexWrap: 'wrap', justifyContent: 'center' }))(
       $fundChip('$600 AUM'),
@@ -804,7 +804,7 @@ const $storyline = (): I$Node => {
         progress,
         0.1 + i * 2 * 0.12,
         MASTER_COLOR,
-        'Master · the trader',
+        'The trader',
         'left',
         beat.master,
         probe,
@@ -815,7 +815,7 @@ const $storyline = (): I$Node => {
         progress,
         0.1 + (i * 2 + 1) * 0.12,
         PUPPET_COLOR,
-        'Puppet · the backer',
+        'The backer',
         'right',
         beat.puppet,
         probe,
@@ -825,7 +825,7 @@ const $storyline = (): I$Node => {
     ])
 
   return $section(
-    $sectionHeading('The story', 'The seamless premium.'),
+    $sectionHeading('How it works', 'Two sides. One wallet.'),
     $node(style({ position: 'relative', width: '100%' }))(
       $wrapNativeElement(probe)(style({ position: 'absolute', inset: '0', pointerEvents: 'none' }))(),
       $trailLayer(progress, spine, isDesktopScreen, probe, geom),
@@ -864,23 +864,23 @@ const journeySteps: { invest: [string, string]; operate: [string, string] }[] = 
     ],
     operate: [
       'Get backed',
-      'Investors subscribe to your fund under their own signed rules. You never hold or manage anyone’s money.'
+      'Backers subscribe to your fund under their own signed rules. You never hold or manage anyone’s money.'
     ]
   },
   {
     invest: [
       'Your capital follows',
-      'When the operator trades, your matched amount is pulled and you get shares at an attested NAV. Unfunded or throttled matches simply skip.'
+      'When the trader trades, your matched amount is pulled and you get fund shares at a price verified on-chain. Out of budget or on cooldown? The match simply skips.'
     ],
     operate: [
       'Trade as you always do',
-      'By hand on GMX or through an agent. Backer capital rides your position, and every action is co-signed against their rules.'
+      'By hand on GMX or through an agent. Backer capital rides your position, and every action is checked against their rules before it executes.'
     ]
   },
   {
     invest: [
-      'Exit at NAV',
-      'Sell shares into the redeem queue and claim back to your wallet, priced by the same attested NAV.'
+      'Exit anytime',
+      'Sell your shares into the exit queue and claim back to your wallet, at the same on-chain-verified price.'
     ],
     operate: [
       'Earn on the upside',
@@ -974,7 +974,7 @@ const $tradeToday = (): I$Node =>
           'Connect your fund to app.gmx.io through WalletConnect and the fund itself shows up as the connected wallet. You trade by hand, exactly as before.'
         ),
         $body(
-          'Under the hood every order becomes a co-signed intent: screened by the attestor, bounded to GMX, executed by the fund. Backer capital rides along automatically, each pull inside the rules its owner signed.'
+          'Under the hood every order needs two signatures: yours and the protocol’s, which checks the trade is on GMX and inside each backer’s signed rules before it executes. Backer capital rides along automatically.'
         ),
         $row(style({ paddingTop: '4px' }))($navPill('Get started', routeSchema.quickstart, false))
       ),
@@ -1054,9 +1054,9 @@ const $finalCta = (): I$Node =>
     spacing.big,
     style({ alignItems: 'center', textAlign: 'center', width: '100%', paddingTop: isDesktopScreen ? '8px' : '0' })
   )(
-    $heading2($text('Get funded to trade.')),
+    $heading2($text('Fund or get funded.')),
     $node(style({ fontSize: text.lg, lineHeight: '1.6', color: palette.message, maxWidth: '560px' }))(
-      $text('Fund the trader, human or machine, without ever giving up your money.')
+      $text('Back a trader, human or machine, without ever handing over your money. Or run the fund, and get backed to trade.')
     ),
     $row(spacing.default, style({ flexWrap: 'wrap', justifyContent: 'center' }))(
       $navPill('Create a Fund', routeSchema.quickstart, true, undefined, $puppeteer),
@@ -1074,5 +1074,5 @@ export const $Home = () =>
   component(() => [
     $column(
       style({ width: '100%', gap: isDesktopScreen ? '80px' : '56px', padding: isDesktopScreen ? '0' : '0 16px' })
-    )($vortexBackground(), $hero(), $storyline(),  $tradeToday(), $agentSection(), $trust(), $finalCta())
+    )($vortexBackground(), $hero(), $storyline(), $journeys(), $tradeToday(), $agentSection(), $trust(), $finalCta())
   ])

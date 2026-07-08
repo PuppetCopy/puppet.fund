@@ -35,22 +35,25 @@ import { $FieldLabeled, $icon, $infoTooltip, $labeledDivider, text } from '@/ui-
 import { $walletConnectLogo } from '../common/$icons.js'
 import { $navText } from '../common/elements/$common.js'
 import type { IConnectedWallet } from '../wallet/index.js'
-import { disconnectDapp, initWalletLink, pairDapp, startWalletConnect } from '../wallet/walletKitConnect.js'
 import {
   blockedRequest,
+  disconnectDapp,
   type IActiveFund,
   type IPendingSign,
   type IWalletLinkSession,
+  initWalletLink,
   masterOf,
+  pairDapp,
   pendingSign,
   resolveActiveFund,
   resolveSignApproval,
   sameFund,
   setActiveFund,
   setLinkWallet,
+  startWalletConnect,
   walletLinkConnected,
   walletLinkSessions
-} from '../wallet/walletLinkState.js'
+} from '../wallet/walletLink.js'
 import { isWcLink } from '../wallet/wcUri.js'
 import { $fundProfile } from './$AccountProfile.js'
 import { $EnableSession } from './$enableSession.js'

@@ -1,4 +1,4 @@
-import { CHAIN_TOKEN_MAP, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import { CHAIN_META, CHAIN_TOKEN_MAP, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
 import DEPLOYMENTS from '@puppet/contracts/deployments'
 import type {
   IAccountLib__AccountInitParams,
@@ -37,10 +37,10 @@ import {
   type IWrapInput,
   resolveDispatchChainId
 } from '@puppet/sdk/attestation'
-import { CompactError, type IDispatchedFrame, type IRelayRequest, SETTLEMENT_TIMEOUT_MS } from '@puppet/sdk/compact'
+import { type IDispatchedFrame, type IRelayRequest, SETTLEMENT_TIMEOUT_MS } from '@puppet/sdk/compact'
 import type { ChainId } from '@puppet/sdk/const'
 import { awaitWhile } from '@puppet/sdk/core'
-import { assertNavSignable, evaluateCrossChainSwapValue, evaluateSwapValue } from '@puppet/sdk/evaluate'
+import { screenSwapValue } from '@puppet/sdk/evaluate'
 import { fundPositionTable } from '@puppet/sdk/schema'
 import {
   awaitAccountCall,
@@ -49,11 +49,13 @@ import {
   fetchDepositRouteBalance,
   fetchRouteBalance,
   isNonceConsumed,
+  nativeSymbolOf,
   pollDepositRouteBalance,
   pollRouteBalance,
   randomNonce,
   symbolByAddress,
   tokenInfoFor,
+  tokenMetaByAddress,
   wrappedNativeAddressOf
 } from '@puppet/sdk/state'
 import {
@@ -387,46 +389,6 @@ async function resolveFundParams(ctx: ExecContext, fund: Address): Promise<IFund
   return { master: row.master as Address, baseToken: row.baseToken as Hex, name: row.name as Hex }
 }
 
-// Off-chain value bound for every external swap leg, mirroring the matchmaker's screenSwapValue (the relay is the
-// attestor and enforces the same gate; running it here too fails a bad route BEFORE the user is asked to sign). A LOCAL
-// swap's on-chain SignTransfer only proves the account received the client-signed outputAmount (the ratio check is
-// tautological) and a cross-chain leg signs no on-chain floor at all (SignLib.none) — so the value is bounded here
-// against the median oracle (cross-token swap) or an in-domain same-token ratio (across bridge). Fail closed on an
-// unpriceable / stale pair.
-async function screenSwapValue(swap: {
-  routeKind: 'swap' | 'across'
-  inputToken: Address
-  outputToken: Address
-  inputAmount: bigint
-  outputAmount: bigint
-  acceptableRelayFee: bigint
-}): Promise<void> {
-  if (swap.routeKind === 'across') {
-    if (symbolByAddress(swap.inputToken) !== symbolByAddress(swap.outputToken)) {
-      throw new CompactError(
-        'CROSS_CHAIN_ASSET_MISMATCH',
-        `across must bridge the same asset; ${swap.inputToken} and ${swap.outputToken} are different assets`,
-        'hard'
-      )
-    }
-    assertNavSignable(
-      evaluateCrossChainSwapValue({
-        inputAmount: swap.inputAmount - swap.acceptableRelayFee,
-        outputAmount: swap.outputAmount
-      })
-    )
-    return
-  }
-  assertNavSignable(
-    await evaluateSwapValue({
-      input: { token: swap.inputToken, amount: swap.inputAmount },
-      output: { token: swap.outputToken, amount: swap.outputAmount },
-      nowSec: Math.floor(Date.now() / 1000),
-      getRate
-    })
-  )
-}
-
 // The quote's own fillDeadline IS the failure boundary: past it no relayer can fill (Across enforces it on-chain),
 // so the wait is bounded by min(deadline, the 15m cap) — no provider status API needed. On timeout the draft fails
 // loudly; whatever the bridge ultimately does with the funds (origin refund, or the input token delivered on the
@@ -472,14 +434,18 @@ async function runSwapStep(input: ISwapInput, ctx: ExecContext): Promise<IAttest
     ctx,
     chainId
   )
-  await screenSwapValue({
-    routeKind: fresh.route.kind,
-    inputToken: fresh.inputToken,
-    outputToken: fresh.outputToken,
-    inputAmount: fresh.inputAmount,
-    outputAmount: fresh.outputAmount,
-    acceptableRelayFee: fresh.acceptableRelayFee
-  })
+  await screenSwapValue(
+    {
+      routeKind: fresh.route.kind,
+      chainId,
+      inputToken: fresh.inputToken,
+      outputToken: fresh.outputToken,
+      inputAmount: fresh.inputAmount,
+      outputAmount: fresh.outputAmount,
+      acceptableRelayFee: fresh.acceptableRelayFee
+    },
+    getRate
+  )
   const { intent, typedData } = attestSwapIntent(
     {
       chainId: resolveDispatchChainId(chainId),
@@ -900,44 +866,71 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
     const unwrapped = await runWrapStep(fundParams, draft.chainId, draft.amountIn, ctx, true)
     return unwrapped ? [unwrapped] : []
   }
-  // Native is not an ERC-20 the DEX can approve/transferFrom, so a native-input swap first WRAPS the holding to the
-  // chain's wrapped-native token (1:1), then swaps that. tokenIn from here on is the wrapped ERC-20.
-  const wrapResults: IAttestation[] = []
+  // A native input needs NO separate wrap step: FundGate.swap wraps it INSIDE the dispatch (a WNT.deposit leg
+  // precedes the sandwich). The INTENT carries the native marker; quotes/fused calldata are fetched against the
+  // wrapped twin (the token the DEX actually receives).
   const nativeInput = isAddressEqual(getAddress(draft.tokenIn), getAddress(PROTOCOL.nativeToken))
-  if (nativeInput) {
-    const wrap = await runWrapStep(fundParams, draft.chainId, draft.amountIn, ctx)
-    if (wrap) wrapResults.push(wrap)
-  }
-  const tokenIn: Hex = nativeInput ? wrappedNativeAddressOf(draft.chainId as ChainId) : draft.tokenIn
-  const inputToken = resolveTokenAddress(ctx, draft.chainId, tokenIn)
+  const tokenIn: Hex = draft.tokenIn
+  const inputToken = nativeInput
+    ? wrappedNativeAddressOf(draft.chainId as ChainId)
+    : resolveTokenAddress(ctx, draft.chainId, tokenIn)
   const outputToken = resolveTokenAddress(ctx, destChainId, draft.tokenOut)
-  // MON -> WMON is the wrap ALONE: after wrapping, the wrapped input already IS the output, so there is no DEX swap.
-  if (nativeInput && isLocal && isAddressEqual(getAddress(inputToken), getAddress(outputToken))) return wrapResults
+  // MON -> WMON is the dedicated 1:1 wrap action alone (no DEX involved).
+  if (nativeInput && isLocal && isAddressEqual(getAddress(inputToken), getAddress(outputToken))) {
+    const wrapped = await runWrapStep(fundParams, draft.chainId, draft.amountIn, ctx)
+    return wrapped ? [wrapped] : []
+  }
 
-  // COMPOSED cross-token cross-chain: a single cross-chain swap-and-bridge has an unpinnable delivery recipient (the
-  // co-signer rejects it), so route through a bridgeable intermediate X: local swap tokenIn -> X on the origin, a
-  // SAME-ASSET Across bridge X -> X to the dest (recipient pinned), then a local swap X -> tokenOut on the dest. Each leg
-  // is signable on its own. X = the editor's chosen bridgeToken (the output's twin when Across bridges it, else a
-  // stablecoin) so execution matches the priced route; every leg is sized from the amount the PRIOR leg actually
-  // delivered. leg 1 is skipped when the input already IS X, leg 3 when the bridge already delivered the output asset.
-  if (!isLocal && symbolByAddress(tokenIn) !== symbolByAddress(draft.tokenOut)) {
+  // COMPOSED cross-token cross-chain: a fused cross-chain swap-and-bridge delivers through a MulticallHandler whose
+  // program the co-signer cannot bound, so route through a bridgeable intermediate X instead: local swap the input -> X
+  // on the origin, a SAME-ASSET Across bridge X -> X to the dest (recipient pinned), then a local swap X -> tokenOut on
+  // the dest. Each leg is signable on its own. X = the editor's chosen bridgeToken (the output's twin when Across bridges
+  // it, else a stablecoin) so execution matches the priced route; every leg is sized from the amount the PRIOR leg
+  // actually delivered. leg 1 is skipped when the input already IS X, leg 3 when the bridge already delivered the output
+  // asset.
+  // X resolves by TOKEN KEY (WETH-dest -> 'WETH' -> each side's WETH ERC-20), never the priced symbol: the priced
+  // symbol collapses the WETH family onto the CHAIN_TOKEN_MAP 'ETH' key = the native MARKER, which can neither bridge
+  // nor serve a DEX, and whose cross-chain intent the co-signer refuses outright. A NATIVE output keys the
+  // destination's wrapped twin and ALWAYS takes the final local leg (a 1:1 unwrap when the twin bridged, a DEX swap
+  // when a stablecoin did); it also always COMPOSES, even when the priced symbols match (WETH -> native ETH elsewhere
+  // is a same-asset bridge plus that unwrap). Native symbols resolve per-CHAIN (the marker's address-keyed symbol is
+  // meaningless), so a native MON input correctly composes toward an ETH-family output.
+  const outNative = isAddressEqual(getAddress(draft.tokenOut), getAddress(PROTOCOL.nativeToken))
+  const inSymbol = isAddressEqual(getAddress(inputToken), getAddress(PROTOCOL.nativeToken))
+    ? nativeSymbolOf(draft.chainId as ChainId)
+    : symbolByAddress(inputToken)
+  const outSymbol = outNative ? nativeSymbolOf(destChainId as ChainId) : symbolByAddress(outputToken)
+  if (!isLocal && (outNative || inSymbol !== outSymbol)) {
     const originTokens = CHAIN_TOKEN_MAP[draft.chainId as keyof typeof CHAIN_TOKEN_MAP] as Record<string, Hex> | undefined
     const destTokens = CHAIN_TOKEN_MAP[destChainId as keyof typeof CHAIN_TOKEN_MAP] as Record<string, Hex> | undefined
-    const xOrigin = draft.bridgeToken ?? originTokens?.[symbolByAddress(draft.tokenOut)]
-    if (!xOrigin) throw new Error(`no bridge intermediate for ${symbolByAddress(draft.tokenOut)} on chain ${draft.chainId}`)
+    const outKey = outNative
+      ? (CHAIN_META[destChainId as keyof typeof CHAIN_META] as { wnt: string }).wnt
+      : (tokenMetaByAddress.get(getAddress(draft.tokenOut))?.tokenKey ?? symbolByAddress(draft.tokenOut))
+    const bakedX =
+      draft.bridgeToken && !isAddressEqual(getAddress(draft.bridgeToken), getAddress(PROTOCOL.nativeToken))
+        ? draft.bridgeToken
+        : undefined
+    const xOrigin = bakedX ?? originTokens?.[outKey]
+    if (!xOrigin || isAddressEqual(getAddress(xOrigin), getAddress(PROTOCOL.nativeToken))) {
+      throw new Error(`no bridge intermediate for the requested output on chain ${draft.chainId}`)
+    }
+    const xKey = tokenMetaByAddress.get(getAddress(xOrigin))?.tokenKey
+    const xDest = xKey ? destTokens?.[xKey] : undefined
+    if (!xDest || isAddressEqual(getAddress(xDest), getAddress(PROTOCOL.nativeToken))) {
+      throw new Error(`bridge intermediate ${xKey ?? xOrigin} is not registered on chain ${destChainId}`)
+    }
     const xSymbol = symbolByAddress(xOrigin)
-    const xDest = destTokens?.[xSymbol]
-    if (!xDest) throw new Error(`bridge intermediate ${xSymbol} is not registered on chain ${destChainId}`)
-    const needsDestSwap = xSymbol !== symbolByAddress(draft.tokenOut)
-    const results = [...wrapResults]
+    const needsDestSwap = outNative || !isAddressEqual(getAddress(xDest), getAddress(outputToken))
+    const results: IAttestation[] = []
 
-    // leg 1: local swap tokenIn -> X on the origin. Floor it at the reviewed minOut ONLY when X is already the output
+    // leg 1: local swap the input -> X on the origin. Floor it at the reviewed minOut ONLY when X is already the output
     // asset (the 2-leg direct shape); a stablecoin intermediate is floored downstream at leg 3.
+    const leg1Needed = xSymbol !== inSymbol
     let bridgeAmount = draft.amountIn
-    if (xSymbol !== symbolByAddress(tokenIn)) {
+    if (leg1Needed) {
       const before = await fetchSignedBalance(ctx, fund, draft.chainId, xOrigin)
       const leg1 = await runFundSwapDraft(
-        { ...draft, tokenIn, tokenOut: xOrigin, destinationChainId: undefined, bridgeToken: undefined, minOut: needsDestSwap ? 0n : draft.minOut },
+        { ...draft, tokenOut: xOrigin, destinationChainId: undefined, bridgeToken: undefined, minOut: needsDestSwap ? 0n : draft.minOut },
         ctx
       )
       bridgeAmount = (await fetchSignedBalance(ctx, fund, draft.chainId, xOrigin)) - before
@@ -945,10 +938,12 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
       results.push(...leg1)
     }
 
-    // leg 2: same-asset X -> X bridge to the dest (recipient pinned) + dest recognize.
+    // leg 2: same-asset X -> X bridge to the dest (recipient pinned) + dest recognize. When leg 1 was skipped the
+    // ORIGINAL tokenIn carries through: a native input holds the marker balance and wraps in-dispatch (the fund does
+    // not hold the wrapped X the keyed lookup names).
     const beforeDest = needsDestSwap ? await fetchSignedBalance(ctx, fund, destChainId, xDest) : 0n
     const leg2 = await runFundSwapDraft(
-      { ...draft, tokenIn: xOrigin, tokenOut: xDest, amountIn: bridgeAmount, minOut: 0n, bridgeToken: undefined },
+      { ...draft, tokenIn: leg1Needed ? xOrigin : draft.tokenIn, tokenOut: xDest, amountIn: bridgeAmount, minOut: 0n, bridgeToken: undefined },
       ctx
     )
     results.push(...leg2)
@@ -958,16 +953,17 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
     // actually delivered, floored at the reviewed overall minOut (the cumulative-slippage backstop).
     const producedDest = (await fetchSignedBalance(ctx, fund, destChainId, xDest)) - beforeDest
     if (producedDest <= 0n) throw new Error('the bridge produced no output to swap on the destination')
+    // The unwrap leg is 1:1 and carries no DEX floor, so the reviewed overall minimum is enforced on the bridged
+    // amount itself.
+    if (
+      outNative &&
+      isAddressEqual(getAddress(xDest), getAddress(wrappedNativeAddressOf(destChainId as ChainId))) &&
+      producedDest < draft.minOut
+    ) {
+      throw new Error('the bridged amount fell below your reviewed minimum output; refresh and retry')
+    }
     const leg3 = await runFundSwapDraft(
-      {
-        ...draft,
-        chainId: destChainId,
-        tokenIn: xDest,
-        tokenOut: draft.tokenOut,
-        amountIn: producedDest,
-        destinationChainId: undefined,
-        bridgeToken: undefined
-      },
+      { ...draft, chainId: destChainId, tokenIn: xDest, tokenOut: draft.tokenOut, amountIn: producedDest, destinationChainId: undefined, bridgeToken: undefined },
       ctx
     )
     results.push(...leg3)
@@ -1000,7 +996,7 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
         outputToken,
         inputAmount: swapInputAmount,
         route,
-        crossToken: symbolByAddress(tokenIn) !== symbolByAddress(draft.tokenOut)
+        crossToken: symbolByAddress(inputToken) !== symbolByAddress(outputToken)
       })
   if (quote.outputAmount === 0n) throw new Error('swap route quoted zero output, adjust the amount and retry')
   if (belowReviewedFloor(draft.minOut, quote.outputAmount)) {
@@ -1026,14 +1022,18 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
     fromRoute: false
   }
   const fresh = await freshEnvelope(input, ctx, draft.chainId)
-  await screenSwapValue({
-    routeKind: fresh.route.kind,
-    inputToken: fresh.inputToken,
-    outputToken: fresh.outputToken,
-    inputAmount: fresh.inputAmount,
-    outputAmount: fresh.outputAmount,
-    acceptableRelayFee: fresh.acceptableRelayFee
-  })
+  await screenSwapValue(
+    {
+      routeKind: fresh.route.kind,
+      chainId: draft.chainId,
+      inputToken: fresh.inputToken,
+      outputToken: fresh.outputToken,
+      inputAmount: fresh.inputAmount,
+      outputAmount: fresh.outputAmount,
+      acceptableRelayFee: fresh.acceptableRelayFee
+    },
+    getRate
+  )
   const { intent, typedData } = attestFundSwapIntent(
     {
       chainId: resolveDispatchChainId(draft.chainId),
@@ -1045,7 +1045,7 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
     fresh
   )
   const swapped = await signAndSettle({ kind: 'fundSwap', input: fresh, intent }, typedData, fresh.inputToken, ctx)
-  if (isLocal) return [...wrapResults, ...(swapped === null ? [] : [swapped])]
+  if (isLocal) return swapped === null ? [] : [swapped]
 
   await awaitBridgeFill({
     client: publicClientForChain(destChainId),
@@ -1061,7 +1061,7 @@ async function runFundSwapDraft(draft: IFundSwapDraft, ctx: ExecContext): Promis
     destRouteBefore + quote.outputAmount,
     ctx
   )
-  const settledSteps: IAttestation[] = [...wrapResults]
+  const settledSteps: IAttestation[] = []
   if (swapped !== null) settledSteps.push(swapped)
   if (recognized !== null) settledSteps.push(recognized)
   return settledSteps

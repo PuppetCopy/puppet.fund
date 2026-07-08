@@ -297,7 +297,7 @@ export const $Main = (_config: IApp = {}) =>
           // derivation signature, deriving the same signer deterministically.
           let signer = wallet?.session?.signer
           if (wallet && signer === undefined) {
-            signer = (await recoverPuppetIdentity(wallet.address).catch(() => undefined))?.signer
+            signer = (await recoverPuppetIdentity(wallet.address))?.signer
           }
           let initial: ISubaccountState | null = null
           // Boot-time RPC discovery of the funds this wallet masters (indexer-free, chain-sourced, device-cached). It
@@ -308,19 +308,27 @@ export const $Main = (_config: IApp = {}) =>
             const params = { user: wallet.address, signer }
             const puppet = predictPuppetAccount(params)
             discoveryFold = op(
-              fromPromise(discoverMasteredFunds(puppet).catch(() => [] as IDiscoveredFund[])),
+              fromPromise(
+                discoverMasteredFunds(puppet).catch((err: unknown) => {
+                  console.error('fund discovery scan failed', err)
+                  return [] as IDiscoveredFund[]
+                })
+              ),
               map((discovered): IRootFold => ({ discovered }))
             )
             // PA existence + per-chain presence via cache-first eth_getCode instead of the indexer identity table: the
             // account address is deterministic from {user, signer} (already known) and isFund is always false for a PA,
-            // so the only facts the indexer added were "deployed?" and "on which chains" — both are getCode. A read that
-            // throws is excluded (unknown, not proven-absent); no code on any chain => never deployed, so stub.
+            // so the only facts the indexer added were "deployed?" and "on which chains" — both are getCode.
             const deployedChains = (
               await Promise.all(
                 VIEM_CHAINS.map(chain =>
                   viewCode(chain.id as ChainId, puppet)
                     .then(code => (code && code !== '0x' ? (chain.id as ChainId) : null))
-                    .catch(() => null)
+                    .catch((err: unknown) => {
+                      if (chain.id === HUB_CHAIN_ID) throw err
+                      console.error(`account presence read failed on chain ${chain.id}`, err)
+                      return null
+                    })
                 )
               )
             ).filter((cid): cid is ChainId => cid !== null)
@@ -408,8 +416,8 @@ export const $Main = (_config: IApp = {}) =>
           return { initial, folds }
           })()
           return op(
-            fromPromise(seeded),
-            switchMap(s => reduce(applyRootFold, s.initial, s.folds)),
+            fromPromise(seeded.catch((): null => null)),
+            switchMap(s => (s === null ? (empty as IStream<ISubaccountState | null>) : reduce(applyRootFold, s.initial, s.folds))),
             map(v => Promise.resolve(v)),
             start(seeded.then(s => s.initial))
           )
@@ -425,6 +433,12 @@ export const $Main = (_config: IApp = {}) =>
 
       const walletAccount: IStream<Address | null> = op(
         walletState,
+        map(q =>
+          q.catch((err: unknown): null => {
+            console.error('account state read failed', err)
+            return null
+          })
+        ),
         switchPromises,
         map(root => root?.account ?? null)
       )

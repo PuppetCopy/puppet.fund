@@ -120,6 +120,14 @@ export function screenGmxOperate(input: IScreenOperateInput): IGuardResult | nul
             })
           }
           sendWntTotal += amount
+        } else if (dec.functionName === 'claimFundingFees') {
+          const [, , receiver] = dec.args as readonly [Address[], Address[], Address]
+          if (!isAddressEqual(getAddress(receiver), getAddress(input.account))) {
+            reasons.push({
+              code: 'CLAIM_BAD_RECEIVER',
+              detail: `claimFundingFees receiver ${receiver} must be the fund ${input.account}`
+            })
+          }
         } else if (dec.functionName !== 'cancelOrder' && dec.functionName !== 'updateOrder') {
           reasons.push({ code: 'ROUTER_FN_FORBIDDEN', detail: `GMX router fn "${dec.functionName}" not allowed` })
         }
@@ -284,6 +292,41 @@ export function deriveGmxOutflow(callList: readonly IOperateCall[]): Array<{ tok
     if (isAddressEqual(getAddress(spender), GMX_TOKEN_SPENDER)) add(call.target, 0n)
   }
   return [...byToken.entries()].map(([token, amountOut]) => ({ token: getAddress(token), amountOut }))
+}
+
+export interface IGmxOrderSummary {
+  orderType: number
+  kind: 'increase' | 'decrease'
+  isLong: boolean | undefined
+  market: Address | undefined
+  collateralToken: Address | undefined
+  collateralDeltaAmount: bigint
+  sizeDeltaUsd: bigint
+}
+
+export function describeGmxOrders(callList: readonly IOperateCall[]): IGmxOrderSummary[] {
+  const orders: IGmxOrderSummary[] = []
+  for (const call of callList) {
+    const inner = unwrapRouterCalls(call.callData)
+    if (!inner) continue
+    for (const dec of inner) {
+      if (dec.functionName !== 'createOrder') continue
+      const p = dec.args[0] as Record<string, unknown>
+      const addresses = (p.addresses ?? {}) as Record<string, unknown>
+      const numbers = (p.numbers ?? {}) as Record<string, unknown>
+      const orderType = Number(p.orderType)
+      orders.push({
+        orderType,
+        kind: GMX_DECREASE_TYPES.has(orderType) ? 'decrease' : 'increase',
+        isLong: typeof p.isLong === 'boolean' ? p.isLong : undefined,
+        market: addresses.market as Address | undefined,
+        collateralToken: addresses.initialCollateralToken as Address | undefined,
+        collateralDeltaAmount: (numbers.initialCollateralDeltaAmount as bigint) ?? 0n,
+        sizeDeltaUsd: (numbers.sizeDeltaUsd as bigint) ?? 0n
+      })
+    }
+  }
+  return orders
 }
 
 export function assertOperateSignable(result: IGuardResult | null): void {

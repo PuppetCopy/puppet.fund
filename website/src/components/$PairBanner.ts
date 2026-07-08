@@ -1,7 +1,7 @@
 import { type IPairedSession, predictPuppetAccount, sealPairingPayload } from '@puppet/sdk/account'
 import type { IFund } from '@puppet/sdk/schema'
 import { type ISubaccountState, tokenRegistryRows } from '@puppet/sdk/state'
-import { combine, constant, empty, type IStream, map, nowWith, op, switchLatest, switchPromises } from 'aelea/stream'
+import { combine, constant, empty, type IStream, map, nowWith, switchLatest } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $node, $text, component, effectProp, type I$Node, type INode, nodeEvent, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
@@ -13,6 +13,7 @@ import context from '../io/context.js'
 import { matchmakerUrl } from '../io/matchmaker/index.js'
 import { subject } from '../utils/subject.js'
 import type { IConnectedWallet } from '../wallet/index.js'
+import { resolvedWalletPair } from '../wallet/pair.js'
 import { $fundProfile } from './$AccountProfile.js'
 import { $EnableSession } from './$enableSession.js'
 import { $WalletConnect } from './$WalletConnect.js'
@@ -37,7 +38,8 @@ export const $PairBanner = ({ walletQuery, walletState: rootStateQuery }: IPairB
   component(([selectFund, selectFundTether]: IBehavior<INode, Hex>, [_connect, connectTether]: IBehavior<unknown>) => {
     const pairParams = readPairParams()
     if (!pairParams) return [empty]
-    const walletState: IStream<ISubaccountState | null> = op(rootStateQuery, switchPromises, state())
+    const walletPair = resolvedWalletPair(walletQuery, rootStateQuery)
+    const walletState: IStream<ISubaccountState | null> = map(p => p.root, walletPair)
 
     const pairMessage = subject<string>()
 
@@ -129,7 +131,7 @@ export const $PairBanner = ({ walletQuery, walletState: rootStateQuery }: IPairB
           )
         },
         combine({
-          wallet: op(walletQuery, switchPromises, state()),
+          wallet: map(p => p.wallet, walletPair),
           root: walletState,
           sel: state(null, selectFund)
         })

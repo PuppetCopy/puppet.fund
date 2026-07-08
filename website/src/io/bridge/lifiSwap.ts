@@ -38,7 +38,10 @@ async function fetchLifiQuote(params: ILifiSwapParams): Promise<ILifiQuoteRespon
     fromChain: String(params.chainId),
     toChain: String(toChain),
     fromToken: providerToken(params.inputToken, params.chainId),
-    toToken: providerToken(params.outputToken, toChain),
+    // The OUTPUT passes through un-coerced: LI.FI accepts the EIP-7528 native marker (verified live) and delivers
+    // the actual gas coin — coercing it to wrapped made the DEX deliver the ERC-20 while a native-out intent's gate
+    // branch expected native, reverting on-chain. Inputs stay coerced (the account approves the wrapped ERC-20).
+    toToken: params.outputToken,
     fromAmount: params.inputAmount.toString(),
     fromAddress: params.fromAddress,
     toAddress: params.toAddress,

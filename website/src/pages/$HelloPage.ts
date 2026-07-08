@@ -84,6 +84,7 @@ import { DOCS_URL, GITHUB_REPO_URL, OPERATOR_GUIDE_URL } from '../const/links.js
 import context from '../io/context.js'
 import { canInstallApp, promptInstallApp } from '../utils/pwaInstall.js'
 import { bindSession, type IConnectedWallet, refreshWallet } from '../wallet/index.js'
+import { resolvedWalletPair } from '../wallet/pair.js'
 import { $body, $bulletList, $callout, $linkButton, $stageHeader, $terminal } from './$onboarding.js'
 
 const BUBBLE_SEED = '0x0000000000000000000000000000000000000001' as Address
@@ -142,8 +143,9 @@ export const $HelloPage = ({
       [selectTemplate, selectTemplateTether]: IBehavior<ITemplate>,
       [_connect, connectTether]: IBehavior<unknown>
     ) => {
-      const walletState: IStream<IConnectedWallet | null> = op(walletQuery, switchPromises, state())
-      const rootState: IStream<ISubaccountState | null> = op(rootStateQuery, switchPromises, state())
+      const walletPair = resolvedWalletPair(walletQuery, rootStateQuery)
+      const walletState: IStream<IConnectedWallet | null> = map(p => p.wallet, walletPair)
+      const rootState: IStream<ISubaccountState | null> = map(p => p.root, walletPair)
       const tokenRegistryValue = fromPromise(context.getTokenRegistry())
       const baseToken: IStream<Hex> = state(zeroAddress, selectBaseToken)
       const modeState: IStream<IMasterMode> = state('human', selectMode)
@@ -164,19 +166,6 @@ export const $HelloPage = ({
       const $createMasterStep: I$Node = switchLatest(
         map(
           (p: ISectionParams) => {
-            if (!p.wallet)
-              return $column(spacing.default, style({ alignItems: 'center', textAlign: 'center' }))(
-                $subhead('Connect your wallet'),
-                $node(style({ fontSize: text.sm, color: palette.foreground, lineHeight: '1.6', maxWidth: '420px' }))(
-                  $text('It secures a new smart wallet, recoverable any time. No seed phrase to manage.')
-                ),
-                $row(
-                  spacing.default,
-                  style({ justifyContent: 'center', width: '100%', flexWrap: 'wrap' })
-                )($WalletConnect()({ connect: connectTether() }))
-              )
-            const wallet = p.wallet
-            const signer: Address | null = wallet.session?.signer ?? null
             const homeTokens = p.registry.get(HUB_CHAIN_ID)
             const registeredIds = [...(homeTokens?.entries() ?? [])]
               .filter(([, info]) => info.token !== PROTOCOL.nativeToken)
@@ -200,66 +189,88 @@ export const $HelloPage = ({
                 $text('The currency your fund holds and settles in, pick the one your traders use.')
               )
             )
+            const baseInfo = homeTokens?.get(effectiveBid)
+            const $stubIdentity = (hint: string): I$Node =>
+              $column(spacing.small, style({ width: '100%', maxWidth: '520px', alignSelf: 'center' }))(
+                $node(style({ color: palette.foreground, fontSize: text.xs, alignSelf: 'center' }))(
+                  $text('Your fund is your public identity')
+                ),
+                $card2(
+                  style({
+                    borderRadius: '30px',
+                    padding: '12px 24px',
+                    border: `1px solid ${colorShade(palette.foreground, 25)}`
+                  })
+                )(
+                  $row(
+                    style({ alignItems: 'center', justifyContent: 'space-between', gap: '16px', width: '100%' })
+                  )(
+                    $node(style({ opacity: '0.6' }))(
+                      $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
+                        $node(
+                          style({
+                            width: '48px',
+                            height: '48px',
+                            borderRadius: '50%',
+                            flexShrink: '0',
+                            backgroundColor: colorShade(palette.foreground, 15),
+                            border: `1px dashed ${colorShade(palette.foreground, 40)}`
+                          })
+                        )(),
+                        $column(style({ minWidth: '0', gap: '2px' }))(
+                          $node(style({ fontWeight: '600', fontSize: text.lg, color: palette.foreground }))(
+                            $text('Your fund')
+                          ),
+                          baseInfo
+                            ? $node($tokenLabelFromSummary(getChainTokenDescription(HUB_CHAIN_ID, baseInfo.token)))
+                            : empty
+                        )
+                      )
+                    ),
+                    $node(
+                      style({
+                        color: palette.indeterminate,
+                        fontSize: text.xs,
+                        textAlign: 'right',
+                        flexShrink: '0'
+                      })
+                    )($text(hint))
+                  )
+                )
+              )
+            if (!p.wallet)
+              return $column(spacing.big)(
+                $baseTokenField,
+                $stubIdentity('Connect a wallet to see your fund'),
+                $column(spacing.default, style({ alignItems: 'center', textAlign: 'center' }))(
+                  $subhead('Connect your wallet'),
+                  $node(style({ fontSize: text.sm, color: palette.foreground, lineHeight: '1.6', maxWidth: '420px' }))(
+                    $text('It secures a new smart wallet, recoverable any time. No seed phrase to manage.')
+                  ),
+                  $row(
+                    spacing.default,
+                    style({ justifyContent: 'center', width: '100%', flexWrap: 'wrap' })
+                  )($WalletConnect()({ connect: connectTether() }))
+                )
+              )
+            const wallet = p.wallet
+            const signer: Address | null = wallet.session?.signer ?? null
 
             const $signSession = $EnableSession(wallet)({})
 
             if (signer === null) {
-              const baseInfo = homeTokens?.get(effectiveBid)
-              const $stubProfile = $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
-                $node(
-                  style({
-                    width: '48px',
-                    height: '48px',
-                    borderRadius: '50%',
-                    flexShrink: '0',
-                    backgroundColor: colorShade(palette.foreground, 15),
-                    border: `1px dashed ${colorShade(palette.foreground, 40)}`
-                  })
-                )(),
-                $column(style({ minWidth: '0', gap: '2px' }))(
-                  $node(style({ fontWeight: '600', fontSize: text.lg, color: palette.foreground }))($text('Your fund')),
-                  baseInfo ? $node($tokenLabelFromSummary(getChainTokenDescription(HUB_CHAIN_ID, baseInfo.token))) : empty
-                )
-              )
               return $column(spacing.big)(
-                $column(spacing.big)(
-                  $baseTokenField,
-                  $column(spacing.small, style({ width: '100%', alignItems: 'flex-start', color: palette.foreground }))(
-                    $row(spacing.small, style({ width: '100%', alignItems: 'center' }))(
-                      $labelDisplay(style({ width: '92px' }))($text('Session')),
-                      $signSession
-                    ),
-                    $node(style({ color: palette.foreground, fontSize: text.xs, lineHeight: '1.5' }))(
-                      $text('Sign a session to preview and create your fund.')
-                    )
+                $baseTokenField,
+                $column(spacing.small, style({ width: '100%', alignItems: 'flex-start', color: palette.foreground }))(
+                  $row(spacing.small, style({ width: '100%', alignItems: 'center' }))(
+                    $labelDisplay(style({ width: '92px' }))($text('Session')),
+                    $signSession
                   ),
-                  $column(spacing.small, style({ width: '100%', maxWidth: '520px', alignSelf: 'center' }))(
-                    $node(style({ color: palette.foreground, fontSize: text.xs, alignSelf: 'center' }))(
-                      $text('Your fund is your public identity')
-                    ),
-                    $card2(
-                      style({
-                        borderRadius: '30px',
-                        padding: '12px 24px',
-                        border: `1px solid ${colorShade(palette.foreground, 25)}`
-                      })
-                    )(
-                      $row(
-                        style({ alignItems: 'center', justifyContent: 'space-between', gap: '16px', width: '100%' })
-                      )(
-                        $node(style({ opacity: '0.6' }))($stubProfile),
-                        $node(
-                          style({
-                            color: palette.indeterminate,
-                            fontSize: text.xs,
-                            textAlign: 'right',
-                            flexShrink: '0'
-                          })
-                        )($text('Sign a session to see your fund'))
-                      )
-                    )
+                  $node(style({ color: palette.foreground, fontSize: text.xs, lineHeight: '1.5' }))(
+                    $text('One gasless signature opens your session and unlocks the fund preview. Nothing moves without rules you sign.')
                   )
-                )
+                ),
+                $stubIdentity('Sign a session to see your fund')
               )
             }
 
@@ -666,9 +677,9 @@ const $tradeStep = ({
   rootState: IStream<ISubaccountState | null>
 }): I$Node =>
   $column(spacing.big)(
-    $body('Link this fund to GMX (or any dApp) over WalletConnect.'),
+    $body('Link this fund to GMX over WalletConnect and trade there exactly as you do today.'),
     $callout(
-      'Your session key allows any operation on approved venues within the rules you set, but it can never move funds out of your fund.'
+      'Your session key can operate on approved venues within the rules you set. It can never withdraw: funds only ever leave to your own wallet.'
     ),
     switchLatest(
       map(
@@ -690,8 +701,8 @@ const $tradeStep = ({
     ),
     $tradeRow(
       $tradeExplain(
-        'Link a dApp',
-        'On the dApp choose WalletConnect, copy its connection link, then open this panel to paste it. Every trade executes under the rules you signed.'
+        'Link GMX',
+        'On app.gmx.io choose WalletConnect, copy its connection link, then open this panel to paste it. Every trade executes under the rules you signed.'
       ),
       $WalletLink({ walletState, rootState, size: 56 })({})
     )
@@ -711,7 +722,7 @@ const $humanNextStep = (): I$Node =>
       ],
       [
         'Attract outside capital',
-        'Once your record stands out, puppets fund you under rules they set, and you trade for the pool.'
+        'Once your record stands out, backers fund you under rules they set, and you trade for the pool.'
       ]
     ]),
     $row(spacing.default, style({ paddingTop: '8px' }))(
@@ -829,7 +840,7 @@ const $spinUpStep = (templateState: IStream<ITemplate>, $picker: I$Node): I$Node
 const $agentNextStep = (): I$Node =>
   $column(spacing.default)(
     $body(
-      'A funded fund, an agent trading within the rules you signed, every action co-signed by the protocol. From here, performance is the work.'
+      'A live fund, an agent trading within the rules you signed, and every action checked by the protocol before it executes. From here, performance is the work.'
     ),
     $bulletList([
       [

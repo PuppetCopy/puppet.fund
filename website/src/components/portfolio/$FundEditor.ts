@@ -52,7 +52,7 @@ import {
 } from 'aelea/stream'
 import { type IBehavior, multicast, state } from 'aelea/stream-extended'
 import { $element, $node, $text, attr, component, type I$Node, type INode, nodeEvent, style, styleBehavior } from 'aelea/ui'
-import { $column, $defaultPopoverContentContainer, $Popover, $row, spacing } from 'aelea/ui-components'
+import { $column, $Popover, $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { type Address, formatUnits, getAddress, type Hex, isAddressEqual } from 'viem'
 import {
@@ -73,7 +73,7 @@ import { uiStorage } from '@/ui-storage'
 import { depositSourceKey, type IDepositSource } from '../../app/localStoreSchema.js'
 import { routeSchema } from '../../app/routeSchema.js'
 import { chainFor } from '../../common/$contract.js'
-import type { ISwapQuote, ISwapRequest } from '../../io/bridge/swapQuote.js'
+import { type ISwapQuote, type ISwapRequest, isExecutableSwapRoute } from '../../io/bridge/swapQuote.js'
 import { fetchTokenBalances } from '../../io/chain/balances.js'
 import context, { relayFeeFor } from '../../io/context.js'
 import { fetchFundAccountMetricList, fetchPuppetUsers } from '../../io/datastore/query.js'
@@ -84,10 +84,11 @@ import { $fundProfile, $profileDisplay } from '../$AccountProfile.js'
 import { $FulfillEditor } from './$FulfillEditor.js'
 import { $fundAllocations, $fundBalances, $fundPositions } from './$fundHoldings.js'
 import { $SwapProviderFeeEditor, type ISelectedRoute } from './$SwapProviderFeeEditor.js'
-import { $tokenSourcePicker, decorateOptionList, type ITokenInputOption } from './$tokenOption.js'
+import { $TokenSelectFlow, decorateOptionList, type ITokenInputOption } from './$tokenOption.js'
 import type { IAllocateDraft, IClaimDraft, IClaimRouteDraft, IFundSwapDraft, IRecognizeFundDraft, IRedeemDraft, ISellDraft } from './draft.js'
 import {
   $editorPercentSlider,
+  $editorPopoverContentContainer,
   $maxAmountButton,
   $statRow,
   $surplusAlertSlot,
@@ -136,6 +137,7 @@ export const $FundEditor = ({
       [changeSwapDraft, changeSwapDraftTether]: IBehavior<IFundSwapDraft>,
       [changeClaimDraft, changeClaimDraftTether]: IBehavior<PointerEvent, IClaimRouteDraft>,
       [selectOption, selectOptionTether]: IBehavior<ITokenInputOption>,
+      [selectingSource, selectingSourceTether]: IBehavior<boolean>,
       [selectView, selectViewTether]: IBehavior<IFundView>,
       [selectedRoute, selectedRouteTether]: IBehavior<ISelectedRoute>
     ) => {
@@ -357,9 +359,9 @@ export const $FundEditor = ({
           const srcId = p.sel.isNative ? wrappedNativeAddressOf(p.sel.chainId as ChainId) : p.sel.token
           const token = tokenInfoFor(tokenRegistry, p.sel.chainId as ChainId, srcId).token
           try {
-            const newLocal = await fetchDepositRouteBalance(client, token, p.acc.signer)
-            return newLocal
-          } catch {
+            return await fetchDepositRouteBalance(client, token, p.acc.signer)
+          } catch (err) {
+            console.error('origin surplus read failed', err)
             return 0n
           }
         }),
@@ -442,7 +444,8 @@ export const $FundEditor = ({
           const baseToken = tokenInfoFor(tokenRegistry, HUB_CHAIN_ID, baseId).token
           try {
             return await fetchDepositRouteBalance(homePublicClient, baseToken, p.acc.signer)
-          } catch {
+          } catch (err) {
+            console.error('hub surplus read failed', err)
             return 0n
           }
         }),
@@ -594,7 +597,7 @@ export const $FundEditor = ({
                   walletBalance,
                   spender: DEPLOYMENTS[`Deposit:${HUB_CHAIN_ID}`].address
                 }
-        if ((inputToken === bid && srcChain === HUB_CHAIN_ID) || quote === null || quote.route.kind === 'composed') {
+        if ((inputToken === bid && srcChain === HUB_CHAIN_ID) || quote === null || !isExecutableSwapRoute(quote.route)) {
           return { wallet, swap: null }
         }
         const swap: ISwapInput = {
@@ -1103,9 +1106,6 @@ export const $FundEditor = ({
               )($text(readableAddress(surplusRoute)))
           })
 
-          const $picker = $tokenSourcePicker({ hideBalances, value: selectedOption, optionList })({
-            select: selectOptionTether()
-          })
 
           const projectionValue = start(
             {
@@ -1146,8 +1146,11 @@ export const $FundEditor = ({
             )
           }, projectionValue)
 
-          const $editor = $column(spacing.default, style({ minWidth: '380px' }))(
-            $row(
+          const $topSection = $TokenSelectFlow({
+            hideBalances,
+            value: selectedOption,
+            optionList,
+            $container: $row(
               style({
                 padding: '18px 28px',
                 borderRadius: '22px 22px 0 0',
@@ -1156,23 +1159,35 @@ export const $FundEditor = ({
                 gap: '12px',
                 alignItems: 'center'
               })
-            )(
-              $element('label')(
-                style({
-                  display: 'flex',
-                  flexDirection: 'column',
-                  cursor: 'text',
-                  flex: '1',
-                  minWidth: '0',
-                  gap: '4px'
-                })
-              )(
-                $node(style({ color: palette.foreground, fontSize: text.sm, fontWeight: '500' }))($text('Fund')),
-                $row(spacing.small, style({ alignItems: 'center' }))($field, $maxButton),
-                $alertSlot
-              ),
-              $picker
             ),
+            $inputContent: $anchor =>
+              $node(style({ display: 'contents' }))(
+                $element('label')(
+                  style({
+                    display: 'flex',
+                    flexDirection: 'column',
+                    cursor: 'text',
+                    flex: '1',
+                    minWidth: '0',
+                    gap: '4px'
+                  })
+                )(
+                  $node(style({ color: palette.foreground, fontSize: text.sm, fontWeight: '500' }))($text('Fund')),
+                  $row(spacing.small, style({ alignItems: 'center' }))($field, $maxButton),
+                  $alertSlot
+                ),
+                $anchor
+              )
+          })({ select: selectOptionTether(), selecting: selectingSourceTether() })
+
+          const $editor = $column(spacing.default, style({ minWidth: '380px' }))(
+            $topSection,
+            // The selection list owns the WHOLE popover: everything below the top section hides while selecting.
+            // Visibility only, never a mount toggle — the fee editor's route stream is tethered in here.
+            $node(
+              style({ display: 'contents' }),
+              styleBehavior(map(s => (s ? { display: 'none' } : { display: 'contents' }), selectingSource))
+            )(
             $column(spacing.small)(
               $node(style({ margin: '0 -26px', display: 'flex' }))($percentSlider),
               $puppetRows,
@@ -1197,6 +1212,7 @@ export const $FundEditor = ({
               )($swapResolution),
               $node(style({ flex: 1 }))(),
               $ButtonPrimaryOutline({ disabled, $content: $text('Save') })({ click: clickSaveTether() })
+            )
             )
           )
 
@@ -1304,7 +1320,7 @@ export const $FundEditor = ({
 
           return $Popover({
             $container: $node(style({ flex: 1, display: 'flex' })),
-            $contentContainer: $defaultPopoverContentContainer(style({ width: '450px' })),
+            $contentContainer: $editorPopoverContentContainer(style({ width: '450px' })),
             dismiss: merge(changeDraft, changeRedeemDraft, changeFulfillDraft),
             $target: $column(spacing.big, style({ padding: '4px', borderRadius: '4px', flex: 1 }))(
               $fundHeader,

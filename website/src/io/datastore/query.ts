@@ -2,7 +2,7 @@ import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
 import { CONTRACT_EVENT_MAP } from '@puppet/contracts/events'
 import type { IIAccount__Call, IIAccount__SignTransfer } from '@puppet/contracts/types'
 import { decodeRuleBody, type IAllocationPuppet } from '@puppet/sdk/attestation'
-import { BALANCE_TIMELINE_BUCKETS, type IntervalTime, USD_DECIMALS } from '@puppet/sdk/const'
+import { BALANCE_TIMELINE_BUCKETS, type ChainId, type IntervalTime, USD_DECIMALS } from '@puppet/sdk/const'
 import { formatFixed, getMasterMatchingKey, getUnixTimestamp, resampleTimeSeries } from '@puppet/sdk/core'
 import {
   fundLatestMetricTable,
@@ -12,7 +12,7 @@ import {
   type IFund,
   type IFundLatestMetric
 } from '@puppet/sdk/schema'
-import type { ISubaccountState, ITokenRegistryMap } from '@puppet/sdk/state'
+import { type ISubaccountState, type ITokenRegistryMap, wrappedNativeAddressOf } from '@puppet/sdk/state'
 import { type Address, decodeAbiParameters, getAddress, type Hex } from 'viem'
 import context, { getPrice } from '../context.js'
 import { readSignedBalance } from '../onchain/account.js'
@@ -136,7 +136,7 @@ export async function fetchMasterSubscribers(fund: Address, baseToken: Address):
   // holder — a full readAccountBalances sweep here cost chains × tokens view calls per subscriber for one used row.
   const balanceEntries = await Promise.all(
     holders.map(async holder => {
-      const signed = await readSignedBalance(holder, HUB_CHAIN_ID, baseToken).catch(() => 0n)
+      const signed = await readSignedBalance(holder, HUB_CHAIN_ID, baseToken)
       return [holder, signed] as const
     })
   )
@@ -236,7 +236,7 @@ const FEE_BY_HASH = new Map<Hex, (typeof FEE_EVENTS)[number]>(FEE_EVENTS.map(ev 
 // a single account=fund query covers them. We decode each event's `data` for its detail (call/transfer legs, allocated
 // amounts, relay fee); unknown/label-only events fall through to a plain row.
 export async function fetchFundActivity(fund: Address, limit = 40): Promise<IFundAction[]> {
-  const rawList = await fetchRawActivity(getAddress(fund), limit).catch(() => [] as IRawEvent[])
+  const rawList = await fetchRawActivity(getAddress(fund), limit)
 
   const base = (e: IRawEvent) => ({
     blockTimestamp: e.blockTimestamp,
@@ -271,7 +271,8 @@ export async function fetchFundActivity(fund: Address, limit = 40): Promise<IFun
         resultCount: result.length,
         callList: intent.callList,
         transferList: intent.transferList,
-        relayFee: actualRelayFee
+        relayFee: actualRelayFee,
+        feeToken: wrappedNativeAddressOf(Number(e.chainId) as ChainId)
       })
     } else if (e.method === CONTRACT_EVENT_MAP.Allocate.Allocate.hash) {
       const [intent, actualRelayFee, , , puppetSharesPostList, totalAllocated] = decodeAbiParameters(

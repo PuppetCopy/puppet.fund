@@ -72,7 +72,7 @@ async function readChainBalances(
     // lagging-node state the pin exists to reject. The fallback only serves the unpinned path (no Multicall3 deploy).
     if (minBlock !== undefined) throw new Error(`pinned balance read failed for chain ${chainId} at block ${minBlock}`)
     const fallback = await Promise.all(
-      tokenList.map(async token => row(token, await readSignedBalance(acct, chainId, token, refresh).catch(() => 0n)))
+      tokenList.map(async token => row(token, await readSignedBalance(acct, chainId, token, refresh)))
     )
     return fallback.filter((r): r is IAccountBalanceRow => r !== null)
   }

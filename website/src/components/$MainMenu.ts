@@ -66,6 +66,7 @@ import context from '../io/context.js'
 import { liveTotalUsdValue } from '../io/totalValue.js'
 import { $separator2 } from '../pages/common.js'
 import { type connectWallet, type IConnectedWallet, walletQuery } from '../wallet/index.js'
+import { resolvedWalletPair } from '../wallet/pair.js'
 import { $accountLabel } from './$AccountProfile.js'
 import { $ServicesConnectivity } from './$ServicesConnectivity.js'
 import { $ThemePicker } from './$ThemePicker.js'
@@ -92,8 +93,8 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
       // operator chain. Without it, button clicks don't fire connect. Value is unused here.
       [_connect, connectTether]: IBehavior<ReturnType<typeof connectWallet>>
     ) => {
-      // The resolved root for compute paths (totals, wallet-link); display paths read the promise stream directly.
-      const rootState: IStream<ISubaccountState | null> = op(walletState, switchPromises, state())
+      const walletPair = resolvedWalletPair(walletQuery, walletState)
+      const rootState: IStream<ISubaccountState | null> = map(p => p.root, walletPair)
       // Trigger handle for returning focus when Escape closes the extra menu.
       let extraTriggerEl: HTMLElement | null = null
       // Open/closed stream: true on trigger click, false on the popover's dismiss event.
@@ -354,7 +355,7 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
                 )
               }, walletQuery)
             }),
-            $WalletLink({ walletState: op(walletQuery, switchPromises, state()), rootState })({})
+            $WalletLink({ walletState: map(p => p.wallet, walletPair), rootState })({})
           ),
 
           $row(spacing.big, style({ flex: 1, placeContent: 'flex-end', alignItems: 'center' }))(

@@ -168,16 +168,27 @@ contract FundGate is BaseGate, EIP712 {
 
         if (_intent.fromRoute) {
             address _route = accountModule.predictRoute(_fundAddr);
-            uint _routeBalance = IERC20(_inputToken).balanceOf(_route);
+            // A route can hold NATIVE (anyone can send the gas coin to the deposit address): wrap it INSIDE the route's
+            // own leg batch (WNT.deposit{value} first), then run the sandwich on the wrapped twin — the mirror of the
+            // signed-balance branch below.
+            bool _nativeIn = _inputToken == NATIVE_TOKEN;
+            address _swapIn = _nativeIn ? address(registerModule.getWnt()) : _inputToken;
+            uint _routeBalance = _nativeIn ? _route.balance : IERC20(_inputToken).balanceOf(_route);
             if (_routeBalance < _swap.inputAmount) {
                 revert Error.Balance__InsufficientBalance(_routeBalance, _swap.inputAmount);
             }
 
+            IAccount.Call memory _wrap = IAccount.Call({
+                target: _swapIn,
+                value: _swap.inputAmount,
+                gasLimit: transferGasLimit,
+                callData: abi.encodeWithSignature("deposit()")
+            });
             IAccount.Call memory _approve =
-                CallLib.approve(_inputToken, _swap.provider, _swap.inputAmount - _actualRelayFee, transferGasLimit);
+                CallLib.approve(_swapIn, _swap.provider, _swap.inputAmount - _actualRelayFee, transferGasLimit);
             IAccount.Call memory _dex =
                 IAccount.Call({target: _swap.provider, value: 0, gasLimit: 0, callData: _swap.providerCallData});
-            IAccount.Call memory _reset = CallLib.approve(_inputToken, _swap.provider, 0, transferGasLimit);
+            IAccount.Call memory _reset = CallLib.approve(_swapIn, _swap.provider, 0, transferGasLimit);
 
             IAccount.Call[] memory _legs;
             IAccount.SignTransfer[] memory _transferList;
@@ -185,18 +196,26 @@ contract FundGate is BaseGate, EIP712 {
                 IntentLib.verifyTokenAndCap(registerModule, _swap.outputToken, _swap.outputAmount);
                 address _outputToken = _swap.outputToken;
                 IAccount.Call memory _forward = CallLib.payout(_outputToken, _fundAddr, _swap.outputAmount, transferGasLimit);
-                _legs = _actualRelayFee > 0
-                    ? CallLib.compose(
-                        _approve, _dex, _reset, CallLib.fee(_inputToken, feeReceiver, _actualRelayFee, transferGasLimit), _forward
-                    )
-                    : CallLib.compose(_approve, _dex, _reset, _forward);
+                if (_actualRelayFee > 0) {
+                    IAccount.Call memory _fee = CallLib.fee(_swapIn, feeReceiver, _actualRelayFee, transferGasLimit);
+                    _legs = _nativeIn
+                        ? CallLib.compose(_wrap, _approve, _dex, _reset, _fee, _forward)
+                        : CallLib.compose(_approve, _dex, _reset, _fee, _forward);
+                } else {
+                    _legs = _nativeIn
+                        ? CallLib.compose(_wrap, _approve, _dex, _reset, _forward)
+                        : CallLib.compose(_approve, _dex, _reset, _forward);
+                }
                 _transferList = SignLib.transfer(_outputToken, _swap.outputAmount, 0);
             } else {
-                _legs = _actualRelayFee > 0
-                    ? CallLib.compose(
-                        _approve, _dex, _reset, CallLib.fee(_inputToken, feeReceiver, _actualRelayFee, transferGasLimit)
-                    )
-                    : CallLib.compose(_approve, _dex, _reset);
+                if (_actualRelayFee > 0) {
+                    IAccount.Call memory _fee = CallLib.fee(_swapIn, feeReceiver, _actualRelayFee, transferGasLimit);
+                    _legs = _nativeIn
+                        ? CallLib.compose(_wrap, _approve, _dex, _reset, _fee)
+                        : CallLib.compose(_approve, _dex, _reset, _fee);
+                } else {
+                    _legs = _nativeIn ? CallLib.compose(_wrap, _approve, _dex, _reset) : CallLib.compose(_approve, _dex, _reset);
+                }
                 _transferList = SignLib.none();
             }
 
@@ -211,16 +230,35 @@ contract FundGate is BaseGate, EIP712 {
                 _intent.nonce
             );
         } else {
+            // Native input wraps INSIDE the same dispatch: WNT.deposit{value: inputAmount} precedes the sandwich, the
+            // approvals/fee run on the wrapped twin, and the signed leg still debits the NATIVE balance (1:1 with the
+            // wrap), so a native swap is ONE action instead of a wrap step followed by a swap step.
+            bool _nativeIn = _inputToken == NATIVE_TOKEN;
+            address _swapIn = _nativeIn ? address(registerModule.getWnt()) : _inputToken;
             IAccount.Call memory _approve =
-                CallLib.approve(_inputToken, _swap.provider, _swap.inputAmount - _actualRelayFee, transferGasLimit);
+                CallLib.approve(_swapIn, _swap.provider, _swap.inputAmount - _actualRelayFee, transferGasLimit);
             IAccount.Call memory _dex =
                 IAccount.Call({target: _swap.provider, value: 0, gasLimit: 0, callData: _swap.providerCallData});
-            IAccount.Call memory _reset = CallLib.approve(_inputToken, _swap.provider, 0, transferGasLimit);
-            IAccount.Call[] memory _legs = _actualRelayFee > 0
-                ? CallLib.compose(
-                    _approve, _dex, _reset, CallLib.fee(_inputToken, feeReceiver, _actualRelayFee, transferGasLimit)
-                )
-                : CallLib.compose(_approve, _dex, _reset);
+            IAccount.Call memory _reset = CallLib.approve(_swapIn, _swap.provider, 0, transferGasLimit);
+            IAccount.Call memory _last = _actualRelayFee > 0
+                ? CallLib.fee(_swapIn, feeReceiver, _actualRelayFee, transferGasLimit)
+                : _reset;
+            IAccount.Call[] memory _legs;
+            if (_nativeIn) {
+                IAccount.Call memory _wrap = IAccount.Call({
+                    target: _swapIn,
+                    value: _swap.inputAmount,
+                    gasLimit: transferGasLimit,
+                    callData: abi.encodeWithSignature("deposit()")
+                });
+                _legs = _actualRelayFee > 0
+                    ? CallLib.compose(_wrap, _approve, _dex, _reset, _last)
+                    : CallLib.compose(_wrap, _approve, _dex, _reset);
+            } else {
+                _legs = _actualRelayFee > 0
+                    ? CallLib.compose(_approve, _dex, _reset, _last)
+                    : CallLib.compose(_approve, _dex, _reset);
+            }
 
             IAccount.SignTransfer[] memory _transferList;
             if (_local) {

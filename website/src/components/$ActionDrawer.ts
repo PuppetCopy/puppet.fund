@@ -1,4 +1,4 @@
-import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
+import { HUB_CHAIN_ID, PRECISION, PROTOCOL } from '@puppet/contracts/const'
 import {
   predictFundAccount,
   predictShareToken,
@@ -24,6 +24,7 @@ import {
   type ISubaccountState,
   type ITokenRegistryMap,
   MIN_TTL_MS,
+  nativeSymbolOf,
   type RelayFeeMap,
   stubSubaccountState,
   symbolByAddress,
@@ -73,6 +74,8 @@ import {
   $defaultTooltipDropContainer,
   $icon,
   $info,
+  $inlineSpinner,
+  $intermediatePromise,
   $labeledValue,
   $popoverCaret,
   $Tooltip,
@@ -98,6 +101,7 @@ import {
   type ISessionKey,
   walletQuery
 } from '../wallet/index.js'
+import { resolvedWalletPair } from '../wallet/pair.js'
 import { $profileDisplay } from './$AccountProfile.js'
 import { $enableSessionDisclaimer } from './$enableSession.js'
 import { $TokenBalanceEditor, type IEditorDraft } from './portfolio/$TokenBalanceEditor.js'
@@ -210,8 +214,9 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>
     ) => {
       const tokenRegistryValue = fromPromise(context.getTokenRegistry())
-      const walletState: IStream<IConnectedWallet | null> = op(walletQuery, switchPromises, state())
-      const rootState: IStream<ISubaccountState | null> = op(rootStateQuery, switchPromises, state())
+      const walletPair = resolvedWalletPair(walletQuery, rootStateQuery)
+      const walletState: IStream<IConnectedWallet | null> = map(p => p.wallet, walletPair)
+      const rootState: IStream<ISubaccountState | null> = map(p => p.root, walletPair)
 
       // Attestation rows captured from each runDraft return value, fed up to
       // the parent so it can fold them into account state without a datastore round-trip.
@@ -282,11 +287,12 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
 
       const submitEnv: IStream<SubmitEnv | null> = op(
         combine({
-          wallet: walletState,
-          planned: plannedSteps,
-          root: rootState
+          pair: walletPair,
+          planned: plannedSteps
         }),
-        map((p): SubmitEnv | null => (p.wallet ? (p as SubmitEnv) : null)),
+        map((p): SubmitEnv | null =>
+          p.pair.wallet ? { wallet: p.pair.wallet, root: p.pair.root, planned: p.planned } : null
+        ),
         state(null)
       )
 
@@ -539,8 +545,10 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
         // distinct base tokens out into priceFor streams (positional, by index).
         return switchMap((registry: ITokenRegistryMap) => {
           const tokenPriceStreams = tokens.map(t => {
+            // A chain-scoped token (a fund-swap leg on a spoke chain) has no hub-registry row; price it by its own
+            // address — getPrice resolves the symbol itself. Without this, spoke-chain fund swaps sum to $0 -> '-'.
             const info = registry.get(HUB_CHAIN_ID)?.get(getAddress(t))
-            return info ? priceFor(getAddress(info.token)) : just<bigint | null>(null)
+            return priceFor(getAddress(info ? info.token : t))
           })
           return op(
             combineMap(
@@ -834,7 +842,12 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
       const renderToken = (registry: ITokenRegistryMap, token: Address, chainId: number = HUB_CHAIN_ID) => {
         const homeToken = tokenInfoFor(registry, chainId as ChainId, token).token
         const desc = getChainTokenDescription(chainId as ChainId, homeToken)
-        return { symbol: symbolByAddress(token), desc }
+        // The native marker shares one address on every chain, so its symbol is per-chain (MON on Monad, ETH
+        // elsewhere) — the address-keyed symbolByAddress collapses it to 'ETH' and mislabels a MON swap.
+        const symbol = isAddressEqual(getAddress(token), getAddress(PROTOCOL.nativeToken))
+          ? nativeSymbolOf(chainId as ChainId)
+          : symbolByAddress(token)
+        return { symbol, desc }
       }
 
       const $accountProfile = (address: Address, fundName?: Hex, avatarSeed?: Address): I$Node =>
@@ -871,15 +884,15 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
                 () => fundStateCache.delete(key)
               )
             }
-            return switchLatest(
-              map(
-                fund =>
-                  fund
-                    ? $accountProfile(fundAccount, fund.name as Hex, getAddress(fund.shareToken as Address))
-                    : $addressOnChain(fundAccount, HUB_CHAIN_ID),
-                op(just(fetched), switchPromises, start(undefined))
-              )
-            )
+            return $intermediatePromise({
+              $loader: $inlineSpinner,
+              $display: map(async () => {
+                const fund = await fetched
+                return fund
+                  ? $accountProfile(fundAccount, fund.name as Hex, getAddress(fund.shareToken as Address))
+                  : $addressOnChain(fundAccount, HUB_CHAIN_ID)
+              }, just(null))
+            })
           }, rootState)
         )
 

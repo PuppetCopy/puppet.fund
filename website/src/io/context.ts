@@ -73,7 +73,7 @@ export const getPrice = async (token: Address, freshness = 10000): Promise<IPric
 
 const getTokenPerNativeToken = async (chainId: number, token: Address): Promise<bigint> => {
   const nativeSymbol = nativeSymbolOf(chainId as ChainId)
-  const symbol = priceSymbolOf(token)
+  const symbol = isNativeToken(token) ? nativeSymbol : symbolByAddress(token)
   if (symbol === nativeSymbol) return NATIVE_PRECISION
   const [native, tok] = await Promise.all([getRate(nativeSymbol, USD_PROXY), getRate(symbol, USD_PROXY)])
   if (native.token0 === 0n || tok.token0 === 0n) throw new Error(`no price for fee token ${token}`)

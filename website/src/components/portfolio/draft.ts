@@ -48,7 +48,8 @@ export const STEP_DESCRIPTION: Record<StepKind, string> = {
   walletTransfer: 'Sends funds from your wallet to your account. The next step confirms them into your balance.',
   swap:
     'Converts and moves funds to your account on the destination chain, usually within seconds. Your funds stay in transit and settle on-chain even if you wait. If it fails, they reappear in the deposit editor to recover.',
-  recognize: 'Confirms the tokens you just sent so they show up in your balance.',
+  recognize:
+    'Confirms the tokens you just sent so they show up in your balance. On a chain your account has not touched yet, this same step also opens the account.',
   withdraw:
     'Moves funds from your account to your wallet, optionally bridging to another chain. Cross-chain transfers usually settle within seconds and stay in transit on-chain even if you wait.',
   mandate:
@@ -159,7 +160,7 @@ export interface IFundSwapDraft extends IDraftBase {
   amountIn: bigint
   minOut: bigint
   // The composed route's chosen bridge asset (on the ORIGIN chain), baked by the editor so the runner executes the same
-  // intermediate the quote priced. Absent for direct (non-composed) swaps.
+  // intermediate the quote priced. Absent for direct (local or same-asset) swaps.
   bridgeToken?: Address
 }
 

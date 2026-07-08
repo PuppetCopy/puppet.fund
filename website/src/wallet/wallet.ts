@@ -44,7 +44,12 @@ export const wagmi: Config = createConfig({
 // with reconnection"), so a reload reports `disconnected` until reconnect() re-establishes
 // the live connector. Fire it once at startup; consumers re-read via the `connection` stream
 // (watchConnection emits the reconnecting → connected transition).
-export const walletReconnected: Promise<void> = reconnect(wagmi).then(() => undefined)
+export const walletReconnected: Promise<void> = reconnect(wagmi).then(
+  () => undefined,
+  (err: unknown) => {
+    console.error('wallet reconnect failed', err)
+  }
+)
 
 export const publicClientMap: Record<number, PublicClient> = Object.fromEntries(
   VIEM_CHAINS.flatMap(chain => {

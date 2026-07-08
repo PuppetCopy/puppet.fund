@@ -84,7 +84,10 @@ export const $SubscribeEditor = (config: I$SubscribeEditor) =>
       const activeRule = op(
         userMatchingRuleQuery,
         map(async listQuery => {
-          const list = await listQuery.catch(() => [] as ISubscribeRule[])
+          const list = await listQuery.catch((err: unknown) => {
+            console.error('subscription rules read failed', err)
+            return [] as ISubscribeRule[]
+          })
           return list.find(mr => getMasterMatchingKey(mr.baseToken, mr.master) === masterMatchingKey)
         }),
         awaitPromises

@@ -14,6 +14,7 @@ import {
 import {
   combine,
   empty,
+  filter,
   fromPromise,
   type IStream,
   just,
@@ -24,13 +25,25 @@ import {
   switchLatest,
   switchPromises,
 } from 'aelea/stream'
-import { type IBehavior, state } from 'aelea/stream-extended'
+import { type IBehavior, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, style } from 'aelea/ui'
 import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { getAddress, type Hex, isAddressEqual } from 'viem'
 import type { Address } from 'viem/accounts'
-import { $arrowRight, $icon, $infoLabel, $infoTooltip, $navLink, $puppeteer, $spinner, text } from '@/ui-components'
+import {
+  $arrowRight,
+  $errorCard,
+  $icon,
+  $infoLabel,
+  $infoTooltip,
+  $inlineSpinner,
+  $intermediatePromise,
+  $navLink,
+  $puppeteer,
+  $spinner,
+  text
+} from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
 import { $puppetLogo } from '../common/$icons.js'
 import { $heading3 } from '../common/$text.js'
@@ -190,7 +203,17 @@ export const $Portfolio = ({
           .then(reg => [...(reg.get(HUB_CHAIN_ID)?.values() ?? [])].map(i => i.token).filter(t => t !== PROTOCOL.nativeToken))
       )
       const walletState: IStream<IConnectedWallet | null> = op(walletQuery, switchPromises, state())
-      const rootState: IStream<ISubaccountState | null> = op(rootStateQuery, switchPromises, state())
+      const rootState: IStream<ISubaccountState | null> = op(
+        rootStateQuery,
+        map(q =>
+          q.catch((err: unknown): null => {
+            console.error('account state read failed', err)
+            return null
+          })
+        ),
+        switchPromises,
+        state()
+      )
 
       interface IPortfolioSectionParams {
         root: ISubaccountState | null
@@ -199,6 +222,7 @@ export const $Portfolio = ({
         rules: ISubscribeRule[]
         draftRules: ISubscribeRule[]
       }
+      type ISectionState = { kind: 'params'; params: IPortfolioSectionParams } | { kind: 'error'; error: unknown }
       const heldKey = (root: ISubaccountState | null): string =>
         root
           ? [...root.balances.entries()]
@@ -211,18 +235,30 @@ export const $Portfolio = ({
         [...new Set(rules.filter(r => r.allocationRate > 0n).map(r => r.baseToken))].sort().join(',')
       const tokenRegistryValue = fromPromise(context.getTokenRegistry())
 
+      const sectionQuery: IStream<Promise<IPortfolioSectionParams>> = op(
+        combine({
+          wallet: walletQuery,
+          root: rootStateQuery,
+          rules: userMatchingRuleQuery,
+          draftRules: draftMatchingRuleList
+        }),
+        map(async p => {
+          const [wallet, root, rules, registry] = await Promise.all([
+            p.wallet,
+            p.root,
+            p.rules,
+            context.getTokenRegistry()
+          ])
+          return { wallet, root, rules, registry, draftRules: p.draftRules }
+        })
+      )
+
       const balanceTimelineQuery: IStream<Promise<ITimelinePoint[]>> = op(
-        combine({ tf: activityTimeframe, root: rootState, registry: tokenRegistryValue }),
-        skipRepeatsWith(
-          (a, b) =>
-            a.tf === b.tf &&
-            a.root?.account === b.root?.account &&
-            a.root?.lastTransactionHash === b.root?.lastTransactionHash &&
-            (a.root?.funds.length ?? 0) === (b.root?.funds.length ?? 0) &&
-            (a.root?.positions.length ?? 0) === (b.root?.positions.length ?? 0) &&
-            heldKey(a.root) === heldKey(b.root)
-        ),
-        map(p => fetchPuppetBalanceTimeline(p.registry, p.root ? [p.root] : [], p.tf))
+        combine({ tf: activityTimeframe, root: rootStateQuery, registry: tokenRegistryValue }),
+        map(async p => {
+          const root = await p.root
+          return fetchPuppetBalanceTimeline(p.registry, root ? [root] : [], p.tf)
+        })
       )
 
       const liveUsd = liveTotalUsdValue(rootState, tokenRegistryValue)
@@ -238,15 +274,15 @@ export const $Portfolio = ({
       const $lead = $row(style({ flex: 1 }))()
 
       const $fundProfileByAddress = (fundAddress: Address): I$Node =>
-        switchLatest(
-          map(
-            fund =>
-              fund
-                ? $fundProfile({ master: fund.master, baseToken: fund.baseToken, name: fund.name }, 36, fund)
-                : $profileDisplay({ address: fundAddress, profileSize: 36 }),
-            op(just(fetchMasterPoolState(fundAddress)), switchPromises, start(undefined))
-          )
-        )
+        $intermediatePromise({
+          $loader: $inlineSpinner,
+          $display: map(async () => {
+            const fund = await fetchMasterPoolState(fundAddress)
+            return fund
+              ? $fundProfile({ master: fund.master, baseToken: fund.baseToken, name: fund.name }, 36, fund)
+              : $profileDisplay({ address: fundAddress, profileSize: 36 })
+          }, just(null))
+        })
 
       return [
         $column(spacing.default)(
@@ -263,7 +299,9 @@ export const $Portfolio = ({
               start(
                 $column(style({ alignItems: 'center', padding: '80px 0' }))($spinner),
                 map(
-                (p: IPortfolioSectionParams) => {
+                (s: ISectionState) => {
+                  if (s.kind === 'error') return $errorCard(s.error)
+                  const p = s.params
                   if (!p.wallet)
                     return $column(
                       spacing.big,
@@ -302,9 +340,16 @@ export const $Portfolio = ({
                   }
                   const signer = sessionSigner
                   const puppetAddress = predictPuppetAccount({ user: wallet.address, signer })
-                  const puppetAccount: IStream<ISubaccountState> = op(
-                    rootState,
-                    map(root => root ?? stubSubaccountState({ user: wallet.address, signer }))
+                  const liveRoot: IStream<ISubaccountState> = filter(
+                    (root): root is ISubaccountState =>
+                      root !== null &&
+                      isAddressEqual(root.signer, signer) &&
+                      (root.user === undefined || isAddressEqual(root.user, wallet.address)),
+                    rootState
+                  )
+                  const puppetAccount: IStream<ISubaccountState> = start(
+                    p.root ?? stubSubaccountState({ user: wallet.address, signer }),
+                    liveRoot
                   )
                   const registeredIds = [...(p.registry.get(HUB_CHAIN_ID)?.keys() ?? [])]
 
@@ -383,19 +428,15 @@ export const $Portfolio = ({
                       isFund: true
                     }
                     const fundAccount: IStream<ISubaccountState> = op(
-                      rootState,
-                      map(root =>
-                        root
-                          ? {
-                              ...fundStub,
-                              funds: root.funds,
-                              positions: root.positions,
-                              chains: root.chains,
-                              lastTransactionHash: root.lastTransactionHash,
-                              lastSettled: root.lastSettled
-                            }
-                          : fundStub
-                      )
+                      puppetAccount,
+                      map(root => ({
+                        ...fundStub,
+                        funds: root.funds,
+                        positions: root.positions,
+                        chains: root.chains,
+                        lastTransactionHash: root.lastTransactionHash,
+                        lastSettled: root.lastSettled
+                      }))
                     )
                     return $column(
                       spacing.tiny,
@@ -559,6 +600,30 @@ export const $Portfolio = ({
                     ),
                     $column(spacing.default)(
                       $sectionHeader(
+                        'Funding rules',
+                        'Traders you fund, grouped by the token each fund trades in. Deposit that token here to fund the allocations under it; an unfunded allocation is simply skipped at match time.',
+                        {
+                          role: 'You follow',
+                          $glyph: $icon({
+                            $content: $puppetLogo,
+                            width: '18px',
+                            viewBox: '0 0 32 32',
+                            fill: palette.message,
+                            svgOps: style({ display: 'block' })
+                          })
+                        }
+                      ),
+                      ...($subscriptionGroups.length > 0
+                        ? $subscriptionGroups
+                        : [
+                            $row(spacing.small, style({ alignItems: 'center' }))(
+                              $emptyHint('Not following any traders yet.'),
+                              $navText('/leaderboard', 'Browse traders →')
+                            )
+                          ])
+                    ),
+                    $column(spacing.default)(
+                      $sectionHeader(
                         'Funds',
                         'Funds you run as the master trader. Each is a smart account that puppets fund; you trade the pooled capital on GMX and beyond, and share in the performance.',
                         {
@@ -585,30 +650,6 @@ export const $Portfolio = ({
                         ? $fundRows
                         : [$emptyHint('No funds yet. Create one to get funded to trade.')])
                     ),
-                    $column(spacing.default)(
-                      $sectionHeader(
-                        'Funding rules',
-                        'Traders you fund, grouped by the token each fund trades in. Deposit that token here to fund the allocations under it; an unfunded allocation is simply skipped at match time.',
-                        {
-                          role: 'You follow',
-                          $glyph: $icon({
-                            $content: $puppetLogo,
-                            width: '18px',
-                            viewBox: '0 0 32 32',
-                            fill: palette.message,
-                            svgOps: style({ display: 'block' })
-                          })
-                        }
-                      ),
-                      ...($subscriptionGroups.length > 0
-                        ? $subscriptionGroups
-                        : [
-                            $row(spacing.small, style({ alignItems: 'center' }))(
-                              $emptyHint('Not following any traders yet.'),
-                              $navText('/leaderboard', 'Browse traders →')
-                            )
-                          ])
-                    ),
                     ...(redemptionFunds.length === 0
                       ? []
                       : [
@@ -623,23 +664,33 @@ export const $Portfolio = ({
                   )
                 },
                 skipRepeatsWith(
-                  (a: IPortfolioSectionParams, b: IPortfolioSectionParams) =>
-                    a.wallet?.address === b.wallet?.address &&
-                    a.wallet?.session?.signer === b.wallet?.session?.signer &&
-                    a.registry === b.registry &&
-                    a.rules === b.rules &&
-                    !!a.root === !!b.root &&
-                    a.root?.signer === b.root?.signer &&
-                    (a.root?.funds.length ?? 0) === (b.root?.funds.length ?? 0) &&
-                    heldKey(a.root) === heldKey(b.root) &&
-                    pendingSubKey(a.draftRules) === pendingSubKey(b.draftRules),
-                  combine({
-                    root: rootState,
-                    registry: tokenRegistryValue,
-                    wallet: walletState,
-                    rules: switchPromises(userMatchingRuleQuery),
-                    draftRules: draftMatchingRuleList
-                  })
+                  (x: ISectionState, y: ISectionState) => {
+                    if (x.kind !== 'params' || y.kind !== 'params') return false
+                    const a = x.params
+                    const b = y.params
+                    return (
+                      a.wallet?.address === b.wallet?.address &&
+                      a.wallet?.session?.signer === b.wallet?.session?.signer &&
+                      a.registry === b.registry &&
+                      a.rules === b.rules &&
+                      !!a.root === !!b.root &&
+                      a.root?.signer === b.root?.signer &&
+                      (a.root?.funds.length ?? 0) === (b.root?.funds.length ?? 0) &&
+                      heldKey(a.root) === heldKey(b.root) &&
+                      pendingSubKey(a.draftRules) === pendingSubKey(b.draftRules)
+                    )
+                  },
+                  op(
+                    sectionQuery,
+                    promiseState,
+                    filter(s => s.status !== PromiseStatus.PENDING),
+                    map(
+                      (s): ISectionState =>
+                        s.status === PromiseStatus.ERROR
+                          ? { kind: 'error', error: s.error }
+                          : { kind: 'params', params: s.value }
+                    )
+                  )
                 )
                 )
               )

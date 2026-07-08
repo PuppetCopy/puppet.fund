@@ -20,11 +20,21 @@ import {
   switchMap
 } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
-import { $node, $text, attr, component, type I$Node, type I$Slottable, style, styleBehavior } from 'aelea/ui'
-import { $row, spacing } from 'aelea/ui-components'
+import {
+  $node,
+  $text,
+  attr,
+  component,
+  type I$Node,
+  type I$Slottable,
+  type INodeCompose,
+  style,
+  styleBehavior
+} from 'aelea/ui'
+import { $column, $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { type Address, formatUnits, getAddress } from 'viem'
-import { $DropSelect, $inlineSpinner, $labeledValue, text } from '@/ui-components'
+import { $DropSelect, $dropSelectJoinedListContainer, $infoTooltip, $inlineSpinner, text } from '@/ui-components'
 import { providerToken } from '../../io/bridge/swapCommon.js'
 import {
   type ISwapAttempt,
@@ -53,10 +63,13 @@ interface IRouteOption {
   status: 'pending' | 'ok' | 'error'
   label: string
   feeUsd: string
+  feePct: string
+  minReceived: string
   high: boolean
   eta: string
   etaWarn: boolean
   isBest: boolean
+  isSelected: boolean
   detail: string
 }
 
@@ -141,42 +154,56 @@ const routeError = (rows: IRouteRow[]): string | null => {
   return 'No swap route is available right now — adjust the amount or retry shortly'
 }
 
-const feeText = (inUsd: number, outUsd: number): { text: string; high: boolean } => {
+const feeParts = (inUsd: number, outUsd: number): { amount: string; pct: string; high: boolean } => {
   const fee = inUsd - outUsd
   const amount = fee <= 0 ? '$0.00' : fee < 0.01 ? '< $0.01' : `$${fee.toFixed(2)}`
-  const pct = inUsd > 0 ? (fee / inUsd) * 100 : 0
-  const high = pct > HIGH_SWAP_FEE_PCT
-  return { text: high ? `${amount} (${pct.toFixed(1)}%)` : amount, high }
+  const pctVal = inUsd > 0 ? (fee / inUsd) * 100 : 0
+  const pct = fee <= 0 || inUsd <= 0 ? '' : pctVal < 0.1 ? '< 0.1%' : `${pctVal.toFixed(1)}%`
+  return { amount, pct, high: pctVal > HIGH_SWAP_FEE_PCT }
 }
+
+const feeDisplay = (opt: IRouteOption) => (opt.feePct === '' ? opt.feeUsd : `${opt.feeUsd} (${opt.feePct})`)
 
 const toOption = (
   row: IRouteRow,
   req: ISwapRequest,
   inPrice: bigint | null,
   outPrice: bigint | null,
-  isBest: boolean
+  isBest: boolean,
+  isSelected: boolean
 ): IRouteOption => {
-  if (row.status === 'pending') {
-    return { provider: row.provider, status: 'pending', label: row.provider, feeUsd: '', high: false, eta: '', etaWarn: false, isBest, detail: '' }
+  const base = {
+    provider: row.provider,
+    feeUsd: '-',
+    feePct: '',
+    minReceived: '-',
+    high: false,
+    eta: '',
+    etaWarn: false,
+    isBest,
+    isSelected,
+    detail: ''
   }
-  if (row.status === 'error') {
-    return { provider: row.provider, status: 'error', label: row.provider, feeUsd: '', high: false, eta: '', etaWarn: false, isBest, detail: row.message }
-  }
+  if (row.status === 'pending') return { ...base, status: 'pending', label: row.provider }
+  if (row.status === 'error') return { ...base, status: 'error', label: row.provider, detail: row.message }
   const fee =
     inPrice === null || outPrice === null
-      ? { text: '-', high: false }
-      : feeText(usdNumber(req.inputAmount, inPrice), usdNumber(row.quote.outputAmount, outPrice))
+      ? { amount: '-', pct: '', high: false }
+      : feeParts(usdNumber(req.inputAmount, inPrice), usdNumber(row.quote.outputAmount, outPrice))
   const eta = etaLabel(row.quote, req.originChainId !== req.destinationChainId)
   return {
-    provider: row.provider,
+    ...base,
     status: 'ok',
     label: routeToolName(row.quote),
-    feeUsd: fee.text,
+    feeUsd: fee.amount,
+    feePct: fee.pct,
     high: fee.high,
+    minReceived: readableTokenAmountLabel(
+      getChainTokenDescription(req.destinationChainId as ChainId, req.outputToken),
+      row.quote.outputAmount
+    ),
     eta: eta.text,
-    etaWarn: eta.warn,
-    isBest,
-    detail: ''
+    etaWarn: eta.warn
   }
 }
 
@@ -191,7 +218,20 @@ const $defaultDisclaimer = $node(style({ maxWidth: '240px', lineHeight: '1.4', f
   )
 )
 
-const PLACEHOLDER: IRouteOption = { provider: 'LI.FI', status: 'pending', label: '', feeUsd: '', high: false, eta: '', etaWarn: false, isBest: false, detail: '' }
+const PLACEHOLDER: IRouteOption = {
+  provider: 'LI.FI',
+  status: 'pending',
+  label: '',
+  feeUsd: '-',
+  feePct: '',
+  minReceived: '-',
+  high: false,
+  eta: '',
+  etaWarn: false,
+  isBest: false,
+  isSelected: false,
+  detail: ''
+}
 
 type IAttemptsFor = (req: ISwapRequest, signal: AbortSignal) => ISwapAttempt[]
 
@@ -224,45 +264,70 @@ const rowsFor = (
   )
 }
 
-// One shared single-line composition for the option rows AND the anchor, so the selected value reads exactly like the
-// list it was picked from: `<tool>  <fee> <eta>`.
-const $routeLine = (opt: IRouteOption): I$Node =>
+const $feeEta = (opt: IRouteOption, fee: string): I$Node =>
+  $row(style({ alignItems: 'baseline', gap: '6px' }))(
+    $node(style({ fontSize: text.xs, color: opt.high ? palette.negative : palette.message }))($text(fee)),
+    opt.eta
+      ? $node(style({ fontSize: text.xs, color: opt.etaWarn ? palette.indeterminate : palette.foreground }))(
+          $text(opt.eta)
+        )
+      : empty
+  )
+
+// Collapsed anchor: the number that matters (all-in fee) plus arrival, nothing else — the route name and the full
+// breakdown live in the expanded panel, so the closed control stays narrow enough to share the Save row.
+const $anchorLine = (opt: IRouteOption): I$Node =>
   $row(spacing.small, style({ alignItems: 'center' }))(
-    $node(style({ color: palette.message }))($text(opt.label)),
+    $node(style({ fontSize: text.xs, color: palette.foreground }))($text('fee')),
+    opt.status === 'pending'
+      ? opt.label === ''
+        ? $node(style({ color: palette.foreground }))($text('-'))
+        : $inlineSpinner
+      : opt.status === 'error'
+        ? $node(style({ color: palette.foreground }), attr({ title: opt.detail }))($text('unavailable'))
+        : $feeEta(opt, opt.high ? feeDisplay(opt) : opt.feeUsd)
+  )
+
+const $valueLabel: IOps<IRouteOption, I$Node> = map($anchorLine)
+
+const $routeOptionRow: IOps<IRouteOption, I$Node> = map(opt =>
+  $row(style({ minWidth: '280px', padding: '8px 10px', alignItems: 'center', gap: '10px' }))(
+    $node(style({ width: '12px', fontSize: text.xs, color: palette.message }))($text(opt.isSelected ? '✓' : '')),
+    $node(style({ color: palette.message, flex: '1' }))($text(opt.label)),
+    opt.isBest
+      ? $node(
+          style({
+            fontSize: '10px',
+            color: palette.positive,
+            border: `1px solid ${palette.positive}`,
+            borderRadius: '6px',
+            padding: '1px 5px'
+          })
+        )($text('best'))
+      : empty,
     opt.status === 'pending'
       ? $inlineSpinner
       : opt.status === 'error'
-        ? $node(style({ fontSize: text.xs, color: palette.foreground }), attr({ title: opt.detail }))($text('unavailable'))
-        : $row(spacing.tiny, style({ alignItems: 'baseline', gap: '6px' }))(
-            $node(style({ fontSize: text.xs, ...(opt.high ? { color: palette.negative } : { color: palette.message }) }))(
-              $text(opt.feeUsd)
-            ),
-            opt.eta
-              ? $node(style({ fontSize: text.xs, color: opt.etaWarn ? palette.indeterminate : palette.foreground }))(
-                  $text(opt.eta)
-                )
-              : empty
+        ? $node(style({ fontSize: text.xs, color: palette.foreground }), attr({ title: opt.detail }))(
+            $text('unavailable')
           )
+        : $feeEta(opt, feeDisplay(opt))
   )
-
-const $routeOptionRow: IOps<IRouteOption, I$Node> = map(opt =>
-  $row(style({ minWidth: '220px', padding: '6px 8px' }))($routeLine(opt))
 )
 
-const $valueLabel: IOps<IRouteOption, I$Node> = map(opt => {
-  if (opt.label === '') {
-    if (opt.status === 'error') return $node(style({ color: palette.foreground }))($text('unavailable'))
-    return $node(style({ color: palette.foreground }))($text('-'))
-  }
-  return $routeLine(opt)
-})
+// Mirrors aelea's node-compose currying (an ops call is all functions, a children call is all slottables) so the
+// injected header survives $DropSelect's and $Dropdown's staged decorator application before the children land.
+const withPanelHeader = ($header: I$Node, container: INodeCompose): INodeCompose =>
+  ((...input: unknown[]) =>
+    input.some(a => typeof a === 'function')
+      ? withPanelHeader($header, (container as (...args: unknown[]) => INodeCompose)(...input))
+      : (container as unknown as (...children: unknown[]) => I$Node)($header, ...input)) as unknown as INodeCompose
 
 export interface I$SwapProviderFeeEditor {
   // Whether a swap/bridge is involved at all (input token != base token). Drives visibility so the row holds its slot
   // and shows an awaiting-amount placeholder rather than popping in once an amount is typed.
   active: IStream<boolean>
   request: IStream<ISwapRequest | null>
-  label?: string
   $disclaimer?: I$Slottable
   // Route sources raced for a request; the default races every provider. A single-provider surface (the withdraw
   // bridge is Across-only, its intent bakes an across route) passes its own list.
@@ -272,7 +337,6 @@ export interface I$SwapProviderFeeEditor {
 export const $SwapProviderFeeEditor = ({
   active,
   request,
-  label = 'Swap fee',
   $disclaimer = $defaultDisclaimer,
   attempts = swapQuoteAttempts
 }: I$SwapProviderFeeEditor) =>
@@ -344,56 +408,85 @@ export const $SwapProviderFeeEditor = ({
     )
 
     const options = op(
-      combine({ rs: routeState, prices }),
-      map(({ rs, prices: { inPrice, outPrice } }): IRouteOption[] => {
+      combine({ rs: routeState, prices, selected }),
+      map(({ rs, prices: { inPrice, outPrice }, selected }): IRouteOption[] => {
         if (rs === null) return []
         const best = bestProvider(rs.rows)
-        return rs.rows.map(row => toOption(row, rs.req, inPrice, outPrice, row.provider === best))
+        const effective = selected !== null && okRows(rs.rows).some(r => r.provider === selected) ? selected : best
+        return rs.rows.map(row =>
+          toOption(row, rs.req, inPrice, outPrice, row.provider === best, row.provider === effective)
+        )
       }),
       state<IRouteOption[]>([])
     )
 
     const value = op(
-      combine({ options, selected }),
-      map(({ options, selected }): IRouteOption => {
-        if (options.length === 0) return PLACEHOLDER
-        const oks = options.filter(o => o.status === 'ok')
-        const picked = selected ? oks.find(o => o.provider === selected) : undefined
-        const best = picked ?? oks.find(o => o.isBest) ?? oks[0]
-        if (best) return best
+      options,
+      map((opts): IRouteOption => {
+        const picked = opts.find(o => o.isSelected && o.status === 'ok')
+        if (picked) return picked
+        if (opts.length === 0) return PLACEHOLDER
         // Nothing quoted yet: a still-pending round anchors as loading; an all-failed round anchors as a generic
         // unavailable (the per-provider details live on the list rows).
-        return options.some(o => o.status === 'pending')
-          ? { ...PLACEHOLDER, label: options[0].label }
+        return opts.some(o => o.status === 'pending')
+          ? { ...PLACEHOLDER, label: opts[0].label }
           : { ...PLACEHOLDER, status: 'error' }
       }),
       state<IRouteOption>(PLACEHOLDER)
     )
 
-    // The anchor already shows the selection; the open list offers only the alternatives (falling back to the full
-    // list for a single-provider surface so the dropdown never opens empty).
-    const listOptions = op(
-      combine({ options, value }),
-      map(({ options, value }) => {
-        const rest = options.filter(o => o.provider !== value.provider)
-        return rest.length > 0 ? rest : options
+    const detailText = (f: (o: IRouteOption) => string) => map(o => (o.status === 'ok' && f(o) !== '' ? f(o) : '-'), value)
+    const $detailLabel = (label: string) => $node(style({ fontSize: text.xs, color: palette.foreground }))($text(label))
+    const $detailRow = ($label: I$Node, $value: I$Node) =>
+      $row(style({ alignItems: 'center', justifyContent: 'space-between', gap: '24px' }))($label, $value)
+
+    const $panelHeader = $column(
+      style({
+        gap: '8px',
+        padding: '12px 14px',
+        margin: '-6px -6px 4px',
+        minWidth: '280px',
+        borderBottom: `1px solid ${palette.horizon}`,
+        fontSize: text.sm
       })
+    )(
+      $detailRow(
+        $detailLabel('Route'),
+        $node(style({ color: palette.message }))($text(detailText(o => o.label)))
+      ),
+      $detailRow(
+        $row(style({ alignItems: 'center', gap: '2px' }))($detailLabel('Fee'), $infoTooltip($disclaimer, palette.foreground, '18px')),
+        $node(styleBehavior(map(o => ({ color: o.status === 'ok' && o.high ? palette.negative : palette.message }), value)))(
+          $text(detailText(feeDisplay))
+        )
+      ),
+      $detailRow(
+        $detailLabel('Min. received'),
+        $node(style({ color: palette.message }))($text(detailText(o => o.minReceived)))
+      ),
+      $detailRow(
+        $detailLabel('Est. arrival'),
+        $node(
+          styleBehavior(map(o => ({ color: o.status === 'ok' && o.etaWarn ? palette.indeterminate : palette.message }), value))
+        )($text(detailText(o => o.eta)))
+      )
     )
+
     const $dropSelect = $DropSelect({
       value,
-      optionList: listOptions,
+      optionList: options,
       $valueLabel,
       $$option: $routeOptionRow,
+      $dropListContainer: withPanelHeader($panelHeader, $dropSelectJoinedListContainer),
       closeOnSelect: true
     })({
-      select: selectTether
-        ()
+      select: selectTether()
     })
 
     const $view = $node(
       style({ display: 'contents' }),
       styleBehavior(map(a => (a ? { display: 'contents' } : { display: 'none' }), active))
-    )($labeledValue(label, $dropSelect, $disclaimer))
+    )($dropSelect)
 
     return [$view, { selectRoute: selectedRoute }]
   })

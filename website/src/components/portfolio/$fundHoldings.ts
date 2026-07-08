@@ -4,14 +4,23 @@ import type { ChainId } from '@puppet/sdk/const'
 import { getChainTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { getMarketDescription, getTokenDescription } from '@puppet/sdk/gmx'
 import type { IFund } from '@puppet/sdk/schema'
-import { type ITokenRegistryMap, tokenInfoFor } from '@puppet/sdk/state'
-import { aggregate, combine, fromPromise, type IStream, map, switchLatest } from 'aelea/stream'
-import type { IBehavior } from 'aelea/stream-extended'
+import { type IAccountBalanceRow, type ITokenRegistryMap, tokenInfoFor } from '@puppet/sdk/state'
+import { aggregate, combine, filter, fromPromise, type IStream, map, op, start, switchLatest } from 'aelea/stream'
+import { type IBehavior, PromiseStatus, promiseState } from 'aelea/stream-extended'
 import { $node, $text, type I$Node, style, } from 'aelea/ui'
 import { $column, $row, $Tooltip, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { type Address, getAddress, type Hex } from 'viem'
-import { $amountDisplay, $ButtonSecondary, $icon, $puppeteer, $tooltipDropContainer, text } from '@/ui-components'
+import {
+  $amountDisplay,
+  $ButtonSecondary,
+  $errorCard,
+  $icon,
+  $intermediatePromise,
+  $puppeteer,
+  $tooltipDropContainer,
+  text
+} from '@/ui-components'
 import { $jazzicon } from '../../common/$avatar.js'
 import { chainName } from '../../common/$chain.js'
 import { $size } from '../../common/$common.js'
@@ -105,79 +114,86 @@ export const $fundBalances = (
   changeSwapDraftTether: IBehavior<IFundSwapDraft>[1],
   changeClaimDraftTether: IBehavior<PointerEvent, IClaimRouteDraft>[1],
   settleTrigger: IStream<{ chainId: number; block: bigint } | null>
-): I$Node =>
-  switchLatest(
-    map(
-      p => {
-        const rowList = p.rows
-          .filter(r => r.signedBalance > 0n)
-          .map(r => ({ chainId: Number(r.chainId) as ChainId, token: r.token as Hex, balance: r.signedBalance }))
-        const $claims = p.pending.map(row =>
-          $claimRow(hideBalances, fundAddress, tokenRegistry, row, changeClaimDraftTether)
-        )
-        if (rowList.length === 0 && $claims.length === 0) return $hint('No balances yet.')
-        const $balances =
-          rowList.length === 0
-            ? []
-            : [
-                $FundSwapEditor({
-                  hideBalances,
-                  fundAddress,
-                  holdings: rowList,
-                  tokenRegistry,
-                  swapDraftList
-                })({ changeDraft: changeSwapDraftTether() })
-              ]
-        return $column(spacing.default)(...$balances, ...withSeparators($claims))
-      },
-      switchLatest(
-        map(
-          read =>
-            combine({
-              rows: fromPromise(readBalancesPinned(tokenRegistry, fundAddress, read.refresh, read.pin)),
-              pending: fromPromise(readRouteBalances(tokenRegistry, predictDepositRoute(fundAddress)).catch(() => []))
-            }),
-          aggregate<
-            { chainId: number; block: bigint } | null,
-            boolean,
-            { refresh: boolean; pin: { chainId: number; block: bigint } | null }
-          >((seed, pin) => ({ seed: true, value: { refresh: seed, pin } }), false, settleTrigger)
-        )
+): I$Node => {
+  const query: IStream<Promise<{ rows: IAccountBalanceRow[]; pending: IRouteBalanceRow[] }>> = map(
+    async read => {
+      const [rows, pending] = await Promise.all([
+        readBalancesPinned(tokenRegistry, fundAddress, read.refresh, read.pin),
+        readRouteBalances(tokenRegistry, predictDepositRoute(fundAddress))
+      ])
+      return { rows, pending }
+    },
+    aggregate<
+      { chainId: number; block: bigint } | null,
+      boolean,
+      { refresh: boolean; pin: { chainId: number; block: bigint } | null }
+    >((seed, pin) => ({ seed: true, value: { refresh: seed, pin } }), false, settleTrigger)
+  )
+  return switchLatest(
+    start(
+      $hint('Loading balances…'),
+      op(
+        query,
+        promiseState,
+        filter(s => s.status !== PromiseStatus.PENDING),
+        map(s => {
+          if (s.status === PromiseStatus.ERROR) return $errorCard(s.error)
+          const p = s.value
+          const rowList = p.rows
+            .filter(r => r.signedBalance > 0n)
+            .map(r => ({ chainId: Number(r.chainId) as ChainId, token: r.token as Hex, balance: r.signedBalance }))
+          const $claims = p.pending.map(row =>
+            $claimRow(hideBalances, fundAddress, tokenRegistry, row, changeClaimDraftTether)
+          )
+          if (rowList.length === 0 && $claims.length === 0) return $hint('No balances yet.')
+          const $balances =
+            rowList.length === 0
+              ? []
+              : [
+                  $FundSwapEditor({
+                    hideBalances,
+                    fundAddress,
+                    holdings: rowList,
+                    tokenRegistry,
+                    swapDraftList
+                  })({ changeDraft: changeSwapDraftTether() })
+                ]
+          return $column(spacing.default)(...$balances, ...withSeparators($claims))
+        })
       )
     )
   )
+}
 
 export const $fundPositions = (fundAddress: Address, settleTrigger: IStream<unknown>): I$Node =>
-  switchLatest(
-    map(
-      positions => {
-        const open = positions.filter(pos => pos.sizeInUsd > 0n)
-        if (open.length === 0) return $hint('No open positions')
-        const $rows = open.map(pos => {
-          const symbol = getTokenDescription(getMarketDescription(pos.market).indexToken).symbol
-          const directionColor = pos.isLong ? palette.positive : palette.negative
-          return $row(spacing.default, style({ alignItems: 'center' }))(
-            $row(spacing.small, style({ alignItems: 'center', flex: 1, minWidth: '0' }))(
-              $node(style({ fontSize: text.base, color: palette.message, fontWeight: '600' }))($text(symbol)),
-              $node(
-                style({
-                  fontSize: text.xs,
-                  fontWeight: '600',
-                  padding: '1px 7px',
-                  borderRadius: '4px',
-                  color: directionColor,
-                  backgroundColor: colorShade(directionColor, 12)
-                })
-              )($text(pos.isLong ? 'Long' : 'Short'))
-            ),
-            $size(pos.sizeInUsd, pos.collateralInUsd)
-          )
-        })
-        return $column(spacing.small)(...withSeparators($rows))
-      },
-      switchLatest(map(() => fromPromise(fetchOpenPositions(getAddress(fundAddress)).catch(() => [])), settleTrigger))
-    )
-  )
+  $intermediatePromise({
+    $display: map(async () => {
+      const positions = await fetchOpenPositions(getAddress(fundAddress))
+      const open = positions.filter(pos => pos.sizeInUsd > 0n)
+      if (open.length === 0) return $hint('No open positions')
+      const $rows = open.map(pos => {
+        const symbol = getTokenDescription(getMarketDescription(pos.market).indexToken).symbol
+        const directionColor = pos.isLong ? palette.positive : palette.negative
+        return $row(spacing.default, style({ alignItems: 'center' }))(
+          $row(spacing.small, style({ alignItems: 'center', flex: 1, minWidth: '0' }))(
+            $node(style({ fontSize: text.base, color: palette.message, fontWeight: '600' }))($text(symbol)),
+            $node(
+              style({
+                fontSize: text.xs,
+                fontWeight: '600',
+                padding: '1px 7px',
+                borderRadius: '4px',
+                color: directionColor,
+                backgroundColor: colorShade(directionColor, 12)
+              })
+            )($text(pos.isLong ? 'Long' : 'Short'))
+          ),
+          $size(pos.sizeInUsd, pos.collateralInUsd)
+        )
+      })
+      return $column(spacing.small)(...withSeparators($rows))
+    }, settleTrigger)
+  })
 
 export const $allocationDistribution = (
   hideBalances: IStream<boolean>,

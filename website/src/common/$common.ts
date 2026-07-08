@@ -9,7 +9,7 @@ import {
 } from '@puppet/sdk/core'
 import { empty, type IStream, map, skipRepeats, toStream } from 'aelea/stream'
 import type { IBehavior, IComposeBehavior } from 'aelea/stream-extended'
-import { $node, $text, component, type I$Node, type INode, nodeEvent, style, styleInline } from 'aelea/ui'
+import { $node, $text, component, type INode, nodeEvent, style, styleInline } from 'aelea/ui'
 import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import type { Address } from 'viem/accounts'

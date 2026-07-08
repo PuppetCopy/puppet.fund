@@ -15,7 +15,7 @@ export async function readSubaccountState(
   const idRows = await client.select(accountIdentityTable, { where: { account: acct } })
   if (idRows.length === 0) return undefined
   const [balanceRows, fundRows, positionRows] = await Promise.all([
-    readAccountBalances(registry, acct).catch(() => []),
+    readAccountBalances(registry, acct),
     client.select(fundTable, { where: { master: acct } }),
     client.select(fundPositionTable, { where: { holder: acct } })
   ])

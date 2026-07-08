@@ -23,4 +23,4 @@ export {
   WALLETCONNECT_PROJECT_ID,
   wagmi
 } from './wallet.js'
-export { disconnect } from './walletKitConnect.js'
+export { disconnect } from './walletLink.js'
