@@ -9,7 +9,7 @@ enforces the risk caps, and the protocol's signed rules are the final backstop. 
 
 1. `bun install`  (pulls `@anthropic-ai/sdk`)
 2. Set `ANTHROPIC_API_KEY=...` in `.env` (get one at https://console.anthropic.com).
-3. Create your account + allocate a **WETH** fund on the site, then `bun run dev` to pair.
+3. Create a trading account on the site and deposit **WETH** into it on Arbitrum, then `bun run dev` to pair.
 4. **Dry-run is the default** (`DRY_RUN=1` in `.env.example`): the model still decides every tick
    and the full order pipeline runs, but nothing dispatches. Set `DRY_RUN=0` to trade live.
 

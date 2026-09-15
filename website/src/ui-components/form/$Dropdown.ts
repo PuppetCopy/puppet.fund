@@ -33,7 +33,7 @@ import {
   type INodeCompose,
   nodeEvent,
   style,
-  styleInline,
+  styleBehavior,
   stylePseudo
 } from 'aelea/ui'
 import { $column, $row, designSheet, disabledOp, observer, spacing } from 'aelea/ui-components'
@@ -58,8 +58,6 @@ export const $defaultDropListContainer = $column(
     userSelect: 'text',
     background: palette.background,
     boxShadow: `${palette.shadow} 0px 4px 20px 8px, ${palette.shadow} 0px 1px 3px 1px`,
-    // Explicit border: the panel is a native [popover], and without an author value the
-    // UA default border renders (the panel keeps its container border, see $list below).
     border: `1px solid ${colorShade(palette.foreground, 60)}`,
     borderRadius: '0 0 8px 8px',
     fontWeight: 'normal',
@@ -94,10 +92,6 @@ const showPopover = (el: unknown): void => {
   if (el instanceof HTMLElement && typeof el.showPopover === 'function') el.showPopover()
 }
 
-// Drained from aelea's $Dropdown with two deliberate changes: the panel ALWAYS opens
-// below the anchor (no viewport flip, so the anchor/panel join is predictable), and the
-// panel keeps its container-defined border instead of the forced inline `border: none`.
-// It sits flush at rect.bottom - 1 so its top border overlaps the anchor's bottom border.
 export function $Dropdown<T>({
   $anchor,
   optionList,
@@ -152,7 +146,7 @@ export function $Dropdown<T>({
           ),
           effectRun(showPopover),
           contentTether(observer.intersection() as IOps<INode<HTMLElement>, IntersectionObserverEntry[]>),
-          styleInline(
+          styleBehavior(
             map(
               ({ aEntry, cEntry }) => {
                 const aEl = aEntry[0]?.target as HTMLElement | undefined

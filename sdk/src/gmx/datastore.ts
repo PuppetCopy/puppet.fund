@@ -10,7 +10,7 @@ function hashData(types: string[], values: (string | number | bigint | boolean)[
   return keccak256(encodeAbiParameters(parseAbiParameters(types) as any, values))
 }
 
-export function getDatastoreUint(client: PublicClient, key: Hex) {
+function getDatastoreUint(client: PublicClient, key: Hex) {
   return client.readContract({
     address: datastoreAddress,
     abi: datastoreAbi,
@@ -19,7 +19,7 @@ export function getDatastoreUint(client: PublicClient, key: Hex) {
   })
 }
 
-export function getDatastoreUintByName(client: PublicClient, key: string) {
+function getDatastoreUintByName(client: PublicClient, key: string) {
   return getDatastoreUint(client, hashData(['string'], [key]))
 }
 

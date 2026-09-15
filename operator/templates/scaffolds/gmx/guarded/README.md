@@ -11,7 +11,7 @@ halt latch, day ledger) persists to `state.json`; everything else re-derives fro
 ## Setup
 
 1. `bun install`
-2. Create your account + allocate a **WETH** fund on the site, then `bun run dev` to pair.
+2. Create a trading account on the site and deposit **WETH** into it on Arbitrum, then `bun run dev` to pair.
 3. **Dry-run is the default** (with or without a `.env`): the bot runs the full verify/screen
    pipeline and logs every order it would place, dispatching nothing and persisting no risk
    state. When you're ready: `cp .env.example .env` and set `DRY_RUN=0` to trade live.
@@ -36,9 +36,9 @@ halt latch, day ledger) persists to `state.json`; everything else re-derives fro
    equity + drawdown vs the high-water mark, measured day cost vs budget, and the
    `raw → final (reasons)` chain. This is how you debug a bot that "does nothing".
 
-Drawdown is **WETH-denominated**: a WETH fund holding WETH is the benchmark, so it measures
+Drawdown is **WETH-denominated**: a trading body holding WETH is the benchmark, so it measures
 bot-attributable loss, never ETH/USD moves while flat. Costs are **measured, not modeled**: each
-order records the relay fee from the dispatch ack plus whatever left the fund beyond intended
+order records the relay fee from the dispatch ack plus whatever left the trading body beyond intended
 collateral (the keeper execution fee), and opens stop when the day's spend hits
 `dailyCostBudgetBps` of day-start equity.
 
@@ -53,7 +53,7 @@ hysteresis band exist to keep those costs survivable, not to make money. Start t
 
 - Persist nothing you can re-derive; persist everything you can't (`state.json` already does
   this); read it after a few days and check the cost ledger against your expectations.
-- Reconcile estimated vs realized cost per round trip (two `getFundBalance()` reads +
+- Reconcile estimated vs realized cost per round trip (two `readBalance(ETH)` reads +
   `getPositionPnlUsd`) and alarm when realized exceeds estimate by 1.5×.
 - Replace the fixed `stopLossPct` with a volatility-scaled stop (ATR) so size adapts to regime.
 - A time stop: close any position older than N hours (read `increasedAtTime` on the position).

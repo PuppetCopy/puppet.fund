@@ -3,7 +3,7 @@ import { CompactError } from '../compact/error.js'
 import { abs, delta, max } from '../core/math.js'
 import type { IEvaluationConfig, INavBreakdown, INavGate, INavGateReason, INavKind } from './types.js'
 
-export function navDriftBps(clientNav: bigint, computedNav: bigint): bigint {
+function navDriftBps(clientNav: bigint, computedNav: bigint): bigint {
   const denom = max(abs(clientNav), abs(computedNav))
   if (denom === 0n) return 0n
   return (delta(clientNav, computedNav) * PRECISION.basisPoints) / denom
@@ -11,32 +11,20 @@ export function navDriftBps(clientNav: bigint, computedNav: bigint): bigint {
 
 export function checkNavGate(
   breakdown: INavBreakdown,
-  navSigned: bigint,
+  navMark: bigint,
   config: IEvaluationConfig,
   opts?: { clientNav?: bigint; kind?: INavKind }
 ): INavGate {
   const reasons: INavGateReason[] = []
 
-  // Liveness, not lag: the cash leg is read on-chain per intent (no indexer to trail the head), so the only blocking
-  // condition is a chain we cannot reach — there is no "behind" to gate on. A reachable chain is always current.
   for (const c of breakdown.perChain) {
     if (!c.reachable) {
       reasons.push({ code: 'CHAIN_UNREACHABLE', detail: `chain ${c.chainId} is unreachable; cannot price its custody` })
     }
   }
 
-  let unitedUnrecognized = 0n
-  for (const c of breakdown.perChain) unitedUnrecognized += c.unrecognized
-  for (const h of breakdown.holdings) unitedUnrecognized += h.unrecognizedBase
-  if (unitedUnrecognized > config.maxUnrecognizedBaseWei) {
-    reasons.push({
-      code: 'UNRECOGNIZED_BALANCE',
-      detail: `${unitedUnrecognized} base returned but not co-signed (max ${config.maxUnrecognizedBaseWei}); recognise it first`
-    })
-  }
-
-  for (const platform of breakdown.unavailablePlatforms) {
-    reasons.push({ code: 'PLATFORM_UNAVAILABLE', detail: `platform ${platform} cannot value its positions` })
+  for (const u of breakdown.unavailablePlatforms) {
+    reasons.push({ code: 'PLATFORM_UNAVAILABLE', detail: `platform ${u.platform} cannot value its positions: ${u.reason}` })
   }
 
   for (const p of breakdown.positions) {
@@ -54,55 +42,45 @@ export function checkNavGate(
   }
 
   for (const h of breakdown.holdings) {
-    if (h.priceAgeSec === undefined) {
+    if (h.mark.priceAgeSec > config.maxPriceAgeSec) {
       reasons.push({
         code: 'STALE_ORACLE',
-        detail: `holding ${h.symbol} (${h.token}) on chain ${h.chainId} is unvaluable`
-      })
-    } else if (h.priceAgeSec > config.maxPriceAgeSec) {
-      reasons.push({
-        code: 'STALE_ORACLE',
-        detail: `holding ${h.symbol} on chain ${h.chainId} priced ${h.priceAgeSec}s old (max ${config.maxPriceAgeSec}s)`
+        detail: `holding ${h.symbol} on chain ${h.chainId} priced ${h.mark.priceAgeSec}s old (max ${config.maxPriceAgeSec}s)`
       })
     }
   }
 
-  for (const f of breakdown.inFlight) {
-    reasons.push({
-      code: f.kind === 'transfer' ? 'PENDING_BRIDGE' : 'PENDING_ORDER',
-      detail: `${f.platform} ${f.kind} in-flight (${f.ref}): ${f.detail}`
-    })
+  if (opts?.kind !== 'view') {
+    for (const f of breakdown.inFlight) {
+      reasons.push({
+        code: 'PENDING_ORDER',
+        detail: `${f.platform} in-flight (${f.ref}): ${f.detail}`
+      })
+    }
   }
 
-  // Liquidate demands a fully-unwound book: an open position cannot ride into a close,
-  // the full drain transfers actual base.
-  if (opts?.kind === 'liquidate' && breakdown.positions.length > 0) {
+  const exposed = breakdown.positions.filter(p => p.facets?.kind !== 'venue-cash' && p.facets?.kind !== 'claimable-funding')
+  if (opts?.kind === 'settle' && exposed.length > 0) {
     reasons.push({
       code: 'OPEN_POSITIONS',
-      detail: `${breakdown.positions.length} venue position(s) still open; unwind to base before liquidating`
-    })
-  }
-  if (opts?.kind === 'liquidate' && breakdown.holdings.some(h => h.signedBalance > 0n)) {
-    reasons.push({
-      code: 'OPEN_POSITIONS',
-      detail: 'non-base holdings still open; swap to base before liquidating'
+      detail: `${exposed.length} venue position(s) still open; a cycle settles only once every position is closed`
     })
   }
 
   if (opts?.clientNav !== undefined && opts.kind !== 'view') {
-    const drift = navDriftBps(opts.clientNav, navSigned)
+    const drift = navDriftBps(opts.clientNav, navMark)
     if (drift > config.driftToleranceBps) {
       reasons.push({
         code: 'NAV_MISMATCH',
-        detail: `client NAV ${opts.clientNav} diverges from computed ${navSigned} by ${drift}bps for ${opts.kind} (consensus max ${config.driftToleranceBps}bps)`
+        detail: `client NAV ${opts.clientNav} diverges from computed ${navMark} by ${drift}bps for ${opts.kind} (consensus max ${config.driftToleranceBps}bps)`
       })
     }
   }
 
-  return { ok: reasons.length === 0, reasons }
+  return reasons.length === 0 ? { ok: true } : { ok: false, reasons }
 }
 
-export function assertNavSignable(gate: INavGate): void {
+export function assertNavSignable(gate: INavGate): asserts gate is { ok: true } {
   if (gate.ok) return
   const first = gate.reasons[0]
   throw new CompactError(first.code, gate.reasons.map(r => r.detail).join('; '), 'soft')

@@ -14,11 +14,10 @@ export interface IAccountPosition {
   sizeInTokens: bigint
   collateralInUsd: bigint
   collateralAmount: bigint
-  // Marked PnL at the last on-chain update; callers re-mark live against the index price.
   pnl: bigint
   realizedPnlUsd: bigint
   cumulativeSizeInUsd: bigint
-  openedAt: number
+  openedAt: number | null
   closedAt: number
   lastUpdatedAt: number
 }

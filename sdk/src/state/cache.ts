@@ -1,10 +1,3 @@
-// Age-based TTL memo with a PER-CALL freshness bound: each caller states how stale a value it will accept (default =
-// the construction TTL). A display read can accept minutes-old state while a signing read on the same getter passes 0
-// and always refetches — one cache, per-caller freshness. Same-instant callers still coalesce on the in-flight promise
-// (age 0 is never > any bound).
-// The floor for ANY freshness bound: below this a getter degrades into a per-call refetch (maxAge 0 turned the
-// signing path into a fetch-per-intent stampede under load) while gaining nothing — no chain state we read moves
-// meaningfully inside 20ms. Same-window callers still coalesce on one in-flight fetch.
 export const MIN_TTL_MS = 20
 
 const assertTtl = (ms: number): void => {

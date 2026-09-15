@@ -1,7 +1,7 @@
 import type { Connector } from '@wagmi/core'
 import { empty, type IStream, just, map, switchMap } from 'aelea/stream'
 import { type IBehavior, multicast, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
-import { $element, $node, $text, attr, attrBehavior, component, style } from 'aelea/ui'
+import { $element, $text, attr, attrBehavior, component, style } from 'aelea/ui'
 import { $column, $defaultButtonContainer, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { $alertNegativeContainer, $ButtonSecondary, $icon, text } from '@/ui-components'
@@ -57,20 +57,6 @@ const $walletIcon = (connector: Connector) => {
   )($content)
 }
 
-const $inlineSpinner = $node(
-  style({
-    width: '16px',
-    height: '16px',
-    flexShrink: '0',
-    boxSizing: 'border-box',
-    borderRadius: '50%',
-    borderStyle: 'solid',
-    borderWidth: '2px',
-    borderColor: `${palette.message} transparent ${colorShade(palette.foreground, 30)} transparent`,
-    animation: 'rotate 0.7s linear infinite'
-  })
-)()
-
 const friendlyConnectError = (err: unknown): string => {
   const name = err && typeof err === 'object' && 'name' in err ? String((err as { name?: unknown }).name ?? '') : ''
   const causeName =
@@ -124,8 +110,6 @@ export const $WalletConnect = () =>
       )
     )
 
-    // Only one wallet can connect at a time; disable every connector while any is pending so a second click can't
-    // pre-empt the first attempt (switchMap would otherwise drop the in-flight connector's spinner/status).
     const anyPending: IStream<boolean> = map(
       byId => Object.values(byId).some(s => s.kind === 'pending'),
       statusById
@@ -173,13 +157,7 @@ export const $WalletConnect = () =>
                       ),
                       $content: $row(spacing.default, style({ alignItems: 'center', width: '100%' }))(
                         $walletIcon(connector),
-                        $text(
-                          map(
-                            s => (s.kind === 'pending' ? 'Connecting…' : connector.name || 'Connect Wallet'),
-                            connectorStatus
-                          )
-                        ),
-                        switchMap(s => (s.kind === 'pending' ? $inlineSpinner : empty), connectorStatus)
+                        $text(connector.name || 'Connect Wallet')
                       )
                     })({
                       click: attemptTether(map(() => ({ id: connector.id, promise: connectWallet(connector.id) })))

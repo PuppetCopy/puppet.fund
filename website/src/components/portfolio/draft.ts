@@ -1,201 +1,109 @@
-import type { IAccountLib__AccountInitParams } from '@puppet/contracts/types'
-import type {
-  IAllocateInput,
-  IClaimInput,
-  IDepositRoute,
-  ILiquidateInput,
-  IMandateInput,
-  IOperateInput,
-  IRecognizeBalanceInput,
-  IRedeemInput,
-  ISellInput,
-  ISwapInput,
-  IWithdrawInput
-} from '@puppet/sdk/attestation'
-import type { Address, Hex } from 'viem'
-import type { ISubscribeRule } from './$MatchingRuleEditor.js'
+import type { IAccountLib__Mandate, IIAccount__Call } from '@puppet/contracts/types'
+import type { ChainId } from '@puppet/sdk/const'
+import type { ISwapRoute, IWithdrawInput } from '@puppet/sdk/intent'
+import type { Address } from 'viem'
 
-export type StepInput =
-  | { kind: 'walletTransfer'; input: IDepositRoute }
-  | { kind: 'swap'; input: ISwapInput }
-  | { kind: 'recognize'; input: IRecognizeBalanceInput }
-  | { kind: 'withdraw'; input: IWithdrawInput }
-  | { kind: 'mandate'; input: IMandateInput }
-  | { kind: 'allocate'; input: IAllocateInput }
-  | { kind: 'sell'; input: ISellInput }
-  | { kind: 'claim'; input: IClaimInput }
-  | { kind: 'redeem'; input: IRedeemInput }
-  | { kind: 'liquidate'; input: ILiquidateInput }
-  | { kind: 'recognizeFund'; input: IOperateInput }
+export type IUnsealed<T> = T extends unknown ? Omit<T, 'header'> : never
 
-export type StepKind = StepInput['kind']
+export type StepKind =
+  | 'approve'
+  | 'fund'
+  | 'key'
+  | 'session'
+  | 'deposit'
+  | 'swap'
+  | 'credit'
+  | 'withdraw'
+  | 'mandate'
+  | 'unbond'
+  | 'operate'
+  | 'settle'
 
-export const STEP_LABEL: Record<StepKind, string> = {
-  walletTransfer: 'Deposit',
-  swap: 'Swap',
-  recognize: 'Credit',
-  withdraw: 'Withdraw',
-  mandate: 'Follow',
-  allocate: 'Allocate',
-  sell: 'Sell',
-  claim: 'Claim',
-  redeem: 'Redeem',
-  liquidate: 'Liquidate',
-  recognizeFund: 'Recognize'
-}
-
-export const STEP_DESCRIPTION: Record<StepKind, string> = {
-  walletTransfer: 'Sends funds from your wallet to your account. The next step confirms them into your balance.',
-  swap:
-    'Converts and moves funds to your account on the destination chain, usually within seconds. Your funds stay in transit and settle on-chain even if you wait. If it fails, they reappear in the deposit editor to recover.',
-  recognize:
-    'Confirms the tokens you just sent so they show up in your balance. On a chain your account has not touched yet, this same step also opens the account.',
-  withdraw:
-    'Moves funds from your account to your wallet, optionally bridging to another chain. Cross-chain transfers usually settle within seconds and stay in transit on-chain even if you wait.',
-  mandate:
-    'Subscribes you to this trader under your rules and moves any funds you just deposited into your balance, so the trader can commit a share at each allocation. Funds stay in your balance until then; unfunded allocations are skipped.',
-  allocate: 'A trader pulls allocated funds from puppets into their fund.',
-  sell: 'Joins the exit queue. Payment arrives when the manager next processes redemptions.',
-  claim: 'Settles the base currency accrued to you from past redemptions into your account.',
-  redeem: 'Pays everyone in the queue their share of the chosen amount, at the fund’s verified value.',
-  liquidate:
-    'Ends this fund permanently. Every holder receives the identical closing price per share; investors claim theirs anytime.',
-  recognizeFund:
-    'Co-signs funds a closed position returned to your fund into your balance, so they count toward NAV and can be redeemed.'
-}
-
+export type IReportWalletTx = (kind: StepKind, hash: `0x${string}` | null, chainId: ChainId) => void
 
 export interface IDraftAmount {
   amount: bigint
-  baseToken: Address
+  token: Address
 }
 
 export interface IDraftOutput extends IDraftAmount {
-  receiver: Address
-  chainId: number
+  expected: bigint
   approx: boolean
 }
 
-// Internal: common shape every draft kind carries.
 interface IDraftBase {
   id: string
-  account: Address
-  title: string
-  alert: string | null
 }
 
-export interface IDepositDraft extends IDraftBase {
+export interface IDepositLeg {
+  chainId: ChainId
+  inputToken: Address
+  outputToken: Address
+  inputAmount: bigint
+  outputAmount: bigint
+  destinationChainId: bigint
+  route: ISwapRoute | null
+  fillDeadline: number
+}
+
+export interface IDepositFunding {
+  deposit: IDepositLeg
+  nativeValue: bigint
+  expectedOutput: bigint
+  hub: null
+  arrival: 'credit' | 'bond'
+}
+
+export const arrivalFloor = (funding: IDepositFunding): bigint => funding.deposit.outputAmount
+
+export const depositCreditToken = (funding: IDepositFunding): Address => funding.deposit.outputToken
+
+export interface IDepositDraft extends IDraftBase, IDepositFunding {
   kind: 'deposit'
-  params: IAccountLib__AccountInitParams
-  inputAmount: IDraftAmount
-  output: IDraftOutput
-  wallet: IDepositRoute | null
-  swap: ISwapInput | null
-  // Composed two-leg delivery: `swap` above is then a SAME-ASSET bridge to the hub, and this leg converts the
-  // bridged token to the base LOCALLY on the hub — signed by the session at execution time, sized from the live
-  // route balance, and floor-checked against estimateOut. A local PA swap credits the signed balance directly,
-  // so a composed deposit runs no recognize step.
-  hubSwap?: { inputToken: Hex; estimateOut: bigint } | null
-  surplus: bigint
 }
 
 export interface IWithdrawDraft extends IDraftBase {
   kind: 'withdraw'
+  chainId: ChainId
+  balanceBefore: bigint
   inputAmount: IDraftAmount
-  output: IDraftOutput
-  input: IWithdrawInput
+  output: IDraftOutput & { receiver: Address; chainId: ChainId }
+  input: IUnsealed<IWithdrawInput>
 }
 
-export interface ISubscribeDraft extends IDraftBase, ISubscribeRule {
+export type IEditorDraft = IDepositDraft | IWithdrawDraft
+
+export interface IMandateDraft extends IDraftBase {
   kind: 'mandate'
+  bond: bigint
+  mandate: IAccountLib__Mandate | null
 }
 
-export interface IAllocateDraft extends IDraftBase {
-  kind: 'allocate'
-  master: Address
-  masterSigner: Address
-  baseToken: Address
-  name: Hex
-  masterAmount: bigint
-  inputAmount: bigint
-  sourceChainId: number
-  wallet: IDepositRoute | null
-  swap: ISwapInput | null
-}
-
-export interface ISellDraft extends IDraftBase {
-  kind: 'sell'
-  master: Address
-  masterAccount: Address
-  baseToken: Address
-  sharesOut: bigint
-}
-
-export interface IClaimDraft extends IDraftBase {
-  kind: 'claim'
-  master: Address
-  masterAccount: Address
-  baseToken: Address
-}
-
-export interface IRedeemDraft extends IDraftBase {
-  kind: 'redeem'
-  master: Address
-  masterAccount: Address
-  baseToken: Address
-  sharesOut: bigint
-  assetsOut: bigint
-  fulfill: boolean
-  liquidate: boolean
-}
-
-// Fund rebalance: swap one token the fund holds (signed balance) for another, in a single guarded
-// FundGate.swap (fromRoute=false). Local same-chain only.
-export interface IFundSwapDraft extends IDraftBase {
-  kind: 'fundSwap'
-  chainId: number
-  destinationChainId?: number
-  tokenIn: Address
-  tokenOut: Address
-  amountIn: bigint
-  minOut: bigint
-  // The composed route's chosen bridge asset (on the ORIGIN chain), baked by the editor so the runner executes the same
-  // intermediate the quote priced. Absent for direct (local or same-asset) swaps.
-  bridgeToken?: Address
-}
-
-// Recognize a closed position's return: the funds landed in the fund account as raw ERC-20 (no signed-domain event),
-// so they sit unrecognized until co-signed. A single pure-recognition operate (transferList amountIn = balanceOf -
-// signedBalanceOf, empty callList) credits them into the signed balance.
-export interface IRecognizeFundDraft extends IDraftBase {
-  kind: 'recognizeFund'
-  master: Address
-  masterAccount: Address
-  baseToken: Address
-  surplus: bigint
-}
-
-// Claim funds sitting at the fund's cross-chain deposit route (a bridge delivery whose recognize never ran, or any
-// direct transfer to the route): one dest-chain FundGate.recognize sweeps the FULL route balance into the fund's
-// signed balance, creating the fund account (and master PA) on that chain when absent.
-export interface IClaimRouteDraft extends IDraftBase {
-  kind: 'claimRoute'
-  chainId: number
-  token: Hex
+export interface IUnbondDraft extends IDraftBase {
+  kind: 'unbond'
   amount: bigint
 }
 
-// Public discriminated union — any draft kind.
-export type IDraft =
-  | IDepositDraft
-  | IWithdrawDraft
-  | ISubscribeDraft
-  | IAllocateDraft
-  | IFundSwapDraft
-  | ISellDraft
-  | IClaimDraft
-  | IClaimRouteDraft
-  | IRedeemDraft
-  | IRecognizeFundDraft
+export interface ICreditDraft extends IDraftBase {
+  kind: 'credit'
+  chainId: ChainId
+  creditList: Address[]
+}
 
-// Narrower union: amount-bearing drafts only (deposit + withdraw).
+export interface IOperateDraft extends IDraftBase {
+  kind: 'operate'
+  chainId: ChainId
+  token: Address
+  skin: bigint
+  feeToken: Address
+  callList: IIAccount__Call[]
+}
+
+export interface ISettleDraft extends IDraftBase {
+  kind: 'settle'
+  spokeChainId: ChainId
+  token: Address
+}
+
+export type ITradeDraft = ICreditDraft | IOperateDraft | ISettleDraft
+export type IDraft = IEditorDraft | IMandateDraft | IUnbondDraft | ITradeDraft

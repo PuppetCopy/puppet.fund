@@ -3,6 +3,9 @@
   "include": [
     "src"
   ],
+  "exclude": [
+    "src/**/*.test.ts"
+  ],
   "compilerOptions": {
     "outDir": "dist/esm",
     "rootDir": "./src",
@@ -15,6 +18,6 @@
     "types": ["@types/bun"]
   },
   "references": [
-    { "path": "../contracts-artifacts" }
+    { "path": "../contracts-manifest" }
   ]
 }

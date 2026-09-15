@@ -55,9 +55,6 @@ export const $chainLabel = (chainId: number, iconSize: number | string = 20): I$
     $node(style({ color: palette.message }))($text(chainName(chainId)))
   )
 
-// Small chain badge anchored flush to the bottom-right of a token glyph. The
-// caller wraps the token icon in `$tokenWithChainBadge` (or any
-// position:relative container) and appends this.
 export const $chainBadge = (chainId: number, badgeSize: number | string = 12): I$Node =>
   $element('img')(
     attr({ src: chainAssetSrc(chainId) }),
@@ -73,9 +70,6 @@ export const $chainBadge = (chainId: number, badgeSize: number | string = 12): I
     })
   )()
 
-// Token icon (SVG glyph or other I$Node) with the chain badge tucked into the
-// bottom-right corner. Caller passes the rendered token node so this stays
-// agnostic of token-icon source.
 export const $tokenWithChainBadge = (
   $tokenIcon: I$Node,
   chainId: number,

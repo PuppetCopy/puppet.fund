@@ -1,7 +1,13 @@
+import { PROTOCOL } from '@puppet/contracts/const'
 import { createCompact, type ICompact } from '@puppet/sdk/compact'
+import type { Address } from 'viem'
 
-// HTTP(S) base of the attest-only relay; the compact client posts intents to `${matchmakerUrl}/attest` and resolves at
-// the dispatch ACK. No head stream / reads here. A relative base (same-origin via the edge proxy) works in the browser.
-export const matchmakerUrl = (import.meta.env.VITE_MATCHMAKER_URL as string | undefined) ?? '/api/matchmaker'
+declare const __RELAYER_ADDRESS__: Address
+
+export const matchmakerUrl = '/api/matchmaker'
+
+export const relayerAddress = __RELAYER_ADDRESS__
+
+export const attestorAddress = PROTOCOL.attestor
 
 export const compact: ICompact = createCompact({ matchmakerUrl })

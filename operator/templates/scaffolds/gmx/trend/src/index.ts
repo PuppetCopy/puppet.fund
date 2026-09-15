@@ -1,6 +1,6 @@
 import { createConnector, runOperator } from '@puppet.fund/operator'
-import { acceptablePrice, formatUsd, formatWeth, gmxOperator, usd, weth } from '@puppet.fund/operator/gmx'
-import { type Address, isAddressEqual } from 'viem'
+import { acceptablePrice, formatUsd, GMX_ORDER_TYPE, gmxOperator, usd } from '@puppet.fund/operator/gmx'
+import { type Address, formatEther, isAddressEqual, parseEther } from 'viem'
 
 // A complete autonomous, long/flat trend-following agent on ETH (no LLM). Perceive (price +
 // indicators + account + positions) → decide (EMA trend, RSI filter) → size (risk budget) →
@@ -26,7 +26,8 @@ const TICK_MS = 60_000
 const COOLDOWN_MS = 5 * 60_000
 
 const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, dryRun: DRY })
-const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
+if (!Bun.env.ARBITRUM_RPC_URL) throw new Error('set ARBITRUM_RPC_URL in .env (cp .env.example .env)')
+const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL, token: ETH, skin: 10_000n })
 const market = gmx.getMarket(ETH)
 let lastTradeAt = 0
 
@@ -46,11 +47,11 @@ await runOperator(connector, async signal => {
 
 async function tick(): Promise<void> {
 
-  // perceive (fund balance = deployable base; collateral GMX frees on a close returns
-  // to the fund on its own and shows up here next tick)
+  // perceive (account balance = deployable network token; collateral GMX frees on a close
+  // returns to the account on its own and shows up here next tick)
   const closes = (await fetchCandles('ETHUSDT', '5m', 200)).map(c => c.close)
   const price = closes[closes.length - 1]
-  const freeWeth = Number(formatWeth(await gmx.operator.getFundBalance()))
+  const freeWeth = Number(formatEther(await gmx.operator.readBalance(ETH)))
   const longPos = (await gmx.getPositions()).find(p => isAddressEqual(p.addresses.market, market) && p.flags.isLong)
   const inLong = !!longPos && longPos.numbers.sizeInUsd > 0n
 
@@ -74,22 +75,22 @@ async function tick(): Promise<void> {
     console.log(`OPEN long $${s.sizeUsd.toFixed(0)} (collateral ${s.collateralWeth.toFixed(5)} WETH)`)
     lastTradeAt = Date.now()
     await gmx.createOrder({
-      orderType: gmx.GMX_ORDER_TYPE.MarketIncrease,
+      orderType: GMX_ORDER_TYPE.MarketIncrease,
       market,
       isLong: true,
       sizeDeltaUsd: usd(s.sizeUsd.toFixed(2)),
-      collateralDelta: weth(s.collateralWeth.toFixed(8)),
+      collateralDelta: parseEther(s.collateralWeth.toFixed(8)),
       acceptablePrice: acceptablePrice(price, true, true, SLIPPAGE_BPS)
     })
   } else if (!wantLong && inLong && longPos) {
     console.log(`CLOSE long $${formatUsd(longPos.numbers.sizeInUsd)}`)
     lastTradeAt = Date.now()
     await gmx.createOrder({
-      orderType: gmx.GMX_ORDER_TYPE.MarketDecrease,
+      orderType: GMX_ORDER_TYPE.MarketDecrease,
       market,
       isLong: true,
       sizeDeltaUsd: longPos.numbers.sizeInUsd, // whole size = full close
-      collateralDelta: 0n, // GMX returns the position's collateral to the fund on a full close
+      collateralDelta: 0n, // GMX returns the position's collateral to the account on a full close
       acceptablePrice: acceptablePrice(price, true, false, SLIPPAGE_BPS)
     })
   }

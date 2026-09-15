@@ -1,18 +1,14 @@
 
-import type { ISubaccountState, ITokenRegistryMap } from '@puppet/sdk/state'
 import {
   constant,
   empty,
   filter,
-  fromPromise,
   type IStream,
   map,
   merge,
   o,
   op,
-  start,
   switchLatest,
-  switchPromises,
   tap
 } from 'aelea/stream'
 import { type IBehavior, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
@@ -42,7 +38,6 @@ import {
 } from 'aelea/ui-components'
 import { colorShade, palette, type Theme, theme } from 'aelea/ui-components-theme'
 import { $defaultAnchor, $Link, locationChange } from 'aelea/ui-router'
-import type { Address, } from 'viem'
 import {
   $alertIntermediateSpinnerContainer,
   $anchor,
@@ -51,7 +46,6 @@ import {
   $github,
   $icon,
   $intermediatePromise,
-  $loadingValue,
   $moreDots,
   $twitter,
   keyActivate,
@@ -62,44 +56,30 @@ import { routeSchema } from '../app/routeSchema.js'
 import { $jazzicon } from '../common/$avatar.js'
 import { $puppetLogo } from '../common/$icons.js'
 import { DOCS_URL, GITHUB_REPO_URL } from '../const/links.js'
-import context from '../io/context.js'
-import { liveTotalUsdValue } from '../io/totalValue.js'
 import { $separator2 } from '../pages/common.js'
-import { type connectWallet, type IConnectedWallet, walletQuery } from '../wallet/index.js'
-import { resolvedWalletPair } from '../wallet/pair.js'
+import { type IConnectedWallet, type IWalletPair, walletQuery } from '../wallet/index.js'
 import { $accountLabel } from './$AccountProfile.js'
 import { $ServicesConnectivity } from './$ServicesConnectivity.js'
 import { $ThemePicker } from './$ThemePicker.js'
 import { $WalletConnect } from './$WalletConnect.js'
 import { $WalletLink } from './$WalletLink.js'
 
-interface I$MainMenu {
-  walletState: IStream<Promise<ISubaccountState | null>>
+export interface I$MainMenu {
+  walletPair: IStream<IWalletPair>
+  walletValue: IStream<Promise<number | null>>
 }
 
-export const $MainMenu = ({ walletState }: I$MainMenu) =>
+export const $MainMenu = ({ walletPair, walletValue }: I$MainMenu) =>
   component(
     (
       [clickPopoverClaim, clickPopoverClaimTether]: IBehavior<any, any>,
       [changeTheme, changeThemeTether]: IBehavior<ISlottable, Theme>,
-      [selectConnector, selectConnectorTether]: IBehavior<Address[]>, //
       [targetClick, targetClickTether]: IBehavior<INode, PointerEvent>,
-      // Capture the extra menu's dismiss output so aria-expanded can mirror open/closed state.
       [extraDismiss, extraDismissTether]: IBehavior<unknown>,
-      // Escape keydown inside the extra menu (popover:'manual' suppresses native Escape close);
-      // fed back into the popover's `dismiss` prop to close it.
-      [escapeExtra, escapeExtraTether]: IBehavior<INode, KeyboardEvent>,
-      // Wiring this through is what subscribes $WalletConnect's click → map(connectWallet)
-      // operator chain. Without it, button clicks don't fire connect. Value is unused here.
-      [_connect, connectTether]: IBehavior<ReturnType<typeof connectWallet>>
+      [escapeExtra, escapeExtraTether]: IBehavior<INode, KeyboardEvent>
     ) => {
-      const walletPair = resolvedWalletPair(walletQuery, walletState)
-      const rootState: IStream<ISubaccountState | null> = map(p => p.root, walletPair)
-      // Trigger handle for returning focus when Escape closes the extra menu.
       let extraTriggerEl: HTMLElement | null = null
-      // Open/closed stream: true on trigger click, false on the popover's dismiss event.
       const extraOpen = merge(constant(true, clickPopoverClaim), constant(false, extraDismiss))
-      // Escape keydown → close: filters Escape, returns focus to the trigger, emits a dismiss.
       const onEscape = (getTrigger: () => HTMLElement | null) =>
         o(
           nodeEvent('keydown'),
@@ -144,10 +124,9 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
         )
       ]
 
-      const themeState = start(theme, changeTheme)
+      const themeState = state(theme, changeTheme)
       const $extraMenuPopover = $Popover({
         $container: $iconCircular,
-        // Announced as a menu; popover:'manual' suppresses native Escape, so wire it explicitly.
         $contentContainer: $defaultPopoverContentContainer(
           attr({ role: 'menu', tabindex: '-1' }),
           escapeExtraTether(onEscape(() => extraTriggerEl))
@@ -165,7 +144,6 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
           ),
           clickPopoverClaim
         ),
-        // Close on route change OR Escape pressed inside the menu/trigger.
         dismiss: merge(locationChange, escapeExtra),
         $target: $icon({
           svgOps: o(
@@ -187,8 +165,6 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
           width: '32px',
           $content: $moreDots,
           viewBox: '0 0 32 32',
-          // Accessible name so the icon-only trigger is not silent to AT (and is not aria-hidden).
-          // The svgOps above further refine role/aria-label for the menu-trigger semantics.
           label: 'More options'
         })
       })({ dismiss: extraDismissTether() })
@@ -222,6 +198,7 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
         $node(
           style({
             width: '1px',
+            flexShrink: 0,
             alignSelf: 'stretch',
             backgroundColor: colorShade(palette.foreground, 40)
           })
@@ -285,9 +262,8 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
                   return $Popover({
                     $target,
                     $open: map(() => {
-                      return $WalletConnect()({ connect: connectTether() })
-                    }, targetClick),
-                    dismiss: selectConnector
+                      return $WalletConnect()({})
+                    }, targetClick)
                   })({})
                 }
 
@@ -303,22 +279,27 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
                   overflow: 'hidden'
                 })
 
-                const registryState: IStream<ITokenRegistryMap> = op(
-                  fromPromise(context.getTokenRegistry()),
-                  state()
-                )
-                // Total account value, lensed off the root PA state: cash + per-position value (claimable + held shares
-                // at fund NAV) + mastered-fund AUM. Shared with the wallet-page chart headline via liveTotalUsdValue.
-                const totalUsdText: IStream<string> = map(
-                  v => (v === null ? '-' : `$${v.toFixed(2)}`),
-                  liveTotalUsdValue(rootState, registryState)
-                )
-                const $totalUsd = $node(style({ fontSize: text.xs, fontWeight: '600', color: palette.message, lineHeight: '1.1' }))(
-                  $loadingValue(totalUsdText)
+                const $totalUsd = $node(
+                  style({ fontSize: text.xs, fontWeight: '600', color: palette.message, lineHeight: '1.1' })
+                )(
+                  switchLatest(
+                    map(
+                      s =>
+                        s.status === PromiseStatus.ERROR
+                          ? $node(
+                              attr({ title: `Value unavailable: ${s.error instanceof Error ? s.error.message : String(s.error)}` }),
+                              style({ color: palette.negative })
+                            )($text('!'))
+                          : $node(style({ color: s.status === PromiseStatus.DONE && s.value !== null ? palette.message : palette.foreground }))(
+                              $text(s.status === PromiseStatus.DONE && s.value !== null ? `$${s.value.toFixed(2)}` : '-')
+                            ),
+                      op(walletValue, promiseState)
+                    )
+                  )
                 )
 
                 return $element('a')(
-                  attr({ 'aria-label': 'Portfolio', href: '/portfolio' }),
+                  attr({ 'aria-label': 'Account', href: '/portfolio' }),
                   style({
                     display: 'inline-flex',
                     alignItems: 'center',
@@ -341,21 +322,13 @@ export const $MainMenu = ({ walletState }: I$MainMenu) =>
                     $column(spacing.tiny, style({ minWidth: '0', flex: 1 }))(
                       $accountLabel({ address: connection.address, primarySize: 0.75 }),
                       $separator2,
-                      // The root promise drives the display: the USD total renders only once the seed resolved to a
-                      // real account; anything else (still resolving, or no on-chain identity — the signer is chain
-                      // -recovered, so no session gate applies) stays the dim intermediate dash.
-                      switchLatest(
-                        map(root => {
-                          if (root.status === PromiseStatus.DONE && root.value !== null) return $totalUsd
-                          return $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.1' }))($text('-'))
-                        }, promiseState(walletState))
-                      )
+                      $totalUsd
                     )
                   )
                 )
               }, walletQuery)
             }),
-            $WalletLink({ walletState: map(p => p.wallet, walletPair), rootState })({})
+            $WalletLink({ walletPair })({})
           ),
 
           $row(spacing.big, style({ flex: 1, placeContent: 'flex-end', alignItems: 'center' }))(

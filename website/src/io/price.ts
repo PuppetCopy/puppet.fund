@@ -1,32 +1,35 @@
+import type { ChainId } from '@puppet/sdk/const'
 import { periodicRun } from '@puppet/sdk/core'
 import { USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
-import { type IStream, map, op, skipRepeats } from 'aelea/stream'
-import { recover, state } from 'aelea/stream-extended'
-import { type Address, formatUnits, getAddress } from 'viem'
+import { type ITokenMetaKey, tokenMetaByChainToken, tokenMetaKey } from '@puppet/sdk/state'
+import { type IStream, just, map, op, skipRepeats } from 'aelea/stream'
+import { state } from 'aelea/stream-extended'
+import { type Address, formatUnits, } from 'viem'
 import { getPrice } from './context.js'
 
 const PRICE_REFRESH_MS = 10_000
 
-// Reactive per-token price stream for DISPLAY: base-1e30 bigint, or null while it loads / when the oracle can't price
-// it. Polls the shared getPrice (so display and NAV read one source), de-duped per token; getPrice resolves native and
-// hub-wrapped variants itself.
-const priceStreamCache = new Map<Address, IStream<bigint | null>>()
-export function priceFor(token: Address): IStream<bigint | null> {
-  const key = getAddress(token)
+const priceStreamCache = new Map<ITokenMetaKey, IStream<bigint | null>>()
+export function priceFor(chainId: ChainId, token: Address): IStream<bigint | null> {
+  const key = tokenMetaKey(chainId, token)
   const existing = priceStreamCache.get(key)
   if (existing) return existing
-  const stream = op(
-    periodicRun({
-      startImmediate: true,
-      interval: PRICE_REFRESH_MS,
-      // Display fails SOFT: an unpriceable token (oracle has no market yet, e.g. a thin new listing) yields null -> '-'
-      // rather than throwing a render error. NAV/attestation still reads getRate directly and fails closed.
-      actionOp: map(() => getPrice(key, PRICE_REFRESH_MS).then(source => source.price).catch(() => null))
-    }),
-    skipRepeats,
-    recover({}),
-    state(null)
-  )
+  const stream = tokenMetaByChainToken.has(key)
+    ? op(
+        periodicRun({
+          startImmediate: true,
+          interval: PRICE_REFRESH_MS,
+          actionOp: map(() =>
+            getPrice(chainId, token, PRICE_REFRESH_MS).then(
+              source => source.price,
+              (): null => null
+            )
+          )
+        }),
+        skipRepeats,
+        state(null)
+      )
+    : just<bigint | null>(null)
   priceStreamCache.set(key, stream)
   return stream
 }

@@ -1,166 +1,147 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.35;
+pragma solidity ^0.8.36;
 
-import {LibClone} from "solady/utils/LibClone.sol";
+import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
+import {ECDSA} from "solady/utils/ECDSA.sol";
+import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
 
-import {IAccount} from "../utils/interfaces/IAccount.sol";
 import {AccountLib} from "../utils/AccountLib.sol";
-import {FundAccountLib} from "../utils/FundAccountLib.sol";
-import {PuppetAccount} from "./PuppetAccount.sol";
-import {FundAccount} from "./FundAccount.sol";
-import {Attest} from "./Attest.sol";
-import {Permission} from "../utils/auth/Permission.sol";
+import {BalanceLib} from "../utils/BalanceLib.sol";
+import {CallLib} from "../utils/CallLib.sol";
 import {Error} from "../utils/Error.sol";
-import {NonceLib} from "../utils/NonceLib.sol";
-import {IAuthority} from "../utils/interfaces/IAuthority.sol";
+import {IAccount} from "../utils/interfaces/IAccount.sol";
+import {DepositRoute} from "./DepositRoute.sol";
 
-contract Account is Permission {
-    uint internal constant _NONCE_SCOPE = uint32(bytes4(keccak256("PuppetAccount")));
-
-    Attest public immutable attest;
-    address public immutable puppetAccountImpl;
-    address public immutable fundAccountImpl;
-    address public immutable routeImpl;
-
-    constructor(
-        IAuthority _authority,
-        Attest _attest,
-        address _puppetAccountImpl,
-        address _fundAccountImpl,
-        address _routeImpl
-    ) Permission(_authority) {
-        if (
-            address(_attest) == address(0) || _puppetAccountImpl == address(0) || _fundAccountImpl == address(0)
-                || _routeImpl == address(0)
-        ) {
-            revert Error.Register__InvalidImpl();
-        }
-        attest = _attest;
-        puppetAccountImpl = _puppetAccountImpl;
-        fundAccountImpl = _fundAccountImpl;
-        routeImpl = _routeImpl;
+contract Account is IAccount {
+    struct Body {
+        address module;
+        address user;
+        address signer;
+        uint64 nonce;
     }
 
-    function predictPuppetAccount(
-        AccountLib.AccountInitParams calldata _params
-    ) external view returns (address) {
-        return AccountLib.predictAccount(puppetAccountImpl, address(attest), _params);
+    bytes32 internal immutable SLOT;
+
+    constructor() {
+        SLOT = keccak256(abi.encode("puppet.account", address(this)));
     }
 
-    function verifyPuppetAccount(
-        AccountLib.AccountInitParams calldata _params
-    ) external view returns (PuppetAccount) {
-        return PuppetAccount(payable(AccountLib.verifyAccount(puppetAccountImpl, address(attest), _params)));
+    function nonce() public view returns (uint) {
+        return _body().nonce;
     }
 
-    function predictFundAccount(
-        FundAccountLib.FundAccountInitParams calldata _fundParams
-    ) external view returns (address) {
-        return FundAccountLib.predictFund(fundAccountImpl, address(attest), _fundParams);
+    function args() public view returns (address, address, address) {
+        Body storage _b = _body();
+        return (_b.module, _b.user, _b.signer);
     }
 
-    function verifyFundAccount(
-        FundAccountLib.FundAccountInitParams calldata _fundParams
-    ) external view returns (FundAccount) {
-        return FundAccount(payable(FundAccountLib.verifyFund(fundAccountImpl, address(attest), _fundParams)));
-    }
-
-    function predictRoute(
-        address _account
-    ) external view returns (address) {
-        return AccountLib.predictRoute(routeImpl, address(this), _account);
-    }
-
-    function isNonceConsumed(
-        address _account,
-        uint _nonce
-    ) external view returns (bool) {
-        return NonceLib.isConsumedBy(_NONCE_SCOPE, _nonce, _account);
-    }
-
-    function _deployRoute(
-        address _account
-    ) private returns (address) {
-        return LibClone.cloneDeterministic(routeImpl, abi.encodePacked(_account), bytes32(uint(uint160(_account))));
-    }
-
-    function createPuppetAccount(
-        AccountLib.AccountInitParams calldata _params,
-        bytes calldata _userDeploySig,
-        bytes calldata _signerProof
-    ) external auth returns (PuppetAccount account_, address route_) {
-        if (_params.user == address(0)) revert Error.Account__InvalidUser();
-        AccountLib.verifyDeployAuth(_params.user, _params.signer, _userDeploySig, _signerProof);
-        bytes memory _args = AccountLib.accountArgs(address(attest), _params);
-        address _account = LibClone.cloneDeterministic(puppetAccountImpl, _args, keccak256(_args));
-        route_ = _deployRoute(_account);
-        account_ = PuppetAccount(payable(_account));
-        _logEvent("DeployPuppetAccount", abi.encode(_params.user, _params.signer, _account, route_));
-    }
-
-    function createFundAccount(
-        address _user,
-        FundAccountLib.FundAccountInitParams calldata _fundParams
-    ) external auth returns (FundAccount account_, address route_) {
-        if (_fundParams.master == address(0)) revert Error.Account__InvalidUser();
-        bytes memory _args = FundAccountLib.fundArgs(address(attest), _fundParams);
-        address _account = LibClone.cloneDeterministic(fundAccountImpl, _args, keccak256(_args));
-        route_ = _deployRoute(_account);
-        account_ = FundAccount(payable(_account));
-        _logEvent(
-            "DeployFundAccount",
-            abi.encode(_user, _fundParams.master, _fundParams.baseToken, _fundParams.name, _account, route_)
-        );
-    }
-
-    function dispatch(
-        IAccount _account,
-        IAccount.Call[] calldata _callList,
-        IAccount.SignTransfer[] calldata _transferList,
+    function isValidSignature(
         bytes32 _digest,
-        bytes calldata _userSignature,
-        bytes calldata _attestorSignature,
+        bytes calldata _signature
+    ) public view returns (bytes4) {
+        if (ECDSA.tryRecoverCalldata(_digest, _signature) != address(this)) return 0xffffffff;
+        return IERC1271.isValidSignature.selector;
+    }
+
+    function genesis(
+        address _user,
+        address _signer,
+        bytes calldata _keySignature
+    ) external returns (bytes32 digest_) {
+        Body storage _b = _body();
+        if (_b.nonce != 0) revert Error.Account__AlreadyCreated();
+        if (_user == address(0) || _signer == address(0)) revert Error.Account__InvalidUser();
+        digest_ = AccountLib.genesisDigest(msg.sender, address(this), _user, _signer);
+        if (ECDSA.tryRecoverCalldata(digest_, _keySignature) != address(this)) {
+            revert Error.Account__InvalidSignature();
+        }
+        _b.module = msg.sender;
+        _b.user = _user;
+        _b.signer = _signer;
+        _b.nonce = 1;
+    }
+
+    function execute(
         address _attestor,
-        uint _nonce
-    )
-        external
-        payable
-        auth
-        returns (uint[] memory signedPostBalanceList_, uint[] memory postBalanceList_, bytes[] memory resultList_)
-    {
-        NonceLib.consumeBy(_NONCE_SCOPE, _nonce, address(_account));
+        bytes32 _digest,
+        bytes calldata _signature,
+        IAccount.Call[] calldata _callList
+    ) external payable returns (bytes[] memory resultList_) {
+        Body storage _b = _body();
+        if (msg.sender != _b.module) revert Error.Account__UnauthorizedCaller();
+        if (
+            _signature.length < 130 || ECDSA.tryRecoverCalldata(_digest, _signature[:65]) != _b.signer
+                || !SignatureCheckerLib.isValidSignatureNowCalldata(_attestor, _digest, _signature[65:])
+        ) revert Error.Account__InvalidSignature();
 
-        (signedPostBalanceList_, postBalanceList_, resultList_) = attest.execute{value: msg.value}(
-            _account, _callList, _transferList, _digest, _userSignature, _attestorSignature, _attestor
-        );
+        uint64 _expected;
+        unchecked {
+            _expected = _b.nonce + 1;
+        }
+        _b.nonce = _expected;
 
-        _logEvent(
-            "AccountCall",
-            abi.encode(
-                block.chainid, address(_account), _nonce, _transferList, signedPostBalanceList_, postBalanceList_
-            )
-        );
+        uint _callLen = _callList.length;
+        resultList_ = new bytes[](_callLen);
+        for (uint _i; _i < _callLen; ++_i) {
+            IAccount.Call calldata _call = _callList[_i];
+            if (_call.target == address(this) || _call.target == msg.sender) {
+                revert Error.Account__ForbiddenTarget(_call.target);
+            }
+            bool _ok;
+            (_ok, resultList_[_i]) = _call.target
+            .call{value: _call.value, gas: _call.gasLimit > 0 ? _call.gasLimit : gasleft()}(
+                _call.callData
+            );
+            if (!_ok) {
+                bytes memory _res = resultList_[_i];
+                assembly ("memory-safe") {
+                    revert(add(_res, 32), mload(_res))
+                }
+            }
+        }
+        if (_b.nonce != _expected) revert Error.Account__ReentrantCall();
     }
 
-    function dispatchMandate(
-        IAccount _puppet,
-        bytes32 _mandateDigest,
-        bytes calldata _mandate,
-        IAccount.Call[] calldata _callList,
-        IAccount.SignTransfer[] calldata _transferList
-    )
-        external
-        auth
-        returns (uint[] memory signedPostBalanceList_, uint[] memory postBalanceList_, bytes[] memory resultList_)
-    {
-        (
-            signedPostBalanceList_, postBalanceList_, resultList_
-        ) = attest.executeMandate(_puppet, _callList, _transferList, _mandateDigest, _mandate);
-        _logEvent(
-            "MandateCall",
-            abi.encode(
-                block.chainid, address(_puppet), _mandateDigest, _transferList, signedPostBalanceList_, postBalanceList_
-            )
-        );
+    function forcedWithdrawal(
+        address _route,
+        address _token,
+        uint _amount,
+        address _to
+    ) external returns (IAccount.Call[] memory callList_, bytes[] memory resultList_) {
+        if (msg.sender != _body().module) revert Error.Account__UnauthorizedCaller();
+        uint _atRoute = BalanceLib.balanceOf(_token, _route);
+        callList_ = new IAccount.Call[](_atRoute > 0 ? 2 : 1);
+        uint _at;
+        if (_atRoute > 0) {
+            IAccount.Call[] memory _inner = new IAccount.Call[](1);
+            _inner[0] = CallLib.pay(_token, _to, _atRoute, 0);
+            callList_[0] = IAccount.Call({
+                target: _route, value: 0, gasLimit: 0, callData: abi.encodeCall(DepositRoute.execute, (_inner))
+            });
+            _at = 1;
+        }
+        callList_[_at] = CallLib.pay(_token, _to, _amount, 0);
+
+        uint _callLen = callList_.length;
+        resultList_ = new bytes[](_callLen);
+        for (uint _i; _i < _callLen; ++_i) {
+            bool _ok;
+            (_ok, resultList_[_i]) = callList_[_i].target.call{value: callList_[_i].value}(callList_[_i].callData);
+            if (!_ok) {
+                bytes memory _res = resultList_[_i];
+                assembly ("memory-safe") {
+                    revert(add(_res, 32), mload(_res))
+                }
+            }
+        }
     }
+
+    function _body() internal view returns (Body storage b_) {
+        bytes32 _slot = SLOT;
+        assembly ("memory-safe") {
+            b_.slot := _slot
+        }
+    }
+
+    receive() external payable {}
 }

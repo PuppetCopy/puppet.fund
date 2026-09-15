@@ -1,54 +1,35 @@
 import type { Address, Hex, PublicClient } from 'viem'
 import type { ChainId } from '../const/index.js'
 
-export type INavKind = 'allocate' | 'redeem' | 'liquidate' | 'view'
+export type INavKind = 'operate' | 'settle' | 'view'
 
 export interface INavChainBalance {
   chainId: ChainId
-  signedBalance: bigint
-  unrecognized: bigint
+  balance: bigint
   reachable: boolean
 }
 
-// A non-base spot holding in the fund's signed domain, priced into base by the evaluation. The CALLER builds the
-// list (website via composeHoldings() from its fold subaccount; the relay from its per-token on-chain reads) and
-// resolves `symbol` chain-aware to the PRICED asset (WMON -> MON): the native marker is the same address on every
-// chain, so it cannot be address-keyed.
 export interface INavHolding {
   chainId: ChainId
   token: Address
   symbol: string
-  signedBalance: bigint
-  unrecognized: bigint
+  balance: bigint
 }
 
 export interface INavValuedHolding extends INavHolding {
-  valueBase: bigint
-  unrecognizedBase: bigint
-  priceAgeSec: number | undefined
+  mark: { valueBase: bigint; priceAgeSec: number }
 }
-
 
 export type IPriceSource = { readonly price: bigint; readonly time: number }
 
-// A pair exchange rate: two non-directional per-wei legs scaled to the protocol precision. The oracle sources
-// it from a directly observed market; `quoteAmount(fromWei, token0, token1)` converts a token0 amount to token1
-// wei (reverse the args for the other direction). Defined here (not in @puppet/oracle) so the consensus
-// evaluation layer owns the contract; the oracle imports it back (it already depends on this module).
 export interface IRate {
   token0: bigint
   token1: bigint
   time: number
 }
 
-// The sole injected pricing primitive: an explicit pair rate keyed by canonical asset SYMBOL ('ETH', 'USDC', …). The
-// caller names both legs by symbol (swap = the two legs; NAV/position = token vs the dollar-proxy 'USDC'), resolving any
-// token ADDRESS it holds to its symbol via symbolByAddress at the call site. Symbol, not the keccak tokenId, is the rate
-// key end to end: the oracle prices markets by symbol, so a hash would only get mapped back to a symbol at the wire.
 export type IGetRate = (asset0: string, asset1: string, freshness?: number) => Promise<IRate>
 
-// An open venue position, valuation-ready. Sourced from an injected reader: the matchmaker's
-// GmxReaderV2.getAccountPositions over RPC, or the browser's relay /positions client.
 export interface IGmxPositionRow {
   positionKey: Hex
   market: Address
@@ -59,8 +40,9 @@ export interface IGmxPositionRow {
   collateralUsd: bigint
   collateralAmount: bigint
   storedPnlUsd: bigint
+  increasedAtTime: number
 }
-export type IGmxPositionProvider = (account: Address, baseToken: Address) => Promise<IGmxPositionRow[]>
+export type IGmxPositionProvider = (account: Address) => Promise<IGmxPositionRow[]>
 
 export interface IGmxOrderRow {
   orderKey: Hex
@@ -97,7 +79,6 @@ export interface INavPosition {
 
 export interface IPlatformInFlight {
   platform: string
-  kind: 'order' | 'transfer'
   ref: string
   detail: string
 }
@@ -111,8 +92,11 @@ export interface IPlatformValuation {
 }
 
 export interface IPlatformEvalParams {
+  chainId: ChainId
   account: Address
   baseToken: Address
+  blockNumber: bigint
+  blockTimestamp: number
   nowSec: number
   publicClient?: PublicClient
   getRate: IGetRate
@@ -123,19 +107,19 @@ export interface IPlatformEvalParams {
 
 export interface IPlatformEvaluator {
   platform: string
+  chainId: ChainId
   evaluate(params: IPlatformEvalParams): Promise<IPlatformValuation>
 }
 
 export interface INavBreakdown {
-  unitedSignedBalance: bigint
+  unitedCashBase: bigint
   positionMarkBase: bigint
-  positionFloorBase: bigint
   holdingMarkBase: bigint
   perChain: INavChainBalance[]
   holdings: INavValuedHolding[]
   positions: INavPosition[]
   inFlight: IPlatformInFlight[]
-  unavailablePlatforms: string[]
+  unavailablePlatforms: { platform: string; reason: string | undefined }[]
 }
 
 export interface INavGateReason {
@@ -143,19 +127,14 @@ export interface INavGateReason {
   detail: string
 }
 
-export interface INavGate {
-  ok: boolean
-  reasons: INavGateReason[]
-}
+export type INavGate = { ok: true } | { ok: false; reasons: INavGateReason[] }
 
 export type INavGateCode =
   | 'CHAIN_UNREACHABLE'
   | 'STALE_ORACLE'
   | 'NAV_MISMATCH'
   | 'PENDING_ORDER'
-  | 'PENDING_BRIDGE'
   | 'PLATFORM_UNAVAILABLE'
-  | 'UNRECOGNIZED_BALANCE'
   | 'OPEN_POSITIONS'
   | 'VENUE_TOKEN_UNSUPPORTED'
   | 'VENUE_PRICE_STALE'
@@ -165,25 +144,23 @@ export type INavGateCode =
 
 export interface IEvaluationConfig {
   maxPriceAgeSec: number
-  allocateGainHaircutBps: bigint
   driftToleranceBps: bigint
-  maxUnrecognizedBaseWei: bigint
   swapMaxSlippageBps: bigint
   bridgeMaxSlippageBps: bigint
 }
 
 export const DEFAULT_EVALUATION_CONFIG: IEvaluationConfig = {
   maxPriceAgeSec: 120,
-  allocateGainHaircutBps: 2000n,
   driftToleranceBps: 50n,
-  maxUnrecognizedBaseWei: 0n,
   swapMaxSlippageBps: 500n,
   bridgeMaxSlippageBps: 500n
 }
 
 export interface IEvaluateAccountParams {
   master: Address
-  baseToken: Address
+  baseKey: string
+  blockNumber: bigint
+  blockTimestamp: number
   kind: INavKind
   platforms?: IPlatformEvaluator[]
   publicClient?: PublicClient
@@ -194,18 +171,11 @@ export interface IEvaluateAccountParams {
   nowSec?: number
   config?: Partial<IEvaluationConfig>
   clientNav?: bigint
-  // The base-token cash leg per chain (signedBalance, unrecognized = held − signed, reachable). The CALLER builds it — the
-  // website via composeCashLeg() from its fold subaccount; the relay directly from its on-chain reads (no synthetic fold).
   cashLeg: INavChainBalance[]
-  // Non-base spot holdings to price into base (same caller-built contract as cashLeg). Omitted = none.
-  holdings?: INavHolding[]
+  holdings: INavHolding[]
 }
 
-export interface INavResult {
-  navMark: bigint
-  navFloor: bigint
-  navSigned: bigint
-  kind: INavKind
-  breakdown: INavBreakdown
-  gate: INavGate
-}
+export type INavResult = { kind: INavKind; breakdown: INavBreakdown } & (
+  | { ok: true; navMark: bigint }
+  | { ok: false; reasons: INavGateReason[] }
+)

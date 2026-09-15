@@ -1,34 +1,34 @@
 import { clientsClaim } from 'workbox-core'
 import { cleanupOutdatedCaches, createHandlerBoundToURL, precacheAndRoute } from 'workbox-precaching'
 import { NavigationRoute, registerRoute } from 'workbox-routing'
-import { API_CACHE, deleteManagedCaches, EVICT_VIEW_OWNER, type IViewRequest, parseViewRequest, viewBucket } from '../swCache.js'
+import {
+  deleteStaleUniverseCaches,
+  EVICT_VIEW_OWNER,
+  type IViewRequest,
+  parseViewRequest,
+  stampedJson,
+  viewBucket,
+  withinMaxAge
+} from '../swCache.js'
 
-declare const self: ServiceWorkerGlobalScope & typeof globalThis
+declare const self: ServiceWorkerGlobalScope & typeof globalThis & { __WB_DISABLE_DEV_LOGS: boolean }
 
-// self.__WB_MANIFEST is the default injection point
+self.__WB_DISABLE_DEV_LOGS = true
+
 precacheAndRoute(self.__WB_MANIFEST)
 
-// clean old assets
 cleanupOutdatedCaches()
 
 let allowlist: RegExp[] | undefined
-// in dev mode, we disable precaching to avoid caching issues
 if (import.meta.env.DEV) allowlist = [/^\/$/]
 
-// to allow work offline - exclude /assets/ from SPA fallback
 registerRoute(
   new NavigationRoute(createHandlerBoundToURL('index.html'), {
     allowlist,
-    denylist: [/^\/assets\//]
+    denylist: [/^\/assets\//, /^\/api\//]
   })
 )
 
-const CACHEABLE_PATHS: RegExp[] = [/^\/api\/og(\/|$)/]
-
-// Self-state view-cache. GET /api/view?net=&to=&data=[&m=code] is a same-origin cache key for ONE eth_call (or
-// eth_getCode); the URL is the key, so it's served cache-first and a per-URL ?refresh=true busts exactly that view
-// (the app does this on settlement). On miss the SW dispatches the read itself to /api/rpc and caches only a
-// successful result, so the matchmaker is never in the read path. A user-supplied RPC can later be tried first here.
 async function dispatchView(view: IViewRequest): Promise<{ result?: string; error?: string }> {
   const method = view.isCode ? 'eth_getCode' : 'eth_call'
   const block = view.block ?? 'latest'
@@ -51,59 +51,41 @@ self.addEventListener('fetch', event => {
   const url = new URL(event.request.url)
   if (url.origin !== self.location.origin) return
 
-  // One bucket per connected wallet (`w`), so a wallet's PA + FA self-views live together and can be evicted as a
-  // unit on disconnect/switch; global/deterministic reads (no `w`) share one bucket that survives wallet changes.
   const view = parseViewRequest(url)
-  if (view) {
-    event.respondWith(
-      (async () => {
-        const cache = await caches.open(view.bucket)
-        if (!view.forceRefresh) {
-          const cached = await cache.match(view.cacheKey)
-          if (cached) return cached
-        }
-        const out = await dispatchView(view)
-        const response = new Response(JSON.stringify(out), { headers: { 'content-type': 'application/json' } })
-        if (out.result !== undefined) await cache.put(view.cacheKey, response.clone())
-        return response
-      })()
-    )
-    return
-  }
-
-  if (!CACHEABLE_PATHS.some(rx => rx.test(url.pathname))) return
-
-  const forceRefresh = url.searchParams.get('refresh') === 'true'
-  url.searchParams.delete('refresh')
-
+  if (!view) return
   event.respondWith(
     (async () => {
-      const cache = await caches.open(API_CACHE)
-      const cacheKey = new Request(url.href)
-
-      if (!forceRefresh) {
-        const cached = await cache.match(cacheKey)
-        if (cached) return cached
-      }
-
-      const response = await fetch(event.request)
-      if (response.ok) cache.put(cacheKey, response.clone())
+      const cache = await caches.open(view.bucket)
+      const cached = await cache.match(view.cacheKey)
+      if (cached && withinMaxAge(cached, view.maxAge)) return cached
+      const out = await dispatchView(view)
+      const response = stampedJson(out)
+      if (out.result !== undefined) await cache.put(view.cacheKey, response.clone())
       return response
     })()
   )
 })
 
-// Clear api-cache and every per-wallet/shared view bucket on new service worker activation. waitUntil holds the
-// activating state until the deletes resolve, so clientsClaim() cannot hand a freshly-claimed client a stale entry.
 self.addEventListener('activate', event => {
-  event.waitUntil(deleteManagedCaches())
+  event.waitUntil(deleteStaleUniverseCaches())
 })
 
-// Auto update: activate immediately and take control of existing clients
 clientsClaim()
 
-// Let the client decide when to promote a waiting SW (via registerSW.reloadCb), and drop a wallet's view bucket when
-// it disconnects / the active wallet switches.
+self.addEventListener('notificationclick', event => {
+  event.notification.close()
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async list => {
+      const client = list.find(c => c.url.startsWith(self.registration.scope)) ?? list[0]
+      if (client) {
+        await client.focus()
+        return
+      }
+      await self.clients.openWindow(self.registration.scope)
+    })
+  )
+})
+
 self.addEventListener('message', event => {
   const data = event.data
   if (!data) return

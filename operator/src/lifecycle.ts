@@ -1,9 +1,7 @@
-export interface IClosable {
-  close(): void
-}
+import type { IConnector } from './connector.js'
 
 export async function runOperator(
-  operator: IClosable,
+  connector: IConnector,
   body: (signal: AbortSignal) => unknown | Promise<unknown>
 ): Promise<void> {
   const controller = new AbortController()
@@ -15,6 +13,6 @@ export async function runOperator(
   } finally {
     process.off('SIGINT', abort)
     process.off('SIGTERM', abort)
-    operator.close()
+    connector.close()
   }
 }

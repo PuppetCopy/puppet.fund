@@ -1,9 +1,12 @@
-import type { ChainId } from '@puppet/sdk/const'
-import { getChainTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
+
+import { getTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
+import { deliveredLeg, type IRouteLane, type IRoutePlan } from '@puppet/sdk/intent'
 import {
   combine,
   debounce,
+  disposeBoth,
+  disposeWith,
   empty,
   filter,
   fromPromise,
@@ -13,13 +16,12 @@ import {
   map,
   merge,
   op,
-  periodic,
   reduce,
   skipRepeatsWith,
   start,
   switchMap
 } from 'aelea/stream'
-import { type IBehavior, state } from 'aelea/stream-extended'
+import { type IBehavior, state, stream } from 'aelea/stream-extended'
 import {
   $node,
   $text,
@@ -33,33 +35,39 @@ import {
 } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
-import { type Address, formatUnits, getAddress } from 'viem'
+import { formatUnits, } from 'viem'
 import { $DropSelect, $dropSelectJoinedListContainer, $infoTooltip, $inlineSpinner, text } from '@/ui-components'
-import { providerToken } from '../../io/bridge/swapCommon.js'
-import {
-  type ISwapAttempt,
-  type ISwapProvider,
-  type ISwapQuote,
-  type ISwapRequest,
-  swapQuoteAttempts
-} from '../../io/bridge/swapQuote.js'
+import { type ISwapRequest, swapRouteCandidates } from '../../io/bridge/swapQuote.js'
 import { priceFor } from '../../io/price.js'
 
 const HIGH_SWAP_FEE_PCT = 1
-// Quotes go stale (Across pins quoteTimestamp to a ~10 minute SpokePool window; DEX calldata drifts with the pool),
-// so an active request re-quotes on a fixed cadence — the drafts then always bake a recent route.
-const QUOTE_REFRESH_MS = 60_000
 
-type IRouteRowOk = { provider: ISwapProvider; status: 'ok'; quote: ISwapQuote }
+const ROUTE_LABEL: Record<string, string> = {
+  lifi: 'LI.FI',
+  across: 'Across',
+  acrossSwap: 'AcrossSwap',
+  composed: 'Composed'
+}
+
+const routeLabel = (id: string): string => {
+  const label = ROUTE_LABEL[id]
+  if (label === undefined) throw new Error(`unrecognised swap route candidate '${id}'`)
+  return label
+}
+
+const bridgeLeg = (plan: IRoutePlan): IRouteLane =>
+  plan.length === 1 || plan[0].route.kind === 'across' ? plan[0] : plan[1]!
+
+type IRouteRowOk = { id: string; status: 'ok'; req: ISwapRequest; plan: IRoutePlan }
 type IRouteRow =
-  | { provider: ISwapProvider; status: 'pending' }
+  | { id: string; status: 'pending' }
   | IRouteRowOk
-  | { provider: ISwapProvider; status: 'error'; message: string }
+  | { id: string; status: 'error'; message: string }
 
 type IRouteState = { req: ISwapRequest; rows: IRouteRow[] }
 
 interface IRouteOption {
-  provider: ISwapProvider
+  id: string
   status: 'pending' | 'ok' | 'error'
   label: string
   feeUsd: string
@@ -74,48 +82,39 @@ interface IRouteOption {
 }
 
 export interface ISelectedRoute {
-  quote: ISwapQuote | null
-  forInput: bigint | null
-  // The exact request the quote answers; `ready` is the one flag editors gate submit on: a fresh quote (matches the
-  // LIVE request, not one still lagging a just-changed amount/route), with output and within bridge limits.
-  forRequest: ISwapRequest | null
+  plan: IRoutePlan | null
   ready: boolean
   error: string | null
   limitError: string | null
 }
 
-const EMPTY_SELECTED: ISelectedRoute = { quote: null, forInput: null, forRequest: null, ready: false, error: null, limitError: null }
+const EMPTY_SELECTED: ISelectedRoute = { plan: null, ready: false, error: null, limitError: null }
 
-const limitErrorOf = (req: ISwapRequest, quote: ISwapQuote): string | null => {
-  // Bridge limits are denominated in the BRIDGED asset, so compare against the amount that ACTUALLY crosses the bridge,
-  // in that asset's units: the composed route carries its own bridgeInput/bridgeAsset (the fund composed bridges a
-  // swapped stablecoin, not the request input), a fused/same-asset route bridges the request input to its output.
-  const bridgedAmount = quote.provider === 'Composed' ? quote.bridgeInput : req.inputAmount
-  const desc =
-    quote.provider === 'Composed'
-      ? getChainTokenDescription(req.originChainId as ChainId, quote.bridgeAsset)
-      : getChainTokenDescription(req.destinationChainId as ChainId, req.outputToken)
-  if (quote.isAmountTooLow) return `Below bridge minimum ${readableTokenAmountLabel(desc, quote.limits.minDeposit)}`
-  if (bridgedAmount > quote.limits.maxDeposit) {
-    return `Exceeds bridge maximum ${readableTokenAmountLabel(desc, quote.limits.maxDeposit)}`
+const limitErrorOf = (req: ISwapRequest, plan: IRoutePlan): string | null => {
+  const bridge = bridgeLeg(plan)
+  const composed = plan.length > 1
+  const tooLow = plan.some(leg => leg.isAmountTooLow)
+  if (bridge.limits === null) return tooLow ? 'Below this route’s minimum' : null
+  const desc = composed
+    ? getTokenDescription(req.originChainId, bridge.inputToken)
+    : getTokenDescription(req.destinationChainId, req.outputToken)
+  if (tooLow) return `Below bridge minimum ${readableTokenAmountLabel(desc, bridge.limits.minDeposit)}`
+  const bridgedAmount = composed ? bridge.inputAmount : req.inputAmount
+  if (bridgedAmount > bridge.limits.maxDeposit) {
+    return `Exceeds bridge maximum ${readableTokenAmountLabel(desc, bridge.limits.maxDeposit)}`
   }
   return null
 }
 
 const usdNumber = (amount: bigint, price: bigint) => Number(formatUnits(amount * price, USD_PRICE_DECIMALS))
 
-const routeToolName = (quote: ISwapQuote) => ('tool' in quote ? quote.tool : quote.provider)
-
-// Arrival communication, IN ADVANCE: a provider estimate renders as `~3s`; a cross-chain route WITHOUT an estimate
-// renders its worst-case bound `≤30m` (the quote's fill deadline — the point past which the runner treats the fill
-// as failed and the funds resurface as route surplus) in the attention tone, so slow routes are visible before submit.
-const etaLabel = (quote: ISwapQuote, crossChain: boolean): { text: string; warn: boolean } => {
-  const sec = quote.etaSec
+const etaLabel = (plan: IRoutePlan, crossChain: boolean): { text: string; warn: boolean } => {
+  const sec = bridgeLeg(plan).etaSec
   if (sec !== undefined && sec > 0) {
     return { text: sec < 60 ? `~${sec}s` : `~${Math.round(sec / 60)}m`, warn: false }
   }
   if (!crossChain) return { text: '', warn: false }
-  const untilDeadlineSec = Math.max(0, Math.floor(quote.fillDeadline) - Math.floor(Date.now() / 1000))
+  const untilDeadlineSec = Math.max(0, Math.floor(plan[0].fillDeadline) - Math.floor(Date.now() / 1000))
   return { text: `≤${Math.max(1, Math.round(untilDeadlineSec / 60))}m`, warn: true }
 }
 
@@ -128,30 +127,33 @@ const sameRequest = (a: ISwapRequest | null, b: ISwapRequest | null) =>
     a.inputToken === b.inputToken &&
     a.outputToken === b.outputToken &&
     a.inputAmount === b.inputAmount &&
-    a.route === b.route &&
-    !!a.crossToken === !!b.crossToken)
+    a.account === b.account &&
+    a.recipient === b.recipient)
 
 const okRows = (rows: IRouteRow[]) => rows.filter((r): r is IRouteRowOk => r.status === 'ok')
 
-const bestProvider = (rows: IRouteRow[]): ISwapProvider | null => {
-  const oks = okRows(rows)
-  if (oks.length === 0) return null
-  return oks.reduce((b, r) => (r.quote.outputAmount > b.quote.outputAmount ? r : b)).provider
+const cheaper = (a: IRouteRowOk, b: IRouteRowOk): IRouteRowOk => {
+  if (a.plan.length !== b.plan.length) return a.plan.length < b.plan.length ? a : b
+  return deliveredLeg(a.plan).outputAmount > deliveredLeg(b.plan).outputAmount ? a : b
 }
 
-const pickQuote = (rows: IRouteRow[], selected: ISwapProvider | null): ISwapQuote | null => {
+const bestRouteId = (rows: IRouteRow[]): string | null => {
   const oks = okRows(rows)
   if (oks.length === 0) return null
-  const best = oks.reduce((b, r) => (r.quote.outputAmount > b.quote.outputAmount ? r : b))
-  const picked = selected ? oks.find(r => r.provider === selected) : undefined
-  return (picked ?? best).quote
+  return oks.reduce(cheaper).id
 }
 
-// The centralized editor alert stays provider-agnostic (per-provider failures are inlined on their dropdown rows);
-// it only communicates that nothing can fulfill the swap right now.
+const pickRow = (rows: IRouteRow[], selected: string | null): IRouteRowOk | null => {
+  const oks = okRows(rows)
+  if (oks.length === 0) return null
+  const best = oks.reduce(cheaper)
+  const picked = selected ? oks.find(r => r.id === selected) : undefined
+  return picked ?? best
+}
+
 const routeError = (rows: IRouteRow[]): string | null => {
   if (rows.length === 0 || rows.some(r => r.status !== 'error')) return null
-  return 'No swap route is available right now — adjust the amount or retry shortly'
+  return 'No swap route is available right now. Adjust the amount or retry shortly'
 }
 
 const feeParts = (inUsd: number, outUsd: number): { amount: string; pct: string; high: boolean } => {
@@ -173,7 +175,7 @@ const toOption = (
   isSelected: boolean
 ): IRouteOption => {
   const base = {
-    provider: row.provider,
+    id: row.id,
     feeUsd: '-',
     feePct: '',
     minReceived: '-',
@@ -184,42 +186,40 @@ const toOption = (
     isSelected,
     detail: ''
   }
-  if (row.status === 'pending') return { ...base, status: 'pending', label: row.provider }
-  if (row.status === 'error') return { ...base, status: 'error', label: row.provider, detail: row.message }
+  if (row.status === 'pending' || (row.status === 'ok' && !sameRequest(row.req, req))) {
+    return { ...base, status: 'pending', label: routeLabel(row.id) }
+  }
+  if (row.status === 'error') return { ...base, status: 'error', label: routeLabel(row.id), detail: row.message }
+  const displayOut = deliveredLeg(row.plan).expectedOutputAmount
   const fee =
     inPrice === null || outPrice === null
       ? { amount: '-', pct: '', high: false }
-      : feeParts(usdNumber(req.inputAmount, inPrice), usdNumber(row.quote.outputAmount, outPrice))
-  const eta = etaLabel(row.quote, req.originChainId !== req.destinationChainId)
+      : feeParts(usdNumber(req.inputAmount, inPrice), usdNumber(displayOut, outPrice))
+  const eta = etaLabel(row.plan, req.originChainId !== req.destinationChainId)
   return {
     ...base,
     status: 'ok',
-    label: routeToolName(row.quote),
+    label: row.plan.map(leg => leg.tool).join(' + '),
     feeUsd: fee.amount,
     feePct: fee.pct,
     high: fee.high,
     minReceived: readableTokenAmountLabel(
-      getChainTokenDescription(req.destinationChainId as ChainId, req.outputToken),
-      row.quote.outputAmount
+      getTokenDescription(req.destinationChainId, req.outputToken),
+      deliveredLeg(row.plan).outputAmount
     ),
-    eta: eta.text,
+    eta: [eta.text, row.plan.length > 1 ? `${row.plan.length} txs` : ''].filter(part => part !== '').join(' - '),
     etaWarn: eta.warn
   }
 }
 
-// USD pricing derives from the REQUEST itself (it names both tokens and chains; providerToken resolves the native
-// marker to the chain's wrapped-native, which is what the oracle prices) — editors pass no price streams.
-const priceOf = (token: Address, chainId: number): IStream<bigint | null> =>
-  priceFor(getAddress(providerToken(token, chainId)))
-
 const $defaultDisclaimer = $node(style({ maxWidth: '240px', lineHeight: '1.4', fontSize: text.sm }))(
   $text(
-    'The all-in cost of converting through the selected route: what you send minus the guaranteed minimum you receive (routing fee + slippage). It goes to the third-party route, not to Puppet. Each route shows its estimated arrival; without an estimate a cross-chain transfer can take up to its fill deadline (the ≤ time shown) before it is treated as failed and the funds surface back as recoverable balance.'
+    'The all-in cost of converting through the selected route: what you send minus what the route expects to deliver (routing fee + price impact); the guaranteed floor is shown as Min. received. It goes to the third-party route, not to Puppet. Each route shows its estimated arrival; without an estimate a cross-chain transfer can take up to its fill deadline (the ≤ time shown) before it is treated as failed and the funds surface back as recoverable balance.'
   )
 )
 
 const PLACEHOLDER: IRouteOption = {
-  provider: 'LI.FI',
+  id: 'lifi',
   status: 'pending',
   label: '',
   feeUsd: '-',
@@ -233,23 +233,21 @@ const PLACEHOLDER: IRouteOption = {
   detail: ''
 }
 
-type IAttemptsFor = (req: ISwapRequest, signal: AbortSignal) => ISwapAttempt[]
-
 const rowsFor = (
   req: ISwapRequest,
   signal: AbortSignal,
-  attempts: IAttemptsFor,
+  maxLegs: number,
   seed: IRouteRow[] | null
 ): IStream<IRouteRow[]> => {
-  const seedByProvider = new Map((seed ?? []).filter(r => r.status === 'ok').map(r => [r.provider, r]))
-  const streams = attempts(req, signal).map(attempt =>
+  const seedById = new Map((seed ?? []).filter(r => r.status === 'ok').map(r => [r.id, r]))
+  const streams = swapRouteCandidates(req, maxLegs, signal).map(candidate =>
     start(
-      seedByProvider.get(attempt.provider) ?? ({ provider: attempt.provider, status: 'pending' } as IRouteRow),
+      seedById.get(candidate.id) ?? ({ id: candidate.id, status: 'pending' } as IRouteRow),
       fromPromise(
-        attempt.quote.then(
-          (quote): IRouteRow => ({ provider: attempt.provider, status: 'ok', quote }),
+        candidate.plan.then(
+          (plan): IRouteRow => ({ id: candidate.id, status: 'ok', req, plan }),
           (err): IRouteRow => ({
-            provider: attempt.provider,
+            id: candidate.id,
             status: 'error',
             message: err instanceof Error ? err.message : 'Route unavailable'
           })
@@ -259,7 +257,7 @@ const rowsFor = (
   )
   return op(
     merge(...streams),
-    reduce((acc: Record<string, IRouteRow>, row: IRouteRow) => ({ ...acc, [row.provider]: row }), {} as Record<string, IRouteRow>),
+    reduce((acc: Record<string, IRouteRow>, row: IRouteRow) => ({ ...acc, [row.id]: row }), {} as Record<string, IRouteRow>),
     map(acc => Object.values(acc))
   )
 }
@@ -274,18 +272,18 @@ const $feeEta = (opt: IRouteOption, fee: string): I$Node =>
       : empty
   )
 
-// Collapsed anchor: the number that matters (all-in fee) plus arrival, nothing else — the route name and the full
-// breakdown live in the expanded panel, so the closed control stays narrow enough to share the Save row.
 const $anchorLine = (opt: IRouteOption): I$Node =>
   $row(spacing.small, style({ alignItems: 'center' }))(
-    $node(style({ fontSize: text.xs, color: palette.foreground }))($text('fee')),
     opt.status === 'pending'
       ? opt.label === ''
         ? $node(style({ color: palette.foreground }))($text('-'))
         : $inlineSpinner
       : opt.status === 'error'
         ? $node(style({ color: palette.foreground }), attr({ title: opt.detail }))($text('unavailable'))
-        : $feeEta(opt, opt.high ? feeDisplay(opt) : opt.feeUsd)
+        : $row(spacing.small, style({ alignItems: 'baseline' }))(
+            $node(style({ fontSize: text.xs, color: palette.foreground }))($text(opt.label)),
+            $feeEta(opt, feeDisplay(opt))
+          )
   )
 
 const $valueLabel: IOps<IRouteOption, I$Node> = map($anchorLine)
@@ -315,8 +313,6 @@ const $routeOptionRow: IOps<IRouteOption, I$Node> = map(opt =>
   )
 )
 
-// Mirrors aelea's node-compose currying (an ops call is all functions, a children call is all slottables) so the
-// injected header survives $DropSelect's and $Dropdown's staged decorator application before the children land.
 const withPanelHeader = ($header: I$Node, container: INodeCompose): INodeCompose =>
   ((...input: unknown[]) =>
     input.some(a => typeof a === 'function')
@@ -324,82 +320,66 @@ const withPanelHeader = ($header: I$Node, container: INodeCompose): INodeCompose
       : (container as unknown as (...children: unknown[]) => I$Node)($header, ...input)) as unknown as INodeCompose
 
 export interface I$SwapProviderFeeEditor {
-  // Whether a swap/bridge is involved at all (input token != base token). Drives visibility so the row holds its slot
-  // and shows an awaiting-amount placeholder rather than popping in once an amount is typed.
   active: IStream<boolean>
   request: IStream<ISwapRequest | null>
   $disclaimer?: I$Slottable
-  // Route sources raced for a request; the default races every provider. A single-provider surface (the withdraw
-  // bridge is Across-only, its intent bakes an across route) passes its own list.
-  attempts?: IAttemptsFor
+  maxLegs: number
 }
 
 export const $SwapProviderFeeEditor = ({
   active,
   request,
   $disclaimer = $defaultDisclaimer,
-  attempts = swapQuoteAttempts
+  maxLegs
 }: I$SwapProviderFeeEditor) =>
   component(([select, selectTether]: IBehavior<IRouteOption>) => {
-    // Debounce + dedupe OWNED here so every editor gets both without hand-rolled trigger pipelines: rapid keystrokes
-    // collapse to one request, and late-arriving async inputs (fee maps) that re-fire the editor's combine without
-    // changing the request are dropped by sameRequest instead of refetching.
-    const request0 = op(request, debounce(200), skipRepeatsWith(sameRequest), state())
-    // Superseded fetches are ABORTED (not just discarded): a new request or a refresh tick cancels the in-flight
-    // provider calls instead of letting them run to their 10s timeouts.
-    let inflight: AbortController | null = null
+    const liveRequest = op(request, state())
+    const request0 = op(liveRequest, debounce(200), skipRepeatsWith(sameRequest), state())
+    let lanePrior: { lane: string; rows: IRouteRow[] } | null = null
     const routeState = op(
       request0,
       switchMap(req => {
-        if (req === null) {
-          inflight?.abort()
-          inflight = null
-          return just<IRouteState | null>(null)
-        }
-        // Background re-quote: refresh rounds SEED from the previous round's resolved rows, so the displayed quote
-        // (and `ready`) holds while fresh quotes stream in — the blocking spinner only ever shows before the FIRST
-        // quote of a new request.
-        let prior: IRouteRow[] | null = null
-        return op(
-          start(0, periodic(QUOTE_REFRESH_MS)),
-          switchMap(() => {
-            inflight?.abort()
-            const controller = new AbortController()
-            inflight = controller
-            return map(rows => {
-              prior = rows
+        if (req === null) return just<IRouteState | null>(null)
+        const lane = `${req.originChainId}:${req.inputToken}>${req.destinationChainId}:${req.outputToken}`
+        return stream<IRouteState | null>((sink, scheduler) => {
+          const controller = new AbortController()
+          const seed = lanePrior?.lane === lane ? lanePrior.rows : null
+          return disposeBoth(
+            map(rows => {
+              lanePrior = { lane, rows }
               return { req, rows }
-            }, rowsFor(req, controller.signal, attempts, prior))
-          })
-        )
+            }, rowsFor(req, controller.signal, maxLegs, seed)).run(sink, scheduler),
+            disposeWith(() => controller.abort())
+          )
+        })
       }),
       state<IRouteState | null>(null)
     )
-    const selected = state(null as ISwapProvider | null, op(select, filter(o => o.status === 'ok'), map(o => o.provider)))
+    const selected = state(null as string | null, op(select, filter(o => o.status === 'ok'), map(o => o.id)))
     const prices = op(
       request0,
       switchMap(req =>
         req === null
           ? just<{ inPrice: bigint | null; outPrice: bigint | null }>({ inPrice: null, outPrice: null })
           : combine({
-              inPrice: priceOf(req.inputToken, req.originChainId),
-              outPrice: priceOf(req.outputToken, req.destinationChainId)
+              inPrice: priceFor(req.originChainId, req.inputToken),
+              outPrice: priceFor(req.destinationChainId, req.outputToken)
             })
       ),
       state({ inPrice: null as bigint | null, outPrice: null as bigint | null })
     )
 
     const selectedRoute = op(
-      combine({ rs: routeState, req: request0, selected }),
+      combine({ rs: routeState, req: liveRequest, selected }),
       map(({ rs, req, selected }): ISelectedRoute => {
         if (rs === null || req === null) return EMPTY_SELECTED
-        const quote = pickQuote(rs.rows, selected)
-        const limitError = quote === null ? null : limitErrorOf(rs.req, quote)
+        const row = pickRow(rs.rows, selected)
+        const plan = row === null ? null : row.plan
+        const limitError = plan === null ? null : limitErrorOf(rs.req, plan)
         return {
-          quote,
-          forInput: rs.req.inputAmount,
-          forRequest: rs.req,
-          ready: sameRequest(rs.req, req) && quote !== null && quote.outputAmount > 0n && limitError === null,
+          plan,
+          ready:
+            row !== null && sameRequest(row.req, req) && deliveredLeg(row.plan).outputAmount > 0n && limitError === null,
           error: routeError(rs.rows),
           limitError
         }
@@ -408,14 +388,13 @@ export const $SwapProviderFeeEditor = ({
     )
 
     const options = op(
-      combine({ rs: routeState, prices, selected }),
-      map(({ rs, prices: { inPrice, outPrice }, selected }): IRouteOption[] => {
-        if (rs === null) return []
-        const best = bestProvider(rs.rows)
-        const effective = selected !== null && okRows(rs.rows).some(r => r.provider === selected) ? selected : best
-        return rs.rows.map(row =>
-          toOption(row, rs.req, inPrice, outPrice, row.provider === best, row.provider === effective)
-        )
+      combine({ rs: routeState, req: liveRequest, prices, selected }),
+      map(({ rs, req, prices: { inPrice, outPrice }, selected }): IRouteOption[] => {
+        if (rs === null || req === null) return []
+        const rows = rs.rows.some(r => r.status === 'ok') ? rs.rows.filter(r => r.status !== 'error') : rs.rows
+        const best = bestRouteId(rows)
+        const effective = selected !== null && okRows(rows).some(r => r.id === selected) ? selected : best
+        return rows.map(row => toOption(row, req, inPrice, outPrice, row.id === best, row.id === effective))
       }),
       state<IRouteOption[]>([])
     )
@@ -426,8 +405,6 @@ export const $SwapProviderFeeEditor = ({
         const picked = opts.find(o => o.isSelected && o.status === 'ok')
         if (picked) return picked
         if (opts.length === 0) return PLACEHOLDER
-        // Nothing quoted yet: a still-pending round anchors as loading; an all-failed round anchors as a generic
-        // unavailable (the per-provider details live on the list rows).
         return opts.some(o => o.status === 'pending')
           ? { ...PLACEHOLDER, label: opts[0].label }
           : { ...PLACEHOLDER, status: 'error' }
@@ -441,8 +418,8 @@ export const $SwapProviderFeeEditor = ({
       $row(style({ alignItems: 'center', justifyContent: 'space-between', gap: '24px' }))($label, $value)
 
     const $panelHeader = $column(
+      spacing.small,
       style({
-        gap: '8px',
         padding: '12px 14px',
         margin: '-6px -6px 4px',
         minWidth: '280px',
@@ -455,7 +432,7 @@ export const $SwapProviderFeeEditor = ({
         $node(style({ color: palette.message }))($text(detailText(o => o.label)))
       ),
       $detailRow(
-        $row(style({ alignItems: 'center', gap: '2px' }))($detailLabel('Fee'), $infoTooltip($disclaimer, palette.foreground, '18px')),
+        $row(style({ alignItems: 'center', gap: '2px' }))($detailLabel('Fee'), $infoTooltip($disclaimer, palette.foreground)),
         $node(styleBehavior(map(o => ({ color: o.status === 'ok' && o.high ? palette.negative : palette.message }), value)))(
           $text(detailText(feeDisplay))
         )

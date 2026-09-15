@@ -1,713 +1,796 @@
-import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
-import { predictFundAccount, predictPuppetAccount, } from '@puppet/sdk/account'
-import type { IntervalTime } from '@puppet/sdk/const'
-import { applyFactor, getDuration, readablePercentage } from '@puppet/sdk/core'
-import type { IFund } from '@puppet/sdk/schema'
-import {
-  computeClaimable,
-  computeQueuedShares,
-  type ISubaccountState,
-  type ITokenRegistryMap,
-  stubSubaccountState,
-  tokenInfoFor
-} from '@puppet/sdk/state'
+import { CHAIN_IDS, HUB_CHAIN_ID } from '@puppet/contracts/const'
+import type { ChainId, IntervalTime } from '@puppet/sdk/const'
+import { getDuration, getTokenDescription, getUnixTimestamp, readableAddress, readableDate, readablePercentage, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { VALUE_KEY } from '@puppet/sdk/evaluate'
+import type { IMandateRow } from '@puppet/sdk/schema'
+import { bondTokenOf, chainTokenOfKey, type ITokenRegistryMap, listedTokenAddresses } from '@puppet/sdk/state'
 import {
   combine,
   empty,
   filter,
-  fromPromise,
   type IStream,
   just,
   map,
+  merge,
   op,
+  reduce,
+  sampleMap,
   skipRepeatsWith,
   start,
-  switchLatest,
-  switchPromises,
+  switchLatest
 } from 'aelea/stream'
 import { type IBehavior, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, style } from 'aelea/ui'
-import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
+import { $column, $Popover, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { getAddress, type Hex, isAddressEqual } from 'viem'
-import type { Address } from 'viem/accounts'
+import { $defaultAnchor, $Link } from 'aelea/ui-router'
+import { type Address, getAddress, type Hex, isAddressEqual } from 'viem'
 import {
+  $amountDisplay,
   $arrowRight,
+  $ButtonPrimary,
+  $ButtonSecondary,
+  $defaultMiniButtonPrimary,
+  $defaultMiniButtonSecondary,
   $errorCard,
   $icon,
-  $infoLabel,
   $infoTooltip,
-  $inlineSpinner,
   $intermediatePromise,
-  $navLink,
-  $puppeteer,
-  $spinner,
+  $labeledDivider,
+  $popoverCaret,
+  $sectionLoader,
   text
 } from '@/ui-components'
+import { uiStorage } from '@/ui-storage'
+import { localStoreSchema } from '../app/localStoreSchema.js'
 import { routeSchema } from '../app/routeSchema.js'
-import { $puppetLogo } from '../common/$icons.js'
+import { $tokenProfile } from '../common/$common.js'
+import { chainFor } from '../common/$contract.js'
+import { $roboAvatar } from '../common/$roboAvatar.js'
 import { $heading3 } from '../common/$text.js'
-import { $card, $card2, $navText } from '../common/elements/$common.js'
+import { $card, $card2 } from '../common/elements/$common.js'
 import { $AccountMenu } from '../components/$AccountMenu.js'
-import { $fundProfile, $profileDisplay } from '../components/$AccountProfile.js'
-import { $SelectCollateralToken } from '../components/$CollateralTokenSelector.js'
+import { accountDisplayName } from '../components/$AccountProfile.js'
 import { $WalletConnect } from '../components/$WalletConnect.js'
-import { $usdTimeline, type ITimelinePoint } from '../components/participant/$ProfilePeformanceTimeline.js'
-import { $FundEditor } from '../components/portfolio/$FundEditor.js'
-import { $FundSell } from '../components/portfolio/$FundSell.js'
-import { $RecognizeBanner } from '../components/portfolio/$RecognizeBanner.js'
-import { $SubscribeEditor } from '../components/portfolio/$SubscribeEditor.js'
+import { $ValueTimeline } from '../components/participant/$ValueTimeline.js'
+import { $AccountHistory } from '../components/portfolio/$AccountHistory.js'
+import { $DepositEditor } from '../components/portfolio/$DepositEditor.js'
+import { $MandateEditor } from '../components/portfolio/$MandateEditor.js'
 import { $TokenBalanceEditor } from '../components/portfolio/$TokenBalanceEditor.js'
-import type {
-  IAllocateDraft,
-  IClaimDraft,
-  IClaimRouteDraft,
-  IDepositDraft,
-  IFundSwapDraft,
-  IRecognizeFundDraft,
-  IRedeemDraft,
-  ISellDraft,
-  IWithdrawDraft
+import { $CycleEditor } from '../components/portfolio/$TradeEditors.js'
+import { $UnbondEditor } from '../components/portfolio/$UnbondEditor.js'
+import {
+  arrivalFloor,
+  depositCreditToken,
+  type IDepositDraft,
+  type IEditorDraft,
+  type IMandateDraft,
+  type ITradeDraft,
+  type IUnbondDraft,
+  type IWithdrawDraft
 } from '../components/portfolio/draft.js'
+import { $editorPopoverContentContainer } from '../components/portfolio/editorUtils.js'
 import context from '../io/context.js'
-import { fetchMasterPoolState, fetchPuppetBalanceTimeline, type ISubscribeRule } from '../io/datastore/query.js'
-import { liveTotalUsdValue } from '../io/totalValue.js'
-import type { connectWallet, IConnectedWallet } from '../wallet/index.js'
-import { $fundOrGetFundedCta } from './$FundQuickstart.js'
+import { type IBackingView, ownBackingViews, ownTradeViews } from '../io/datastore/own.js'
+import type { ITimelinePoint } from '../io/datastore/traders.js'
+import type { ITradeView } from '../io/datastore/trading.js'
+import { flatTimeline, walletTimeline } from '../io/datastore/walletTimeline.js'
+import type { IAccountAction } from '../io/journal/history.js'
+import type { IOwnState } from '../io/journal/localFold.js'
+import { formatUsd, priceFor } from '../io/price.js'
+import { walletValueUsd } from '../io/walletValue.js'
+import { balanceAt, type IConnectedWallet, type IRootState, type IWalletPair } from '../wallet/index.js'
 import type { IPageFilterParams } from './types.js'
 
-const $timelineCard = (
-  hideBalances: IStream<boolean>,
-  timelineQuery: IStream<Promise<ITimelinePoint[]>>,
-  activityTimeframe: IStream<IntervalTime>,
-  $lead: I$Node,
-  changeActivityTimeframeTether: IBehavior<any, IntervalTime>[1],
-  liveUsd: IStream<number | null>
-): I$Node =>
-  $card2(
-    style({
-      padding: 0,
-      height: '200px',
-      position: 'relative',
-      margin: isDesktopScreen ? '-36px -36px 0' : '-12px -12px 0px'
-    })
-  )(
-    $usdTimeline({
-      hideBalances,
-      timelineQuery,
-      label: 'Total Value (USD)',
-      tooltip: 'Your total value in USD: account balance plus the current value of your open positions',
-      activityTimeframe,
-      $lead,
-      liveUsd,
-      $empty: $column(
-        spacing.small,
-        style({ alignItems: 'center', textAlign: 'center', color: palette.foreground, fontSize: text.sm })
-      )($heading3($text('No activity yet')))
-    })({ changeActivityTimeframe: changeActivityTimeframeTether() })
+const $section = $column(spacing.small)
+const $sectionList = $column(style({ gap: isDesktopScreen ? '48px' : '34px' }))
+const value = getTokenDescription(HUB_CHAIN_ID, chainTokenOfKey(HUB_CHAIN_ID, VALUE_KEY))
+const bond = getTokenDescription(HUB_CHAIN_ID, bondTokenOf(HUB_CHAIN_ID))
+
+const BOND_TOOLTIP = `One ${bond.symbol} pool on ${chainFor(HUB_CHAIN_ID).name}, shared by every trader you back. Bond deposits land there, and you can release whatever is not backing an open cycle.`
+
+const $sectionTip = (tooltip: string): I$Node =>
+  $infoTooltip(
+    $node(style({ display: 'block', maxWidth: '280px', whiteSpace: 'normal', fontSize: text.sm }))($text(tooltip)),
+    colorShade(palette.foreground, 60))
+
+const $emptySection = (detail: string, $cta?: I$Node): I$Node =>
+  $row(spacing.small, style({ alignItems: 'baseline', flexWrap: 'wrap', padding: '4px 0', color: palette.foreground, fontSize: text.sm }))(
+    $node($text(detail)),
+    ...($cta ? [$cta] : [])
   )
 
-const $sectionHeader = (
-  title: string,
-  tooltip: string,
-  opts?: { $glyph?: I$Node; $trailing?: I$Node; role?: string }
-): I$Node => {
-  const $tip = $infoTooltip(
-    $node(style({ display: 'block', maxWidth: '280px', whiteSpace: 'normal', fontSize: text.sm }))($text(tooltip)),
-    colorShade(palette.foreground, 60),
-    '20px'
+const $sectionHeader = ($title: I$Node, tooltip: string, $trailing?: I$Node): I$Node =>
+  $row(
+    spacing.small,
+    style({
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      height: '44px',
+      flexShrink: 0,
+      borderBottom: `1px solid ${colorShade(palette.foreground, 15)}`
+    })
+  )(
+    $row(spacing.small, style({ alignItems: 'center' }))($title, $sectionTip(tooltip)),
+    $trailing ?? empty
   )
-  const $inner = [
-    ...(opts?.$glyph ? [opts.$glyph] : []),
-    $heading3($text(title)),
-    ...(opts?.role
-      ? [
-          $node(
-            style({
-              fontSize: text.xs,
-              color: palette.foreground,
-              border: `1px solid ${colorShade(palette.foreground, 25)}`,
-              borderRadius: '4px',
-              padding: '1px 6px',
-              whiteSpace: 'nowrap'
-            })
-          )($text(opts.role))
-        ]
-      : []),
-    $tip
-  ]
-  return opts?.$trailing
-    ? $row(
-        spacing.small,
-        style({
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          paddingBottom: '12px',
-          borderBottom: `1px solid ${colorShade(palette.foreground, 15)}`
-        })
-      )($row(spacing.small, style({ alignItems: 'center' }))(...$inner), opts.$trailing)
-    : $row(
-        spacing.small,
-        style({
-          alignItems: 'center',
-          paddingBottom: '12px',
-          borderBottom: `1px solid ${colorShade(palette.foreground, 15)}`
-        })
-      )(...$inner)
-}
+
+const $bondDivider = ($action: I$Node): I$Node =>
+  $column(style({ paddingTop: '8px' }))(
+    $labeledDivider(
+      $row(spacing.default, style({ alignItems: 'center' }))(
+        $row(spacing.small, style({ alignItems: 'center' }))($text('Bond balances'), $sectionTip(BOND_TOOLTIP)),
+        $action
+      )
+    )
+  )
 
 interface I$Portfolio extends IPageFilterParams {
   hideBalances: IStream<boolean>
+  walletPair: IStream<IWalletPair>
+  walletRoot: IStream<IRootState | null>
+  historyQuery: IStream<Promise<IAccountAction[]>>
+  ownStateQuery: IStream<Promise<IOwnState | null>>
+  mandatesQuery: IStream<Promise<IMandateRow[]>>
   draftDepositList: IStream<IDepositDraft[]>
   draftWithdrawList: IStream<IWithdrawDraft[]>
-  draftAllocateList: IStream<IAllocateDraft[]>
-  draftSwapList: IStream<IFundSwapDraft[]>
-  draftRedeemList: IStream<IRedeemDraft[]>
-  draftMatchingRuleList: IStream<ISubscribeRule[]>
-  walletQuery: IStream<Promise<IConnectedWallet | null>>
-  walletState: IStream<Promise<ISubaccountState | null>>
-  userMatchingRuleQuery: IStream<Promise<ISubscribeRule[]>>
+  draftMandateList: IStream<IMandateDraft[]>
+  draftUnbondList: IStream<IUnbondDraft[]>
+  draftTradeList: IStream<ITradeDraft[]>
 }
 
 export const $Portfolio = ({
   hideBalances,
-  activityTimeframe,
-  collateralTokenList,
-  walletQuery,
-  walletState: rootStateQuery,
-  userMatchingRuleQuery,
+  walletPair,
+  walletRoot,
+  historyQuery,
+  ownStateQuery,
+  mandatesQuery,
   draftDepositList,
   draftWithdrawList,
-  draftAllocateList,
-  draftSwapList,
-  draftRedeemList,
-  draftMatchingRuleList
+  draftMandateList,
+  draftUnbondList,
+  draftTradeList
 }: I$Portfolio) =>
   component(
     (
-      [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<any, IntervalTime>,
-      [selectCollateralTokenList, selectCollateralTokenListTether]: IBehavior<Address[]>,
       [changeHideBalances, changeHideBalancesTether]: IBehavior<boolean>,
+      [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<IntervalTime>,
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
-      [changeMasterDraft, changeMasterDraftTether]: IBehavior<IAllocateDraft>,
-      [changeSwapDraft, changeSwapDraftTether]: IBehavior<IFundSwapDraft>,
-      [changeClaimDraft, changeClaimDraftTether]: IBehavior<IClaimRouteDraft>,
-      [changeRedeemDraft, changeRedeemDraftTether]: IBehavior<ISellDraft | IClaimDraft>,
-      [changeFulfillDraft, changeFulfillDraftTether]: IBehavior<IRedeemDraft | IRecognizeFundDraft>,
-      [changeMatchRuleList, changeMatchRuleListTether]: IBehavior<ISubscribeRule[]>,
-      [_connect, connectTether]: IBehavior<ReturnType<typeof connectWallet>>
+      [changeMandateDraft, changeMandateDraftTether]: IBehavior<IMandateDraft>,
+      [toggleMandate, toggleMandateTether]: IBehavior<PointerEvent, Address>,
+      [changeTradeDraft, changeTradeDraftTether]: IBehavior<ITradeDraft>,
+      [toggleTrade, toggleTradeTether]: IBehavior<PointerEvent, string>,
+      [popDeposit, popDepositTether]: IBehavior<PointerEvent>,
+      [popUnbond, popUnbondTether]: IBehavior<PointerEvent>,
+      [changeUnbondDraft, changeUnbondDraftTether]: IBehavior<IUnbondDraft>,
+      [popBondDeposit, popBondDepositTether]: IBehavior<PointerEvent>,
+      [changeBondDeposit, changeBondDepositTether]: IBehavior<IDepositDraft | IWithdrawDraft>
     ) => {
-      const registeredCollateralList = fromPromise(
-        context
-          .getTokenRegistry()
-          .then(reg => [...(reg.get(HUB_CHAIN_ID)?.values() ?? [])].map(i => i.token).filter(t => t !== PROTOCOL.nativeToken))
+
+      interface ISectionParams {
+        root: IRootState | null
+        registry: ITokenRegistryMap
+        wallet: IConnectedWallet | null
+      }
+      type ISectionState = { kind: 'params'; params: ISectionParams } | { kind: 'error'; error: unknown } | { kind: 'pending' }
+      const heldKey = (root: IRootState | null): string =>
+        root ? root.balances.filter(b => b.balance > 0n).map(b => `${b.chainId}:${b.token}`).sort().join(',') : ''
+
+      const activityTimeframe: IStream<IntervalTime> = op(
+        uiStorage.replayWrite(localStoreSchema.global.activityTimeframe, changeActivityTimeframe),
+        state()
       )
-      const walletState: IStream<IConnectedWallet | null> = op(walletQuery, switchPromises, state())
-      const rootState: IStream<ISubaccountState | null> = op(
-        rootStateQuery,
-        map(q =>
-          q.catch((err: unknown): null => {
-            console.error('account state read failed', err)
-            return null
-          })
-        ),
-        switchPromises,
+      const timelineQuery: IStream<Promise<ITimelinePoint[]>> = op(
+        combine({ own: ownStateQuery, tf: activityTimeframe }),
+        map(async p => {
+          const own = await p.own
+          const until = getUnixTimestamp()
+          if (own === null) return flatTimeline(until - p.tf, until)
+          const [views, backings] = await Promise.all([ownTradeViews(own), ownBackingViews(own)])
+          const [points, live] = await Promise.all([
+            walletTimeline([own.account], own.books, until - p.tf, until),
+            walletValueUsd(views, backings, own.deposits, own.bonds)
+          ])
+          return live === null ? points : [...points.slice(0, -1), { time: until, value: live }]
+        }),
+        state()
+      )
+      const $identity = $node(style({ color: palette.message }))($text('Account'))
+      const $timeline = $card2(
+        style({
+          padding: 0,
+          height: '200px',
+          position: 'relative',
+          overflow: 'hidden',
+          margin: isDesktopScreen ? '-28px -28px 0' : '-12px -12px 0'
+        })
+      )($ValueTimeline({
+        hideBalances,
+        timelineQuery,
+        unit: '$',
+        label: 'Total value',
+        tooltip:
+          'What your account holds over time. Deposits and withdrawals count at their value when they landed, open cycles at their latest valuation, and settlements at their closing value. The last point is live.',
+        activityTimeframe
+      })({ changeActivityTimeframe: changeActivityTimeframeTether() }))
+
+      const sectionQuery: IStream<Promise<ISectionParams>> = op(
+        walletPair,
+        map(async pair => {
+          const [registry, root] = await Promise.all([context.getTokenRegistry(), pair.root])
+          return { wallet: pair.wallet, root, registry }
+        }),
         state()
       )
 
-      interface IPortfolioSectionParams {
-        root: ISubaccountState | null
-        registry: ITokenRegistryMap
-        wallet: IConnectedWallet | null
-        rules: ISubscribeRule[]
-        draftRules: ISubscribeRule[]
+      const $historyHeader = ($trailing?: I$Node): I$Node =>
+        $sectionHeader(
+          $heading3($text('History')),
+          'Every settled action of your account, read from its own on-chain log: deposits, withdrawals, mandates, trades and settlements.',
+          $trailing
+        )
+      const $balancesHeader = ($trailing?: I$Node): I$Node =>
+        $sectionHeader(
+          $heading3($text('Balances')),
+          'Tokens your account holds on each chain. Deposit any token from any chain and choose where it lands; your first deposit sets up your account.',
+          $trailing
+        )
+      const $tradingHeader = ($trailing?: I$Node): I$Node =>
+        $sectionHeader(
+          $heading3($text('Trading')),
+          'Trade what your account holds through a linked dApp. Your first order opens a cycle: it locks that capital and matches backers to it. Closing at flat settles the cycle. Marked value is the latest valuation of the book.',
+          $trailing
+        )
+      const $backingHeader = ($trailing?: I$Node): I$Node =>
+        $sectionHeader(
+          $heading3($text('Backing')),
+          `Your ${bond.symbol} bond is one pool, shared by every trader you back. Each match uses the share your mandate allows from what is still matchable. Your claim follows the latest valuation of each book and shows as evaluating while it is pending.`,
+          $trailing
+        )
+      const $emptyHistory = $emptySection('Every settled action of your account lands here.')
+      const draftedBond: IStream<bigint> = map(
+        q =>
+          q.dep.filter(d => d.arrival === 'bond').reduce((total, d) => total + arrivalFloor(d), 0n) +
+          q.man.reduce((total, d) => total + d.bond, 0n),
+        combine({ dep: draftDepositList, man: draftMandateList })
+      )
+      const $bondStandingRow = (bonded: IStream<bigint>, pending: IStream<bigint>, $release: I$Node | null): I$Node => {
+        const figures = op(
+          combine({ bonded, pending, price: priceFor(HUB_CHAIN_ID, bondTokenOf(HUB_CHAIN_ID)) }),
+          skipRepeatsWith((a, b) => a.bonded === b.bonded && a.pending === b.pending && a.price === b.price),
+          state()
+        )
+        const shown = op(
+          figures,
+          map(f => f.bonded !== 0n || f.pending !== 0n),
+          skipRepeatsWith((a, b) => a === b)
+        )
+        return switchLatest(
+          map(
+            visible =>
+              visible
+                ? $row(
+                    spacing.default,
+                    style({ alignItems: 'center', padding: '10px 0', borderBottom: `1px solid ${colorShade(palette.foreground, 10)}` })
+                  )(
+                    $tokenProfile(HUB_CHAIN_ID, bond.address),
+                    ...($release === null ? [] : [$release]),
+                    $node(style({ flex: 1 }))(),
+                    $amountDisplay({
+                      hideBalances,
+                      usd: map(f => formatUsd(f.bonded, f.price), figures),
+                      amount: map(f => readableTokenAmountLabel(bond, f.bonded), figures),
+                      change: map(
+                        f =>
+                          f.pending === 0n
+                            ? null
+                            : { usd: formatUsd(f.bonded + f.pending, f.price), amount: readableTokenAmountLabel(bond, f.bonded + f.pending) },
+                        figures
+                      ),
+                      color: just(palette.positive),
+                      align: 'flex-end'
+                    })
+                  )
+                : empty,
+            shown
+          )
+        )
       }
-      type ISectionState = { kind: 'params'; params: IPortfolioSectionParams } | { kind: 'error'; error: unknown }
-      const heldKey = (root: ISubaccountState | null): string =>
-        root
-          ? [...root.balances.entries()]
-              .filter(([, r]) => r.signedBalance > 0n)
-              .map(([t]) => t)
-              .sort()
-              .join(',')
-          : ''
-      const pendingSubKey = (rules: ISubscribeRule[]): string =>
-        [...new Set(rules.filter(r => r.allocationRate > 0n).map(r => r.baseToken))].sort().join(',')
-      const tokenRegistryValue = fromPromise(context.getTokenRegistry())
+      const draftedCredits: IStream<{ chainId: ChainId; token: Hex; amount: bigint }[]> = op(
+        draftDepositList,
+        map(list =>
+          list
+            .filter(d => d.arrival === 'credit' && d.expectedOutput > 0n)
+            .map(d => ({ chainId: Number(d.deposit.destinationChainId) as ChainId, token: depositCreditToken(d), amount: d.expectedOutput }))
+        ),
+        skipRepeatsWith((a, b) => a.map(r => `${r.chainId}:${r.token}:${r.amount}`).join() === b.map(r => `${r.chainId}:${r.token}:${r.amount}`).join())
+      )
+      const $draftedCreditRow = (row: { chainId: ChainId; token: Hex; amount: bigint }): I$Node => {
+        const description = getTokenDescription(row.chainId, row.token)
+        return $row(
+          spacing.default,
+          style({ alignItems: 'center', padding: '10px 0', borderBottom: `1px solid ${colorShade(palette.foreground, 10)}` })
+        )(
+          $tokenProfile(row.chainId, row.token),
+          $node(style({ flex: 1 }))(),
+          switchLatest(
+            map(
+              price =>
+                $amountDisplay({
+                  hideBalances,
+                  usd: just(formatUsd(0n, price)),
+                  amount: readableTokenAmountLabel(description, 0n),
+                  change: just({ usd: formatUsd(row.amount, price), amount: readableTokenAmountLabel(description, row.amount) }),
+                  color: just(palette.positive),
+                  align: 'flex-end'
+                }),
+              priceFor(row.chainId, row.token)
+            )
+          )
+        )
+      }
+      const $onboardingShell = ($balancesAction: I$Node, $bondAction: I$Node): I$Node =>
+        $column(style({ gap: isDesktopScreen ? '40px' : '28px', padding: '0 0 4px' }))(
+          $sectionList(
+            $section(
+              $balancesHeader($balancesAction),
+              switchLatest(
+                map(
+                  rows =>
+                    rows.length === 0
+                      ? $emptySection('Deposit any token, from any chain.')
+                      : $column(spacing.default)(...rows.map($draftedCreditRow)),
+                  draftedCredits
+                )
+              ),
+              $bondDivider($bondAction),
+              $bondStandingRow(just(0n), draftedBond, null)
+            ),
+            $section(
+              $tradingHeader(),
+              $emptySection('Link a dApp and trade what your account holds.')
+            ),
+            $section(
+              $backingHeader(),
+              $emptySection(
+                'Back a trader with your bond.',
+                $Link({
+                  route: routeSchema.traders,
+                  $anchor: $defaultAnchor(style({ fontSize: text.sm, textDecoration: 'underline' })),
+                  $content: $text('Browse traders')
+                })({})
+              )
+            ),
+            $section($historyHeader(), $emptyHistory)
+          )
+        )
 
-      const sectionQuery: IStream<Promise<IPortfolioSectionParams>> = op(
-        combine({
-          wallet: walletQuery,
-          root: rootStateQuery,
-          rules: userMatchingRuleQuery,
-          draftRules: draftMatchingRuleList
+      const tradeQuery: IStream<Promise<ITradeView[]>> = op(
+        ownStateQuery,
+        map(async q => {
+          const own = await q
+          return own === null ? [] : ownTradeViews(own)
         }),
-        map(async p => {
-          const [wallet, root, rules, registry] = await Promise.all([
-            p.wallet,
-            p.root,
-            p.rules,
-            context.getTokenRegistry()
-          ])
-          return { wallet, root, rules, registry, draftRules: p.draftRules }
-        })
+        state()
       )
-
-      const balanceTimelineQuery: IStream<Promise<ITimelinePoint[]>> = op(
-        combine({ tf: activityTimeframe, root: rootStateQuery, registry: tokenRegistryValue }),
-        map(async p => {
-          const root = await p.root
-          return fetchPuppetBalanceTimeline(p.registry, root ? [root] : [], p.tf)
-        })
+      const openTrade: IStream<string | null> = op(
+        toggleTrade,
+        reduce((open: string | null, key: string) => (open === key ? null : key), null),
+        state(null)
       )
-
-      const liveUsd = liveTotalUsdValue(rootState, tokenRegistryValue)
-
-      // The collateral filter acts on the BALANCES list, so it lives next to that section's header (it used to sit
-      // in the timeline chart's corner, divorced from its effect); the chart header keeps a spacer for its layout.
-      const $collateralFilter = $SelectCollateralToken({
-        selectedList: collateralTokenList,
-        tokenList: registeredCollateralList
-      })({
-        changeCollateralTokenList: selectCollateralTokenListTether()
-      })
-      const $lead = $row(style({ flex: 1 }))()
-
-      const $fundProfileByAddress = (fundAddress: Address): I$Node =>
-        $intermediatePromise({
-          $loader: $inlineSpinner,
-          $display: map(async () => {
-            const fund = await fetchMasterPoolState(fundAddress)
-            return fund
-              ? $fundProfile({ master: fund.master, baseToken: fund.baseToken, name: fund.name }, 36, fund)
-              : $profileDisplay({ address: fundAddress, profileSize: 36 })
-          }, just(null))
-        })
+      const $sectionSkeleton = $sectionList(
+        $section($backingHeader(), $sectionLoader),
+        $section($historyHeader(), $sectionLoader)
+      )
+      interface IBackingSection {
+        masters: Address[]
+        mandates: IMandateRow[]
+        views: IBackingView[]
+      }
+      const backingQuery: IStream<Promise<IBackingSection>> = op(
+        combine({ own: ownStateQuery, mandates: mandatesQuery }),
+        map(async q => {
+          const [own, mandates] = await Promise.all([q.own, q.mandates])
+          const views = own === null ? [] : await ownBackingViews(own)
+          const masters = [...new Set([...mandates.map(m => getAddress(m.master)), ...views.map(v => getAddress(v.book.master))])]
+          return { masters, mandates, views }
+        }),
+        state()
+      )
+      const openMandate: IStream<Address | null> = op(
+        toggleMandate,
+        reduce((open: Address | null, master: Address) => (open !== null && isAddressEqual(open, master) ? null : master), null),
+        state(null)
+      )
 
       return [
         $column(spacing.default)(
           $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm, color: palette.foreground }))(
-            $navText('/leaderboard', 'Leaderboard'),
+            $Link({ route: routeSchema.traders, $anchor: $defaultAnchor(style({ color: colorShade(palette.message, 85), textDecoration: 'none' })), $content: $text('Traders') })({}),
             $icon({ $content: $arrowRight, fill: palette.foreground, width: '8px' }),
-            $node(style({ color: palette.message }))($text('Portfolio')),
+            $identity,
             $node(style({ flex: 1 }))(),
-            $AccountMenu({ walletState, hideBalances })({ changeHideBalances: changeHideBalancesTether() })
+            $AccountMenu({ hideBalances, walletPair })({ changeHideBalances: changeHideBalancesTether() })
           ),
           $card(spacing.big, style({ flex: 1, width: '100%' }))(
-            $timelineCard(hideBalances, balanceTimelineQuery, activityTimeframe, $lead, changeActivityTimeframeTether, liveUsd),
+            $timeline,
             switchLatest(
               start(
-                $column(style({ alignItems: 'center', padding: '80px 0' }))($spinner),
+                $sectionSkeleton,
                 map(
-                (s: ISectionState) => {
-                  if (s.kind === 'error') return $errorCard(s.error)
-                  const p = s.params
-                  if (!p.wallet)
-                    return $column(
-                      spacing.big,
-                      style({ alignItems: 'center', textAlign: 'center', padding: '40px 16px' })
-                    )(
-                      $heading3($text('Connect your wallet')),
-                      $infoLabel(style({ maxWidth: '420px' }))(
-                        $text(
-                          'Fund top traders and let them trade your capital on GMX and beyond, or run your own fund and get funded. Connect to see your balances, funds and open positions.'
-                        )
-                      ),
-                      $WalletConnect()({ connect: connectTether() }),
-                      $navText('/leaderboard', 'Browse traders →')
-                    )
-                  const wallet = p.wallet
-                  const sessionSigner = wallet.session?.signer ?? p.root?.signer
-                  if (sessionSigner === undefined) {
-                    // The account identity is unknowable until the session-derivation signature: PA(user, sessionSigner)
-                    // is deterministic per wallet, but only once signed. NEVER fabricate a signer here — a phantom PA's
-                    // routes read as real balances/surpluses and quotes deliver funds to them (the stranded-WMON
-                    // incident). A deployed wallet chain-recovers its signer, so this state = a brand-new account. No
-                    // inline sign prompt on an explorable page: the session signature belongs to the ACTION path (the
-                    // drawer's bind step prompts on first submit — e.g. following a trader from the leaderboard).
-                    return $column(
-                      spacing.default,
-                      style({ alignItems: 'center', textAlign: 'center', padding: '40px 16px' })
-                    )(
-                      $heading3($text('Start your account')),
-                      $infoLabel(style({ maxWidth: '420px' }))(
-                        $text(
-                          'Your account and trading session are created with your first action. Create your own fund, or browse traders and follow one.'
-                        )
-                      ),
-                      $fundOrGetFundedCta()
-                    )
-                  }
-                  const signer = sessionSigner
-                  const puppetAddress = predictPuppetAccount({ user: wallet.address, signer })
-                  const liveRoot: IStream<ISubaccountState> = filter(
-                    (root): root is ISubaccountState =>
-                      root !== null &&
-                      isAddressEqual(root.signer, signer) &&
-                      (root.user === undefined || isAddressEqual(root.user, wallet.address)),
-                    rootState
-                  )
-                  const puppetAccount: IStream<ISubaccountState> = start(
-                    p.root ?? stubSubaccountState({ user: wallet.address, signer }),
-                    liveRoot
-                  )
-                  const registeredIds = [...(p.registry.get(HUB_CHAIN_ID)?.keys() ?? [])]
-
-                  const $balanceEditor = (token: Hex): I$Node => {
-                    return $TokenBalanceEditor({
-                      hideBalances,
-                      accountState: puppetAccount,
-                      token,
-                      tokenRegistry: p.registry,
-                      walletAccount: wallet,
-                      draft: op(
-                        combine({ dep: draftDepositList, wd: draftWithdrawList }),
-                        map(
-                          d =>
-                            d.dep.find(x => x.account === puppetAddress && x.output.baseToken === token) ??
-                            d.wd.find(x => x.account === puppetAddress && x.inputAmount.baseToken === token) ??
-                            null
-                        )
-                      )
-                    })({ changeDraft: changeDraftTether() })
-                  }
-
-                  const activeRules = p.rules.filter(rule => rule.allocationRate > 0n)
-                  const pendingRules = p.draftRules.filter(rule => rule.allocationRate > 0n)
-                  const $emptyBalances = $column(
-                    spacing.small,
-                    style({ padding: '8px 0', color: palette.foreground, fontSize: text.sm })
-                  )(
-                    $node(style({ color: palette.message, fontSize: text.base }))($text('No balances yet')),
-                    $text(
-                      'Find a trader worth following and we will prompt you to deposit, your capital then trades alongside theirs. Fund from any token, on any chain.'
-                    ),
-                    $navText('/leaderboard', 'Find traders to follow →')
-                  )
-                  const fundedIds = registeredIds.filter(
-                    tid => (p.root?.balances.get(tid)?.signedBalance ?? 0n) > 0n
-                  )
-                  const needsDepositIds = [
-                    ...new Set([...activeRules, ...pendingRules].map(rule => rule.baseToken as Hex))
-                  ].filter(tid => registeredIds.includes(tid) && !fundedIds.includes(tid))
-                  const $needsDepositList =
-                    needsDepositIds.length === 0
-                      ? $node()
-                      : $column(spacing.default)(
-                          ...needsDepositIds.map(tid => $balanceEditor(tid))
-                        )
-                  const $depositList =
-                    fundedIds.length === 0 && needsDepositIds.length === 0
-                      ? $emptyBalances
-                      : $column(spacing.default)(
-                          $needsDepositList,
-                          switchLatest(
-                            map(collateral => {
-                              const ids = fundedIds.filter(tid => {
-                                const token = p.registry.get(HUB_CHAIN_ID)?.get(tid)?.token
-                                if (token === undefined) return false
-                                if (token === PROTOCOL.nativeToken) return true
-                                return collateral.length === 0 || collateral.some(c => isAddressEqual(c, token))
-                              })
-                              return $column(spacing.default)(...ids.map(tid => $balanceEditor(tid)))
-                            }, collateralTokenList)
-                          )
-                        )
-
-                  const fundStubBase = stubSubaccountState({ user: wallet.address, signer })
-                  const $fundRows = (p.root?.funds ?? []).map(fund => {
-                    const fundAddress = predictFundAccount({
-                      master: puppetAddress,
-                      baseToken: fund.baseToken,
-                      name: fund.name
-                    })
-                    const fundStub: ISubaccountState = {
-                      ...fundStubBase,
-                      account: fundAddress,
-                      signer: puppetAddress,
-                      isFund: true
+                  (s: ISectionState) => {
+                    if (s.kind === 'pending') return $sectionSkeleton
+                    if (s.kind === 'error') return $errorCard(s.error)
+                    const p = s.params
+                    if (!p.wallet) {
+                      return $onboardingShell($WalletConnect()({}), $WalletConnect()({}))
                     }
-                    const fundAccount: IStream<ISubaccountState> = op(
-                      puppetAccount,
-                      map(root => ({
-                        ...fundStub,
-                        funds: root.funds,
-                        positions: root.positions,
-                        chains: root.chains,
-                        lastTransactionHash: root.lastTransactionHash,
-                        lastSettled: root.lastSettled
-                      }))
-                    )
-                    return $column(
-                      spacing.tiny,
-                      style({ flex: 1 })
-                    )(
-                      $node(style({ maxWidth: '520px', width: '100%', alignSelf: 'center' }))(
-                        $RecognizeBanner({
-                          master: puppetAddress,
-                          masterAccount: fundAddress,
-                          baseToken: fund.baseToken as Address,
-                          tokenRegistry: p.registry
-                        })({ change: changeFulfillDraftTether() })
-                      ),
-                      $card2(
-                        style({
-                          maxWidth: '520px',
-                          width: '100%',
-                          alignSelf: 'center',
-                          borderRadius: '30px',
-                          padding: '20px 24px',
-                          border: `1px solid ${colorShade(palette.foreground, 25)}`,
-                          display: 'flex',
-                          flex: 1
-                        })
-                      )(
-                        $FundEditor({
-                          hideBalances,
-                          account: fundAccount,
-                          walletAccount: wallet,
-                          tokenRegistry: p.registry,
-                          fund: just({ master: puppetAddress, baseToken: fund.baseToken, name: fund.name }),
-                          draft: map(list => list.find(d => d.account === fundAddress) ?? null, draftAllocateList),
-                          redeemDraft: map(
-                            list => list.find(d => d.masterAccount === fundAddress) ?? null,
-                            draftRedeemList
+                    const wallet = p.wallet
+                    const root = p.root
+                    if (root === null) {
+                      return $onboardingShell(
+                        $Popover({
+                          $contentContainer: $editorPopoverContentContainer,
+                          $target: $ButtonPrimary({
+                            $container: $defaultMiniButtonPrimary,
+                            $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Deposit'), $popoverCaret())
+                          })({ click: popDepositTether() }),
+                          $open: map(
+                            () =>
+                              $DepositEditor({
+                                hideBalances,
+                                account: null,
+                                tokenRegistry: p.registry,
+                                walletAccount: wallet,
+                                destination: 'choose',
+                                arrival: 'credit',
+                                existingDraft: map(
+                                  list => list.find(d => Number(d.deposit.destinationChainId) === d.deposit.chainId) ?? null,
+                                  draftDepositList
+                                )
+                              })({ changeDraft: changeDraftTether() }),
+                            popDeposit
                           ),
-                          swapDraftList: draftSwapList
-                        })({
-                          changeDraft: changeMasterDraftTether(),
-                          changeSwapDraft: changeSwapDraftTether(),
-                          changeClaimDraft: changeClaimDraftTether(),
-                          changeRedeemDraft: changeRedeemDraftTether(),
-                          changeFulfillDraft: changeFulfillDraftTether()
-                        })
+                          dismiss: changeDraft
+                        })({}),
+                        $Popover({
+                          $contentContainer: $editorPopoverContentContainer,
+                          $target: $ButtonPrimary({
+                            $container: $defaultMiniButtonPrimary,
+                            $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Bond'), $popoverCaret())
+                          })({ click: popBondDepositTether() }),
+                          $open: map(
+                            () =>
+                              $DepositEditor({
+                                hideBalances,
+                                account: null,
+                                tokenRegistry: p.registry,
+                                walletAccount: wallet,
+                                destination: { chainId: HUB_CHAIN_ID, token: bondTokenOf(HUB_CHAIN_ID) },
+                                arrival: 'bond',
+                                existingDraft: map(list => list.find(d => d.arrival === 'bond') ?? null, draftDepositList)
+                              })({ changeDraft: changeBondDepositTether() }),
+                            popBondDeposit
+                          ),
+                          dismiss: changeBondDeposit
+                        })({})
                       )
-                    )
-                  })
-
-                  const $subscriptionRow = (rule: ISubscribeRule): I$Node =>
-                    $row(spacing.default, style({ alignItems: 'center' }))(
-                      $navLink({
-                        route: routeSchema.fund.detail,
-                        params: { address: rule.fund },
-                        $content: $fundProfileByAddress(rule.fund as Address)
-                      }),
-                      $SubscribeEditor({
-                        master: rule.master,
-                        name: rule.name,
-                        baseToken: rule.baseToken,
-                        userMatchingRuleQuery,
-                        draftMatchingRuleList,
-                        label: 'Change',
-                        showTokenIcon: false,
-                        mini: true
-                      })({ changeMatchRuleList: changeMatchRuleListTether() }),
-                      $node(style({ color: palette.foreground, fontSize: text.sm, whiteSpace: 'nowrap' }))(
-                        $text(`Up to ${readablePercentage(rule.allocationRate)}`),
-                        rule.throttlePeriod > 0n
-                          ? $node(style({ color: colorShade(palette.foreground, 60), fontSize: text.xs }))(
-                              $text(` · max 1 / ${getDuration(Number(rule.throttlePeriod))}`)
-                            )
-                          : empty
-                      ),
-                      $node(style({ flex: 1 }))(),
-                      $FundSell({
-                        hideBalances,
-                        puppet: puppetAddress,
-                        masterAccount: rule.fund as Address,
-                        baseToken: rule.baseToken,
-                        tokenRegistry: p.registry,
-                        position: op(
-                          rootState,
-                          map(root =>
-                            root?.positions.find(pos => isAddressEqual(pos.fund as Address, rule.fund as Address))
-                          )
-                        )
-                      })({ changeRedeemDraft: changeRedeemDraftTether() })
-                    )
-
-                  const subsByToken = new Map<Hex, ISubscribeRule[]>()
-                  for (const rule of activeRules) {
-                    const tid = rule.baseToken as Hex
-                    const group = subsByToken.get(tid) ?? []
-                    group.push(rule)
-                    subsByToken.set(tid, group)
-                  }
-                  for (const rule of pendingRules) {
-                    const tid = rule.baseToken as Hex
-                    if (!subsByToken.has(tid)) subsByToken.set(tid, [])
-                  }
-                  const $subscriptionGroups = [...subsByToken.entries()].map(([, rules]) =>
-                    $column(spacing.default)(
-                      ...(rules.length > 0
-                        ? rules.map($subscriptionRow)
-                        : [
-                            $node(style({ color: palette.foreground, fontSize: text.sm }))(
-                              $text('A pending allocation in your cart will draw on this balance.')
-                            )
-                          ])
-                    )
-                  )
-
-                  const ruledFunds = new Set(
-                    [...activeRules, ...pendingRules].filter(r => r.fund).map(r => getAddress(r.fund as Address))
-                  )
-                  const fundById = new Map((p.root?.funds ?? []).map(f => [getAddress(f.fund as Address), f] as const))
-                  const redemptionFunds: IFund[] = []
-                  for (const pos of p.root?.positions ?? []) {
-                    const fund = fundById.get(getAddress(pos.fund as Address))
-                    if (!fund || ruledFunds.has(getAddress(fund.fund as Address))) continue
-                    const surrender =
-                      fund.liquidationRate !== 0n ? applyFactor(fund.liquidationRate, pos.sharesHeld) : 0n
-                    if (computeClaimable(pos, fund) + surrender > 0n || computeQueuedShares(pos, fund) > 0n) {
-                      redemptionFunds.push(fund)
                     }
-                  }
-                  const $redemptionRow = (fund: IFund): I$Node =>
-                    $row(spacing.default, style({ alignItems: 'center' }))(
-                      $navLink({
-                        route: routeSchema.fund.detail,
-                        params: { address: fund.fund as Address },
-                        $content: $fundProfileByAddress(fund.fund as Address)
-                      }),
-                      $node(style({ flex: 1 }))(),
-                      $FundSell({
+                    const puppetAddress = root.account
+                    const puppetAccount: IStream<IRootState> = start(
+                      root,
+                      filter((live): live is IRootState => live !== null && isAddressEqual(live.user, wallet.address), walletRoot)
+                    )
+                    const draftFor = (dep: IDepositDraft[], wd: IWithdrawDraft[], chainId: ChainId, token: Hex): IEditorDraft | null =>
+                      dep.find(
+                        x =>
+                          x.arrival === 'credit' &&
+                          ((Number(x.deposit.destinationChainId) === chainId && isAddressEqual(depositCreditToken(x), token)) ||
+                            (x.deposit.chainId === chainId && isAddressEqual(x.deposit.inputToken, token)))
+                      ) ?? (wd.find(x => x.chainId === chainId && isAddressEqual(x.inputAmount.token, token)) ?? null)
+                    const draftDelta = (d: IEditorDraft, chainId: ChainId, token: Hex): bigint => {
+                      if (d.kind === 'withdraw') {
+                        return d.chainId === chainId && isAddressEqual(d.inputAmount.token, token) ? -d.inputAmount.amount : 0n
+                      }
+                      return Number(d.deposit.destinationChainId) === chainId && isAddressEqual(depositCreditToken(d), token)
+                        ? d.expectedOutput
+                        : 0n
+                    }
+                    const $balanceEditor = (chainId: ChainId, token: Hex): I$Node =>
+                      $TokenBalanceEditor({
                         hideBalances,
-                        puppet: puppetAddress,
-                        masterAccount: fund.fund as Address,
-                        baseToken: tokenInfoFor(p.registry, HUB_CHAIN_ID, fund.baseToken as Hex).token,
+                        accountState: puppetAccount,
+                        chainId,
+                        token,
                         tokenRegistry: p.registry,
-                        position: op(
-                          rootState,
-                          map(root =>
-                            root?.positions.find(pos => isAddressEqual(pos.fund as Address, fund.fund as Address))
+                        walletAccount: wallet,
+                        draft: map(d => draftFor(d.dep, d.wd, chainId, token), combine({ dep: draftDepositList, wd: draftWithdrawList }))
+                      })({ changeDraft: changeDraftTether() })
+                    const heldRows: IStream<{ chainId: ChainId; token: Hex }[]> = op(
+                      combine({ account: puppetAccount, dep: draftDepositList, wd: draftWithdrawList }),
+                      map(q =>
+                        [HUB_CHAIN_ID, ...([...CHAIN_IDS] as ChainId[]).filter(c => c !== HUB_CHAIN_ID)].flatMap(chainId =>
+                          [...(p.registry.get(chainId)?.keys() ?? [])]
+                            .filter(token => {
+                              if (balanceAt(q.account.balances, chainId, token) > 0n) return true
+                              const drafted = draftFor(q.dep, q.wd, chainId, token)
+                              return drafted !== null && draftDelta(drafted, chainId, token) !== 0n
+                            })
+                            .map(token => ({ chainId, token }))
+                        )
+                      ),
+                      skipRepeatsWith((a, b) => a.map(x => `${x.chainId}:${x.token}`).join() === b.map(x => `${x.chainId}:${x.token}`).join())
+                    )
+                    const $depositPopover = $Popover({
+                      $contentContainer: $editorPopoverContentContainer,
+                      $target: $ButtonPrimary({
+                        $container: $defaultMiniButtonPrimary,
+                        $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Deposit'), $popoverCaret())
+                      })({ click: popDepositTether() }),
+                      $open: map(
+                        () =>
+                          $DepositEditor({
+                            hideBalances,
+                            account: puppetAddress,
+                            tokenRegistry: p.registry,
+                            walletAccount: wallet,
+                            destination: 'choose',
+                            arrival: 'credit',
+                            existingDraft: map(
+                              list =>
+                                list.find(d => Number(d.deposit.destinationChainId) === d.deposit.chainId) ?? null,
+                              draftDepositList
+                            )
+                          })({ changeDraft: changeDraftTether() }),
+                        popDeposit
+                      ),
+                      dismiss: changeDraft
+                    })({})
+                    const $bondDepositPopover = $Popover({
+                      $contentContainer: $editorPopoverContentContainer,
+                      $target: $ButtonPrimary({
+                        $container: $defaultMiniButtonPrimary,
+                        $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Bond'), $popoverCaret())
+                      })({ click: popBondDepositTether() }),
+                      $open: map(
+                        () =>
+                          $DepositEditor({
+                            hideBalances,
+                            account: puppetAddress,
+                            tokenRegistry: p.registry,
+                            walletAccount: wallet,
+                            destination: { chainId: HUB_CHAIN_ID, token: bondTokenOf(HUB_CHAIN_ID) },
+                            arrival: 'bond',
+                            existingDraft: map(list => list.find(d => d.arrival === 'bond') ?? null, draftDepositList)
+                          })({ changeDraft: changeBondDepositTether() }),
+                        popBondDeposit
+                      ),
+                      dismiss: changeBondDeposit
+                    })({})
+                    const $unbondPopover = $Popover({
+                      $contentContainer: $editorPopoverContentContainer,
+                      $target: $bondStandingRow(
+                        map(a => a.bonded, puppetAccount),
+                        draftedBond,
+                        $ButtonSecondary({
+                          $container: $defaultMiniButtonSecondary,
+                          $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Release'), $popoverCaret())
+                        })({ click: popUnbondTether() })
+                      ),
+                      $open: sampleMap(
+                        (account: IRootState, _click: PointerEvent) =>
+                          $UnbondEditor({
+                            bonded: account.bonded,
+                            existingDraft: map(list => list.find(d => d.id === 'unbond') ?? null, draftUnbondList)
+                          })({ changeDraft: changeUnbondDraftTether() }),
+                        puppetAccount,
+                        popUnbond
+                      ),
+                      dismiss: changeUnbondDraft
+                    })({})
+                    const $bondedStanding: I$Node = $unbondPopover
+                    const $depositList = switchLatest(
+                      map(rows => {
+                        if (rows.length === 0) {
+                          return $emptySection('Deposit any token, from any chain.')
+                        }
+                        return $column(style({ gap: '0' }))(
+                          ...rows.map((r, i) =>
+                            $node(style(i === rows.length - 1 ? {} : { borderBottom: `1px solid ${colorShade(palette.foreground, 10)}` }))(
+                              $balanceEditor(r.chainId, r.token)
+                            )
                           )
                         )
-                      })({ changeRedeemDraft: changeRedeemDraftTether() })
+                      }, heldRows)
                     )
-
-                  const $emptyHint = (label: string): I$Node =>
-                    $node(style({ color: palette.foreground, fontSize: text.sm }))($text(label))
-
-                  return $column(spacing.big, style({ padding: '16px 0' }))(
-                    $column(spacing.default)(
-                      $sectionHeader(
-                        'Balances',
-                        'Your overall balance in the app, held by your smart account. It funds the traders you follow, drawn from this balance at match time. Deposit from any token on any chain, withdraw anytime.',
-                        { $trailing: $collateralFilter }
-                      ),
-                      $depositList
-                    ),
-                    $column(spacing.default)(
-                      $sectionHeader(
-                        'Funding rules',
-                        'Traders you fund, grouped by the token each fund trades in. Deposit that token here to fund the allocations under it; an unfunded allocation is simply skipped at match time.',
-                        {
-                          role: 'You follow',
-                          $glyph: $icon({
-                            $content: $puppetLogo,
-                            width: '18px',
-                            viewBox: '0 0 32 32',
-                            fill: palette.message,
-                            svgOps: style({ display: 'block' })
-                          })
-                        }
-                      ),
-                      ...($subscriptionGroups.length > 0
-                        ? $subscriptionGroups
-                        : [
-                            $row(spacing.small, style({ alignItems: 'center' }))(
-                              $emptyHint('Not following any traders yet.'),
-                              $navText('/leaderboard', 'Browse traders →')
+                    const $mandateRow = (b: IBackingSection, master: Address): I$Node => {
+                      const nowSec = getUnixTimestamp()
+                      const mandate = b.mandates.find(m => isAddressEqual(m.master, master))
+                      const active = mandate !== undefined && mandate.expiry > BigInt(nowSec)
+                      const views = b.views.filter(v => isAddressEqual(v.book.master, master))
+                      const stake = views.reduce((acc, v) => acc + v.row.stake, 0n)
+                      const claim = views.some(v => v.claim === null) ? null : views.reduce((acc, v) => acc + (v.claim ?? 0n), 0n)
+                      const draft = op(
+                        draftMandateList,
+                        map(list => list.find(d => d.mandate !== null && isAddressEqual(d.mandate.master, master)) ?? null)
+                      )
+                      const $meta = (label: string): I$Node => $node(style({ color: palette.foreground, fontSize: text.sm }))($text(label))
+                      return $column(spacing.small, style({ padding: '10px 0', borderBottom: `1px solid ${colorShade(palette.foreground, 10)}` }))(
+                        $row(spacing.default, style({ alignItems: 'center', flexWrap: 'wrap' }))(
+                          $row(spacing.small, style({ alignItems: 'center', flex: 1, minWidth: '160px' }))(
+                            $roboAvatar(master, 28),
+                            $column(spacing.tiny)(
+                              $Link({
+                                route: routeSchema.traders.detail,
+                                params: { master },
+                                $anchor: $defaultAnchor(style({ fontWeight: '600', color: palette.message, textDecoration: 'none' })),
+                                $content: $text(accountDisplayName(master))
+                              })({}),
+                              $meta(readableAddress(master))
                             )
-                          ])
-                    ),
-                    $column(spacing.default)(
-                      $sectionHeader(
-                        'Funds',
-                        'Funds you run as the master trader. Each is a smart account that puppets fund; you trade the pooled capital on GMX and beyond, and share in the performance.',
-                        {
-                          role: 'You master',
-                          $glyph: $icon({
-                            $content: $puppeteer,
-                            width: '18px',
-                            viewBox: '0 0 32 32',
-                            fill: palette.message,
-                            svgOps: style({ display: 'block' })
-                          }),
-                          $trailing: $navText('/', '+ Create a Fund', () => {
-                            let tries = 0
-                            const scrollToQuickstart = () => {
-                              const el = document.getElementById('hello-create')
-                              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                              else if (tries++ < 30) requestAnimationFrame(scrollToQuickstart)
-                            }
-                            requestAnimationFrame(scrollToQuickstart)
-                          })
-                        }
-                      ),
-                      ...($fundRows.length > 0
-                        ? $fundRows
-                        : [$emptyHint('No funds yet. Create one to get funded to trade.')])
-                    ),
-                    ...(redemptionFunds.length === 0
-                      ? []
-                      : [
-                          $column(spacing.default)(
-                            $sectionHeader(
-                              'Pending redemptions',
-                              'Funds you hold shares in or have queued to redeem, outside your active funding. Claim once the manager processes the queue.'
+                          ),
+                          $column(spacing.tiny, style({ minWidth: '150px' }))(
+                            mandate !== undefined && active
+                              ? $text(
+                                  `${readablePercentage(mandate.allocationRate)} of matchable bond in ${listedTokenAddresses(p.registry, HUB_CHAIN_ID, mandate.tokenIdList)
+                                    .map(t => getTokenDescription(HUB_CHAIN_ID, t).symbol)
+                                    .join(', ')} per match`
+                                )
+                              : $meta('Not backing'),
+                            ...(mandate !== undefined && active
+                              ? [
+                                  $meta(
+                                    `until ${readableDate(Number(mandate.expiry))}${mandate.cooldownPeriod > 0n ? ` · cooldown ${getDuration(Number(mandate.cooldownPeriod))}` : ''}`
+                                  )
+                                ]
+                              : [])
+                          ),
+                          $column(spacing.tiny, style({ minWidth: '120px', textAlign: 'right' }))(
+                            $text(
+                              views.length === 0
+                                ? '-'
+                                : claim === null
+                                  ? `${readableTokenAmountLabel(value, stake)} (evaluating)`
+                                  : readableTokenAmountLabel(value, claim)
                             ),
-                            ...redemptionFunds.map($redemptionRow)
+                            ...(views.length > 0 && claim !== null
+                              ? [
+                                  $node(style({ color: claim >= stake ? palette.positive : palette.negative, fontSize: text.sm }))(
+                                    $text(`${claim >= stake ? '+' : ''}${readableTokenAmountLabel(value, claim - stake)}`)
+                                  )
+                                ]
+                              : [])
+                          ),
+                          $ButtonSecondary({
+                            $container: $defaultMiniButtonSecondary,
+                            $content: $text(map(open => (open !== null && isAddressEqual(open, master) ? 'Close' : active ? 'Manage' : 'Back'), openMandate))
+                          })({ click: toggleMandateTether(map(() => master)) })
+                        ),
+                        switchLatest(
+                          map(
+                            open =>
+                              open !== null && isAddressEqual(open, master)
+                                ? $MandateEditor({ registry: p.registry, master, existing: mandate, draft })({
+                                    changeMandateDraft: changeMandateDraftTether()
+                                  })
+                                : empty,
+                            openMandate
                           )
-                        ])
-                  )
-                },
-                skipRepeatsWith(
-                  (x: ISectionState, y: ISectionState) => {
-                    if (x.kind !== 'params' || y.kind !== 'params') return false
-                    const a = x.params
-                    const b = y.params
-                    return (
-                      a.wallet?.address === b.wallet?.address &&
-                      a.wallet?.session?.signer === b.wallet?.session?.signer &&
-                      a.registry === b.registry &&
-                      a.rules === b.rules &&
-                      !!a.root === !!b.root &&
-                      a.root?.signer === b.root?.signer &&
-                      (a.root?.funds.length ?? 0) === (b.root?.funds.length ?? 0) &&
-                      heldKey(a.root) === heldKey(b.root) &&
-                      pendingSubKey(a.draftRules) === pendingSubKey(b.draftRules)
+                        )
+                      )
+                    }
+                    const $backingList = $intermediatePromise({
+                      $display: map(async (query: Promise<IBackingSection>) => {
+                        const b = await query
+                        if (b.masters.length === 0) {
+                          return $emptySection(
+                            'Back a trader with your bond.',
+                            $Link({
+                              route: routeSchema.traders,
+                              $anchor: $defaultAnchor(style({ fontSize: text.sm, textDecoration: 'underline' })),
+                              $content: $text('Browse traders')
+                            })({})
+                          )
+                        }
+                        return $column(spacing.tiny)(...b.masters.map(m => $mandateRow(b, m)))
+                      }, backingQuery)
+                    })
+                    const $bookRow = (view: ITradeView): I$Node => {
+                      const chainId = Number(view.book.chainId) as ChainId
+                      const open = view.book.cycle > view.settledCycle
+                      const $meta = (label: string): I$Node => $node(style({ color: palette.foreground, fontSize: text.sm }))($text(label))
+                      const markLabel =
+                        view.mark === undefined
+                          ? '-'
+                          : view.mark.pending || view.mark.closeValue === undefined
+                            ? 'evaluating'
+                            : readableTokenAmountLabel(value, view.mark.closeValue)
+                      return $column(spacing.small, style({ padding: '10px 0', borderBottom: `1px solid ${colorShade(palette.foreground, 10)}` }))(
+                        $row(spacing.default, style({ alignItems: 'center', flexWrap: 'wrap' }))(
+                          $column(spacing.tiny, style({ flex: 1, minWidth: '160px' }))(
+                            $tokenProfile(chainId, getAddress(view.book.token)),
+                            $meta(`${readablePercentage(view.book.skin)} skin`)
+                          ),
+                          $column(spacing.tiny, style({ minWidth: '150px' }))(
+                            $text(`cycle ${view.book.cycle} · ${open ? 'open' : 'settled'}`),
+                            $meta(`${view.book.backerList.length} backer${view.book.backerList.length === 1 ? '' : 's'} · ${readableTokenAmountLabel(value, view.book.backed)} backing`)
+                          ),
+                          $column(spacing.tiny, style({ minWidth: '120px', textAlign: 'right' }))($text(markLabel), $meta('marked value')),
+                          $ButtonSecondary({
+                            $container: $defaultMiniButtonSecondary,
+                            $content: $text(map(o => (o === view.book.id ? 'Close' : 'Cycle'), openTrade))
+                          })({ click: toggleTradeTether(map(() => view.book.id)) })
+                        ),
+                        switchLatest(
+                          map(
+                            o =>
+                              o === view.book.id
+                                ? $CycleEditor({ view })({
+                                    changeTradeDraft: changeTradeDraftTether()
+                                  })
+                                : empty,
+                            openTrade
+                          )
+                        )
+                      )
+                    }
+                    const $tradingList = $intermediatePromise({
+                      $display: map(async (query: Promise<ITradeView[]>) => {
+                        const views = await query
+                        if (views.length === 0) {
+                          return $emptySection('Link a dApp and trade what your account holds.')
+                        }
+                        return $column(spacing.tiny)(...views.map($bookRow))
+                      }, tradeQuery)
+                    })
+                    return $column(style({ gap: isDesktopScreen ? '40px' : '28px', padding: '0 0 4px' }))(
+                      $sectionList(
+                        $section(
+                          $balancesHeader($depositPopover),
+                          $depositList,
+                          $bondDivider($bondDepositPopover),
+                          $bondedStanding
+                        ),
+                        $section($tradingHeader(), $tradingList),
+                        $section($backingHeader(), $backingList),
+                        $AccountHistory(historyQuery, $historyHeader, $emptyHistory)({})
+                      )
                     )
                   },
-                  op(
-                    sectionQuery,
-                    promiseState,
-                    filter(s => s.status !== PromiseStatus.PENDING),
-                    map(
-                      (s): ISectionState =>
-                        s.status === PromiseStatus.ERROR
-                          ? { kind: 'error', error: s.error }
-                          : { kind: 'params', params: s.value }
+                  skipRepeatsWith(
+                    (x: ISectionState, y: ISectionState) => {
+                      if (x.kind !== 'params' || y.kind !== 'params') return x.kind === 'pending' && y.kind === 'pending'
+                      const a = x.params
+                      const b = y.params
+                      return (
+                        a.wallet?.address === b.wallet?.address &&
+                        a.registry === b.registry &&
+                        a.root?.account === b.root?.account &&
+                        (a.root?.deployed.size ?? 0) === (b.root?.deployed.size ?? 0) &&
+                        heldKey(a.root) === heldKey(b.root)
+                      )
+                    },
+                    op(
+                      sectionQuery,
+                      promiseState,
+                      map((s): ISectionState => {
+                        if (s.status === PromiseStatus.PENDING) return { kind: 'pending' }
+                        return s.status === PromiseStatus.ERROR ? { kind: 'error', error: s.error } : { kind: 'params', params: s.value }
+                      })
                     )
                   )
-                )
                 )
               )
             )
           )
         ),
         {
-          changeActivityTimeframe,
-          selectCollateralTokenList,
           changeHideBalances,
-          changeDraft,
-          changeRedeemDraft,
-          changeAllocateDraft: changeMasterDraft,
-          changeSwapDraft,
-          changeClaimDraft,
-          changeFulfillDraft,
-          changeMatchRuleList
+          changeDraft: merge(changeDraft, changeBondDeposit),
+          changeMandateDraft,
+          changeUnbondDraft,
+          changeTradeDraft
         }
       ]
     }

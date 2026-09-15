@@ -1,28 +1,21 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import DEPLOYMENTS from '@puppet/contracts/deployments'
-import { IntervalTime } from '@puppet/sdk/const'
+import { type ChainId, IntervalTime } from '@puppet/sdk/const'
 import { uiStorage } from '@/ui-storage'
 import type { IStreamStoreKey } from '../app/storage/storage.js'
-import type { ILeaderboardView, IPerformanceMetric } from '../io/datastore/query.js'
 
 const DB_NAME = `root:${DEPLOYMENTS[`Dictate:${HUB_CHAIN_ID}`].address}`
 
-export const localStoreSchema = uiStorage.createStoreDefinition(DB_NAME, 1, {
+export const localStoreSchema = uiStorage.createStoreDefinition(DB_NAME, 3, {
   global: {
     chain: HUB_CHAIN_ID,
     wallet: null as null | string,
     activityTimeframe: IntervalTime.WEEK,
-    collateralTokenList: [] as string[],
     firstVisitSeen: false,
     hideBalances: false
   },
   ruleEditor: {
     advancedRouteEditorEnabled: false
-  },
-  leaderboard: {
-    view: 'masters' as ILeaderboardView,
-    performanceMetric: 'realisedPnl' as IPerformanceMetric,
-    account: undefined as string | undefined
   }
 })
 
@@ -36,8 +29,17 @@ export function originChainKey(wallet: string): IStreamStoreKey<number | null> {
 }
 
 export interface IDepositSource {
-  chainId: number
+  chainId: ChainId
   address: `0x${string}`
+}
+
+export function depositDestinationKey(wallet: string): IStreamStoreKey<IDepositSource | null> {
+  return {
+    dbName: DB_NAME,
+    storeName: 'global',
+    key: `depositDestination:${wallet.toLowerCase()}`,
+    initialValue: null
+  }
 }
 
 export function depositSourceKey(wallet: string): IStreamStoreKey<IDepositSource | null> {

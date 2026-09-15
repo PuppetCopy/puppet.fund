@@ -1,10 +1,11 @@
 import { TOKEN_META } from '@puppet/contracts/const'
-import { type Address, getAddress } from 'viem'
+import type { Address, } from 'viem'
+import type { ChainId } from '../../const/index.js'
 import { max } from '../../core/math.js'
-import { MARKET_ADDRESS_DESCRIPTION_MAP } from '../../gmx/market.js'
+import { GMX_V2_CHAIN_ID, MARKET_ADDRESS_DESCRIPTION_MAP } from '../../gmx/market.js'
 import { getLeverageFactor, getPositionPnlUsd } from '../../gmx/position.js'
-import { tokenMetaByAddress } from '../../state/tokenRegistry.js'
-import { usdToBase } from '../precision.js'
+import { type ITokenMetaKey, tokenMetaByChainToken, tokenMetaKey } from '../../state/tokenRegistry.js'
+import { usdPriceFromRate, usdToBase } from '../precision.js'
 import type {
   IGmxClaimableRow,
   IGmxOrderRow,
@@ -52,51 +53,49 @@ export const GMX_ORDER_CUSTODY_TYPES: ReadonlySet<number> = new Set([
   GMX_ORDER_TYPE.StopIncrease
 ])
 
-export const GMX_ORDER_EXECUTING_TYPES: ReadonlySet<number> = new Set([
+const GMX_ORDER_EXECUTING_TYPES: ReadonlySet<number> = new Set([
   GMX_ORDER_TYPE.MarketSwap,
   GMX_ORDER_TYPE.MarketIncrease,
   GMX_ORDER_TYPE.MarketDecrease
 ])
 
-// GMX denominates positions in USD; USDC is the dollar-proxy market we price every token against to convert
-// those USD figures into base-token wei (see usdToBase). A token with no <token>/USDC market simply has no
-// entry and degrades to its stored pnl.
 const USD_PROXY = TOKEN_META.USDC.symbol
 
 const MARKET_INDEX_MAP = MARKET_ADDRESS_DESCRIPTION_MAP as Record<string, { indexToken?: Address } | undefined>
 
 export function resolveIndexToken(market: Address): Address | undefined {
-  return MARKET_INDEX_MAP[getAddress(market)]?.indexToken
+  return MARKET_INDEX_MAP[market]?.indexToken
 }
 
-export type IGmxPriceMap = Map<Address, IPriceSource>
+export type IGmxPriceMap = Map<ITokenMetaKey, IPriceSource>
 
-export function gmxTokensToPrice(
+function gmxTokensToPrice(
   rows: IGmxPositionRow[],
   orders: IGmxOrderRow[],
   claimables: IGmxClaimableRow[],
   baseToken: Address
 ): Address[] {
-  const tokens = new Set<Address>([getAddress(baseToken)])
+  const tokens = new Set<Address>([baseToken])
   for (const r of rows) {
     const indexToken = resolveIndexToken(r.market)
-    if (indexToken) tokens.add(getAddress(indexToken))
-    tokens.add(getAddress(r.collateralToken))
+    if (indexToken) tokens.add(indexToken)
+    tokens.add(r.collateralToken)
   }
   for (const o of orders) {
-    if (GMX_ORDER_CUSTODY_TYPES.has(o.orderType)) tokens.add(getAddress(o.collateralToken))
+    if (GMX_ORDER_CUSTODY_TYPES.has(o.orderType)) tokens.add(o.collateralToken)
   }
-  for (const c of claimables) tokens.add(getAddress(c.token))
+  for (const c of claimables) tokens.add(c.token)
   return [...tokens]
 }
 
-function tokenAmountToUsd(amount: bigint, priceByToken: IGmxPriceMap, token: Address): bigint | null {
-  const entry = priceByToken.get(getAddress(token))
+function tokenAmountToUsd(priceByToken: IGmxPriceMap, chainId: ChainId, token: Address, amount: bigint): bigint | null {
+  const entry = priceByToken.get(tokenMetaKey(chainId, token))
   if (!entry || entry.price === 0n) return null
   return amount * entry.price
 }
 
-export function valueGmxPositions(
+function valueGmxPositions(
+  chainId: ChainId,
   rows: IGmxPositionRow[],
   orders: IGmxOrderRow[],
   claimables: IGmxClaimableRow[],
@@ -107,7 +106,7 @@ export function valueGmxPositions(
   if (rows.length === 0 && orders.length === 0 && claimables.length === 0)
     return { platform: PLATFORM, positions: [], inFlight: [], available: true }
 
-  const baseEntry = priceByToken.get(getAddress(baseToken))
+  const baseEntry = priceByToken.get(tokenMetaKey(chainId, baseToken))
   if (!baseEntry || baseEntry.price === 0n) {
     return {
       platform: PLATFORM,
@@ -122,7 +121,7 @@ export function valueGmxPositions(
 
   const positions: INavPosition[] = rows.map(row => {
     const indexToken = resolveIndexToken(row.market)
-    const indexEntry = indexToken ? priceByToken.get(indexToken) : undefined
+    const indexEntry = indexToken ? priceByToken.get(tokenMetaKey(chainId, indexToken)) : undefined
     const indexPrice = indexEntry ? indexEntry.price : 0n
     const indexAgeSec = indexEntry ? nowSec - indexEntry.time : 0
     const canRevalue = indexEntry !== undefined && indexPrice > 0n && indexToken !== undefined
@@ -149,7 +148,7 @@ export function valueGmxPositions(
   const inFlight: IPlatformInFlight[] = []
   for (const o of orders) {
     if (GMX_ORDER_CUSTODY_TYPES.has(o.orderType) && o.collateralDeltaAmount > 0n) {
-      const custodyUsd = tokenAmountToUsd(o.collateralDeltaAmount, priceByToken, o.collateralToken)
+      const custodyUsd = tokenAmountToUsd(priceByToken, chainId, o.collateralToken, o.collateralDeltaAmount)
       if (custodyUsd === null) {
         return {
           platform: PLATFORM,
@@ -174,7 +173,6 @@ export function valueGmxPositions(
     if (GMX_ORDER_EXECUTING_TYPES.has(o.orderType)) {
       inFlight.push({
         platform: PLATFORM,
-        kind: 'order',
         ref: o.orderKey,
         detail: `market order type ${o.orderType} pending keeper execution`
       })
@@ -182,7 +180,7 @@ export function valueGmxPositions(
   }
   for (const c of claimables) {
     if (c.amount === 0n) continue
-    const claimUsd = tokenAmountToUsd(c.amount, priceByToken, c.token)
+    const claimUsd = tokenAmountToUsd(priceByToken, chainId, c.token, c.amount)
     if (claimUsd === null) {
       return {
         platform: PLATFORM,
@@ -195,7 +193,7 @@ export function valueGmxPositions(
     const collateralBase = usdToBase(claimUsd, basePrice)
     positions.push({
       platform: PLATFORM,
-      positionKey: `${getAddress(c.market)}${getAddress(c.token).slice(2)}` as `0x${string}`,
+      positionKey: `${c.market}${c.token.slice(2)}` as `0x${string}`,
       market: c.market,
       collateralBase,
       pnlBase: 0n,
@@ -209,7 +207,9 @@ export function valueGmxPositions(
 
 export const gmxEvaluator: IPlatformEvaluator = {
   platform: PLATFORM,
+  chainId: GMX_V2_CHAIN_ID,
   async evaluate({
+    chainId,
     baseToken,
     nowSec,
     getRate,
@@ -220,22 +220,17 @@ export const gmxEvaluator: IPlatformEvaluator = {
     if (positions.length === 0 && orders.length === 0 && claimables.length === 0)
       return { platform: PLATFORM, positions: [], inFlight: [], available: true }
 
-    // Price every distinct token (base + per-market index + collateral) against the USD-proxy market in
-    // parallel; token0 is that token's per-wei price in USD-scale. A token with no direct <token>/USDC market
-    // fails closed in getRate and is simply omitted, so valueGmxPositions sees no entry and degrades it (the
-    // base token missing => the platform reports unavailable; an index token missing => stored pnl).
     const priceByToken: IGmxPriceMap = new Map()
     await Promise.all(
       gmxTokensToPrice(positions, orders, claimables, baseToken).map(async token => {
-        // Resolve the token ADDRESS to its asset symbol for the rate API; a GMX index token that isn't a registered
-        // base (e.g. a synthetic market) has no entry, so it's simply omitted (same as the unpriceable-pair degrade).
-        const asset = tokenMetaByAddress.get(getAddress(token))?.symbol
-        if (!asset) return
-        const rate = await getRate(asset, USD_PROXY).catch(() => null)
-        if (rate) priceByToken.set(getAddress(token), { price: rate.token0, time: rate.time })
+        const key = tokenMetaKey(chainId, token)
+        const meta = tokenMetaByChainToken.get(key)
+        if (!meta) return
+        const rate = await getRate(meta.symbol, USD_PROXY).catch(() => null)
+        if (rate) priceByToken.set(key, { price: usdPriceFromRate(rate, TOKEN_META.USDC.decimals), time: rate.time })
       })
     )
 
-    return valueGmxPositions(positions, orders, claimables, priceByToken, getAddress(baseToken), nowSec)
+    return valueGmxPositions(chainId, positions, orders, claimables, priceByToken, baseToken, nowSec)
   }
 }

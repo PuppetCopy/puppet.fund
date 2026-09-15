@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.35;
+pragma solidity ^0.8.36;
 
 contract MockReentrantProvider {
     address public gate;
@@ -13,7 +13,13 @@ contract MockReentrantProvider {
         reentrantCall = _call;
     }
 
-    function swap(address, uint, address, uint, address) external {
+    function swap(
+        address,
+        uint,
+        address,
+        uint,
+        address
+    ) external {
         (bool _ok, bytes memory _ret) = gate.call(reentrantCall);
         if (!_ok) {
             assembly {

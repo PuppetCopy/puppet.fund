@@ -11,9 +11,6 @@ const normalizeWheelDelta = (event: WheelEvent, viewport: number): number => {
   return event.deltaY
 }
 
-// One lerp-RAF scroller over a read/write pair — the body drives window scroll, each inner scrollable drives its own
-// scrollTop. `sync` follows external scrolls (scrollbar drag, keyboard): adopt the position when idle, yield when a
-// live animation diverges from what it rendered.
 interface ISmoother {
   wheel(delta: number, max: number): void
   sync(y: number): void
@@ -84,8 +81,6 @@ const createSmoother = (read: () => number, write: (y: number) => void): ISmooth
   }
 }
 
-// Inner scrollables (popovers, dropdowns, lists) get their OWN smoother, created lazily on first wheel and owned by the
-// element (WeakMap + listeners on the element itself, so a dismissed popover garbage-collects the lot).
 const innerSmoothers = new WeakMap<HTMLElement, ISmoother>()
 const innerSmootherFor = (el: HTMLElement): ISmoother => {
   let smoother = innerSmoothers.get(el)
@@ -103,9 +98,6 @@ const innerSmootherFor = (el: HTMLElement): ISmoother => {
   return smoother
 }
 
-// The scroll surface a wheel event should drive: the nearest scrollable ancestor that can still consume `delta`, else
-// the body. 'native' = leave the event alone entirely (explicit opt-out, or an at-edge scrollable whose
-// overscroll-behavior forbids chaining to the page — matching what native containment would do).
 const resolveSurface = (start: EventTarget | null, delta: number): HTMLElement | 'native' | 'body' => {
   let node = start instanceof HTMLElement ? start : null
   while (node && node !== document.body) {
@@ -135,8 +127,6 @@ export const enableSmoothScroll = (): (() => void) => {
   )
   body.sync(window.scrollY)
 
-  // The body max is cached (recomputed on resize/content growth) — reading root.scrollHeight per wheel would thrash
-  // layout on the hottest path. Inner elements read their own max per wheel: small subtrees, content changes freely.
   let maxScroll = Math.max(0, root.scrollHeight - window.innerHeight)
   const recomputeMax = (): void => {
     maxScroll = Math.max(0, root.scrollHeight - window.innerHeight)

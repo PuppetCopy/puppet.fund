@@ -9,7 +9,7 @@ position can get there). Everything is one file: `src/index.ts`.
 
 1. `bun install`
 2. Set `TRADER_ACCOUNT=0x...` in `.env` (the GMX account to copy).
-3. Create your account + allocate a **WETH** fund on the site, then `bun run dev` to pair.
+3. Create a trading account on the site and deposit **WETH** into it on Arbitrum, then `bun run dev` to pair.
 4. **Dry-run is the default** (`DRY_RUN=1` in `.env.example`): the full mirror + guard pipeline
    runs and logs every order it would place, but nothing dispatches. Set `DRY_RUN=0` to trade live.
 

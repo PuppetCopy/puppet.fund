@@ -1,21 +1,19 @@
-export { bindSession, type IConnectedWallet } from './connectedWallet.js'
+export { createBodyKeys } from './bodyKeys.js'
+export type { IConnectedWallet } from './connectedWallet.js'
 export {
-  approveConnection,
-  clearExtensionStorage,
-  PUPPET_EXTENSION_INSTALL_URL,
-  PUPPET_EXTENSION_RDNS,
-  rejectConnection
-} from './extension.js'
+  applyAttest,
+  balanceAt,
+  balanceId,
+  type IAccountBalance,
+  type IBodyKeys,
+  type IFold,
+  type IPendingCredit,
+  type IRootState,
+  type IWalletPair,
+  rootQuery
+} from './root.js'
+export { refreshWallet, walletQuery } from './state.js'
 export {
-  ensureSessionKey,
-  getStoredSessionKey,
-  type ISessionKey,
-  lastStoredSession,
-  revokeSessionKey
-} from './sessionKey.js'
-export { refreshWallet, setWallet, walletQuery } from './state.js'
-export {
-  connection,
   connectors,
   connectWallet,
   homePublicClient,

@@ -23,8 +23,7 @@
       "@/ui-components": ["./src/ui-components/index.ts"],
       "@/ui-components/*": ["./src/ui-components/*"],
       "@/ui-storage": ["./src/app/storage/index.ts"],
-      "@/ui-storage/*": ["./src/app/storage/*"],
-      "@/utils/*": ["./src/utils/*"]
+      "@/ui-storage/*": ["./src/app/storage/*"]
     }
   },
   "references": [{ "path": "../sdk" }],

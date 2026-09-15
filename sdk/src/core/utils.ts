@@ -3,7 +3,6 @@ import type { Address } from 'viem/accounts'
 export const getUnixTimestamp = () => Math.floor(Date.now() / 1000)
 
 export const ETH_ADDRESS_REGEXP = /^0x[a-fA-F0-9]{40}$/i
-export const TX_HASH_REGEX = /^0x([A-Fa-f0-9]{64})$/i
 
 export function isAddress(address: any): address is Address {
   return ETH_ADDRESS_REGEXP.test(address)
@@ -63,13 +62,4 @@ export function getMappedValueFallback<TMap extends Record<PropertyKey, any>, TF
 ): TMap[keyof TMap] | TFallback {
   if (prop in map) return map[prop as keyof TMap]
   return fallbackValue
-}
-
-export function easeInExpo(x: number) {
-  return x === 0 ? 0 : 2 ** (10 * x - 10)
-}
-
-export function lst<T>(a: readonly T[]): T {
-  if (a.length === 0) throw new Error('empty array')
-  return a[a.length - 1]
 }

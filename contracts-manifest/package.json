@@ -1,0 +1,27 @@
+{
+  "name": "@puppet/contracts",
+  "private": true,
+  "license": "BUSL-1.1",
+  "version": "0.1.0",
+  "type": "module",
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsgo -b",
+    "clean": "rm -rf dist",
+    "tsgo:check": "tsgo --noEmit"
+  },
+  "files": ["dist"],
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/esm/index.js"
+    },
+    "./*": {
+      "types": "./dist/types/*/index.d.ts",
+      "import": "./dist/esm/*/index.js"
+    }
+  },
+  "devDependencies": {
+    "viem": "catalog:"
+  }
+}

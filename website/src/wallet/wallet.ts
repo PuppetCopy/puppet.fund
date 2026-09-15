@@ -18,17 +18,34 @@ import {
 } from '@wagmi/core'
 import type { IStream } from 'aelea/stream'
 import { fromCallback } from 'aelea/stream-extended'
-import type { PublicClient, Transport } from 'viem'
+import { custom, fallback, type PublicClient, type Transport } from 'viem'
 
 export const WALLETCONNECT_PROJECT_ID = '37a9b5a1299a3d3d2ddecf4f022030f5'
 
-// Per-chain public transport: the same-origin /api/rpc proxy (resolved absolute against the page origin, since viem's
-// http transport rejects a bare relative path) handed to the shared rpcTransport, which trails the chain's viem default.
-// Exported so plain viem clients (io/chain/balances) reuse the exact transport wagmi uses.
+const userTransport = (chainId: number): Transport =>
+  custom(
+    {
+      async request({ method, params }: { method: string; params?: unknown }) {
+        const conn = getConnection(wagmi)
+        if (conn.status !== 'connected' || conn.chainId !== chainId || !conn.connector) {
+          throw new Error(`user rpc unavailable for chain ${chainId}`)
+        }
+        const provider = (await conn.connector.getProvider({ chainId })) as {
+          request: (args: { method: string; params?: unknown }) => Promise<unknown>
+        }
+        return provider.request({ method, params })
+      }
+    },
+    { retryCount: 0, methods: { exclude: ['eth_getLogs'] } }
+  )
+
 export const publicTransports = Object.fromEntries(
   VIEM_CHAINS.map(chain => [
     chain.id,
-    rpcTransport(new URL(`/api/rpc?network=${CHAIN_NETWORK_MAP[chain.id]}`, location.origin).href, chain.id)
+    fallback([
+      userTransport(chain.id),
+      rpcTransport(new URL(`/api/rpc?network=${CHAIN_NETWORK_MAP[chain.id]}`, location.origin).href)
+    ])
   ])
 ) as Record<ChainId, Transport>
 
@@ -40,10 +57,6 @@ export const wagmi: Config = createConfig({
   transports: publicTransports
 })
 
-// wagmi persists connection state to storage but drops `status` on rehydrate (it "messes
-// with reconnection"), so a reload reports `disconnected` until reconnect() re-establishes
-// the live connector. Fire it once at startup; consumers re-read via the `connection` stream
-// (watchConnection emits the reconnecting → connected transition).
 export const walletReconnected: Promise<void> = reconnect(wagmi).then(
   () => undefined,
   (err: unknown) => {

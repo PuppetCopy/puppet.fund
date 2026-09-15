@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.35;
+pragma solidity ^0.8.36;
 
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 
@@ -11,21 +11,20 @@ interface IAccount is IERC1271 {
         bytes callData;
     }
 
-    struct SignTransfer {
-        address token;
-        uint amountIn;
-        uint amountOut;
-    }
+    function args() external view returns (address module, address user, address signer);
 
-    function getAttestContract() external view returns (address);
-    function signedBalanceOf(
-        address token
-    ) external view returns (uint);
+    function nonce() external view returns (uint);
+
+    function genesis(
+        address user,
+        address signer,
+        bytes calldata keySignature
+    ) external returns (bytes32 digest);
+
     function execute(
-        Call[] calldata callList,
-        SignTransfer[] calldata transferList
-    )
-        external
-        payable
-        returns (uint[] memory signedPostBalanceList, uint[] memory postBalanceList, bytes[] memory returnDataList);
+        address attestor,
+        bytes32 digest,
+        bytes calldata signature,
+        Call[] calldata callList
+    ) external payable returns (bytes[] memory resultList);
 }

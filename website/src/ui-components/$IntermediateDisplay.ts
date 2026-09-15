@@ -1,6 +1,6 @@
-import { type Fn, fromPromise, type IStream, map, start, switchLatest, switchMap } from 'aelea/stream'
+import { type Fn, type IStream, map, switchLatest, switchMap } from 'aelea/stream'
 import { PromiseStatus, promiseState } from 'aelea/stream-extended'
-import { $node, $text, type I$Node, type I$Slottable, style } from 'aelea/ui'
+import { $node, $text, type I$Node, style } from 'aelea/ui'
 import { $column, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { text } from '@/ui-components'
@@ -29,15 +29,6 @@ export const $inlineSpinner: I$Node = $node(
 export const $loadingValue = (valueSrc: IStream<string>): I$Node =>
   switchLatest(map(v => (v === '…' ? $inlineSpinner : $node($text(v))), valueSrc))
 
-export const intermediateText = (querySrc: IStream<Promise<string>>, hint = '-'): IStream<string> =>
-  switchMap(res => start(hint, fromPromise(res.then(v => v, () => hint))), querySrc)
-
-export const $intermediateText = (
-  querySrc: IStream<Promise<string>>,
-  hint = '-',
-  $display: (src: IStream<string>) => I$Slottable = $loadingValue
-): I$Slottable => $display(intermediateText(querySrc, hint))
-
 export const $spinner = $node(
   style({
     margin: 'auto',
@@ -61,8 +52,9 @@ export const $spinner = $node(
   })
 )()
 
+export const $sectionLoader: I$Node = $column(style({ alignItems: 'center', padding: '48px 0' }))($spinner)
+
 export interface I$IntermediatPromise<_T> {
-  clean?: IStream<any>
   $display: IStream<Promise<I$Node>>
   $$fail?: Fn<unknown, I$Node>
 
@@ -74,9 +66,6 @@ interface ClassifiedError {
   detail: string
 }
 
-// Extract a display-friendly (title, detail) from an unknown throwable.
-// Title from `error.name` (e.g. "RelayHttpError"); detail from the message
-// or a trimmed HTML body. No editorializing; the throw-site phrasing wins.
 function classifyError(res: unknown): ClassifiedError {
   const err = res && typeof res === 'object' ? (res as { name?: string; message?: string }) : null
 
@@ -132,12 +121,14 @@ export const $errorCard = (res: unknown): I$Node => {
   )
 }
 
+export const $errorLabel = (res: unknown): I$Node => {
+  const { detail } = classifyError(res)
+  return $alertTooltip($text(detail))
+}
+
 export const $intermediatePromise = <T>({
   $loader = $spinner,
-  $$fail = res => {
-    const { detail } = classifyError(res)
-    return style({ placeSelf: 'center', margin: 'auto' })($alertTooltip($text(detail)))
-  },
+  $$fail = res => style({ placeSelf: 'center', margin: 'auto' })($errorLabel(res)),
   $display
 }: I$IntermediatPromise<T>) =>
   switchMap(state => {

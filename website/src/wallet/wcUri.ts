@@ -1,6 +1,3 @@
-// Require BOTH symKey and relay-protocol (order-agnostic). This rejects a URI that URLSearchParams.get('uri')
-// truncated at the first unencoded '&' (which drops relay-protocol), so wcUriFromLocation falls through to the raw-href
-// match that captures the whole URI instead of returning an unpairable fragment.
 const WC_URI = /^wc:[0-9a-f]{64}@2\?(?=.*symKey=[0-9a-f]{64})(?=.*relay-protocol=)/i
 
 export const isWcLink = (uri: string): boolean => WC_URI.test(uri)

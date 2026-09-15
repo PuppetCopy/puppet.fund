@@ -22,8 +22,8 @@
     }
   },
   "dependencies": {
-    "@noble/curves": "2.2.0",
-    "@noble/hashes": "2.2.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
     "@puppet/contracts": "workspace:*",
     "aelea": "catalog:",
     "viem": "catalog:"

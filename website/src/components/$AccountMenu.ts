@@ -1,3 +1,4 @@
+
 import { empty, type IStream, map, nowWith, switchLatest } from 'aelea/stream'
 import type { IBehavior } from 'aelea/stream-extended'
 import {
@@ -17,9 +18,13 @@ import {
 import { $column, $Popover, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { $eye, $eyeOff, $icon, $logout, $popoverCaret, keyActivate, text } from '@/ui-components'
-import { disconnect, type IConnectedWallet, refreshWallet, revokeSessionKey } from '../wallet/index.js'
+import {
+  disconnect,
+  type IWalletPair,
+  refreshWallet
+} from '../wallet/index.js'
 
-const $menuGlyph = (path: I$Node, viewBox = '0 0 24 24'): I$Node => $icon({ $content: path, width: '16px', viewBox })
+const $menuGlyph = (path: I$Node): I$Node => $icon({ $content: path, width: '16px', viewBox: '0 0 24 24' })
 
 const $menuItem = (glyph: I$Slottable, label: I$Slottable, click: I$Op, danger = false): I$Node =>
   $row(
@@ -46,20 +51,20 @@ const $menuItem = (glyph: I$Slottable, label: I$Slottable, click: I$Op, danger =
     $node(style({ fontSize: text.sm, whiteSpace: 'nowrap' }))(label)
   )
 
-export const $AccountMenu = ({
-  walletState,
-  hideBalances
-}: {
-  walletState: IStream<IConnectedWallet | null>
+export interface I$AccountMenu {
   hideBalances: IStream<boolean>
-}) =>
+  walletPair: IStream<IWalletPair>
+}
+
+export const $AccountMenu = ({ hideBalances, walletPair }: I$AccountMenu) =>
   component(
     (
       [open, openTether]: IBehavior<INode, PointerEvent>,
       [changeHideBalances, changeHideBalancesTether]: IBehavior<INode, boolean>
     ) => [
       switchLatest(
-        map((wallet: IConnectedWallet | null) => {
+        map((pair: IWalletPair) => {
+          const wallet = pair.wallet
           if (!wallet) return empty
 
           const $menu = (): I$Node =>
@@ -85,13 +90,6 @@ export const $AccountMenu = ({
                 effectProp(
                   'onclick',
                   nowWith(() => async () => {
-                    if (
-                      !confirm(
-                        'Disconnect revokes this session key. Any agent or dApp paired with it stops working, and you will need to sign a new session to reconnect. Continue?'
-                      )
-                    )
-                      return
-                    revokeSessionKey(wallet.address)
                     await disconnect()
                     refreshWallet()
                   })
@@ -119,7 +117,7 @@ export const $AccountMenu = ({
               openTether(nodeEvent('click'))
             )($node(style({ fontSize: text.sm, color: palette.foreground }))($text('Settings')), $popoverCaret())
           })({})
-        }, walletState)
+        }, walletPair)
       ),
       { changeHideBalances }
     ]

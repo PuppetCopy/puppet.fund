@@ -11,22 +11,22 @@
   fs_permissions = [
     { access = "read-write", path = "./deployments.toml" },
     { access = "read", path = "./const.toml" },
-    { access = "read-write", path = "./broadcast" }
+    { access = "read-write", path = "./broadcast" },
+    { access = "read", path = "./forge-artifacts-prod" }
   ]
   remappings = [
     "forge-std/=lib/forge-std/",
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"
   ]
-  evm_version = "cancun"
-  solc_version = "0.8.35"
+  evm_version = "prague"
+  solc_version = "0.8.36"
   via_ir = true
   bytecode_hash = "none"
   cbor_metadata = false
   optimizer = true
   optimizer_runs = 200
   gas_reports = [
-    "PuppetGate",
-    "FundGate",
+    "CoreGate",
     "HubGate"
   ]
 
@@ -45,20 +45,26 @@
   cache_path = "forge-cache-prod"
   optimizer_runs = 100_000
 
-# HubGate and Redeem are EIP-170 size-bound and can't take prod's 100k runs
-# (they overrun the 24576 B limit). Bind them to a low-runs sub-profile; the rest
-# of the codebase keeps prod-level runtime optimization.
+# Under via_ir the whole compilation unit decides a contract's bytecode, so
+# script/ and test/ are pinned to their own harness profile: without it foundry
+# merges same-settings files into one unit, baking forge-std/scripts into the
+# deployed bytecode and its verification input. The cost is that every src
+# contract gets a second <Name>.harness.json artifact from the test/script units,
+# so Deploy._creationCode must load the PROD ARTIFACT BY PATH: both
+# type(X).creationCode and a bare "File.sol:Name" qualifier resolve to the 1-run
+# harness build (v12 and v13 each shipped a whole universe of harness bytecode
+# that way).
 [[profile.prod.additional_compiler_profiles]]
-  name = "capped"
-  optimizer_runs = 200
+  name = "harness"
+  optimizer_runs = 1
 
 [[profile.prod.compilation_restrictions]]
-  paths = "src/HubGate.sol"
-  max_optimizer_runs = 200
+  paths = "script/**"
+  max_optimizer_runs = 1
 
 [[profile.prod.compilation_restrictions]]
-  paths = "src/hub/Redeem.sol"
-  max_optimizer_runs = 200
+  paths = "test/**"
+  max_optimizer_runs = 1
 
 [profile.ci.fuzz]
   runs = 1000
@@ -110,15 +116,17 @@
   ]
 
 [rpc_endpoints]
-  mainnet = { url = "https://lb.drpc.live/ethereum/${RPC_KEY}", chain_id = 1 }
-  arbitrum = { url = "https://lb.drpc.live/arbitrum/${RPC_KEY}", chain_id = 42161 }
-  base = { url = "https://lb.drpc.live/base/${RPC_KEY}", chain_id = 8453 }
-  polygon = { url = "https://lb.drpc.live/polygon/${RPC_KEY}", chain_id = 137 }
-  megaeth = { url = "https://lb.drpc.live/megaeth/${RPC_KEY}", chain_id = 4326 }
-  monad = { url = "https://lb.drpc.live/monad-mainnet/${RPC_KEY}", chain_id = 143 }
+  # mainnet = { url = "${RPC_URL}/ethereum/${RPC_KEY}", chain_id = 1 }
+  arbitrum = { url = "${RPC_URL}/arbitrum/${RPC_KEY}", chain_id = 42161 }
+  # base = { url = "${RPC_URL}/base/${RPC_KEY}", chain_id = 8453 }
+  # polygon = { url = "${RPC_URL}/polygon/${RPC_KEY}", chain_id = 137 }
+  # megaeth = { url = "${RPC_URL}/megaeth/${RPC_KEY}", chain_id = 4326 }
+  monad = { url = "${RPC_URL}/monad-mainnet/${RPC_KEY}", chain_id = 143 }
 
 [etherscan]
   mainnet = { key = "${ETHERSCAN_API_KEY}" }
   arbitrum = { key = "${ETHERSCAN_API_KEY}" }
   base = { key = "${ETHERSCAN_API_KEY}" }
   polygon = { key = "${ETHERSCAN_API_KEY}" }
+  # No `monad` entry: forge cannot resolve chain 143 in its built-in table and errors out at startup. Monad verifies
+  # through const.toml [VERIFIER.monad] instead (--verifier custom against the Etherscan V2 URL, chain id in the query).

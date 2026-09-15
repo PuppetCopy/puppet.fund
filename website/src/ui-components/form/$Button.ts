@@ -29,20 +29,16 @@ const $buttonToggleBtn = $defaultButtonToggleBtn(
     fontSize: text.xs,
     fontWeight: 'bold'
   }),
-  // Selected pill: the "border" is an inline box-shadow aelea sets to --primary; override THAT to a translucent
-  // foreground matching the surrounding container border (needs !important to beat the inline style). Text kept bright.
   stylePseudo('[aria-pressed="true"]', {
     boxShadow: `0px 0px 0 1px color-mix(in srgb, ${palette.foreground} 30%, transparent) inset !important`,
     color: palette.message
   })
-  // stylePseudo(':hover', { color: palette.message })
 )
 
 const $buttonContainer = $defaultButtonToggleContainer(
   style({
     backgroundColor: palette.background
   })
-  // stylePseudo(':hover', { borderColor: palette.foreground, borderWidth: '1px' })
 )
 
 export const $ButtonToggle = <T>(config: I$ButtonToggle<T>) =>
@@ -100,11 +96,11 @@ export const $defaultButtonPrimaryOutline = $defaultButtonPrimary(
   style({
     backgroundColor: 'transparent',
     border: '1px solid',
-    borderColor: palette.primary,
+    borderColor: palette.message,
     color: palette.message,
     fill: palette.message
   }),
-  stylePseudo(':hover', { backgroundColor: palette.primary, color: 'white', fill: 'white' })
+  stylePseudo(':hover', { borderColor: palette.primary })
 )
 
 export const $defaultMiniButtonPrimary = $defaultButtonPrimaryOutline(
@@ -116,12 +112,11 @@ export const $defaultMiniButtonPrimary = $defaultButtonPrimaryOutline(
   })
 )
 
-export const $ButtonPrimary = (config: I$Button) => $keyboardOperableButton($Button, $defaultButtonPrimary, config)
+export const $ButtonPrimary = (config: I$Button) => $keyboardOperableButton($defaultButtonPrimary, config)
 
-export const $ButtonPrimaryOutline = (config: I$Button) =>
-  $keyboardOperableButton($Button, $defaultButtonPrimaryOutline, config)
+export const $ButtonPrimaryOutline = (config: I$Button) => $keyboardOperableButton($defaultButtonPrimaryOutline, config)
 
-export const $ButtonSecondary = (config: I$Button) => $keyboardOperableButton($Button, $defaultButtonSecondary, config)
+export const $ButtonSecondary = (config: I$Button) => $keyboardOperableButton($defaultButtonSecondary, config)
 
 interface I$ButtonCircular extends Control {
   $iconPath: I$Node<SVGPathElement>
@@ -169,12 +164,11 @@ export const $ButtonCircular = ({
   )
 
 const $keyboardOperableButton = (
-  $base: typeof $Button,
   $defaultContainer: INodeCompose<HTMLButtonElement>,
   { $container = $defaultContainer, ...config }: I$Button
 ) =>
   $clickSurfacingButton((bindClick) =>
-    $base({
+    $Button({
       $container: bindClick($container),
       ...config
     })({})

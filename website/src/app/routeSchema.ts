@@ -1,21 +1,17 @@
-import { ETH_ADDRESS_REGEXP } from '@puppet/sdk/core'
 import { createRouteSchema } from 'aelea/ui-router'
 
 export const routeSchema = createRouteSchema({
   fragment: '',
   title: 'Puppet',
   children: {
-    leaderboard: { fragment: 'leaderboard', title: 'Leaderboard' },
-    quickstart: { fragment: 'quickstart', title: 'Create a Fund' },
-    fund: {
-      fragment: 'fund',
+    traders: {
+      fragment: 'traders',
+      title: 'Traders',
       children: {
-        detail: { fragment: ETH_ADDRESS_REGEXP, param: 'address', title: 'Fund' }
+        detail: { fragment: /^0x[0-9a-fA-F]{40}$/, param: 'master', title: 'Trader' }
       }
     },
-    portfolio: {
-      fragment: 'portfolio',
-      title: 'Portfolio'
-    }
+    portfolio: { fragment: 'portfolio', title: 'Account' },
+    quickstart: { fragment: 'quickstart', title: 'Start trading' }
   }
 } as const)

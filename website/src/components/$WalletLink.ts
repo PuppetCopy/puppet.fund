@@ -1,5 +1,4 @@
-import type { IFund } from '@puppet/sdk/schema'
-import type { ISubaccountState } from '@puppet/sdk/state'
+import { formatThrownError } from '@puppet/sdk/compact'
 import {
   combine,
   constant,
@@ -10,10 +9,9 @@ import {
   map,
   merge,
   op,
-  skip,
+  skipRepeatsWith,
   switchLatest,
-  switchMap,
-  tap
+  switchMap
 } from 'aelea/stream'
 import { type IBehavior, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
 import {
@@ -21,56 +19,50 @@ import {
   $node,
   $text,
   attr,
+  attrBehavior,
   component,
   type I$Node,
   type INode,
   nodeEvent,
   style,
+  styleBehavior,
   stylePseudo
 } from 'aelea/ui'
-import { $column, $Popover, $row, spacing } from 'aelea/ui-components'
+import { $column, $defaultInputContainer, $Popover, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { isAddressEqual } from 'viem'
-import { $FieldLabeled, $icon, $infoTooltip, $labeledDivider, text } from '@/ui-components'
+import { $ButtonPrimary, $ButtonSecondary, $defaultButtonPrimary, $defaultMiniButtonPrimary, $defaultMiniButtonSecondary, $FieldLabeled, $icon, $infoTooltip, $labeledDivider, $popoverCaret, POPOVER_WIDTH, text } from '@/ui-components'
+import type { Address } from 'viem'
 import { $walletConnectLogo } from '../common/$icons.js'
-import { $navText } from '../common/elements/$common.js'
-import type { IConnectedWallet } from '../wallet/index.js'
+import type { IConnectedWallet, IWalletPair } from '../wallet/index.js'
 import {
   blockedRequest,
   disconnectDapp,
-  type IActiveFund,
+  enableSignAlerts,
   type IPendingSign,
+  type IWalletLinkLogEntry,
   type IWalletLinkSession,
-  initWalletLink,
-  masterOf,
   pairDapp,
   pendingSign,
-  resolveActiveFund,
   resolveSignApproval,
-  sameFund,
-  setActiveFund,
-  setLinkWallet,
+  signAlertPermission,
+  signWalletLinkSession,
   startWalletConnect,
-  walletLinkConnected,
+  walletLinkLog,
   walletLinkSessions
 } from '../wallet/walletLink.js'
 import { isWcLink } from '../wallet/wcUri.js'
-import { $fundProfile } from './$AccountProfile.js'
-import { $EnableSession } from './$enableSession.js'
+import { $enableSessionDisclaimer } from './$enableSession.js'
 
 export interface I$WalletLink {
-  walletState: IStream<IConnectedWallet | null>
-  rootState: IStream<ISubaccountState | null>
+  walletPair: IStream<IWalletPair>
   size?: number
 }
 
 interface ILinkInfo {
   wallet: IConnectedWallet | null
-  hasSession: boolean
-  funds: IFund[]
-  selected: IActiveFund | null
-  ownSessions: IWalletLinkSession[]
   linked: boolean
+  unanswered: boolean
+  session: 'signed' | 'unsigned' | 'loading' | 'unavailable'
 }
 
 const prettyUrl = (url: string): string => url.replace(/^https?:\/\//, '').replace(/\/$/, '')
@@ -78,10 +70,6 @@ const prettyUrl = (url: string): string => url.replace(/^https?:\/\//, '').repla
 const $dot = (color: string): I$Node =>
   $node(style({ width: '7px', height: '7px', borderRadius: '50%', flexShrink: 0, backgroundColor: color }))()
 
-initWalletLink()
-
-// The "paste a wc: link" tunnel: gated behind an enabled session, it starts the WC engine and
-// pairs the dApp. Kept a self-contained component so its pair-status lives beside its input.
 type IPairStatus = { kind: 'pending' } | { kind: 'error'; text: string }
 
 const $linkTunnel = (walletState: IStream<IConnectedWallet | null>) =>
@@ -116,98 +104,128 @@ const $linkTunnel = (walletState: IStream<IConnectedWallet | null>) =>
       switchLatest(
         map(w => {
           if (!w) return empty
-          if (!w.session)
-            return $row(spacing.small, style({ alignItems: 'center' }))(
-              $EnableSession(w)({}),
-              $infoTooltip(
-                'A session key signs your trades automatically, with no wallet popup per action. It only acts within the rules you sign, can never move funds out, and you can revoke it anytime.',
-                palette.foreground,
-                '16px'
-              )
-            )
           return $FieldLabeled({
             label: null,
             placeholder: 'Paste wc: link',
             value: uri,
+            $input: $defaultInputContainer(
+              attrBehavior(map(s => ({ disabled: s?.kind === 'pending' ? '' : null }), connectStatus)),
+              styleBehavior(map(s => (s?.kind === 'pending' ? { opacity: '0.6' } : null), connectStatus))
+            ),
             hint: map(s => (s?.kind === 'pending' ? 'Connecting…' : ''), connectStatus),
             validation: inputError
           })({ change: changeUriTether() })
-        }, walletState)
+        }, skipRepeatsWith<IConnectedWallet | null>(
+          (a, b) => (a?.address ?? null) === (b?.address ?? null),
+          walletState
+        ))
       ),
       {}
     ]
   })
 
-export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink) =>
+export const $WalletLink = ({ walletPair, size = 32 }: I$WalletLink) =>
   component(
     (
       [open, openTether]: IBehavior<INode, PointerEvent>,
-      [disconnect, disconnectTether]: IBehavior<INode, string>,
-      [signDecision, signDecisionTether]: IBehavior<INode, { id: number; approved: boolean }>,
-      [selectFund, selectFundTether]: IBehavior<INode, IActiveFund>,
-      [createFundNav, createFundNavTether]: IBehavior<INode, PointerEvent>
+      [disconnect, disconnectTether]: IBehavior<PointerEvent, string>,
+      [signDecision, signDecisionTether]: IBehavior<PointerEvent, { id: number; approved: boolean }>,
+      [enableAlerts, enableAlertsTether]: IBehavior<PointerEvent>,
+      [signSession, signSessionTether]: IBehavior<PointerEvent>,
+      [popSession, popSessionTether]: IBehavior<PointerEvent>
     ) => {
-      const funds$: IStream<IFund[]> = op(
-        combine({ wallet: walletState, root: rootState }),
-        map(({ wallet, root }) => {
-          const master = masterOf(wallet)
-          return master ? (root?.funds ?? []).filter(f => isAddressEqual(f.master, master)) : []
-        }),
-        state()
-      )
-      // The chosen fund follows resolveActiveFund (selection, else remembered, else first). The tap
-      // persists the choice per master for the WC engine; it never writes null, so a transient empty
-      // list while the root state loads can't wipe a remembered selection.
-      const selection: IStream<IActiveFund | null> = state(null, selectFund)
-      const active$: IStream<IActiveFund | null> = op(
-        combine({ wallet: walletState, funds: funds$, selection }),
-        map(({ wallet, funds, selection }) => {
-          const master = masterOf(wallet)
-          return { master, chosen: resolveActiveFund(master, funds, selection) }
-        }),
-        tap(({ master, chosen }) => {
-          if (master && chosen) setActiveFund(master, chosen)
-        }),
-        map(p => p.chosen),
+      const connectedWallet: IStream<IConnectedWallet | null> = map(p => p.wallet, walletPair)
+      const rootState = promiseState(map(p => p.root, walletPair))
+
+      const linkInfo: IStream<ILinkInfo> = op(
+        combine({ sessions: walletLinkSessions, pair: walletPair, root: rootState }),
+        map(({ sessions, pair, root }) => ({
+          wallet: pair.wallet,
+          linked: sessions.some(s => s.reachable !== false),
+          unanswered: sessions.length > 0 && sessions.every(s => s.reachable === false),
+          session:
+            root.status === PromiseStatus.PENDING
+              ? ('loading' as const)
+              : root.status === PromiseStatus.ERROR
+                ? ('unavailable' as const)
+                : root.value === null
+                  ? ('unsigned' as const)
+                  : ('signed' as const)
+        })),
+        skipRepeatsWith<ILinkInfo>(
+          (a, b) => a.wallet?.address === b.wallet?.address && a.linked === b.linked && a.unanswered === b.unanswered && a.session === b.session
+        ),
         state()
       )
 
-      const linkInfo: IStream<ILinkInfo> = op(
-        combine({ sessions: walletLinkSessions, wallet: walletState, funds: funds$, active: active$ }),
-        map(({ sessions, wallet, funds, active }) => {
-          setLinkWallet(wallet)
-          const hasSession = !!wallet?.session
-          const selected = active && funds.some(f => sameFund(active, f)) ? active : null
-          // Every linked dApp operates the active fund, so they are all shown (not lensed per fund).
-          return { wallet, hasSession, funds, selected, ownSessions: sessions, linked: sessions.length > 0 }
-        }),
+      const signAttempt: IStream<Promise<Address>> = op(
+        signSession,
+        map(() => signWalletLinkSession()),
         state()
+      )
+
+      const signOutcome: IStream<string | null> = op(
+        signAttempt,
+        promiseState,
+        map(s =>
+          s.status === PromiseStatus.PENDING
+            ? 'Waiting for your wallet signature…'
+            : s.status === PromiseStatus.ERROR
+              ? formatThrownError(s.error)
+              : null
+        )
+      )
+
+      const $sessionGate: I$Node = $column(spacing.small)(
+        $node(style({ fontSize: text.sm, color: palette.foreground, lineHeight: '1.5' }))(
+          $text('Sign a session to derive your account key. dApps connect to it, and the same wallet re-derives it on any device.')
+        ),
+        $row(spacing.default, style({ alignItems: 'center' }))(
+          $Popover({
+            $container: $node(style({ display: 'flex' })),
+            $open: constant(
+              $column(spacing.default, style({ maxWidth: '320px' }))(
+                ...$enableSessionDisclaimer(),
+                $ButtonPrimary({
+                  $container: $defaultButtonPrimary(style({ alignSelf: 'flex-end', minHeight: '40px' })),
+                  $content: $text('Enable session'),
+                  disabled: signAttempt
+                })({ click: signSessionTether() })
+              ),
+              popSession
+            ),
+            $target: $ButtonSecondary({
+              $container: $defaultMiniButtonSecondary,
+              $content: $row(spacing.small, style({ alignItems: 'center' }))($text('Sign session'), $popoverCaret()),
+              disabled: signAttempt
+            })({ click: popSessionTether() })
+          })({}),
+          $node(style({ fontSize: text.xs, color: palette.foreground }))($text(map(o => o ?? '', signOutcome)))
+        )
       )
 
       const statusColor: IStream<string> = map(i => (i.linked ? palette.positive : palette.foreground), linkInfo)
 
       const status = (i: ILinkInfo): { label: string; color: string; tip: string } => {
-        if (!i.wallet)
-          return { label: 'Offline', color: palette.foreground, tip: 'Connect your wallet to link a dApp.' }
-        if (!i.hasSession)
+        if (!i.wallet) return { label: 'Offline', color: palette.foreground, tip: 'Connect your wallet to link a dApp.' }
+        if (i.session === 'loading') return { label: 'Loading', color: palette.foreground, tip: 'Reading your account state.' }
+        if (i.session === 'unavailable')
+          return { label: 'Account unavailable', color: palette.negative, tip: 'Your account state could not be read; dApps cannot connect until it loads.' }
+        if (i.session === 'unsigned')
+          return { label: 'Session unsigned', color: palette.indeterminate, tip: 'Sign once with your wallet to derive your account key; the same wallet re-derives it on any device. dApps connect to that account.' }
+        if (i.unanswered)
           return {
-            label: 'No session',
-            color: palette.indeterminate,
-            tip: 'Enable a signing session to link your funds to a dApp.'
-          }
-        if (i.funds.length === 0)
-          return {
-            label: 'No funds',
-            color: palette.indeterminate,
-            tip: 'Create a fund first, then link a dApp to it.'
+            label: 'Not responding',
+            color: palette.negative,
+            tip: 'The linked dApp did not answer over WalletConnect. It has most likely dropped the link on its side; disconnect it here and pair again.'
           }
         if (i.linked)
-          return { label: 'Linked', color: palette.positive, tip: 'This fund is linked and can trade on the dApp.' }
-        return {
-          label: 'Ready',
-          color: palette.primary,
-          tip: 'Pick a fund, then paste a WalletConnect link from a dApp to connect it.'
-        }
+          return {
+            label: 'Linked',
+            color: palette.positive,
+            tip: 'Your account is linked over WalletConnect. Whether the dApp accepts it depends on that dApp supporting smart-account (ERC-1271) signatures; Puppet cannot see their side.'
+          }
+        return { label: 'Ready', color: palette.message, tip: 'Paste a WalletConnect link from a dApp to connect it to your account.' }
       }
 
       const $header = (i: ILinkInfo): I$Node => {
@@ -215,41 +233,97 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
         return $row(spacing.default, style({ alignItems: 'center' }))(
           $column(style({ flex: 1, borderBottom: `1px solid ${palette.horizon}` }))(),
           $row(spacing.small, style({ alignItems: 'center', flexShrink: 0 }))(
-            $node(style({ fontSize: text.sm, color: palette.foreground }))($text('Funds')),
+            $node(style({ fontSize: text.sm, color: palette.foreground }))($text('Account')),
             $row(spacing.tiny, style({ alignItems: 'center' }))(
               $dot(s.color),
               $node(style({ fontSize: text.xs, color: s.color, whiteSpace: 'nowrap' }))($text(s.label)),
-              $infoTooltip(s.tip, palette.foreground, '18px')
+              $infoTooltip(s.tip, palette.foreground)
             )
           ),
           $column(style({ flex: 1, borderBottom: `1px solid ${palette.horizon}` }))()
         )
       }
 
-      const $fundIdentity = (f: IFund): I$Node =>
-        $row(
-          spacing.small,
-          style({ alignItems: 'center', minWidth: '0', flex: 1 })
-        )($fundProfile({ master: f.master, baseToken: f.baseToken, name: f.name }, 30, f))
-
-      const $selectableFund = (i: ILinkInfo, f: IFund): I$Node => {
-        const isActive = sameFund(i.selected, f)
-        return $row(
-          spacing.small,
-          style({
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            cursor: 'pointer',
-            padding: '8px 10px',
-            borderRadius: '12px',
-            border: `1px solid ${isActive ? palette.primary : colorShade(palette.foreground, 15)}`
-          }),
-          stylePseudo(':hover', { borderColor: isActive ? palette.primary : colorShade(palette.foreground, 40) }),
-          selectFundTether(nodeEvent('click'), constant({ baseToken: f.baseToken, name: f.name }))
-        )($fundIdentity(f), isActive ? $dot(palette.positive) : empty)
+      const $signHint = (session: IWalletLinkSession): I$Node => {
+        if (session.reachable === false)
+          return $node(style({ color: palette.negative, fontSize: text.xs, lineHeight: '1.5' }))(
+            $text(`${session.name} did not answer the ping. It has most likely dropped this link on its side; disconnect and pair again.`)
+          )
+        if (session.probe === 'rejected')
+          return $node(style({ color: palette.negative, fontSize: text.xs, lineHeight: '1.5' }))(
+            $text('Your account rejected the signature Puppet just produced. A stale key share may be cached here; reconnect and try again.')
+          )
+        if (session.probe === 'valid')
+          return $node(style({ color: palette.foreground, fontSize: text.xs, lineHeight: '1.5' }))(
+            $text(
+              session.repeatedSigns >= 2
+                ? `The signature is valid and ${session.name} keeps asking again, so ${session.name} is not accepting it. Nothing on your side can fix this.`
+                : `Signature verified on-chain against your account. If ${session.name} still refuses to sign you in, it does not support smart accounts.`
+            )
+          )
+        return empty
       }
 
+      const $logRow = (entry: IWalletLinkLogEntry): I$Node =>
+        $row(spacing.small, style({ alignItems: 'baseline' }))(
+          $node(style({ fontSize: '10px', color: palette.foreground, flexShrink: '0' }))(
+            $text(new Date(entry.time).toLocaleTimeString())
+          ),
+          $node(
+            style({
+              fontSize: '11px',
+              lineHeight: '1.4',
+              wordBreak: 'break-word',
+              color:
+                entry.level === 'error'
+                  ? palette.negative
+                  : entry.level === 'warn'
+                    ? palette.indeterminate
+                    : palette.message
+            })
+          )($text(entry.text))
+        )
+
+      const $alertState = switchLatest(
+        map(permission => {
+          if (permission === 'granted') return empty
+          return $row(spacing.small, style({ alignItems: 'center', justifyContent: 'space-between' }))(
+            $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.4' }))(
+              $text(
+                permission === 'denied'
+                  ? 'Approval alerts are blocked. Allow notifications from the padlock in your address bar.'
+                  : permission === 'insecure'
+                    ? 'Approval alerts need HTTPS; this page is not served over a valid certificate.'
+                    : permission === 'unsupported'
+                      ? 'This browser cannot show approval alerts.'
+                      : 'Get pinged when a linked dApp needs your approval.'
+              )
+            ),
+            permission === 'default'
+              ? $ButtonSecondary({
+                  $container: $defaultMiniButtonSecondary(style({ flexShrink: '0' })),
+                  $content: $text('Enable alerts')
+                })({ click: enableAlertsTether() })
+              : empty
+          )
+        }, signAlertPermission)
+      )
+
+      const $activityLog = switchLatest(
+        map(
+          entries =>
+            entries.length === 0
+              ? empty
+              : $column(spacing.small)(
+                  $labeledDivider($node(style({ fontSize: text.sm }))($text('Activity'))),
+                  $column(spacing.tiny, style({ maxHeight: '160px', overflowY: 'auto' }))(...entries.map($logRow))
+                ),
+          walletLinkLog
+        )
+      )
+
       const $connectionRow = (session: IWalletLinkSession): I$Node =>
+        $column(spacing.tiny, style({ width: '100%' }))(
         $row(spacing.small, style({ alignItems: 'center', justifyContent: 'space-between' }))(
           $row(spacing.small, style({ alignItems: 'center', minWidth: '0', flex: 1 }))(
             session.icon
@@ -281,14 +355,12 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
               })
             )($text(session.name || prettyUrl(session.url)))
           ),
-          $node(
-            style({ cursor: 'pointer', flexShrink: 0, padding: '4px', fontSize: text.xs, color: palette.foreground }),
-            stylePseudo(':hover', { color: palette.negative }),
-            disconnectTether(
-              nodeEvent('click'),
-              map(() => session.topic)
-            )
-          )($text('Disconnect'))
+          $ButtonSecondary({
+            $container: $defaultMiniButtonSecondary(style({ flexShrink: '0' })),
+            $content: $text('Disconnect')
+          })({ click: disconnectTether(map(() => session.topic)) })
+        ),
+          $signHint(session)
         )
 
       const $signPrompt = (p: IPendingSign): I$Node =>
@@ -302,38 +374,36 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
           })
         )(
           $node(style({ fontSize: text.sm, color: palette.message, lineHeight: '1.4' }))(
-            $text(`${p.name} is asking you to sign in. Approve to authorize the login signature for your fund.`)
+            $text(
+              p.method === 'wc_sessionProposal'
+                ? `${p.name} wants to link to your account. It will be able to request signatures until you disconnect it.`
+                : p.method === 'eth_sendTransaction'
+                  ? `${p.name} wants to submit a transaction from your account. Only approve it if you recognise this action.`
+                  : `${p.name} wants a signature from your account. Only approve it if you recognise this action.`
+            )
           ),
+          $node(
+            style({
+              fontSize: text.xs,
+              color: palette.foreground,
+              fontFamily: 'monospace',
+              wordBreak: 'break-word',
+              maxHeight: '120px',
+              overflowY: 'auto',
+              padding: '6px 8px',
+              borderRadius: '6px',
+              backgroundColor: colorShade(palette.horizon, 15)
+            })
+          )($text(p.payload)),
           $row(spacing.small, style({ justifyContent: 'flex-end', alignItems: 'center' }))(
-            $node(
-              style({
-                cursor: 'pointer',
-                fontSize: text.sm,
-                color: palette.foreground,
-                padding: '6px 12px',
-                borderRadius: '100px',
-                border: `1px solid ${colorShade(palette.foreground, 30)}`
-              }),
-              stylePseudo(':hover', { color: palette.negative, borderColor: palette.negative }),
-              signDecisionTether(
-                nodeEvent('click'),
-                map(() => ({ id: p.id, approved: false }))
-              )
-            )($text('Decline')),
-            $node(
-              style({
-                cursor: 'pointer',
-                fontSize: text.sm,
-                color: 'white',
-                padding: '6px 14px',
-                borderRadius: '100px',
-                backgroundColor: palette.primary
-              }),
-              signDecisionTether(
-                nodeEvent('click'),
-                map(() => ({ id: p.id, approved: true }))
-              )
-            )($text('Approve'))
+            $ButtonSecondary({
+              $container: $defaultMiniButtonSecondary,
+              $content: $text('Decline')
+            })({ click: signDecisionTether(map(() => ({ id: p.id, approved: false }))) }),
+            $ButtonPrimary({
+              $container: $defaultMiniButtonPrimary,
+              $content: $text('Approve')
+            })({ click: signDecisionTether(map(() => ({ id: p.id, approved: true }))) })
           )
         )
 
@@ -342,7 +412,7 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
           $container: $node(style({ display: 'flex' })),
           $open: map(
             () =>
-              $column(spacing.default, style({ minWidth: '300px', maxWidth: '340px' }))(
+              $column(spacing.default, style({ width: POPOVER_WIDTH, maxWidth: 'calc(100vw - 32px)' }))(
                 switchLatest(
                   map(topic => {
                     void disconnectDapp(topic)
@@ -356,8 +426,14 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
                   }, signDecision)
                 ),
                 switchLatest(
+                  map(() => {
+                    enableSignAlerts()
+                    return empty
+                  }, enableAlerts)
+                ),
+                switchLatest(
                   map(
-                    i =>
+                    (i: ILinkInfo) =>
                       $column(spacing.default)(
                         switchLatest(map(p => (p ? $signPrompt(p) : empty), pendingSign)),
                         $labeledDivider(
@@ -365,9 +441,7 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
                             $node(style({ fontSize: text.sm }))($text('Link a dApp')),
                             $infoTooltip(
                               'On the dApp choose WalletConnect, copy its connection link, and paste it here. Keep this tab open while linked.',
-                              palette.foreground,
-                              '14px'
-                            )
+                              palette.foreground)
                           )
                         ),
                         ...(!i.wallet
@@ -376,37 +450,21 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
                                 $text('Connect your wallet, then link a dApp here.')
                               )
                             ]
-                          : i.funds.length === 0
-                            ? [
-                                $column(spacing.small)(
-                                  $node(style({ fontSize: text.sm, color: palette.foreground, lineHeight: '1.5' }))(
-                                    $text(
-                                      'A linked dApp trades through one of your funds, so you need a fund before you can link.'
-                                    )
-                                  ),
-                                  $node(createFundNavTether(nodeEvent('click')))(
-                                    $navText('/', 'Create a fund', () => {
-                                      let tries = 0
-                                      const scrollToQuickstart = (): void => {
-                                        const el = document.getElementById('hello-create')
-                                        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                                        else if (tries++ < 30) requestAnimationFrame(scrollToQuickstart)
-                                      }
-                                      scrollToQuickstart()
-                                    })
-                                  )
-                                )
-                              ]
+                          : i.session !== 'signed'
+                            ? [...(i.session === 'unsigned' ? [$sessionGate] : []), $header(i)]
                             : [
-                                $linkTunnel(walletState)({}),
-                                ...(i.ownSessions.length > 0
-                                  ? [$column(spacing.small)(...i.ownSessions.map($connectionRow))]
-                                  : []),
-                                $header(i),
-                                ...(i.hasSession
-                                  ? [$column(spacing.small)(...i.funds.map(f => $selectableFund(i, f)))]
-                                  : [])
-                              ])
+                                $linkTunnel(connectedWallet)({}),
+                                switchLatest(
+                                  map(
+                                    list =>
+                                      list.length > 0 ? $column(spacing.small)(...list.map($connectionRow)) : empty,
+                                    walletLinkSessions
+                                  )
+                                ),
+                                $header(i)
+                              ]),
+                        $alertState,
+                        $activityLog
                       ),
                     linkInfo
                   )
@@ -417,13 +475,10 @@ export const $WalletLink = ({ walletState, rootState, size = 32 }: I$WalletLink)
               blockedRequest,
               op(
                 pendingSign,
-                filter((p): p is IPendingSign => !!p)
+                filter((p): p is IPendingSign => !!p),
+                skipRepeatsWith((a, b) => a.id === b.id)
               )
             )
-          ),
-          dismiss: merge(
-            op(walletLinkConnected, skip(1), filter(c => c)),
-            constant(true, createFundNav)
           ),
           $target: $row(
             style({

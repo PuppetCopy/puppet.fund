@@ -25,8 +25,6 @@ import { $info } from './$icons.js'
 
 export const $infoLabel = $node(style({ color: palette.foreground }))
 
-// Inline `<muted-label> <value>` row. When `tooltip` is set the label + info
-// icon together become the tooltip trigger.
 export const $labeledValue = (label: string | I$Slottable, value: string | I$Slottable, tooltip?: I$Slottable) =>
   $row(spacing.small, style({ alignItems: 'center' }))(
     tooltip
@@ -39,8 +37,8 @@ export const $labeledValue = (label: string | I$Slottable, value: string | I$Slo
               $content: $info,
               viewBox: '0 0 32 32',
               fill: palette.foreground,
-              size: '20px',
-              svgOps: style({ padding: '0 4px' })
+              size: '1.15em',
+              svgOps: style({ flexShrink: '0', marginLeft: '4px' })
             })
           )
         })({})
@@ -48,7 +46,7 @@ export const $labeledValue = (label: string | I$Slottable, value: string | I$Slo
     isStream(value) ? value : $text(value)
   )
 
-export const $infoTooltip = (text: string | I$Slottable, color = palette.foreground, size = '24px') =>
+export const $infoTooltip = (text: string | I$Slottable, color = palette.foreground) =>
   $Tooltip({
     $dropContainer: $tooltipDropContainer,
     $content: isStream(text) ? text : $node($text(text)),
@@ -56,8 +54,8 @@ export const $infoTooltip = (text: string | I$Slottable, color = palette.foregro
       $content: $info,
       viewBox: '0 0 32 32',
       fill: color,
-      size,
-      svgOps: style({ display: 'block', flexShrink: '0', padding: '2px', cursor: 'help' })
+      size: '1.15em',
+      svgOps: style({ display: 'block', flexShrink: '0', cursor: 'help' })
     })
   })({})
 

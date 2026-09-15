@@ -1,12 +1,6 @@
-// Ephemeral ECDH(P-256) + AES-GCM seal for the browser to agent pairing
-// handshake. The agent generates a keypair and prints its public key in the
-// pair link; the browser seals the bindSig to that public key so only the agent
-// holding the matching private key can open it. A local listener that receives
-// the POST (port squat, loopback sniff) gets ciphertext it cannot read, because
-// the public key in the link came from the agent's own terminal output.
-
 import type { Address, Hex } from 'viem'
 import { decode, encode } from '../compact/frame.js'
+import type { IShare } from '../mpc/keygen.js'
 import type { ITokenRegistry } from '../state/index.js'
 
 const CURVE = { name: 'ECDH', namedCurve: 'P-256' } as const
@@ -17,15 +11,18 @@ export interface ISealedPayload {
   ct: string
 }
 
-// The sealed pairing handshake: the site hands the agent the minimal identity seed and the
-// operator derives the rest (signer from signerKey, account/fund from these). `name` is the
-// fund's bytes32 name; `baseToken` the token it trades.
+export interface IPairedBody {
+  account: Address
+}
+
 export interface IPairedSession {
-  signerKey: Hex
+  share: IShare
+  signer: Hex
   user: Address
-  baseToken: Hex
-  name: Hex
+  body: IPairedBody
   matchmakerUrl: string
+  oracleUrl: string
+  relayer: Address
   tokenRegistry?: ITokenRegistry[]
 }
 

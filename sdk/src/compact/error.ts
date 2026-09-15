@@ -1,4 +1,4 @@
-import { puppetErrorAbi } from '@puppet/contracts'
+import { puppetErrorAbi } from '@puppet/contracts/errors'
 import type { AbiParametersToPrimitiveTypes, ExtractAbiError, ExtractAbiErrorNames } from 'abitype'
 
 declare module 'abitype' {
@@ -15,10 +15,9 @@ export type ICompactContractErrorArgs<N extends ICompactContractErrorName> = Abi
   ExtractAbiError<IErrorAbi, N>['inputs']
 >
 
-// 'server' — server-side fault, sender not at fault, do not penalize.
-// 'soft'   — contention/retry path, cumulative rate-limit signal.
-// 'hard'   — sender supplied a nonsensical request, immediate timeout.
 export type IStrikeSeverity = 'server' | 'soft' | 'hard'
+
+export const OPTIMISTIC_RELAY_CLOSED = 'OPTIMISTIC_RELAY_CLOSED'
 
 export class CompactError extends Error {
   readonly code: string
@@ -45,13 +44,13 @@ export class CompactContractError<N extends ICompactContractErrorName = ICompact
   }
 }
 
-export function humanizeErrorCode(code: string): string {
+function humanizeErrorCode(code: string): string {
   const tail = code.includes('__') ? (code.split('__').pop() ?? code) : code
   const spaced = tail.includes('_') ? tail.replace(/_/g, ' ') : tail.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
   return spaced.charAt(0).toUpperCase() + spaced.slice(1).toLowerCase()
 }
 
-export function humanizeContractError(code: string, args: readonly unknown[]): string {
+function humanizeContractError(code: string, args: readonly unknown[]): string {
   const head = humanizeErrorCode(code)
   if (args.length === 0) return head
   const def = puppetErrorAbi.find(e => e.type === 'error' && e.name === code) as

@@ -29,15 +29,10 @@ export const $defaultDropSelectAnchor = $row(
     padding: '8px 12px',
     gap: '10px',
     borderRadius: '14px',
-    // Visible border consistent with the icon-circular controls (design-system standard).
     border: `1px solid ${colorShade(palette.foreground, 40)}`,
     transition: 'border-color 120ms ease-out'
   }),
-  // Hover brightens the border, matching the icon-circular controls / choice cards.
   stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) }),
-  // While the list is open the anchor MERGES with the panel: same border shade, same fill, bottom corners squared
-  // so the panel (which tucks under it at rect.bottom - 1 with squared top corners and at least the anchor's width)
-  // reads as one continuous surface instead of two cut boxes.
   stylePseudo('[aria-expanded="true"]', {
     borderColor: colorShade(palette.foreground, 60),
     borderRadius: '14px 14px 0 0',
@@ -45,8 +40,6 @@ export const $defaultDropSelectAnchor = $row(
   })
 )
 
-// Panel that joins the open anchor: flush under it (the dropdown positions it overlapping
-// the anchor's 1px bottom border), top corners squared, same border as the open anchor.
 export const $dropSelectJoinedListContainer = $node(
   style({
     display: 'flex',
@@ -83,7 +76,6 @@ const $stringRender = <T>(): IOps<T, I$Node> => map((val: T) => $node($text(Stri
 const labelToNode = (label: string | IStream<string> | I$Node | undefined): I$Node => {
   if (label === undefined) return empty
   if (typeof label === 'string') return $infoLabel($text(label))
-  // Stream of either strings (wrap in $infoLabel) or pre-rendered nodes (passthrough).
   return switchLatest(map(v => (typeof v === 'string' ? $infoLabel($text(v)) : v), label as IStream<string | INode>))
 }
 
@@ -100,12 +92,8 @@ export const $DropSelect = <T>({
   closeOnSelect
 }: I$DropSelect<T>) =>
   component(([select, selectTether]: IBehavior<T>, [isOpen, isOpenTether]: IBehavior<boolean>) => {
-    // Captured so Escape (the popover list uses popover:'manual', which suppresses native
-    // Escape) and focus-return have a handle to the trigger element, and so the anchor's
-    // ArrowDown/ArrowUp can move focus into the freshly-mounted list.
     let anchorEl: HTMLElement | null = null
     let listEl: HTMLElement | null = null
-    // Re-clicking the open trigger toggles the dropdown closed (isOpen reducer).
     const closeAndFocus = () => {
       anchorEl?.click()
       anchorEl?.focus()
@@ -116,7 +104,6 @@ export const $DropSelect = <T>({
         optionList,
         $$option,
         $container,
-        // role=listbox + roving Arrow focus + Escape close (returns focus to the anchor).
         $dropListContainer: $dropListContainer(
           attr({ role: 'listbox', tabindex: '-1' }),
           effectRun((el: unknown) => {
@@ -124,14 +111,9 @@ export const $DropSelect = <T>({
           }),
           listboxKeyNav(closeAndFocus, () => anchorEl)
         ),
-        // Each option is keyboard-activatable and announced as an option.
         $optionContainer: $optionContainer(attr({ role: 'option', tabindex: '0' }), keyActivate()),
         closeOnSelect,
-        // Decorators (ARIA/keyboard/element-capture) are applied first, then the children —
-        // aelea's compose overloads don't allow mixing ops and leaves in a single call.
         $anchor: $anchor(
-          // Focusable, announced as a listbox trigger; aria-expanded follows the open stream.
-          // Enter/Space toggle it; ArrowDown/ArrowUp open it (if closed) and move focus to the list.
           attr({ role: 'button', tabindex: '0', 'aria-haspopup': 'listbox' }),
           attrBehavior(map(open => ({ 'aria-expanded': open ? 'true' : 'false' }), isOpen)),
           effectRun((el: unknown) => {
@@ -153,7 +135,6 @@ export const $DropSelect = <T>({
         )
       })({
         select: selectTether(),
-        // Capture the dropdown open state to feed aria-expanded on the anchor above.
         isOpen: isOpenTether()
       }),
       { select }

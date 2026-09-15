@@ -1,4 +1,5 @@
 import {
+  combine,
   constant,
   type IOps,
   type IStream,
@@ -9,7 +10,8 @@ import {
   sampleMap,
   switchLatest,
   switchMap,
-  tap
+  tap,
+  toStream
 } from 'aelea/stream'
 import type { IBehavior } from 'aelea/stream-extended'
 import {
@@ -26,14 +28,13 @@ import {
   stylePseudo
 } from 'aelea/ui'
 import { $row, spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
+import { palette } from 'aelea/ui-components-theme'
 import {
   $caretDown,
   $Dropdown,
   $defaultDropdownContainer,
   $icon,
   $infoLabel,
-  $xCross,
   dropAnchorKeyNav,
   keyActivate,
   listboxKeyNav
@@ -59,8 +60,8 @@ export const $defaultOptionContainer = $row(
     backgroundColor: palette.primary,
     color: 'white',
     fill: 'white',
-    paddingLeft: '4px',
-    cursor: 'default',
+    padding: '4px 10px',
+    cursor: 'pointer',
     alignItems: 'center',
     borderRadius: '22px'
   })
@@ -75,6 +76,7 @@ export interface I$DropMultiSelect<T> {
   $$selectedOption?: IOps<T, I$Node>
   $$option?: IOps<T, I$Node>
   $container?: INodeCompose
+  $anchorContainer?: INodeCompose
   $dropListContainer?: INodeCompose
   $optionContainer?: INodeCompose
 
@@ -89,8 +91,12 @@ export const $defaultNoneSelected = $infoLabel(
     padding: '10px 0 10px 12px'
   })
 )
+export const $defaultDropMultiSelectAnchor = $row(
+  style({ display: 'flex', flexDirection: 'row', position: 'relative', gap: '8px', alignItems: 'center', flex: 1, minWidth: '0', paddingRight: '20px' })
+)
+
 export const $DropMultiSelect = <T>({
-  value, //
+  value,
   optionList,
 
   getId,
@@ -98,6 +104,7 @@ export const $DropMultiSelect = <T>({
   $$selectedOption = map(item => $defaultDropMultiSelectOption($text(String(item)))),
   $$option = map(item => $defaultDropMultiSelectOption($text(String(item)))),
   $container = $defaultDropdownContainer,
+  $anchorContainer = $defaultDropMultiSelectAnchor,
   $dropListContainer,
   $optionContainer = $defaultOptionContainer,
   validation = constant(null)
@@ -108,8 +115,6 @@ export const $DropMultiSelect = <T>({
       [pluck, pluckTether]: IBehavior<INode, T>,
       [isOpen, isOpenTether]: IBehavior<boolean>
     ) => {
-      // Handles to the trigger and the popover list (popover:'manual' suppresses native Escape)
-      // for focus management and Arrow-into-list navigation.
       let anchorEl: HTMLElement | null = null
       let listEl: HTMLElement | null = null
       const closeAndFocus = () => {
@@ -120,15 +125,13 @@ export const $DropMultiSelect = <T>({
         getId ? seed.findIndex(item => getId(item) === getId(next)) : seed.indexOf(next)
       return [
         $Dropdown({
-          $anchor: $row(
-            // Focusable multi-select listbox trigger; aria-expanded mirrors the open stream.
+          $anchor: $anchorContainer(
             attr({ role: 'button', tabindex: '0', 'aria-haspopup': 'listbox' }),
             attrBehavior(map((open: boolean) => ({ 'aria-expanded': open ? 'true' : 'false' }), isOpen)),
             effectRun((el: unknown) => {
               anchorEl = el as HTMLElement
             }),
-            dropAnchorKeyNav(() => listEl),
-            style({ display: 'flex', flexDirection: 'row', position: 'relative', gap: '8px', alignItems: 'center' })
+            dropAnchorKeyNav(() => listEl)
           )(
             switchMap(valueList => {
               if (!valueList.length) {
@@ -137,54 +140,36 @@ export const $DropMultiSelect = <T>({
 
               return $row(
                 spacing.tiny,
-                style({ alignItems: 'center', paddingLeft: '6px' })
+                style({ alignItems: 'center', flexWrap: 'wrap', flex: 1, minWidth: '0', padding: '8px 0' })
               )(
-                ...valueList.map(token => {
-                  return $optionContainer(
-                    switchLatest($$selectedOption(just(token))),
-                    $icon({
-                      $content: $xCross,
-                      width: '28px',
-                      // Accessible name so the icon-only remove control announces what it removes.
-                      label: `Remove ${String(token)}`,
-                      svgOps: o(
-                        style({ padding: '4px', cursor: 'pointer' }),
-                        pluckTether(
-                          nodeEvent('click'),
-                          tap(x => x.preventDefault()),
-                          constant(token)
-                        )
-                      ),
-                      viewBox: '0 0 32 32'
-                    })
-                  )
-                })
+                ...valueList.map(token =>
+                  $optionContainer(
+                    attr({ role: 'button', tabindex: '0', 'aria-label': `Remove ${String(token)}` }),
+                    keyActivate(),
+                    pluckTether(
+                      nodeEvent('click'),
+                      tap(ev => {
+                        ev.preventDefault()
+                        ev.stopPropagation()
+                      }),
+                      constant(token)
+                    )
+                  )(switchLatest($$selectedOption(just(token))))
+                )
               )
             }, value),
 
-            $row(
-              style({
-                alignItems: 'center',
-                justifyContent: 'center',
-                cursor: 'pointer',
-                width: '32px',
-                height: '32px',
-                borderRadius: '50%',
-                border: `1px solid ${colorShade(palette.foreground, 40)}`
-              })
-            )(
-              $icon({
-                $content: $caretDown,
-                width: '12px',
-                svgOps: style({ minWidth: '12px' }),
-                viewBox: '0 0 32 32'
-              })
-            )
+            $icon({
+              $content: $caretDown,
+              width: '10px',
+              viewBox: '0 0 32 32',
+              fill: palette.foreground,
+              svgOps: style({ position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' })
+            })
           ),
-          optionList,
+          optionList: map(p => p.options.filter(option => findIdx(p.value, option) === -1), combine({ options: toStream(optionList), value })),
           $$option,
           $container,
-          // role=listbox + roving Arrow focus + Escape close on the popover list.
           $dropListContainer: ($dropListContainer ?? $aeleaDropListContainer)(
             attr({ role: 'listbox', tabindex: '-1' }),
             effectRun((el: unknown) => {
@@ -192,11 +177,9 @@ export const $DropMultiSelect = <T>({
             }),
             listboxKeyNav(closeAndFocus, () => anchorEl)
           ),
-          // Each list option is announced as an option and keyboard-activatable.
           $optionContainer: $aeleaOptionContainer(attr({ role: 'option', tabindex: '0' }), keyActivate())
         })({
           select: selectTether(),
-          // Feed the dropdown open state to aria-expanded on the anchor above.
           isOpen: isOpenTether()
         }),
         {
@@ -218,7 +201,6 @@ export const $DropMultiSelect = <T>({
               pluck
             )
           )
-          // alert
         }
       ]
     }

@@ -5,28 +5,12 @@ import type { IBehavior } from 'aelea/stream-extended'
 import { $node, $text, component, type INodeCompose } from 'aelea/ui'
 import { $ButtonToggle } from '@/ui-components'
 
-export const activityOptionLabelMap = {
-  [IntervalTime.DAY]: '24 Hours',
-  [IntervalTime.WEEK]: '7 Days',
-  [IntervalTime.MONTH]: '30 Days',
-  [IntervalTime.QUARTER]: '90 Days',
-  [IntervalTime.YEAR]: '1 Year'
-} as const
-
 export const activityOptionShortLabelMap = {
   [IntervalTime.DAY]: '1D',
   [IntervalTime.WEEK]: '1W',
   [IntervalTime.MONTH]: '1M',
   [IntervalTime.QUARTER]: '3M',
   [IntervalTime.YEAR]: '1Y'
-} as const
-
-export const activityOptionPeriodLabelMap = {
-  [IntervalTime.DAY]: '1 Day',
-  [IntervalTime.WEEK]: '1 Week',
-  [IntervalTime.MONTH]: '1 Month',
-  [IntervalTime.QUARTER]: '3 Months',
-  [IntervalTime.YEAR]: '1 Year'
 } as const
 
 export interface I$LastActivity {

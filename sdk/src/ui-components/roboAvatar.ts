@@ -1,63 +1,8 @@
 import type { Address } from 'viem/accounts'
-import {
-  type IGradientArt,
-  INK,
-  type IRoboCategory,
-  type ITraitArt,
-  MYSTERY,
-  MYSTERY_SKIN,
-  ROBO_LAYERS,
-  ROLLED_CATEGORIES,
-  shade
-} from './roboTraits.js'
+import { inkFor, pixelArtToSvg, unit, weightedPick } from './avatarEngine.js'
+import { type IGradientArt, INK, type ITraitArt, ROBO_LAYERS, shade } from './roboTraits.js'
 
 const isGradient = (art: ITraitArt): art is IGradientArt => 'gradient' in art
-
-const hashKey = (key: string) => {
-  let h = 0x811c9dc5
-  for (let i = 0; i < key.length; i++) {
-    h ^= key.charCodeAt(i)
-    h = Math.imul(h, 0x01000193)
-  }
-  return h >>> 0
-}
-
-const INK_LIGHT = '#f4f6fb'
-const INK_DARK = '#15161a'
-
-const channelLuminance = (c: number) => {
-  const s = c / 255
-  return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
-}
-
-const relativeLuminance = (hex: string) => {
-  const n = Number.parseInt(hex.slice(1, 7), 16)
-  return (
-    0.2126 * channelLuminance((n >> 16) & 255) +
-    0.7152 * channelLuminance((n >> 8) & 255) +
-    0.0722 * channelLuminance(n & 255)
-  )
-}
-
-const contrastRatio = (a: number, b: number) => (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05)
-
-const inkFor = (skin: string) => {
-  const skinLum = relativeLuminance(skin)
-  return contrastRatio(relativeLuminance(INK_LIGHT), skinLum) >= contrastRatio(relativeLuminance(INK_DARK), skinLum)
-    ? INK_LIGHT
-    : INK_DARK
-}
-
-const weightedPick = (seed: string, category: IRoboCategory) => {
-  const entryList = Object.entries(category.traits)
-  const total = entryList.reduce((sum, [, art]) => sum + (art.weight ?? 1), 0)
-  let cursor = (hashKey(`${seed}:${category.name}`) / 0x100000000) * total
-  for (const [name, art] of entryList) {
-    cursor -= art.weight ?? 1
-    if (cursor < 0) return name
-  }
-  return entryList[entryList.length - 1][0]
-}
 
 const artToSvg = (art: ITraitArt, idSuffix: string, ink: string): { defs: string; body: string } => {
   if (isGradient(art)) {
@@ -71,35 +16,24 @@ const artToSvg = (art: ITraitArt, idSuffix: string, ink: string): { defs: string
     }
   }
 
-  const ox = art.x ?? 0
-  const oy = art.y ?? 0
-  const pathByColor = new Map<string, string>()
-  art.rows.forEach((row, r) => {
-    for (let c = 0; c < row.length; c++) {
-      const ch = row[c]
-      if (ch === '.' || ch === ' ') continue
-      const slot = art.palette[Number.parseInt(ch, 36)]
-      if (!slot) continue
-      const color = slot === INK ? ink : slot
-      pathByColor.set(color, `${pathByColor.get(color) ?? ''}M${ox + c} ${oy + r}h1v1h-1z`)
-    }
-  })
-
-  let body = ''
-  for (const [color, d] of pathByColor) body += `<path fill="${color}" d="${d}"/>`
-  return { defs: '', body }
+  return { defs: '', body: pixelArtToSvg(art, slot => (slot === INK ? ink : slot)) }
 }
 
 export const roboTraitsFromAddress = (address: Address): Record<string, string> => {
   const seed = address.toLowerCase()
   const traits: Record<string, string> = {}
-  for (const category of ROBO_LAYERS) traits[category.name] = weightedPick(seed, category)
+  for (const category of ROBO_LAYERS)
+    traits[category.name] = weightedPick(
+      Object.entries(category.traits),
+      ([, art]) => art.weight ?? 1,
+      unit(`${seed}:${category.name}`)
+    )[0]
   return traits
 }
 
 export const ROBO_LAYER_KEYS: string[][] = ROBO_LAYERS.map(category => Object.keys(category.traits))
 
-export const roboTraitsFromIndices = (indices: number[]): Record<string, string> => {
+const roboTraitsFromIndices = (indices: number[]): Record<string, string> => {
   const traits: Record<string, string> = {}
   ROBO_LAYERS.forEach((category, layer) => {
     const keys = ROBO_LAYER_KEYS[layer]
@@ -109,31 +43,11 @@ export const roboTraitsFromIndices = (indices: number[]): Record<string, string>
   return traits
 }
 
-export const roboIndicesFromTraits = (traits: Record<string, string>): number[] =>
+const roboIndicesFromTraits = (traits: Record<string, string>): number[] =>
   ROBO_LAYERS.map((category, layer) => {
     const at = ROBO_LAYER_KEYS[layer].indexOf(traits[category.name])
     return at < 0 ? 0 : at
   })
-
-export const roboIndicesFromAddress = (address: Address): number[] => roboIndicesFromTraits(roboTraitsFromAddress(address))
-
-export const roboTraitsFromNameAndAddress = (indices: number[] | null, address: Address): Record<string, string> => {
-  const fromAddress = roboTraitsFromAddress(address)
-  if (!indices) return fromAddress
-  const picked = roboTraitsFromIndices(indices)
-  const traits: Record<string, string> = {}
-  for (const category of ROBO_LAYERS)
-    traits[category.name] = ROLLED_CATEGORIES.has(category.name) ? fromAddress[category.name] : picked[category.name]
-  return traits
-}
-
-export const roboPreviewTraits = (indices: number[]): Record<string, string> => {
-  const picked = roboTraitsFromIndices(indices)
-  const traits: Record<string, string> = {}
-  for (const category of ROBO_LAYERS)
-    traits[category.name] = ROLLED_CATEGORIES.has(category.name) ? MYSTERY : picked[category.name]
-  return traits
-}
 
 export interface ITraitOdds {
   key: string
@@ -150,14 +64,14 @@ export const traitRollOdds = (categoryName: string): ITraitOdds[] => {
     .sort((a, b) => b.percent - a.percent)
 }
 
-export const SKIN_LADDER: string[] = traitRollOdds('skin').map(o => o.key)
+const SKIN_LADDER: string[] = traitRollOdds('skin').map(o => o.key)
 
-export const HEADWEAR_LADDER: string[] = traitRollOdds('headwear').map(o => o.key)
+const HEADWEAR_LADDER: string[] = traitRollOdds('headwear').map(o => o.key)
 
-export const tierFromPercentile = (percentile: number, ladderLength: number): number =>
+const tierFromPercentile = (percentile: number, ladderLength: number): number =>
   Math.max(0, Math.min(ladderLength - 1, Math.floor(percentile * ladderLength)))
 
-export interface IFundRank {
+export interface IAccountRank {
   pnlPercentile: number | null
   roiPercentile: number | null
 }
@@ -165,7 +79,7 @@ export interface IFundRank {
 export const roboTraitsFromRank = (
   indices: number[] | null,
   address: Address,
-  rank: IFundRank
+  rank: IAccountRank
 ): Record<string, string> => {
   const base = indices ? roboTraitsFromIndices(indices) : roboTraitsFromAddress(address)
   const traits: Record<string, string> = { ...base }
@@ -258,35 +172,17 @@ export const roboAvatarNameFromTraits = (traits: Record<string, string>): string
   return `${adjective} ${TYPE_NOUN[traits.skin] ?? 'Pup'}`
 }
 
-export const roboAvatarName = (address: Address): string => roboAvatarNameFromTraits(roboTraitsFromAddress(address))
-
 export const renderRoboAvatar = (chosen: Record<string, string>, idSuffix: string): string => {
-  const skinArt = chosen.skin === MYSTERY ? MYSTERY_SKIN : ROBO_LAYERS[1].traits[chosen.skin]
+  const skinArt = ROBO_LAYERS[1].traits[chosen.skin]
   const skin = isGradient(skinArt) ? '#000000' : skinArt.palette[0]
   const ink = inkFor(skin)
-  const hideMouth = chosen.face === 'mask'
 
   let defs = ''
   let body = ''
   for (const category of ROBO_LAYERS) {
-    if (category.name === 'mouth' && hideMouth) continue
-    const key = chosen[category.name]
-    if (key === MYSTERY) {
-      if (category.name !== 'skin') continue
-      const part = artToSvg(MYSTERY_SKIN, idSuffix, ink)
-      defs += part.defs
-      body += part.body
-      continue
-    }
-    const part = artToSvg(category.traits[key], idSuffix, ink)
+    const part = artToSvg(category.traits[chosen[category.name]], idSuffix, ink)
     defs += part.defs
     body += part.body
   }
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" shape-rendering="crispEdges" width="100%" height="100%"><defs>${defs}</defs>${body}</svg>`
 }
-
-export const roboAvatarSvg = (address: Address): string =>
-  renderRoboAvatar(roboTraitsFromAddress(address), address.toLowerCase().slice(2, 8))
-
-export const roboAvatarSvgFromTraits = (chosen: Record<string, string>, idSuffix: string): string =>
-  renderRoboAvatar(chosen, idSuffix)

@@ -1,37 +1,48 @@
 [PROTOCOL]
-version = 10
+version = 18
 hubChainId = 143
 maxRelayFeeBps = 1000
+maxIntentTtlSec = 600
+performanceFee = 1000
+bondToken = "USDC"
+maxCohortSize = 50
+resetPeriodSec = 604800
 transferGasLimit = 200000
-signerDerivationMessage = "Puppet: Authorize session key"
 nativeToken = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+attestor = "0x6099cf647F048571BE259e0dFc6A46240AD75E7E"
+BASE_TOKEN = ["WETH", "USDC", "USDT"]
 
 [CHAIN_META.arbitrum]
 id = 42161
+chain = "ArbitrumChain"
 blockDelay = 2400
 wnt = "WETH"
 nativeSymbol = "ETH"
 
 [CHAIN_META.base]
 id = 8453
+chain = "EvmChain"
 blockDelay = 300
 wnt = "WETH"
 nativeSymbol = "ETH"
 
 [CHAIN_META.polygon]
 id = 137
+chain = "EvmChain"
 blockDelay = 600
 wnt = "WPOL"
 nativeSymbol = "POL"
 
 [CHAIN_META.megaeth]
 id = 4326
+chain = "EvmChain"
 blockDelay = 600
 wnt = "WETH"
 nativeSymbol = "ETH"
 
 [CHAIN_META.monad]
 id = 143
+chain = "EvmChain"
 blockDelay = 1500
 wnt = "WMON"
 nativeSymbol = "MON"
@@ -45,81 +56,79 @@ nativeSymbol = "MON"
 basisPoints = 10000
 floatPrecisionExp = 30
 sharePrecisionExp = 12
-shareTokenDecimals = 18
-maxQuoteAgeSec = 600
 
 [GMX]
 referralCode = "PUPPET"
 
 [TOKEN_ADDRESS.arbitrum]
-ETH = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
-USDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831"
-USDT = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"
-WETH = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"
+ETH = { address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+USDC = { address = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+USDT = { address = "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+WETH = { address = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
 
 [TOKEN_ADDRESS.base]
-ETH = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
-USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"
-USDT = "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2"
-WETH = "0x4200000000000000000000000000000000000006"
+ETH = { address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+USDC = { address = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+USDT = { address = "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+WETH = { address = "0x4200000000000000000000000000000000000006", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
 
 [TOKEN_ADDRESS.polygon]
-POL = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
-WPOL = "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"
-USDC = "0x3c499c542cEF5E3811e1192ce70d8cc03d5c3359"
-USDT = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
-WETH = "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619"
+POL = { address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+WPOL = { address = "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+USDC = { address = "0x3c499c542cEF5E3811e1192ce70d8cc03d5c3359", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+USDT = { address = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+WETH = { address = "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
 
 [TOKEN_ADDRESS.mainnet]
-ETH = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
-USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
-USDT = "0xdAC17F958D2ee523a2206206994597C13D831ec7"
-WETH = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
+ETH = { address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+USDC = { address = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+USDT = { address = "0xdAC17F958D2ee523a2206206994597C13D831ec7", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+WETH = { address = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
 
 [TOKEN_ADDRESS.megaeth]
-ETH = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
-USDT = "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb"
-WETH = "0x4200000000000000000000000000000000000006"
+ETH = { address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+USDT = { address = "0xB8CE59FC3717ada4C02eaDF9682A9e934F625ebb", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+WETH = { address = "0x4200000000000000000000000000000000000006", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
 
 [TOKEN_ADDRESS.monad]
-MON = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
-WMON = "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A"
-WETH = "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242"
-USDC = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603"
-USDT = "0xe7cd86e13AC4309349F30B3435a9d337750fC82D"
+MON = { address = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+WMON = { address = "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+WETH = { address = "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+USDC = { address = "0x754704Bc059F8C67012fEd69BC8A327a5aafb603", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
+USDT = { address = "0xe7cd86e13AC4309349F30B3435a9d337750fC82D", cap = "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }
 
 [SWAP_PROVIDER.arbitrum]
 lifiDiamond = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
-acrossPeriphery = "0x10D8b8DaA26d307489803e10477De69C0492B610"
+acrossPeriphery = "0x97CCDBea4632140639aD5eA9b944aa034eb15fD4"
 acrossSpokePool = "0xe35e9842fceaCA96570B734083f4a58e8F7C5f2A"
 
 [SWAP_PROVIDER.base]
 lifiDiamond = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
-acrossPeriphery = "0x10D8b8DaA26d307489803e10477De69C0492B610"
+acrossPeriphery = "0x97CCDBea4632140639aD5eA9b944aa034eb15fD4"
 acrossSpokePool = "0x09aea4b2242abC8bb4BB78D537A67a245A7bEC64"
 
 [SWAP_PROVIDER.polygon]
 lifiDiamond = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
-acrossPeriphery = "0x10D8b8DaA26d307489803e10477De69C0492B610"
+acrossPeriphery = "0x97CCDBea4632140639aD5eA9b944aa034eb15fD4"
 acrossSpokePool = "0x9295ee1d8C5b022Be115A2AD3c30C72E34e7F096"
 
 [SWAP_PROVIDER.mainnet]
 lifiDiamond = "0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE"
-acrossPeriphery = "0x10D8b8DaA26d307489803e10477De69C0492B610"
+acrossPeriphery = "0x97CCDBea4632140639aD5eA9b944aa034eb15fD4"
 acrossSpokePool = "0x5c7BCd6E7De5423a257D81B442095A1a6ced35C5"
 
 [SWAP_PROVIDER.megaeth]
 lifiDiamond = "0x026F252016A7C47CDEf1F05a3Fc9E20C92a49C37"
-acrossPeriphery = "0x10D8b8DaA26d307489803e10477De69C0492B610"
+acrossPeriphery = "0x97CCDBea4632140639aD5eA9b944aa034eb15fD4"
 
 [SWAP_PROVIDER.monad]
 lifiDiamond = "0x026F252016A7C47CDEf1F05a3Fc9E20C92a49C37"
-acrossPeriphery = "0x10D8b8DaA26d307489803e10477De69C0492B610"
+acrossPeriphery = "0x97CCDBea4632140639aD5eA9b944aa034eb15fD4"
 acrossSpokePool = "0xd2ecb3afe598b746F8123CaE365a598DA831A449"
 
 [VERIFIER.monad]
-verifier = "sourcify"
-url = "https://sourcify-api-monad.blockvision.org/"
+verifier = "custom"
+url = "https://api.etherscan.io/v2/api?chainid=143"
 
 [TOKEN_META.ETH]
 symbol = "ETH"

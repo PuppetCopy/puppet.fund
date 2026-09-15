@@ -1,30 +1,17 @@
-import {
-  dustToZeroUsd,
-  getMappedValueFallback,
-  getRegisteredTokenDescription,
-  type ITokenDescription,
-  readableLeverage,
-  readablePnl,
-  readableUsd
-} from '@puppet/sdk/core'
-import { empty, type IStream, map, skipRepeats, toStream } from 'aelea/stream'
-import type { IBehavior, IComposeBehavior } from 'aelea/stream-extended'
-import { $node, $text, component, type INode, nodeEvent, style, styleInline } from 'aelea/ui'
+import { PROTOCOL } from '@puppet/contracts/const'
+import type { ChainId } from '@puppet/sdk/const'
+import { dustToZeroUsd, getAccountExplorerUrl, getMappedValueFallback, getTokenDescription, type ITokenDescription, readableAddress, readableLeverage, readablePnl, readableUsd } from '@puppet/sdk/core'
+import { empty, type IStream, just, map, skipRepeats, switchMap, toStream } from 'aelea/stream'
+import { PromiseStatus, promiseState } from 'aelea/stream-extended'
+import { $node, $text, attr, type I$Node, style, styleBehavior } from 'aelea/ui'
 import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
-import type { Address } from 'viem/accounts'
-import {
-  $icon,
-  $Link,
-  $tokenIconMap,
-  $unknown,
-  text
-} from '@/ui-components'
-import { routeSchema } from '../app/routeSchema.js'
-import { $accountLabel } from '../components/$AccountProfile.js'
+import { type Address, isAddressEqual } from 'viem'
+import { $anchor, $defaultTooltipDropContainer, $errorLabel, $icon, $inlineSpinner, $Tooltip, $tokenIconMap, $unknown, text } from '@/ui-components'
+import context from '../io/context.js'
 import { $separator2 } from '../pages/common.js'
-import { $jazzicon } from './$avatar.js'
-import { $roboAvatar } from './$roboAvatar.js'
+import { $chainIcon, $tokenWithChainBadge, chainName } from './$chain.js'
+import { chainFor } from './$contract.js'
 
 export const $midContainer = $column(
   style({
@@ -43,11 +30,6 @@ export const $size = (size: bigint, collateral: bigint, $divider = $separator2) 
 export const $route = (collateralTokenDescription: ITokenDescription, displayLabel = true) => {
   return $row(spacing.small, style({ alignItems: 'center', position: 'relative' }))(
     $row(
-      // style({
-      //   width: '38px', height: '34x'
-      // })(
-      //   $tokenIcon(indexTokenDescription)
-      // ),
       style({
         width: '32px',
         height: '34x'
@@ -64,7 +46,7 @@ export const $tokenLabeled = (indexDescription: ITokenDescription) => {
   )
 }
 
-export const $tokenIcon = (tokenDesc: ITokenDescription, size = '32px', color = palette.message) => {
+export const $tokenIcon = (tokenDesc: Pick<ITokenDescription, 'symbol'>, size = '32px', color = palette.message) => {
   const $token = getMappedValueFallback($tokenIconMap, tokenDesc.symbol, $unknown)
 
   if (!$token) {
@@ -80,45 +62,39 @@ export const $tokenIcon = (tokenDesc: ITokenDescription, size = '32px', color = 
   })
 }
 
-export const $tokenIconByAddress = (tokenAddress: Address, size = '24px') => {
-  const tokenDesc = getRegisteredTokenDescription(tokenAddress)
+const $detail = (label: string, $value: I$Node) =>
+  $row(spacing.small, style({ alignItems: 'center' }))($node(style({ color: palette.foreground, minWidth: '56px' }))($text(label)), $value)
 
-  if (!tokenDesc) {
-    // Fallback to unknown icon if token not found
-    return $icon({
-      $content: $unknown,
-      size,
-      fill: palette.message,
-      svgOps: style({ backgroundColor: palette.background, borderRadius: '50%' }),
-      viewBox: '0 0 32 32'
-    })
-  }
-
-  return $tokenIcon(tokenDesc, size)
-}
-
-export const $puppetList = (puppets?: Address[], click?: IComposeBehavior<INode, string>) => {
-  if (!puppets || puppets.length === 0) {
-    return $node(style({ fontSize: text.sm, color: palette.foreground }))($text('-'))
-  }
-
-  return $row(style({ cursor: 'pointer' }))(
-    ...puppets.map(account => {
-      if (!click) {
-        return style({ marginRight: '-12px', border: '2px solid black' })($jazzicon(account, 25))
-      }
-
-      return click(
-        nodeEvent('click'),
-        map(() => {
-          const url = `/position/${account}`
-
-          history.pushState({}, '', url)
-          return url
-        })
-      )(style({ marginRight: '-12px', border: '2px solid black' })($jazzicon(account, 25)))
-    })
-    // $content
+export const $tokenProfile = (chainId: ChainId, token: Address, size = 32) => {
+  const description = getTokenDescription(chainId, token)
+  const native = isAddressEqual(token, PROTOCOL.nativeToken)
+  const $tip = $Tooltip({
+    $dropContainer: $defaultTooltipDropContainer,
+    $content: $column(spacing.tiny, style({ fontSize: text.xs, whiteSpace: 'nowrap', color: palette.message }))(
+      $detail('Chain', $row(spacing.tiny, style({ alignItems: 'center' }))($chainIcon(chainId, 14), $text(chainName(chainId)))),
+      $detail(
+        'Risk',
+        switchMap(s => {
+          if (s.status === PromiseStatus.PENDING) return $inlineSpinner
+          if (s.status === PromiseStatus.ERROR) return $errorLabel(s.error)
+          const listed = [...(s.value.get(chainId)?.keys() ?? [])].some(listedToken => isAddressEqual(listedToken, token))
+          return $node(style({ color: listed ? palette.positive : palette.indeterminate }))($text(listed ? 'Verified' : 'Unverified'))
+        }, promiseState(just(context.getTokenRegistry())))
+      ),
+      $detail(
+        'Contract',
+        native
+          ? $node(style({ color: palette.foreground }))($text('Native token'))
+          : $anchor(attr({ href: getAccountExplorerUrl(token, chainFor(chainId)), target: '_blank' }))($text(readableAddress(token)))
+      )
+    ),
+    $anchor: $node(style({ display: 'flex', cursor: 'help' }))(
+      $tokenWithChainBadge($tokenIcon(description, `${size}px`), chainId, size, Math.round(size * 0.45))
+    )
+  })({})
+  return $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
+    $tip,
+    $node(style({ fontWeight: '600', fontSize: text.base, color: palette.message }))($text(description.symbol))
   )
 }
 
@@ -137,7 +113,7 @@ export const $pnlDisplay = (pnlSrc: IStream<bigint> | bigint, bold = true) => {
     }, pnl)
   )
 
-  const colorStyle = styleInline(
+  const colorStyle = styleBehavior(
     map(color => {
       return { color }
     }, displayColor)
@@ -147,55 +123,9 @@ export const $pnlDisplay = (pnlSrc: IStream<bigint> | bigint, bold = true) => {
 }
 
 export const $drawdownDisplay = (maxDrawdown: bigint) => {
-  // maxDrawdown is in basis points (2500 = 25%)
   const percentage = Number(maxDrawdown) / 100
   const color =
     maxDrawdown > 2000n ? palette.negative : maxDrawdown > 1000n ? palette.indeterminate : palette.foreground
   return $node(style({ color }))($text(`${percentage.toFixed(1)}%`))
 }
 
-interface I$MasterDisplay {
-  address: Address
-  ensName?: string | null
-  ensNameStream?: IStream<string | null>
-  avatarSeed?: Address
-  traits?: Record<string, string>
-  puppetList: Address[]
-  labelSize?: number
-  profileSize?: number
-}
-export const $MasterDisplay = (config: I$MasterDisplay) =>
-  component(([click, clickTether]: IBehavior<any, Address>) => {
-    const { address, ensName, ensNameStream, avatarSeed, traits, puppetList, labelSize, profileSize = 50 } = config
-
-    return [
-      $Link({
-        $content: $row(spacing.small, style({ alignItems: 'center', textDecoration: 'none', minWidth: '0' }))(
-          $roboAvatar(avatarSeed ?? address, profileSize, traits),
-          labelSize === undefined || labelSize > 0
-            ? $column(style({ gap: '3px', minWidth: '0' }))(
-                $accountLabel({
-                  address,
-                  ensName,
-                  primarySize: labelSize
-                }),
-                puppetList.length > 0
-                  ? $row(style({ alignItems: 'center' }))(
-                      ...puppetList.map(puppet => {
-                        return style({ marginRight: '-12px', border: '2px solid black' })($jazzicon(puppet, 25))
-                      }),
-                      $node(style({ gap: '8px', marginLeft: '16px', fontSize: text.sm }))($text(`${puppetList.length}`))
-                    )
-                  : $row(style({ alignItems: 'center' }))(
-                      $node(style({ color: palette.foreground, fontSize: text.sm }))($text('0 puppets'))
-                    )
-              )
-            : empty
-        ),
-        route: routeSchema.fund.detail,
-        params: { address }
-      })({ click: clickTether() }),
-
-      { click }
-    ]
-  })

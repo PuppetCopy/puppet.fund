@@ -1,17 +1,22 @@
-import { CHAIN_META, CHAIN_TOKEN_MAP, TOKEN_META } from '@puppet/contracts/const'
-import { type Address, getAddress, type Hex } from 'viem'
+import { CHAIN_META, CHAIN_TOKEN_MAP, HUB_CHAIN_ID, PROTOCOL, TOKEN_META } from '@puppet/contracts/const'
+import { type Address, getAddress, type Hex, isAddressEqual, } from 'viem'
 import { CompactContractError } from '../compact/error.js'
 import type { ChainId } from '../const/index.js'
-import type { ITokenRegistry } from '../schema/index.js'
 import { ttlCached } from './cache.js'
 
-const TOKEN_REGISTRY_TTL_MS = 6 * 60 * 60 * 1000
+export const TOKEN_REGISTRY_TTL_MS = 6 * 60 * 60 * 1000
 
-// Shared default for every app's context: read all TokenRegistry rows from the local datastore (logstore store.all
-// or matchmaker-reads client.select) and fold them, cached for 6h. Only the row reader differs per app.
 export const cachedTokenRegistry = (
   readRows: () => Promise<readonly ITokenRegistry[]>
 ): (() => Promise<ITokenRegistryMap>) => ttlCached(async () => tokenRegistryFromRows(await readRows()), TOKEN_REGISTRY_TTL_MS)
+
+export interface ITokenRegistry {
+  id: string
+  chainId: bigint
+  token: Address
+  registeredCap: bigint
+  tokenId: Hex
+}
 
 export type ITokenRegistryMap = Map<ChainId, Map<Address, ITokenRegistry>>
 
@@ -33,84 +38,109 @@ export function tokenRegistryRows(registry: ITokenRegistryMap): ITokenRegistry[]
   return [...registry.values()].flatMap(chainMap => [...chainMap.values()])
 }
 
-// Offline fallback when no live registry was handed over (headless operator, wallet
-// before its first handshake): the protocol's known tokens from the generated const
-// map, with cap 0 (uncapped client-side — the matchmaker still enforces live caps;
-// a capped intent surfaces as a silent rejection instead of a local error).
-export function staticTokenRegistry(): ITokenRegistryMap {
-  const rows: ITokenRegistry[] = []
+export function candidateTokens(): Map<ChainId, Address[]> {
+  const byChain = new Map<ChainId, Address[]>()
   for (const [chainId, tokens] of Object.entries(CHAIN_TOKEN_MAP)) {
-    for (const token of Object.values(tokens)) {
-      rows.push({
-        id: `${chainId}:${token}`,
-        chainId: BigInt(chainId),
-        token: token as Address,
-        cap: 0n
-      })
-    }
+    byChain.set(Number(chainId) as ChainId, Object.values(tokens) as Address[])
   }
-  return tokenRegistryFromRows(rows)
+  return byChain
 }
 
-// The token's generated metadata ({ symbol, decimals, isFiat } from TOKEN_META) plus the per-chain address. Derived
-// from the generated const so decimals/isFiat/symbol can never drift from the source. `tokenKey` is the TOKEN_ADDRESS
-// key = the token's OWN symbol (WETH, WMON, USDC), distinct from `symbol` = the priced ASSET (WETH/WMON -> ETH/MON):
-// display uses tokenKey so a wrapped token isn't confused with the native coin; pricing uses symbol.
 export type ITokenMeta = (typeof TOKEN_META)[keyof typeof TOKEN_META] & { address: Address; tokenKey: string }
 
-export const tokenMetaByAddress: Map<Address, ITokenMeta> = (() => {
-  const map = new Map<Address, ITokenMeta>()
-  for (const tokens of Object.values(CHAIN_TOKEN_MAP)) {
+export type ITokenMetaKey = `${ChainId}:${Address}`
+
+export const tokenMetaKey = (chainId: ChainId, token: Address): ITokenMetaKey => `${chainId}:${getAddress(token)}`
+
+export const tokenMetaByChainToken: Map<ITokenMetaKey, ITokenMeta> = (() => {
+  const map = new Map<ITokenMetaKey, ITokenMeta>()
+  for (const [chain, tokens] of Object.entries(CHAIN_TOKEN_MAP)) {
+    const chainId = Number(chain) as ChainId
     for (const [symbol, address] of Object.entries(tokens)) {
       const meta = TOKEN_META[symbol as keyof typeof TOKEN_META]
       if (!meta) continue
       const key = getAddress(address as Address)
-      map.set(key, { ...meta, address: key, tokenKey: symbol })
+      map.set(tokenMetaKey(chainId, key), { ...meta, address: key, tokenKey: symbol })
     }
   }
   return map
 })()
 
-// Chain-agnostic canonical asset SYMBOL for any registered token address, off the static const map (WETH and ETH both
-// -> 'ETH'). The rate API is symbol-keyed, so consumers holding an ADDRESS resolve it here before pricing. Throws if
-// the token isn't registered.
-export function symbolByAddress(token: Address): string {
-  const meta = tokenMetaByAddress.get(getAddress(token))
-  if (!meta) throw new CompactContractError('Intent__TokenNotRegistered', [token as Hex])
+export function tokenMetaOf(chainId: ChainId, token: Address): ITokenMeta {
+  const meta = tokenMetaByChainToken.get(tokenMetaKey(chainId, token))
+  if (!meta) throw new CompactContractError('Intent__TokenNotValuable', [token as Hex])
+  return meta
+}
+
+export function symbolOf(chainId: ChainId, token: Address): string {
+  return tokenMetaOf(chainId, token).symbol
+}
+
+export function tokenKeyOf(chainId: ChainId, token: Address): string {
+  return tokenMetaOf(chainId, token).tokenKey
+}
+
+export function symbolOfKey(tokenKey: string): string {
+  const meta = TOKEN_META[tokenKey as keyof typeof TOKEN_META]
+  if (!meta) throw new Error(`token key ${tokenKey} has no meta`)
   return meta.symbol
 }
 
-// The native gas asset's CEX symbol for a chain (Monad -> MON, ETH-native chains -> ETH). The native marker
-// (PROTOCOL.nativeToken) is the SAME address on every chain, so tokenMetaByAddress/symbolByAddress can't tell
-// MON from ETH; resolve the native asset's symbol per-chain through here instead.
+export function chainTokenOfKey(chainId: ChainId, tokenKey: string): Address {
+  const address = (CHAIN_TOKEN_MAP[chainId] as Record<string, string>)[tokenKey]
+  if (address === undefined) throw new Error(`chain ${chainId} has no token ${tokenKey}`)
+  return getAddress(address)
+}
+
+export function bondTokenOf(chainId: ChainId): Address {
+  return chainTokenOfKey(chainId, PROTOCOL.bondToken)
+}
+
+export function isProtocolBase(token: Address): boolean {
+  return (PROTOCOL.BASE_TOKEN as readonly string[]).includes(tokenKeyOf(HUB_CHAIN_ID, token))
+}
+
 export function nativeSymbolOf(chainId: ChainId): string {
   return CHAIN_META[chainId].nativeSymbol
 }
 
-// 10^(native decimals) for a chain, off the generated meta (CHAIN_META.nativeSymbol -> TOKEN_META.decimals). This is the
-// fixed-point scale of a native->token rate AND one whole native in its base units; both the rate producer and the relay
-// fee formula divide by it, so it must NOT assume 18 (a non-18-decimal native chain would otherwise misprice fees).
 export function nativePrecisionOf(chainId: ChainId): bigint {
   return 10n ** BigInt(TOKEN_META[nativeSymbolOf(chainId) as keyof typeof TOKEN_META].decimals)
 }
 
-// The chain's wrapped-native ERC-20 ADDRESS (WMON/WETH). Native deposits route through this (the raw native marker
-// isn't an ERC-20); resolved from the generated const (CHAIN_META.wnt names the TOKEN_ADDRESS key).
 export function wrappedNativeAddressOf(chainId: ChainId): Address {
-  return getAddress((CHAIN_TOKEN_MAP[chainId] as Record<string, string>)[CHAIN_META[chainId].wnt] as Address)
+  return chainTokenOfKey(chainId, CHAIN_META[chainId].wnt)
+}
+
+export function providerToken(token: Address, chainId: number): Address {
+  return getAddress(isAddressEqual(token, PROTOCOL.nativeToken) ? wrappedNativeAddressOf(chainId as ChainId) : token)
 }
 
 export function tokenInfoFor(registry: ITokenRegistryMap, chainId: ChainId, token: Address): ITokenRegistry {
   const info = registry.get(chainId)?.get(getAddress(token))
   if (!info) {
-    throw new CompactContractError('Intent__TokenNotRegistered', [token as Hex])
+    throw new CompactContractError('Intent__TokenNotValuable', [token as Hex])
   }
   return info
 }
 
-// Every registered token address on a chain, checksummed. The venue screen uses this to admit
-// any registered token as GMX collateral (not just the fund's base), since a registered token
-// is one NAV can value and the order receiver is pinned to the fund.
 export function registeredTokenAddresses(registry: ITokenRegistryMap, chainId: ChainId): Address[] {
-  return [...(registry.get(chainId)?.values() ?? [])].map(info => getAddress(info.token))
+  const chainMap = registry.get(chainId)
+  if (!chainMap) throw new Error(`token registry has no chain ${chainId}`)
+  return [...chainMap.values()].map(info => getAddress(info.token))
+}
+
+export function listedTokenAddresses(registry: ITokenRegistryMap, chainId: ChainId, baseTokenIdList: readonly Hex[]): Address[] {
+  const chainMap = registry.get(chainId)
+  if (!chainMap) throw new Error(`token registry has no chain ${chainId}`)
+  return [...chainMap.values()].filter(info => baseTokenIdList.includes(info.tokenId)).map(info => getAddress(info.token))
+}
+
+export function custodyTokenAddresses(chainId: ChainId): Address[] {
+  return Object.values(CHAIN_TOKEN_MAP[chainId] as Record<string, string>).map(t => getAddress(t))
+}
+
+export function chainBaseToken(fromChainId: ChainId, baseToken: Address, toChainId: ChainId): Address {
+  const key = tokenKeyOf(fromChainId, baseToken)
+  return symbolOfKey(key) === nativeSymbolOf(toChainId) ? PROTOCOL.nativeToken : chainTokenOfKey(toChainId, key)
 }

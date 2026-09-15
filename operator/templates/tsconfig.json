@@ -7,7 +7,20 @@
     "skipLibCheck": true,
     "noEmit": true,
     "verbatimModuleSyntax": true,
-    "types": ["bun"]
+    "types": [
+      "bun"
+    ],
+    "paths": {
+      "@puppet.fund/operator": [
+        "../src/index.ts"
+      ],
+      "@puppet.fund/operator/gmx": [
+        "../src/gmx/index.ts"
+      ]
+    }
   },
-  "include": ["src"]
+  "include": [
+    "src",
+    "scaffolds/*/*/src"
+  ]
 }

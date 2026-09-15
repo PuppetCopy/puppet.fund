@@ -1,25 +1,7 @@
 import { empty, type IStream, map, nowWith } from 'aelea/stream'
-import {
-  $element,
-  attr,
-  effectProp,
-  type I$Slottable,
-  type INodeCompose,
-  type IStyleCSS,
-  style,
-  styleBehavior
-} from 'aelea/ui'
+import { $element, effectProp, type I$Slottable, type INodeCompose, type IStyleCSS, style, styleBehavior } from 'aelea/ui'
 import { palette } from 'aelea/ui-components-theme'
-import {
-  $Link as $aeleaLink,
-  $defaultAnchor,
-  href,
-  type I$Link as I$AeleaLink,
-  type ParamsOf,
-  pushUrl,
-  type RouteNode,
-  type RouteSpec
-} from 'aelea/ui-router'
+import { $Link as $aeleaLink, $defaultAnchor, type I$Link as I$AeleaLink, type ParamsOf, pushUrl, type RouteNode, type RouteSpec } from 'aelea/ui-router'
 
 export interface I$Link extends Omit<I$AeleaLink, '$anchor' | '$content'> {
   $content: I$Slottable
@@ -56,13 +38,3 @@ export const softNavClick = (url: string, after?: () => void) =>
       after?.()
     })
   )
-
-export const $navLink = <T extends RouteSpec>({
-  route,
-  params,
-  $content,
-  $anchor = $plainAnchor
-}: I$NavLink<T>): I$Slottable => {
-  const url = href(route, params)
-  return $anchor(attr({ href: url }), softNavClick(url))($content)
-}

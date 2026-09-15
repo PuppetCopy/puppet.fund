@@ -56,8 +56,6 @@ const inputStyles = o(
 
 export interface I$FieldLabeled extends Partial<Input<string>> {
   label: string | I$Node | null
-  // Secondary description displayed below the input: a plain string, a stream of
-  // strings, or any slottable node (compose your own $Tooltip there if you want one).
   hint?: string | IStream<string> | I$Node
   placeholder?: string | IStream<string>
   maxLength?: number
@@ -80,8 +78,6 @@ export const $FieldLabeled = ({
   component(([change, sampleValue]: IBehavior<string, string>) => {
     const validationStream: IStream<string | null> = start(null, validation ?? just(null))
 
-    // Hints and validation render on a single line, ellipsized, with the full text in a native
-    // tooltip ONLY when it overflows the available width (measured on render and on resize).
     const $clampLine = (color: string, value: string): I$Node =>
       $node(
         style({
@@ -119,8 +115,6 @@ export const $FieldLabeled = ({
               hint as IStream<string | INode>
             )
 
-    // One shared slot below the input: a validation message REPLACES the hint while
-    // present (and restores it when cleared), so the field never jumps in height.
     const $below: I$Node =
       hint === undefined && validation === undefined
         ? empty

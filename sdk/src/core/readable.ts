@@ -1,16 +1,13 @@
 import { PRECISION } from '@puppet/contracts/const'
 import { curry2 } from 'aelea/stream'
-import { type Address, formatUnits } from 'viem'
 import { USD_DECIMALS } from '../const/common.js'
-import { formatFixed, getTokenDenominator } from './parse.js'
-import { getRegisteredTokenDescription } from './token.js'
+import { formatFixed } from './parse.js'
 import type { ITokenDescription } from './types.js'
 
 const readableAccountingNumber: Intl.NumberFormatOptions = { maximumFractionDigits: 2, minimumFractionDigits: 2 }
 const readableLargeNumber: Intl.NumberFormatOptions = { maximumFractionDigits: 0 }
 const readableTinyNumber: Intl.NumberFormatOptions = { maximumSignificantDigits: 2, minimumSignificantDigits: 2 }
 
-// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Intl/NumberFormat/NumberFormat#options
 export const readableNumber = curry2((formatOptions: Intl.NumberFormatOptions, ammount: number | bigint) => {
   const absAmount = Math.abs(Number(ammount))
   if (absAmount > 0 && absAmount < 1e-8) {
@@ -29,75 +26,20 @@ export const readableFactorPercentage = (amount: bigint) =>
   `${readableUnitAmount(formatFixed(USD_DECIMALS, amount) * 100)}%`
 export const readableLeverage = (a: bigint, b: bigint) =>
   `${b ? readableUnitAmount(formatFixed(4, (a * PRECISION.basisPoints) / b)) : 0n}x`
-// Sub-cent USD magnitudes (30-dec scale) are dust: zero them BEFORE display so the
-// rendered value and its sign-derived color agree instead of showing a red "0.00".
 const USD_DUST = 10n ** 28n
 export const dustToZeroUsd = (amount: bigint): bigint => (amount < USD_DUST && amount > -USD_DUST ? 0n : amount)
 export const readableUsd = (ammount: bigint) => readableUSD(formatFixed(USD_DECIMALS, ammount))
-export const readableTokenUsd = (
-  token: ITokenDescription | Address,
-  value: bigint,
-  format: Intl.NumberFormatOptions = {}
-) => {
-  const tokenDescription = typeof token === 'string' ? getRegisteredTokenDescription(token) : token
-
-  if (tokenDescription === null) {
-    throw new Error(`Unknown token: ${token}`)
-  }
-
-  return readableNumber(format, formatFixed(USD_DECIMALS, value * getTokenDenominator(tokenDescription)))
-}
 export const readablePnl = (ammount: bigint, decimals = USD_DECIMALS) =>
   readableNumber({ signDisplay: 'exceptZero' })(formatFixed(decimals, ammount))
-export const readableTokenAmount = (token: ITokenDescription | Address | number, amount: bigint) => {
-  if (typeof token === 'number') {
-    return readableUnitAmount(formatFixed(token, amount))
-  }
-
-  const tokenDescription = typeof token === 'string' ? getRegisteredTokenDescription(token) : token
-
-  if (tokenDescription === null) {
-    throw new Error(`Unknown token: ${token}`)
-  }
-
-  return readableUnitAmount(formatFixed(tokenDescription.decimals, amount))
+export const readableTokenAmount = (token: ITokenDescription | number, amount: bigint) => {
+  const value = formatFixed(typeof token === 'number' ? token : token.decimals, amount)
+  const absValue = Math.abs(value)
+  return absValue >= 1e-8 && absValue < 1
+    ? Intl.NumberFormat('en-US', readableTinyNumber).format(value)
+    : readableUnitAmount(value)
 }
-export const readableTokenAmountLabel = (
-  token: ITokenDescription | Address | { decimals: number; symbol: string },
-  amount: bigint
-) => {
-  if (typeof token === 'string') {
-    const tokenDescription = getRegisteredTokenDescription(token)
-    if (tokenDescription === null) {
-      throw new Error(`Unknown token: ${token}`)
-    }
-    return `${readableTokenAmount(tokenDescription.decimals, amount)} ${tokenDescription.symbol}`
-  }
-
-  return `${readableTokenAmount(token.decimals, amount)} ${token.symbol}`
-}
-
-// Exact (lossless) amount display: preserves every significant decimal and trims
-// trailing zeros. Use for balances where the raw value is load-bearing, e.g. a
-// "Max" button that must sample the exact on-chain balance — rounded displays
-// create the illusion that fees were pre-subtracted.
-export const readableExactTokenAmount = (token: ITokenDescription | number, amount: bigint): string => {
-  const decimals = typeof token === 'number' ? token : token.decimals
-  const raw = formatUnits(amount, decimals)
-  return raw.includes('.') ? raw.replace(/0+$/, '').replace(/\.$/, '') : raw
-}
-
-export const readableExactTokenAmountLabel = (
-  token: ITokenDescription | Address | { decimals: number; symbol: string },
-  amount: bigint
-): string => {
-  if (typeof token === 'string') {
-    const tokenDescription = getRegisteredTokenDescription(token)
-    if (tokenDescription === null) throw new Error(`Unknown token: ${token}`)
-    return `${readableExactTokenAmount(tokenDescription.decimals, amount)} ${tokenDescription.symbol}`
-  }
-  return `${readableExactTokenAmount(token.decimals, amount)} ${token.symbol}`
-}
+export const readableTokenAmountLabel = (token: { decimals: number; symbol: string }, amount: bigint) =>
+  `${readableTokenAmount(token.decimals, amount)} ${token.symbol}`
 
 export function parseReadableNumber(stringNumber: string, locale?: Intl.NumberFormatOptions) {
   const thousandSeparator = Intl.NumberFormat('en-US', locale)

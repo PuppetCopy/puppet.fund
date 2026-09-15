@@ -1,6 +1,5 @@
-import { getAddress } from 'viem'
-import { tokenMetaByAddress } from '../state/tokenRegistry.js'
-import { composeBreakdown, computeNavValues } from './compose.js'
+import { chainTokenOfKey, symbolOfKey } from '../state/tokenRegistry.js'
+import { composeBreakdown } from './compose.js'
 import { gmxEvaluator } from './platform/gmx.js'
 import {
   DEFAULT_EVALUATION_CONFIG,
@@ -13,32 +12,26 @@ import {
 } from './types.js'
 import { checkNavGate } from './verify.js'
 
-export const DEFAULT_PLATFORMS = [gmxEvaluator]
+const DEFAULT_PLATFORMS = [gmxEvaluator]
 
-// Non-base spot holdings priced into base wei via the injected pair rate. A holding whose priced asset IS the base's
-// (native MON next to a WMON base) converts 1:1 without an oracle — wrapped and native are the same asset. An
-// unpriceable holding values to 0 with priceAgeSec undefined, which the gate turns into a fail-closed STALE_ORACLE.
 async function valueHoldings(
   holdings: INavHolding[],
-  baseSymbol: string | undefined,
+  baseSymbol: string,
   getRate: IGetRate,
-  nowSec: number
+  nowSec: number,
+  maxPriceAgeSec: number
 ): Promise<INavValuedHolding[]> {
-  const live = holdings.filter(h => h.signedBalance !== 0n || h.unrecognized !== 0n)
+  const live = holdings.filter(h => h.balance !== 0n)
   return Promise.all(
     live.map(async h => {
       if (h.symbol === baseSymbol) {
-        return { ...h, valueBase: h.signedBalance, unrecognizedBase: h.unrecognized, priceAgeSec: 0 }
+        return { ...h, mark: { valueBase: h.balance, priceAgeSec: 0 } }
       }
-      const rate = baseSymbol ? await getRate(h.symbol, baseSymbol).catch(() => null) : null
-      if (!rate || rate.token1 === 0n) {
-        return { ...h, valueBase: 0n, unrecognizedBase: 0n, priceAgeSec: undefined }
-      }
+      const rate = await getRate(h.symbol, baseSymbol, maxPriceAgeSec * 1000)
+      if (rate.token1 === 0n) throw new Error(`rate ${h.symbol}/${baseSymbol} has a zero denominator`)
       return {
         ...h,
-        valueBase: (h.signedBalance * rate.token0) / rate.token1,
-        unrecognizedBase: (h.unrecognized * rate.token0) / rate.token1,
-        priceAgeSec: Math.max(0, nowSec - rate.time)
+        mark: { valueBase: (h.balance * rate.token0) / rate.token1, priceAgeSec: Math.max(0, nowSec - rate.time) }
       }
     })
   )
@@ -49,13 +42,16 @@ export async function evaluateAccountNav(params: IEvaluateAccountParams): Promis
   const nowSec = params.nowSec ?? Math.floor(Date.now() / 1000)
   const platforms = params.platforms ?? DEFAULT_PLATFORMS
 
-  const baseSymbol = tokenMetaByAddress.get(getAddress(params.baseToken))?.symbol
+  const baseSymbol = symbolOfKey(params.baseKey)
   const [valuations, holdings] = await Promise.all([
     Promise.all(
       platforms.map(p =>
         p.evaluate({
+          chainId: p.chainId,
           account: params.master,
-          baseToken: params.baseToken,
+          baseToken: chainTokenOfKey(p.chainId, params.baseKey),
+          blockNumber: params.blockNumber,
+          blockTimestamp: params.blockTimestamp,
           nowSec,
           publicClient: params.publicClient,
           getRate: params.getRate,
@@ -65,12 +61,14 @@ export async function evaluateAccountNav(params: IEvaluateAccountParams): Promis
         })
       )
     ),
-    valueHoldings(params.holdings ?? [], baseSymbol, params.getRate, nowSec)
+    valueHoldings(params.holdings, baseSymbol, params.getRate, nowSec, config.maxPriceAgeSec)
   ])
 
   const breakdown = composeBreakdown(params.cashLeg, valuations, holdings)
-  const { navMark, navFloor, navSigned } = computeNavValues(breakdown, params.kind, config)
-  const gate = checkNavGate(breakdown, navSigned, config, { clientNav: params.clientNav, kind: params.kind })
+  const navMark = breakdown.unitedCashBase + breakdown.holdingMarkBase + breakdown.positionMarkBase
+  const gate = checkNavGate(breakdown, navMark, config, { clientNav: params.clientNav, kind: params.kind })
 
-  return { navMark, navFloor, navSigned, kind: params.kind, breakdown, gate }
+  return gate.ok
+    ? { kind: params.kind, breakdown, ok: true, navMark }
+    : { kind: params.kind, breakdown, ok: false, reasons: gate.reasons }
 }

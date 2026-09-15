@@ -1,47 +1,11 @@
-import type { IAccountLib__AccountInitParams, IFundAccountLib__FundAccountInitParams } from '@puppet/contracts/types'
-import {
-  generatePairingKeypair,
-  type IPairedSession,
-  type ISealedPayload,
-  openPairingPayload,
-  predictFundAccount,
-  predictPuppetAccount
-} from '@puppet/sdk/account'
+import { generatePairingKeypair, type IPairedSession, type ISealedPayload, openPairingPayload } from '@puppet/sdk/account'
 import { createCompact, type ICompact } from '@puppet/sdk/compact'
-import { DEFAULT_MATCHMAKER_URL } from '@puppet/sdk/const'
-import { type ITokenRegistry, type ITokenRegistryMap, staticTokenRegistry, tokenRegistryFromRows } from '@puppet/sdk/state'
-import { type Address, getAddress, type Hex, type TypedDataDefinition } from 'viem'
+import { type IGetRate, oracleRate } from '@puppet/sdk/evaluate'
+import { type ITokenRegistryMap, tokenRegistryFromRows } from '@puppet/sdk/state'
+import type { Address, Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 
 const PAIR_CALLBACK_PORT = 42071
-
-function hideSignerKey(session: IPairedSession): void {
-  Object.defineProperty(session, 'signerKey', { value: session.signerKey, enumerable: false })
-  Object.defineProperty(session, Symbol.for('nodejs.util.inspect.custom'), {
-    value: () => ({ ...session, signerKey: '[redacted]' }),
-    enumerable: false
-  })
-}
-
-export function buildSession(input: {
-  signerKey: Hex
-  user: Address
-  baseToken: Address
-  name: Hex
-  matchmakerUrl?: string
-  tokenRegistry?: ITokenRegistry[]
-}): IPairedSession {
-  const session: IPairedSession = {
-    signerKey: input.signerKey,
-    user: input.user,
-    baseToken: input.baseToken,
-    name: input.name,
-    matchmakerUrl: input.matchmakerUrl ?? DEFAULT_MATCHMAKER_URL,
-    tokenRegistry: input.tokenRegistry
-  }
-  hideSignerKey(session)
-  return session
-}
 
 export async function pairOverBrowser(pairUrl: string | URL = 'https://puppet.fund'): Promise<IPairedSession> {
   const origin = new URL(pairUrl).origin
@@ -53,7 +17,7 @@ export async function pairOverBrowser(pairUrl: string | URL = 'https://puppet.fu
     'Access-Control-Allow-Headers': 'content-type',
     'Access-Control-Allow-Private-Network': 'true'
   } as const
-  return new Promise(resolve => {
+  return new Promise((resolve, reject) => {
     const server = Bun.serve({
       hostname: '127.0.0.1',
       port: PAIR_CALLBACK_PORT,
@@ -67,10 +31,13 @@ export async function pairOverBrowser(pairUrl: string | URL = 'https://puppet.fu
         try {
           const sealed = (await req.json()) as ISealedPayload
           session = await openPairingPayload<IPairedSession>(privateKey, sealed)
-        } catch {
+        } catch (err) {
+          queueMicrotask(() => {
+            server.stop()
+            reject(new Error(`pairing payload could not be opened: ${err instanceof Error ? err.message : String(err)}`))
+          })
           return new Response('bad payload', { status: 400, headers: cors })
         }
-        hideSignerKey(session)
         queueMicrotask(() => {
           server.stop()
           resolve(session)
@@ -92,53 +59,47 @@ export interface IConnectorConfig {
 export interface IConnector {
   compact: ICompact
   tokenRegistry: ITokenRegistryMap
-  params: IAccountLib__AccountInitParams
-  fundParams: IFundAccountLib__FundAccountInitParams
+  getRate: IGetRate
   user: Address
-  signer: Address
   account: Address
-  fund: Address
-  baseToken: Address
   dryRun: boolean
-  sign: (typedData: TypedDataDefinition) => Promise<Hex>
+  signer: Address
+  signIntent: (digest: Hex) => Promise<Hex>
   close: () => void
 }
 
 export async function createConnector(config: IConnectorConfig = {}): Promise<IConnector> {
   const session = config.session ?? (await pairOverBrowser(config.pairUrl))
-  const matchmakerUrl = session.matchmakerUrl
-  if (!/^https?:\/\//.test(matchmakerUrl)) {
-    throw new Error(
-      `session matchmakerUrl "${matchmakerUrl}" is not an absolute http(s) URL: re-pair against a site that seals an absolute endpoint`
-    )
+  for (const [name, value] of [
+    ['matchmakerUrl', session.matchmakerUrl],
+    ['oracleUrl', session.oracleUrl]
+  ] as const) {
+    if (!/^https?:\/\//.test(value ?? '')) {
+      throw new Error(`session ${name} "${value}" is not an absolute http(s) URL: re-pair against a current puppet.fund build`)
+    }
   }
-  try {
-    await fetch(matchmakerUrl, { method: 'HEAD' })
-  } catch (err) {
-    throw new Error(`matchmaker ${matchmakerUrl} is unreachable: ${err instanceof Error ? err.message : String(err)}`)
+  if (!session.signer) {
+    throw new Error('paired session carries no signer key: re-pair against a current puppet.fund build')
   }
-
-  const sessionSigner = privateKeyToAccount(session.signerKey)
-  const params: IAccountLib__AccountInitParams = { user: session.user, signer: sessionSigner.address }
-  const account = predictPuppetAccount(params)
-  const baseToken = getAddress(session.baseToken)
-  const fundParams: IFundAccountLib__FundAccountInitParams = { master: account, baseToken, name: session.name }
-  const fund = predictFundAccount(fundParams)
-  const tokenRegistry = session.tokenRegistry ? tokenRegistryFromRows(session.tokenRegistry) : staticTokenRegistry()
-  const compact = createCompact({ matchmakerUrl })
-
+  if (!session.tokenRegistry) {
+    throw new Error('paired session lacks the token registry: re-pair against a current puppet.fund build')
+  }
+  if (!session.body) {
+    throw new Error('paired session names no trading account: re-pair against a current puppet.fund build with a trading account selected')
+  }
+  Object.defineProperty(session, 'share', { enumerable: false })
+  Object.defineProperty(session, 'signer', { enumerable: false })
+  const signerAccount = privateKeyToAccount(session.signer)
+  const compact = createCompact({ matchmakerUrl: session.matchmakerUrl })
   return {
     compact,
-    tokenRegistry,
-    params,
-    fundParams,
-    user: params.user,
-    signer: params.signer,
-    account,
-    fund,
-    baseToken,
+    tokenRegistry: tokenRegistryFromRows(session.tokenRegistry),
+    getRate: oracleRate(session.oracleUrl),
+    user: session.user,
+    account: session.body.account,
     dryRun: config.dryRun ?? false,
-    sign: (typedData: TypedDataDefinition): Promise<Hex> => sessionSigner.signTypedData(typedData),
+    signer: signerAccount.address,
+    signIntent: (digest: Hex): Promise<Hex> => signerAccount.sign({ hash: digest }),
     close: (): void => {
       compact.close()
     }

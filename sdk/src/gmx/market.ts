@@ -1,16 +1,25 @@
+import { CHAIN_NETWORK_MAP } from '@puppet/contracts/const'
 import { ARBITRUM_MARKET_LIST, ARBITRUM_TOKEN_LIST } from '@puppet/contracts/gmx'
 import type { Address } from 'viem'
 import { getAddress } from 'viem'
 import { ADDRESS_ZERO } from '../const/common.js'
-import { getRegisteredTokenDescription } from '../core/token.js'
+import { getTokenDescription } from '../core/token.js'
 import type { IMarketDescription, ITokenDescription } from '../core/types.js'
-import { getMappedValue, getMappedValueFallback, groupList } from '../core/utils.js'
+import { getMappedValue, groupList } from '../core/utils.js'
+
+const GMX_NETWORK = 'arbitrum' as const
+type IGmxChainId = {
+  [K in keyof typeof CHAIN_NETWORK_MAP]: (typeof CHAIN_NETWORK_MAP)[K] extends typeof GMX_NETWORK ? K : never
+}[keyof typeof CHAIN_NETWORK_MAP]
+export const GMX_V2_CHAIN_ID = Number(
+  Object.entries(CHAIN_NETWORK_MAP).find(([, network]) => network === GMX_NETWORK)![0]
+) as IGmxChainId
 
 const SUPPLEMENTAL_ARBITRUM_TOKENS: readonly ITokenDescription[] = [
-  { symbol: 'GMX', name: 'GMX', decimals: 18, address: getAddress('0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a') }
+  { symbol: 'GMX', name: 'GMX', decimals: 18, address: '0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a' }
 ]
 
-export const TOKEN_ADDRESS_DESCRIPTION_MAP = {
+const TOKEN_ADDRESS_DESCRIPTION_MAP = {
   ...groupList(ARBITRUM_TOKEN_LIST, 'address'),
   ...groupList(SUPPLEMENTAL_ARBITRUM_TOKENS, 'address')
 }
@@ -23,14 +32,13 @@ const NATIVE_DESCRIPTION: ITokenDescription = {
   address: ADDRESS_ZERO
 }
 
-export function getTokenDescription(token: Address): ITokenDescription {
+export function getGmxTokenDescription(token: Address): ITokenDescription {
   const normalizedToken = getAddress(token)
   if (normalizedToken === ADDRESS_ZERO) return NATIVE_DESCRIPTION
-  return getMappedValueFallback(
-    TOKEN_ADDRESS_DESCRIPTION_MAP,
-    normalizedToken,
-    getRegisteredTokenDescription(normalizedToken)
-  )
+  if (normalizedToken in TOKEN_ADDRESS_DESCRIPTION_MAP) {
+    return TOKEN_ADDRESS_DESCRIPTION_MAP[normalizedToken as keyof typeof TOKEN_ADDRESS_DESCRIPTION_MAP]
+  }
+  return getTokenDescription(GMX_V2_CHAIN_ID, normalizedToken)
 }
 
 export function getMarketDescription(market: Address): IMarketDescription {
@@ -39,14 +47,4 @@ export function getMarketDescription(market: Address): IMarketDescription {
     MARKET_ADDRESS_DESCRIPTION_MAP,
     normalizedMarket as keyof typeof MARKET_ADDRESS_DESCRIPTION_MAP
   ) as IMarketDescription
-}
-
-export function getMarketDescriptionByToken(tokenAddress: Address): IMarketDescription[] {
-  const normalizedAddress = getAddress(tokenAddress)
-  return ARBITRUM_MARKET_LIST.filter(market => {
-    const indexToken = market.indexToken ? getAddress(market.indexToken) : null
-    const longToken = getAddress(market.longToken)
-    const shortToken = getAddress(market.shortToken)
-    return normalizedAddress === indexToken || normalizedAddress === longToken || normalizedAddress === shortToken
-  })
 }

@@ -89,9 +89,6 @@ export const $TokenAmountInput = ({ decimals, valueToShow, $input = $defaultToke
             }
             if (target.value !== formatted) target.value = formatted
             target.setSelectionRange(newCaret, newCaret)
-            // Parse the cleaned decimal string straight to a bigint. Never route through a JS float: String(parseFloat)
-            // loses precision past ~15 significant digits and renders sub-1e-6 values in exponent form, both of which
-            // would silently corrupt the signed amount. Normalize to a single dot and clamp the fraction to `decimals`.
             const decDigits = decPart ? decPart.slice(1).split('.')[0].slice(0, decimals) : ''
             const normalized = decDigits ? `${intPart || '0'}.${decDigits}` : intPart || '0'
             try {

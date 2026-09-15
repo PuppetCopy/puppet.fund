@@ -1,5 +1,4 @@
 export * from './datastore.js'
-export * from './eventStream.js'
 export * from './market.js'
 export * from './onchainPositions.js'
 export * from './position.js'

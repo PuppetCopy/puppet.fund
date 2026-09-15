@@ -8,14 +8,14 @@ file: `src/index.ts` (price feed, indicators, sizing, and the strategy all inlin
 
 ```bash
 bun install
-bun run dev   # pair on the site (create your account + allocate a WETH fund first)
+bun run dev   # pair on the site (create a trading account + deposit WETH into it on Arbitrum first)
 ```
 
 **Dry-run is the default** (`DRY_RUN=1` in `.env.example`): the full signal + sizing + order
 pipeline runs and logs, but nothing dispatches. Set `DRY_RUN=0` to trade live.
 
 Edit the `wantLong` rule (the signal) and `PARAMS` (risk %/trade, leverage, position caps). Each
-tick it reads price + fund balance + position, decides, and opens/closes within the caps. Note
+tick it reads price + trading-body balance + position, decides, and opens/closes within the caps. Note
 that `stopLossPct` only converts risk into a position size: no stop order is placed on-chain and
 there is no liquidation guard here (the `guarded` variant is the one with real stops).
 

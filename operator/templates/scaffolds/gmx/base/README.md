@@ -14,9 +14,11 @@ bun install
 bun run dev
 ```
 
-Create your account and allocate a fund on the site first. A **WETH** fund is simplest (GMX's
-keeper fee and the collateral are one token); any other registered base works too, it just needs
-a little native ETH in the fund for keeper fees. `bun run dev` prints a pairing link: approve it
+Create a trading account on the site first and deposit the WETH it trades with into it on
+Arbitrum. **WETH** collateral is simplest (GMX's keeper fee and the collateral are one token); any
+other registered token works too, it just needs a little native ETH in the account for keeper fees. Relay fees are paid in USDC by the account that acts (the
+trading body for orders, your puppet account for credits), so keep a little USDC in each.
+`bun run dev` prints a pairing link: approve it
 on the site; the operator receives your session key (memory only) **and** the site's
 matchmaker endpoint over the tunnel, so there's nothing to configure. RPC defaults to the
 public Arbitrum endpoint; set `ARBITRUM_RPC_URL` for anything beyond a first run. Copy
@@ -32,17 +34,17 @@ as `gmx.operator`), and hands you the `runOperator(connector, …)` body. Call i
 actions on `connector`, chain actions on `gmx.operator`, GMX actions on `gmx`. No required shape: a poll loop, a one-shot, a
 webhook, or an event subscription all work.
 
-- **connector** (connection + identity): `account` (your signing account) · `fund` (the pooled vehicle that holds capital and carries positions) · `close()` (runOperator handles it)
-- **gmx.operator** (chain-bound): `getFundBalance()` · `getFundSignedBalance()` · `operate(callList, transferList?)` · `swap(input)`
+- **connector** (connection + identity): `account` (your trading account: it signs, holds what you deposit, and trades) · `close()` (runOperator handles it)
+- **gmx.operator** (chain-bound): `account` · `readBalance(token)` · `credit(token)` (sweep a bridged arrival in from the deposit route) · `convert(inputToken, outputToken, inputAmount)` · `operate(callList, open)` · `settle()`
 - **gmx** (venue): `getPositions(account?)` · `getOrders(account?)` · `getMarket(indexToken)` · `markets` · `createOrder(order)` · `cancelOrder` · `updateOrder`
 
 `gmx.createOrder` is the single primitive for every order type (market/limit/stop via `orderType` +
 `triggerPrice`); `gmx.operator.operate()` is the raw dispatch underneath it (the attestor co-signs only
 GMX-perimeter calls today, so swaps/claims/foreign targets are rejected). Both return
 `IDispatchedFrame | null` (`null` = dry-run; a real dispatch settles on-chain before resolving).
-`usd()` / `weth()` build amounts from decimal strings. **`acceptablePrice` uses
+`usd()` builds 30dp amounts from decimal strings; 18dp WETH amounts are viem's `parseEther()`. **`acceptablePrice` uses
 `gmxPrice(usd, decimals)`**: GMX prices are `usd × 10^(30 − tokenDecimals)` (ETH = ×10¹²),
 **not** the 30-decimal `usd()`. The relay is stateless HTTP, fire-and-ACK (no connection state):
 attempt the operate and handle a thrown `DISPATCH_TIMEOUT`.
-Collateral GMX frees on a close returns to the fund on its own, shows
-up in `getFundBalance()`, and your next `createOrder` re-signs it automatically, no extra step.
+Collateral GMX frees on a close returns to the trading body on its own, shows
+up in `readBalance(WETH)`, and your next `createOrder` re-signs it automatically, no extra step.

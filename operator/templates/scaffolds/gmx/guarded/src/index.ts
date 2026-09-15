@@ -1,6 +1,6 @@
-import { createConnector, runOperator } from '@puppet.fund/operator'
-import { acceptablePrice, dominantPosition, gmxOperator, gmxPrice, positionMetrics, usd, weth } from '@puppet.fund/operator/gmx'
-import { type Address, isAddressEqual } from 'viem'
+import { createConnector, type IDispatchedFrame, runOperator } from '@puppet.fund/operator'
+import { acceptablePrice, dominantPosition, GMX_ORDER_TYPE, gmxOperator, gmxPrice, positionMetrics, usd } from '@puppet.fund/operator/gmx'
+import { type Address, isAddressEqual, parseEther } from 'viem'
 
 // GUARDED — the reference risk-managed operator. The guards are the product; the signal is
 // a placeholder. decide() proposes, the guards dispose: every tick produces one Intent and
@@ -39,7 +39,7 @@ const PARAMS = {
   cooldownMs: 600_000,
   orderTtlMs: 300_000, // cancel a market order the keeper hasn't executed after this long
   slippageBps: 30,
-  feeHeadroomWeth: 0.0005, // keeper executionFee headroom the funds veto reserves on top of collateral
+  feeHeadroomWeth: 0.0005, // keeper executionFee headroom the balance veto reserves on top of collateral
   maxOrderCostWeth: 0.001, // per-order ceiling on the measured cost sample (bounds ledger poisoning by unrelated transfers)
   tickMs: 60_000
 }
@@ -48,7 +48,8 @@ const PARAMS = {
 const INTENT_DEADLINE_MS = 5 * 60_000
 
 const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, dryRun: DRY })
-const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
+if (!Bun.env.ARBITRUM_RPC_URL) throw new Error('set ARBITRUM_RPC_URL in .env (cp .env.example .env)')
+const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL, token: ETH, skin: 10_000n })
 const market = gmx.getMarket(ETH)
 const marketInfo = gmx.markets.find(m => isAddressEqual(m.marketToken as Address, market))
 if (!marketInfo) throw new Error(`market ${market} not in the GMX market list`)
@@ -152,9 +153,9 @@ const clampMaxLeverage: Guard = (intent, snap) => {
   if (intent.sizeUsd <= collateralUsd * PARAMS.maxLeverage) return intent
   return { ...intent, sizeUsd: collateralUsd * PARAMS.maxLeverage, reasons: [...intent.reasons, 'clamped-leverage'] }
 }
-const vetoFunds: Guard = (intent, snap) =>
+const vetoBalance: Guard = (intent, snap) =>
   intent.kind === 'open' && intent.collateralWeth! + PARAMS.feeHeadroomWeth > snap.freeWeth
-    ? hold(intent, 'insufficient-funds')
+    ? hold(intent, 'insufficient-balance')
     : intent
 const vetoCooldown: Guard = (intent, snap) =>
   intent.kind !== 'hold' && snap.now - state.lastOrderAt < PARAMS.cooldownMs ? hold(intent, 'cooldown') : intent
@@ -175,7 +176,7 @@ const escalateHardDrawdown: Guard = (intent, snap) => {
 const GUARDS: Guard[] = [
   clampMaxPosition,
   clampMaxLeverage,
-  vetoFunds,
+  vetoBalance,
   vetoCooldown,
   vetoDayBudget,
   vetoOrdersPerDay,
@@ -209,8 +210,8 @@ async function tick(): Promise<void> {
   const orders = (await gmx.getOrders()).filter(o => isAddressEqual(o.order.addresses.market, market))
   const pendingMarket = orders.filter(
     o =>
-      Number(o.order.numbers.orderType) === gmx.GMX_ORDER_TYPE.MarketIncrease ||
-      Number(o.order.numbers.orderType) === gmx.GMX_ORDER_TYPE.MarketDecrease
+      Number(o.order.numbers.orderType) === GMX_ORDER_TYPE.MarketIncrease ||
+      Number(o.order.numbers.orderType) === GMX_ORDER_TYPE.MarketDecrease
   )
   if (pendingMarket.length > 0) {
     for (const o of pendingMarket) {
@@ -249,10 +250,10 @@ async function perceive(): Promise<ISnapshot> {
   const closes = (await fetchCandles('ETHUSDT', '1h', PARAMS.smaHours + 8)).map(c => c.close)
   const price = closes[closes.length - 1]
   const sma = closes.slice(-PARAMS.smaHours).reduce((a, b) => a + b, 0) / PARAMS.smaHours
-  const freeWeth = Number(await gmx.operator.getFundBalance()) / 1e18
+  const freeWeth = Number(await gmx.operator.readBalance(ETH)) / 1e18
   const raw = dominantPosition(await gmx.getPositions(), market)
   const pos = raw ? positionMetrics(raw, gmxPrice(price, 18), longToken) : null
-  // Equity in WETH vs a persisted high-water mark: a WETH fund holding WETH is the benchmark,
+  // Equity in WETH vs a persisted high-water mark: a WETH account holding WETH is the benchmark,
   // so drawdown measures bot-attributable loss, never ETH/USD moves while flat.
   const equityWeth = freeWeth + (pos ? Number(pos.marginUsd) / 1e30 / price : 0)
   const drawdownPct = state.hwmWeth > 0 ? Math.max(0, (1 - equityWeth / state.hwmWeth) * 100) : 0
@@ -276,7 +277,7 @@ async function rollDay(snap: ISnapshot): Promise<void> {
 // stop is the only exit that works when the matchmaker (or this process) is down: placement and
 // crash-repair are the same mechanism, re-checked every tick. Software stops are fiction here.
 async function reconcile(snap: ISnapshot, orders: Order[]): Promise<boolean> {
-  const stops = orders.filter(o => Number(o.order.numbers.orderType) === gmx.GMX_ORDER_TYPE.StopLossDecrease)
+  const stops = orders.filter(o => Number(o.order.numbers.orderType) === GMX_ORDER_TYPE.StopLossDecrease)
   // A frozen stop (failed execution) is dead weight, not protection — cancel and re-place.
   const frozen = stops.filter(o => o.order.flags.isFrozen)
   if (frozen.length > 0 && underHardCap()) {
@@ -293,7 +294,7 @@ async function reconcile(snap: ISnapshot, orders: Order[]): Promise<boolean> {
     console.log('[guarded] placing on-chain stop (full size, autoCancel)')
     await execute({ kind: 'hold', reasons: [] }, snap, true, async () =>
       gmx.createOrder({
-        orderType: gmx.GMX_ORDER_TYPE.StopLossDecrease,
+        orderType: GMX_ORDER_TYPE.StopLossDecrease,
         market,
         isLong: snap.pos!.isLong,
         sizeDeltaUsd: snap.raw!.numbers.sizeInUsd,
@@ -323,14 +324,14 @@ async function reconcile(snap: ISnapshot, orders: Order[]): Promise<boolean> {
   return false
 }
 
-async function recordCancel(cancel: () => Promise<{ actualRelayFee: bigint } | null>): Promise<void> {
+async function recordCancel(cancel: () => Promise<IDispatchedFrame | null>): Promise<void> {
   if (!DRY) {
     state.daySafetyOrders++
     await persist()
   }
   const result = await intoLimboOnFailure(cancel)
   if (!DRY) {
-    state.dayCostWeth += Number(result?.actualRelayFee ?? 0n) / 1e18
+    state.dayCostWeth += result === null ? 0 : Number(result.relayFee) / 1e18
     await persist()
   }
 }
@@ -351,14 +352,14 @@ async function intoLimboOnFailure<T>(dispatch: () => Promise<T>): Promise<T> {
 }
 
 // The one chokepoint every order passes through — no code path trades around the risk engine.
-// Costs are MEASURED, not modeled: actualRelayFee from the dispatch ack plus whatever left the
-// fund beyond the intended collateral (keeper executionFee), counted on attempt, refunds never
+// Costs are MEASURED, not modeled: relayFee from the dispatch ack plus whatever left the
+// account beyond the intended collateral (keeper executionFee), counted on attempt, refunds never
 // credited — all accounting errors lean conservative.
 async function execute(
   intent: IIntent,
   snap: ISnapshot,
   safety: boolean,
-  place?: () => Promise<{ actualRelayFee: bigint } | null>
+  place?: () => Promise<IDispatchedFrame | null>
 ): Promise<void> {
   if (intent.kind === 'hold' && !place) return
   if (!underHardCap()) {
@@ -373,22 +374,22 @@ async function execute(
     }
     await persist()
   }
-  const before = await gmx.operator.getFundBalance()
+  const before = await gmx.operator.readBalance(ETH)
   const intendedOutWeth = intent.kind === 'open' ? intent.collateralWeth! : 0
   const result = await intoLimboOnFailure(() =>
     place
       ? place()
       : intent.kind === 'open'
         ? gmx.createOrder({
-            orderType: gmx.GMX_ORDER_TYPE.MarketIncrease,
+            orderType: GMX_ORDER_TYPE.MarketIncrease,
             market,
             isLong: intent.isLong!,
             sizeDeltaUsd: usd(intent.sizeUsd!.toFixed(2)),
-            collateralDelta: weth(intent.collateralWeth!.toFixed(8)),
+            collateralDelta: parseEther(intent.collateralWeth!.toFixed(8)),
             acceptablePrice: acceptablePrice(snap.price, intent.isLong!, true, PARAMS.slippageBps)
           })
         : gmx.createOrder({
-            orderType: gmx.GMX_ORDER_TYPE.MarketDecrease,
+            orderType: GMX_ORDER_TYPE.MarketDecrease,
             market,
             isLong: snap.pos!.isLong,
             sizeDeltaUsd: snap.raw!.numbers.sizeInUsd,
@@ -397,9 +398,9 @@ async function execute(
           })
   )
   if (DRY) return
-  const after = await gmx.operator.getFundBalance()
+  const after = await gmx.operator.readBalance(ETH)
   const spent = Number(before - after) / 1e18 - intendedOutWeth
-  state.dayCostWeth += Number(result?.actualRelayFee ?? 0n) / 1e18 + Math.min(Math.max(0, spent), PARAMS.maxOrderCostWeth)
+  state.dayCostWeth += (result === null ? 0 : Number(result.relayFee) / 1e18) + Math.min(Math.max(0, spent), PARAMS.maxOrderCostWeth)
   await persist()
 }
 

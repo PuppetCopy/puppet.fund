@@ -1,6 +1,6 @@
 import { createConnector, runOperator } from '@puppet.fund/operator'
-import { acceptablePrice, dominantPosition, formatWeth, gmxOperator, gmxPrice, positionMetrics, usd, weth } from '@puppet.fund/operator/gmx'
-import { type Address, isAddressEqual } from 'viem'
+import { acceptablePrice, dominantPosition, GMX_ORDER_TYPE, gmxOperator, gmxPrice, positionMetrics, usd } from '@puppet.fund/operator/gmx'
+import { type Address, formatEther, isAddressEqual, parseEther } from 'viem'
 
 // COPY-TRADER bot. Mirror a chosen GMX trader's position on one market — same direction and
 // (capped) leverage, sized to OUR funds — with risk caps, anti-churn rebalancing, and an active
@@ -42,7 +42,8 @@ const COOLDOWN_MS = 60_000
 const INTENT_DEADLINE_MS = 5 * 60_000
 
 const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, dryRun: DRY })
-const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL })
+if (!Bun.env.ARBITRUM_RPC_URL) throw new Error('set ARBITRUM_RPC_URL in .env (cp .env.example .env)')
+const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL, token: ETH, skin: 10_000n })
 const market = gmx.getMarket(ETH)
 const marketInfo = gmx.markets.find(m => isAddressEqual(m.marketToken as Address, market))
 if (!marketInfo) throw new Error(`market ${market} not in the GMX market list`)
@@ -69,9 +70,9 @@ async function tick(): Promise<void> {
 
   const price = await ethSpot()
   const markPrice = gmxPrice(price, 18)
-  // Fund balance = deployable base; collateral freed by closes/reduces returns to the
-  // fund on its own and shows up here next tick.
-  const freeWeth = Number(formatWeth(await gmx.operator.getFundBalance()))
+  // Account balance = deployable network token; collateral freed by closes/reduces returns
+  // to the account on its own and shows up here next tick.
+  const freeWeth = Number(formatEther(await gmx.operator.readBalance(ETH)))
   const ourPos = dominantPosition(await gmx.getPositions(), market)
   const traderPos = dominantPosition(await gmx.getPositions(TRADER), market)
 
@@ -170,11 +171,11 @@ function target(traderPos: Position, freeWeth: number, price: number, markPrice:
 
 function closePosition(p: Position, price: number) {
   return dispatch({
-    orderType: gmx.GMX_ORDER_TYPE.MarketDecrease,
+    orderType: GMX_ORDER_TYPE.MarketDecrease,
     market,
     isLong: p.flags.isLong,
     sizeDeltaUsd: p.numbers.sizeInUsd, // whole size
-    collateralDelta: 0n, // collateral returns to the fund async on keeper execution
+    collateralDelta: 0n, // collateral returns to the account async on keeper execution
     acceptablePrice: acceptablePrice(price, p.flags.isLong, false, RISK.slippageBps)
   })
 }
@@ -186,11 +187,11 @@ function order(
   price: number
 ) {
   return dispatch({
-    orderType: kind === 'increase' ? gmx.GMX_ORDER_TYPE.MarketIncrease : gmx.GMX_ORDER_TYPE.MarketDecrease,
+    orderType: kind === 'increase' ? GMX_ORDER_TYPE.MarketIncrease : GMX_ORDER_TYPE.MarketDecrease,
     market,
     isLong,
     sizeDeltaUsd: amounts.sizeUsd === undefined ? 0n : usd(amounts.sizeUsd.toFixed(2)),
-    collateralDelta: amounts.collateralWeth === undefined ? 0n : weth(amounts.collateralWeth.toFixed(8)),
+    collateralDelta: amounts.collateralWeth === undefined ? 0n : parseEther(amounts.collateralWeth.toFixed(8)),
     acceptablePrice: acceptablePrice(price, isLong, kind === 'increase', RISK.slippageBps)
   })
 }

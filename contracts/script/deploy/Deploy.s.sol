@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.35;
+pragma solidity ^0.8.36;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Vm} from "forge-std/src/Vm.sol";
@@ -10,32 +10,20 @@ import {BaseScript} from "./shared/BaseScript.s.sol";
 
 import {Dictate} from "src/core/Dictate.sol";
 import {Register} from "src/core/Register.sol";
-import {NATIVE_TOKEN} from "src/utils/Native.sol";
-import {Account as AccountContract} from "src/core/Account.sol";
-import {Attest} from "src/core/Attest.sol";
-import {PuppetAccount} from "src/core/PuppetAccount.sol";
-import {FundAccount} from "src/core/FundAccount.sol";
-import {Route} from "src/core/Route.sol";
-import {Deposit} from "src/core/Deposit.sol";
+import {Chain as ChainProxy} from "src/core/Chain.sol";
+import {AccountModule as AccountContract} from "src/core/AccountModule.sol";
 import {BaseGate} from "src/utils/BaseGate.sol";
 import {Access} from "src/utils/auth/Access.sol";
-import {Permission} from "src/utils/auth/Permission.sol";
-import {PuppetGate} from "src/PuppetGate.sol";
-import {FundGate} from "src/FundGate.sol";
-import {HubGate} from "src/HubGate.sol";
-import {ShareToken} from "src/hub/ShareToken.sol";
-import {Issue} from "src/hub/Issue.sol";
-import {Redeem} from "src/hub/Redeem.sol";
-import {RedeemStore} from "src/hub/store/RedeemStore.sol";
-import {Mandate} from "src/hub/Mandate.sol";
-import {Allocate} from "src/hub/Allocate.sol";
-import {AllocateStore} from "src/hub/store/AllocateStore.sol";
 
 contract Deploy is BaseScript {
     using stdToml for string;
 
     function _requireDeployConfig() internal view {
-        require(ATTESTOR_ADDRESS != address(0), "Deploy: ATTESTOR_ADDRESS is zero");
+        require(
+            keccak256(bytes(vm.envOr("FOUNDRY_PROFILE", string("")))) == keccak256("prod"),
+            "Deploy: FOUNDRY_PROFILE must be prod; forge-artifacts-prod persists on disk so a default-profile run silently ships stale bytecode"
+        );
+        require(_attestorAddress() != address(0), "Deploy: const.toml [PROTOCOL].attestor is zero");
         require(RELAYER_ADDRESS != address(0), "Deploy: RELAYER_ADDRESS is zero");
         uint _baseFeeCap = vm.envOr("MAX_BASE_FEE_WEI", uint(0));
         if (_baseFeeCap != 0) {
@@ -56,8 +44,46 @@ contract Deploy is BaseScript {
         _requireDeployConfig();
         bool isHub = block.chainid == _getHubChainId();
         _universe = _isUniverseMigration(_getVersion());
-        if (isHub) _resetBroadcastForUniverse();
 
+        _planAndGate(isHub);
+        bool changed;
+        for (uint i; i < _plan.length; ++i) {
+            if (_plan[i].deployNeeded || _plan[i].prev != _plan[i].predicted) {
+                changed = true;
+                break;
+            }
+        }
+        if (!changed) {
+            console2.log("plan all-keep; nothing to broadcast (use wire() to re-assert wiring)");
+            return;
+        }
+        _resetBroadcastForUniverse();
+        vm.startBroadcast(_deployerKey());
+        _executePlan();
+        _wireCore();
+        if (isHub) _wireHub();
+        _registerTokens();
+        vm.stopBroadcast();
+    }
+
+    function wire() public {
+        _requireDeployConfig();
+        bool isHub = block.chainid == _getHubChainId();
+        _universe = _isUniverseMigration(_getVersion());
+        _planAndGate(isHub);
+        for (uint i; i < _plan.length; ++i) {
+            require(!_plan[i].deployNeeded, string.concat("Deploy: not deployed, run deploy(): ", _plan[i].name));
+        }
+        vm.startBroadcast(_deployerKey());
+        _wireCore();
+        if (isHub) _wireHub();
+        _registerTokens();
+        vm.stopBroadcast();
+    }
+
+    function _planAndGate(
+        bool isHub
+    ) internal {
         string[] memory core = _coreContracts();
         string[] memory names = core;
         if (isHub) {
@@ -70,58 +96,32 @@ contract Deploy is BaseScript {
                 names[core.length + i] = hub[i];
             }
         }
-
-        _planAndGate(names);
-        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
-        _executePlan();
-        _wireCore();
-        if (isHub) _wireHub();
-        _registerTokens();
-        vm.stopBroadcast();
-    }
-
-    // The pre-broadcast gate is the doctrine's enforcement point: logic swaps are free,
-    // a store re-key demands an explicit MIGRATE_STORES ack, and a root re-key is only
-    // sanctioned by a protocol.version bump (= deliberate universe migration). The
-    // universe signal is derived, not recorded: Dictate's address is a pure function of
-    // the version salt, so a moved Dictate anchor IS the bump. Nothing is signed or
-    // written before the whole plan passes.
-    function _planAndGate(
-        string[] memory names
-    ) internal {
         uint version = _getVersion();
-        bool universe = _isUniverseMigration(version);
         string memory storeAck = vm.envOr("MIGRATE_STORES", string(""));
         bytes32 salt = bytes32(version);
         bool refused;
-        console2.log("=== deploy plan | version:", version, universe ? "| UNIVERSE MIGRATION" : "");
+        console2.log("=== deploy plan | version:", version, _universe ? "| UNIVERSE MIGRATION" : "");
+        require(
+            !_universe || vm.envOr("ALLOW_UNIVERSE_MIGRATION", false),
+            "Deploy: this re-keys every root and store and orphans the live universe; set ALLOW_UNIVERSE_MIGRATION=true"
+        );
         for (uint i; i < names.length; ++i) {
             Meta memory m = _meta(names[i]);
             bytes32 initCodeHash = keccak256(bytes.concat(m.creationCode, m.ctorArgs));
-            address predicted = address(
-                uint160(uint(keccak256(abi.encodePacked(bytes1(0xff), address(FACTORY), salt, initCodeHash))))
-            );
+            address predicted =
+                address(uint160(uint(keccak256(abi.encodePacked(bytes1(0xff), address(FACTORY), salt, initCodeHash)))));
             _plannedAddr[keccak256(bytes(names[i]))] = predicted;
             address prev = _addrOrZero(_isRouter(names[i]) ? string.concat(names[i], "Impl") : names[i]);
             bool deployNeeded = predicted.code.length == 0;
             bool drift = prev != address(0) && prev != predicted;
-            _plan.push(
-                Plan({
-                    name: names[i],
-                    class: m.class,
-                    universal: m.universal,
-                    predicted: predicted,
-                    prev: prev,
-                    deployNeeded: deployNeeded
-                })
-            );
+            _plan.push(Plan({name: names[i], predicted: predicted, prev: prev, deployNeeded: deployNeeded}));
             console2.log(
                 string.concat(
                     _classLabel(m.class), drift ? " drift " : (deployNeeded ? " new   " : " keep  "), names[i]
                 ),
                 predicted
             );
-            if (drift && !universe) {
+            if (drift && !_universe) {
                 if (m.class == Class.Root) {
                     console2.log("    REFUSED: root re-key orphans derived addresses; bump protocol.version");
                     refused = true;
@@ -136,7 +136,7 @@ contract Deploy is BaseScript {
 
     function _isUniverseMigration(
         uint version
-    ) internal returns (bool) {
+    ) internal view returns (bool) {
         Meta memory m = _meta("Dictate");
         address predicted = address(
             uint160(
@@ -177,15 +177,6 @@ contract Deploy is BaseScript {
         dictate.setAccess(Access(_specAddr(targetName)), _specAddr(granteeName));
     }
 
-    function _grantPermission(
-        Dictate dictate,
-        string memory targetName,
-        bytes4 selector,
-        string memory granteeName
-    ) internal {
-        dictate.setPermission(Permission(_specAddr(targetName)), selector, _specAddr(granteeName));
-    }
-
     function _classLabel(
         Class c
     ) internal pure returns (string memory) {
@@ -201,15 +192,20 @@ contract Deploy is BaseScript {
         bytes memory h = bytes(csv);
         bytes memory n = bytes(name);
         if (n.length == 0 || h.length < n.length) return false;
-        for (uint i; i + n.length <= h.length; ++i) {
-            bool ok = true;
-            for (uint j; j < n.length; ++j) {
-                if (h[i + j] != n[j]) {
-                    ok = false;
-                    break;
+        uint start;
+        for (uint i; i <= h.length; ++i) {
+            if (i < h.length && h[i] != "," && h[i] != " ") continue;
+            if (i - start == n.length) {
+                bool ok = true;
+                for (uint j; j < n.length; ++j) {
+                    if (h[start + j] != n[j]) {
+                        ok = false;
+                        break;
+                    }
                 }
+                if (ok) return true;
             }
-            if (ok) return true;
+            start = i + 1;
         }
         return false;
     }
@@ -217,8 +213,9 @@ contract Deploy is BaseScript {
     function redeployGate(
         string memory name
     ) public {
+        _requireDeployConfig();
         require(bytes(name).length <= 32, "Deploy: gate name exceeds bytes32");
-        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
+        vm.startBroadcast(_deployerKey());
         Dictate dictate = Dictate(_specAddr("Dictate"));
         Meta memory m = _meta(name);
         bytes memory initCode = bytes.concat(m.creationCode, m.ctorArgs);
@@ -238,7 +235,8 @@ contract Deploy is BaseScript {
     }
 
     function registerTokens() public {
-        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
+        _requireDeployConfig();
+        vm.startBroadcast(_deployerKey());
         _registerTokens();
         vm.stopBroadcast();
     }
@@ -247,65 +245,27 @@ contract Deploy is BaseScript {
         Dictate dictate = Dictate(_specAddr("Dictate"));
         Register register = Register(_specAddr("Register"));
         string[] memory symbols = vm.parseTomlKeys(_const, string.concat(".TOKEN_ADDRESS.", _chainKey()));
-        dictate.setAccess(register, DEPLOYER_ADDRESS);
+        dictate.setAccess(register, vm.addr(_deployerKey()));
         for (uint i; i < symbols.length; ++i) {
-            address raw = _const.readAddress(string.concat(".TOKEN_ADDRESS.", _chainKey(), ".", symbols[i]));
-            IERC20 token = raw == NATIVE_TOKEN ? IERC20(NATIVE_TOKEN) : _getChainToken(symbols[i]);
-            register.registerToken(address(token), type(uint).max);
+            uint cap = _getChainTokenCap(symbols[i]);
+            if (cap == 0) continue;
+            register.setRegistered(address(_getChainToken(symbols[i])), cap, bytes32(bytes(symbols[i])));
         }
-        register.setWnt(address(_getChainToken(_wntSymbol())));
-        string memory _providerPath = string.concat(".SWAP_PROVIDER.", _chainKey());
-        if (vm.keyExistsToml(_const, _providerPath)) {
-            string[] memory providers = vm.parseTomlKeys(_const, _providerPath);
-            for (uint i; i < providers.length; ++i) {
-                register.setProvider(_const.readAddress(string.concat(_providerPath, ".", providers[i])), type(uint).max);
-            }
-        }
+        dictate.removeAccess(register, vm.addr(_deployerKey()));
     }
 
-    function setSwapProvider(
-        address provider,
-        uint cap
-    ) public {
-        Dictate dictate = Dictate(_specAddr("Dictate"));
-        Register register = Register(_specAddr("Register"));
-        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
-        dictate.setAccess(register, DEPLOYER_ADDRESS);
-        register.setProvider(provider, cap);
-        vm.stopBroadcast();
-    }
-
-    function registerToken(
+    function setRegistered(
         string calldata symbol
     ) public {
+        _requireDeployConfig();
         Dictate dictate = Dictate(_specAddr("Dictate"));
         Register register = Register(_specAddr("Register"));
         IERC20 token = _getChainToken(symbol);
-        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
-        dictate.setAccess(register, DEPLOYER_ADDRESS);
-        register.registerToken(address(token), type(uint).max);
-        vm.stopBroadcast();
-    }
-
-    function cleanup() public {
-        require(vm.envOr("ALLOW_DECOMMISSION", false), "Deploy: set ALLOW_DECOMMISSION=true to decommission gates");
-        Dictate dictate = Dictate(_specAddr("Dictate"));
-        bytes32[] memory targets;
-        if (block.chainid == _getHubChainId()) {
-            targets = new bytes32[](3);
-            targets[0] = "PuppetGate";
-            targets[1] = "FundGate";
-            targets[2] = "HubGate";
-        } else {
-            targets = new bytes32[](2);
-            targets[0] = "PuppetGate";
-            targets[1] = "FundGate";
-        }
-
-        vm.startBroadcast(DEPLOYER_PRIVATE_KEY);
-        for (uint i; i < targets.length; ++i) {
-            try dictate.removeGate(targets[i]) {} catch {}
-        }
+        uint cap = _getChainTokenCap(symbol);
+        vm.startBroadcast(_deployerKey());
+        dictate.setAccess(register, vm.addr(_deployerKey()));
+        register.setRegistered(address(token), cap, bytes32(bytes(symbol)));
+        dictate.removeAccess(register, vm.addr(_deployerKey()));
         vm.stopBroadcast();
     }
 
@@ -327,95 +287,79 @@ contract Deploy is BaseScript {
     }
 
     function _coreContracts() internal pure returns (string[] memory names) {
-        names = new string[](10);
+        names = new string[](8);
         names[0] = "Dictate";
         names[1] = "Register";
-        names[2] = "PuppetAccount";
-        names[3] = "FundAccount";
-        names[4] = "Route";
-        names[5] = "Attest";
-        names[6] = "Account";
-        names[7] = "Deposit";
-        names[8] = "PuppetGate";
-        names[9] = "FundGate";
+        names[2] = "Chain";
+        names[3] = "Account";
+        names[4] = "DepositRoute";
+        names[5] = "AccountModule";
+        names[6] = "Deposit";
+        names[7] = "CoreGate";
     }
 
     function _hubContracts() internal pure returns (string[] memory names) {
-        names = new string[](8);
-        names[0] = "ShareToken";
-        names[1] = "Issue";
-        names[2] = "RedeemStore";
-        names[3] = "Redeem";
-        names[4] = "AllocateStore";
-        names[5] = "Mandate";
-        names[6] = "Allocate";
-        names[7] = "HubGate";
+        names = new string[](2);
+        names[0] = "BondStore";
+        names[1] = "HubGate";
     }
 
     function _wireCore() internal {
         Dictate dictate = Dictate(_specAddr("Dictate"));
-        AccountContract accountModule = AccountContract(_specAddr("Account"));
-        Deposit walletDeposit = Deposit(_specAddr("Deposit"));
+        ChainProxy chain = ChainProxy(_specAddr("Chain"));
+        if (chain.implementation() == address(0)) {
+            bytes memory initCode = _creationCode(_chainImpl());
+            bytes32 salt = bytes32(_getVersion());
+            address impl = address(
+                uint160(uint(keccak256(abi.encodePacked(bytes1(0xff), address(FACTORY), salt, keccak256(initCode)))))
+            );
+            if (impl.code.length == 0) FACTORY.safeCreate2(salt, initCode);
+            dictate.setAccess(chain, vm.addr(_deployerKey()));
+            chain.setImplementation(impl);
+            dictate.removeAccess(chain, vm.addr(_deployerKey()));
+            _setChainAddress("ChainImpl", impl);
+        }
+        address coreGateImpl = _specAddr("CoreGate");
+        address coreGateProxy = dictate.gateMap("CoreGate");
+        if (coreGateProxy == address(0)) coreGateProxy = dictate.setGate("CoreGate", coreGateImpl);
 
-        // Account is the ONLY authorized caller of Attest.execute/executeMandate (the account's gate).
-        _grantAccess(dictate, "Attest", "Account");
+        dictate.setAccess(Access(_specAddr("AccountModule")), coreGateProxy);
+        dictate.setAccess(Access(_specAddr("AccountModule")), _specAddr("Deposit"));
+        dictate.setAccess(Access(_specAddr("Deposit")), coreGateProxy);
 
-        address puppetGateImpl = _specAddr("PuppetGate");
-        address puppetGateProxy = dictate.setGate("PuppetGate", puppetGateImpl);
-        _setChainAddress("PuppetGateImpl", puppetGateImpl);
-        _setChainAddress("PuppetGate", puppetGateProxy);
-
-        dictate.setPermission(accountModule, AccountContract.dispatch.selector, puppetGateProxy);
-        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, puppetGateProxy);
-        dictate.setAccess(walletDeposit, puppetGateProxy);
-
-        address fundGateImpl = _specAddr("FundGate");
-        address fundGateProxy = dictate.setGate("FundGate", fundGateImpl);
-        _setChainAddress("FundGateImpl", fundGateImpl);
-        _setChainAddress("FundGate", fundGateProxy);
-
-        dictate.setPermission(accountModule, AccountContract.dispatch.selector, fundGateProxy);
-        dictate.setPermission(accountModule, AccountContract.createFundAccount.selector, fundGateProxy);
-        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, fundGateProxy);
+        dictate.setGate("CoreGate", coreGateImpl);
+        _setChainAddress("CoreGateImpl", coreGateImpl);
+        _setChainAddress("CoreGate", coreGateProxy);
     }
 
     function _wireHub() internal {
         Dictate dictate = Dictate(_specAddr("Dictate"));
-        AccountContract accountModule = AccountContract(_specAddr("Account"));
-        Access mandate = Access(_specAddr("Mandate"));
-        Access allocate = Access(_specAddr("Allocate"));
-        Access redeem = Access(_specAddr("Redeem"));
-
         address hubImpl = _specAddr("HubGate");
-        address hubProxy = dictate.setGate("HubGate", hubImpl);
+        address hubProxy = dictate.gateMap("HubGate");
+        if (hubProxy == address(0)) hubProxy = dictate.setGate("HubGate", hubImpl);
+
+        dictate.setAccess(Access(_specAddr("AccountModule")), hubProxy);
+        dictate.setAccess(Access(_specAddr("Deposit")), hubProxy);
+        dictate.setAccess(Access(_specAddr("BondStore")), hubProxy);
+
+        dictate.setGate("HubGate", hubImpl);
         _setChainAddress("HubGateImpl", hubImpl);
         _setChainAddress("HubGate", hubProxy);
+    }
 
-        _grantAccess(dictate, "AllocateStore", "Mandate");
-        _grantAccess(dictate, "AllocateStore", "Allocate");
-        _grantAccess(dictate, "RedeemStore", "Redeem");
-        _grantAccess(dictate, "Issue", "Allocate");
-        _grantAccess(dictate, "Issue", "Redeem");
-        dictate.setAccess(mandate, hubProxy);
-        dictate.setAccess(allocate, hubProxy);
-        dictate.setAccess(redeem, hubProxy);
-
-        dictate.setPermission(accountModule, AccountContract.dispatch.selector, hubProxy);
-        dictate.setPermission(accountModule, AccountContract.createPuppetAccount.selector, hubProxy);
-        _grantPermission(dictate, "Account", AccountContract.createFundAccount.selector, "Allocate");
-        _grantPermission(dictate, "Account", AccountContract.dispatch.selector, "Mandate");
-        _grantPermission(dictate, "Account", AccountContract.dispatch.selector, "Allocate");
-        _grantPermission(dictate, "Account", AccountContract.dispatchMandate.selector, "Allocate");
-        _grantPermission(dictate, "Account", AccountContract.dispatch.selector, "Redeem");
+    function _getMaxCohortSize() internal view returns (uint) {
+        return _const.readUint(".PROTOCOL.maxCohortSize");
     }
 
     function _gateConfig() internal view returns (BaseGate.Config memory) {
         return BaseGate.Config({
-            attestor: ATTESTOR_ADDRESS,
+            attestor: _attestorAddress(),
             feeReceiver: RELAYER_ADDRESS,
             transferGasLimit: _getTransferGasLimit(),
-            maxBlockDelay: _getMaxBlockDelay(),
-            maxRelayFeeBps: _getMaxRelayFeeBps()
+            maxIntentTtl: _const.readUint(".PROTOCOL.maxIntentTtlSec"),
+            maxRelayFeeBps: _getMaxRelayFeeBps(),
+            performanceFee: _const.readUint(".PROTOCOL.performanceFee"),
+            maxCohortSize: _getMaxCohortSize()
         });
     }
 
@@ -429,13 +373,10 @@ contract Deploy is BaseScript {
         bytes creationCode;
         bytes ctorArgs;
         Class class;
-        bool universal;
     }
 
     struct Plan {
         string name;
-        Class class;
-        bool universal;
         address predicted;
         address prev;
         bool deployNeeded;
@@ -451,164 +392,95 @@ contract Deploy is BaseScript {
             && n[n.length - 1] == "e";
     }
 
+    // Load the PROD artifact by path, never type(X).creationCode and never a bare "File.sol:Name" qualifier: test/ and
+    // script/ compile under the 1-run harness restriction, so every src contract also has a <Name>.harness.json and a
+    // name qualifier resolves to it ambiguously. The explicit prod artifact path is the only unambiguous handle on the
+    // 100k-run bytecode that must actually land on chain. Under a non-prod profile this file is absent and the deploy
+    // fails loud, which is correct: deploys are prod-only.
+    function _creationCode(
+        string memory name
+    ) internal view returns (bytes memory) {
+        return vm.getCode(string.concat("forge-artifacts-prod/", name, ".sol/", name, ".json"));
+    }
+
     function _meta(
         string memory name
-    ) internal returns (Meta memory) {
+    ) internal view returns (Meta memory) {
         bytes32 k = keccak256(bytes(name));
         if (k == keccak256("Dictate")) {
-            return
-                Meta({creationCode: type(Dictate).creationCode, ctorArgs: abi.encode(GOVERNOR_ADDRESS), class: Class.Root, universal: true});
+            return Meta({creationCode: _creationCode(name), ctorArgs: abi.encode(GOVERNOR_ADDRESS), class: Class.Root});
         }
         if (k == keccak256("Register")) {
-            return Meta({
-                creationCode: type(Register).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate")),
-                class: Class.Store,
-                universal: true
-            });
-        }
-        if (k == keccak256("PuppetAccount")) {
-            return Meta({creationCode: type(PuppetAccount).creationCode, ctorArgs: "", class: Class.Root, universal: true});
-        }
-        if (k == keccak256("FundAccount")) {
-            return Meta({creationCode: type(FundAccount).creationCode, ctorArgs: "", class: Class.Root, universal: true});
-        }
-        if (k == keccak256("Route")) {
-            return Meta({creationCode: type(Route).creationCode, ctorArgs: "", class: Class.Root, universal: true});
-        }
-        if (k == keccak256("Attest")) {
             return
                 Meta({
-                    creationCode: type(Attest).creationCode,
-                    ctorArgs: abi.encode(_specAddr("Dictate")),
-                    class: Class.Root,
-                    universal: true
+                    creationCode: _creationCode(name), ctorArgs: abi.encode(_specAddr("Dictate")), class: Class.Store
                 });
         }
+        if (k == keccak256("Chain")) {
+            return
+                Meta({creationCode: _creationCode(name), ctorArgs: abi.encode(_specAddr("Dictate")), class: Class.Root});
+        }
         if (k == keccak256("Account")) {
+            return Meta({creationCode: _creationCode(name), ctorArgs: "", class: Class.Root});
+        }
+        if (k == keccak256("DepositRoute")) {
+            return Meta({creationCode: _creationCode(name), ctorArgs: "", class: Class.Root});
+        }
+        if (k == keccak256("AccountModule")) {
             return Meta({
-                creationCode: type(AccountContract).creationCode,
+                creationCode: _creationCode(name),
                 ctorArgs: abi.encode(
                     _specAddr("Dictate"),
-                    _specAddr("Attest"),
-                    _specAddr("PuppetAccount"),
-                    _specAddr("FundAccount"),
-                    _specAddr("Route")
+                    _specAddr("Chain"),
+                    _specAddr("Account"),
+                    _specAddr("DepositRoute"),
+                    _const.readUint(".PROTOCOL.resetPeriodSec")
                 ),
-                class: Class.Store,
-                universal: true
+                class: Class.Root
             });
         }
         if (k == keccak256("Deposit")) {
-            return
-                Meta({
-                    creationCode: type(Deposit).creationCode,
-                    ctorArgs: abi.encode(_specAddr("Dictate")),
-                    class: Class.Logic,
-                    universal: true
-                });
-        }
-        if (k == keccak256("PuppetGate")) {
             return Meta({
-                creationCode: type(PuppetGate).creationCode,
+                creationCode: _creationCode(name),
                 ctorArgs: abi.encode(
                     _specAddr("Dictate"),
-                    _specAddr("Account"),
+                    _specAddr("AccountModule"),
+                    _specAddr("Register"),
+                    address(_getChainToken(_wntSymbol()))
+                ),
+                class: Class.Root
+            });
+        }
+        if (k == keccak256("CoreGate")) {
+            return Meta({
+                creationCode: _creationCode(name),
+                ctorArgs: abi.encode(
+                    _specAddr("AccountModule"),
+                    _specAddr("Register"),
                     _specAddr("Deposit"),
-                    _specAddr("Register"),
                     _gateConfig()
                 ),
-                class: Class.Logic,
-                universal: false
+                class: Class.Logic
             });
         }
-        if (k == keccak256("FundGate")) {
-            return Meta({
-                creationCode: type(FundGate).creationCode,
-                ctorArgs: abi.encode(
-                    _specAddr("Dictate"),
-                    _specAddr("Account"),
-                    _specAddr("Register"),
-                    _gateConfig()
-                ),
-                class: Class.Logic,
-                universal: false
-            });
-        }
-        if (k == keccak256("ShareToken")) {
-            return Meta({
-                creationCode: type(ShareToken).creationCode,
-                ctorArgs: abi.encode(_getHubChainId()),
-                class: Class.Root,
-                universal: false
-            });
-        }
-        if (k == keccak256("Issue")) {
-            return Meta({
-                creationCode: type(Issue).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate"), _specAddr("ShareToken")),
-                class: Class.Root,
-                universal: false
-            });
-        }
-        if (k == keccak256("RedeemStore")) {
-            return Meta({
-                creationCode: type(RedeemStore).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate")),
-                class: Class.Store,
-                universal: false
-            });
-        }
-        if (k == keccak256("Redeem")) {
+        if (k == keccak256("BondStore")) {
             return
                 Meta({
-                    creationCode: type(Redeem).creationCode,
-                    ctorArgs: abi.encode(_specAddr("Dictate")),
-                    class: Class.Logic,
-                    universal: false
+                    creationCode: _creationCode(name), ctorArgs: abi.encode(_specAddr("Dictate")), class: Class.Store
                 });
-        }
-        if (k == keccak256("AllocateStore")) {
-            return Meta({
-                creationCode: type(AllocateStore).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate")),
-                class: Class.Store,
-                universal: false
-            });
-        }
-        if (k == keccak256("Mandate")) {
-            return Meta({
-                creationCode: type(Mandate).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate")),
-                class: Class.Logic,
-                universal: false
-            });
-        }
-        if (k == keccak256("Allocate")) {
-            return Meta({
-                creationCode: type(Allocate).creationCode,
-                ctorArgs: abi.encode(_specAddr("Dictate")),
-                class: Class.Logic,
-                universal: false
-            });
         }
         if (k == keccak256("HubGate")) {
             return Meta({
-                creationCode: type(HubGate).creationCode,
+                creationCode: _creationCode(name),
                 ctorArgs: abi.encode(
-                    _specAddr("Dictate"),
-                    _specAddr("Account"),
-                    _specAddr("Issue"),
-                    _specAddr("Allocate"),
-                    _specAddr("AllocateStore"),
-                    _specAddr("Mandate"),
-                    _specAddr("Redeem"),
-                    _specAddr("RedeemStore"),
+                    _specAddr("AccountModule"),
                     _specAddr("Register"),
+                    _specAddr("Deposit"),
+                    _specAddr("BondStore"),
+                    address(_getChainToken(_const.readString(".PROTOCOL.bondToken"))),
                     _gateConfig()
                 ),
-                class: Class.Logic,
-                universal: false
+                class: Class.Logic
             });
         }
         revert(string.concat("Deploy: unknown contract ", name));
@@ -626,9 +498,10 @@ contract Deploy is BaseScript {
         if (_isRouter(name)) {
             address impl = _addrOrZero(string.concat(name, "Impl"));
             _verifyContract(impl, name, m.ctorArgs);
-            _verifyContract(addr, "RouterProxy", abi.encode(_specAddr("Dictate"), impl, ""));
+            _verifyContract(addr, "RouterProxy", abi.encode(_specAddr("Dictate")));
             return;
         }
+        if (keccak256(bytes(name)) == keccak256("Chain")) _verifyContract(_addrOrZero("ChainImpl"), _chainImpl(), "");
         _verifyContract(addr, name, m.ctorArgs);
     }
 
@@ -643,21 +516,31 @@ contract Deploy is BaseScript {
         }
         string memory verifierPath = string.concat(".VERIFIER.", _chainKey());
         bool custom = vm.keyExistsToml(_const, verifierPath);
-        string[] memory cmd = new string[](custom ? 13 : 9);
+        // A custom verifier carries its chain in the URL and MUST NOT get --chain: forge resolves that flag against its
+        // own built-in chain table, which has no Monad mainnet (143), so passing it fails with "Chain not supported"
+        // before the request is ever sent.
+        string[] memory cmd = new string[](custom ? 15 : 11);
         cmd[0] = "forge";
         cmd[1] = "verify-contract";
         cmd[2] = vm.toString(addr);
         cmd[3] = artifact;
-        cmd[4] = "--chain";
-        cmd[5] = custom ? vm.toString(block.chainid) : _chainKey();
-        cmd[6] = "--constructor-args";
-        cmd[7] = vm.toString(ctorArgs);
-        cmd[8] = "--watch";
+        cmd[4] = "--constructor-args";
+        cmd[5] = vm.toString(ctorArgs);
+        cmd[6] = "--watch";
+        // The harness restriction on script/ + test/ leaves two compilation profiles in the cache; without pinning the
+        // src unit's profile the verifier refuses with "Ambiguous compilation profiles found in cache".
+        cmd[7] = "--compilation-profile";
+        cmd[8] = "default";
         if (custom) {
             cmd[9] = "--verifier";
             cmd[10] = _const.readString(string.concat(verifierPath, ".verifier"));
             cmd[11] = "--verifier-url";
             cmd[12] = _const.readString(string.concat(verifierPath, ".url"));
+            cmd[13] = "--etherscan-api-key";
+            cmd[14] = vm.envString("ETHERSCAN_API_KEY");
+        } else {
+            cmd[9] = "--chain";
+            cmd[10] = _chainKey();
         }
         Vm.FfiResult memory r = vm.tryFfi(cmd);
         if (r.exitCode == 0) {
@@ -670,8 +553,8 @@ contract Deploy is BaseScript {
 
     function _addrOrZero(
         string memory name
-    ) internal returns (address) {
-        string memory fresh = vm.readFile(_deploymentsPath());
+    ) internal view returns (address) {
+        string memory fresh = vm.readFile(DEPLOYMENTS_PATH);
         string memory chainKey = string.concat(".chain.", _chainKey(), ".", name);
         if (vm.keyExistsToml(fresh, chainKey)) return fresh.readAddress(chainKey);
         return address(0);

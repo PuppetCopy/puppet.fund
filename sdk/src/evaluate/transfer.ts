@@ -1,8 +1,7 @@
-import { PROTOCOL, TOKEN_META } from '@puppet/contracts/const'
-import { type Address, getAddress, isAddressEqual } from 'viem'
+import type { Address } from 'viem'
 import { CompactError } from '../compact/error.js'
 import type { ChainId } from '../const/index.js'
-import { symbolByAddress, wrappedNativeAddressOf } from '../state/tokenRegistry.js'
+import { symbolOf } from '../state/tokenRegistry.js'
 import {
   DEFAULT_EVALUATION_CONFIG,
   type IEvaluationConfig,
@@ -12,17 +11,8 @@ import {
 } from './types.js'
 import { assertNavSignable } from './verify.js'
 
-// Evaluation of the non-domain VALUE TRANSFORMATIONS a master can sign through an external
-// venue (a LI.FI swap, an Across bridge), the counterpart to position valuation. The screen
-// + on-chain shortfall already pin the output recipient to the fund, so value cannot leave
-// the fund; this evaluation only bounds the slippage/value gap a master could leak to an
-// AMM/filler, entirely from the in-domain GMX oracle (no 3rd-party route quote). Returns the
-// same gate shape as NAV so attestation runs every value check through one path.
-
-const priceAssetFor = (token: Address): string =>
-  isAddressEqual(getAddress(token), PROTOCOL.nativeToken) ? TOKEN_META.WETH.symbol : symbolByAddress(token)
-
 export interface IVenueValueLeg {
+  chainId: ChainId
   token: Address
   amount: bigint
 }
@@ -41,18 +31,12 @@ export interface IEvaluateCrossChainSwapParams {
   config?: Partial<IEvaluationConfig>
 }
 
-// A swap is attestable only on a directly observed input/output market, with a fresh rate, when the signed
-// minimum output holds at least (1 - swapMaxSlippageBps) of what that rate says the input should fetch. The
-// bound is expressed entirely in the OUTPUT token (the swap's own numeraire) via the direct pair rate — no USD
-// proxy and no triangulation. quoteAmount(input, rate.token0, rate.token1) is the expected output wei; the
-// rate comes from the injected getter (the matchmaker's median oracle, or the browser's signed-prices feed),
-// the same source NAV valuation uses. Fail-closed: an unpriceable / unwhitelisted / stale pair gates the swap.
-export async function evaluateSwapValue(params: IEvaluateSwapParams): Promise<INavGate> {
+async function evaluateSwapValue(params: IEvaluateSwapParams): Promise<INavGate> {
   const config = { ...DEFAULT_EVALUATION_CONFIG, ...params.config }
   const reasons: INavGateReason[] = []
   const { input, output } = params
   const rate = await params
-    .getRate(priceAssetFor(input.token), priceAssetFor(output.token), config.maxPriceAgeSec * 1000)
+    .getRate(symbolOf(input.chainId, input.token), symbolOf(output.chainId, output.token), config.maxPriceAgeSec * 1000)
     .catch((e: unknown) => {
       reasons.push({
         code: 'VENUE_PRICE_UNUSABLE',
@@ -77,16 +61,10 @@ export async function evaluateSwapValue(params: IEvaluateSwapParams): Promise<IN
       }
     }
   }
-  return { ok: reasons.length === 0, reasons }
+  return reasons.length === 0 ? { ok: true } : { ok: false, reasons }
 }
 
-// A cross-chain swap moves the SAME token cross-chain to the fund's own address (recipient
-// pinned by the screen), so the bound is a same-token amount ratio: the net output must hold
-// at least (1 - bridgeMaxSlippageBps) of the input, with no cross-price needed.
-// PRECONDITION: the token has identical decimals on origin and destination (true for every
-// registered token today, USDC 6/6, WETH 18/18). A future registration with asymmetric
-// cross-chain decimals would make this raw-amount ratio meaningless and must normalize here.
-export function evaluateCrossChainSwapValue(params: IEvaluateCrossChainSwapParams): INavGate {
+function evaluateCrossChainSwapValue(params: IEvaluateCrossChainSwapParams): INavGate {
   const config = { ...DEFAULT_EVALUATION_CONFIG, ...params.config }
   const reasons: INavGateReason[] = []
   if (params.inputAmount <= 0n) {
@@ -103,43 +81,27 @@ export function evaluateCrossChainSwapValue(params: IEvaluateCrossChainSwapParam
       })
     }
   }
-  return { ok: reasons.length === 0, reasons }
+  return reasons.length === 0 ? { ok: true } : { ok: false, reasons }
 }
 
-// The ONE slippage/value gate every signed swap runs through (matchmaker AND client runner call this same function):
-// a fund swap moves POOLED depositor assets on the master's signature, so the value bound is mandatory — without it a
-// compromised master signs a 100k-in -> 1-wei-out trade through a whitelisted provider and the tautological on-chain
-// floor passes. Dispatch by route kind:
-// - 'swap' (local DEX): oracle value bound input vs output. Cross-asset cross-chain fund flows run as a COMPOSED route
-//   (a local 'swap' to a bridgeable asset + a same-asset 'across' bridge), so each leg is bounded here on its own.
-// - 'across' (same-asset bridge): raw amount-ratio bound; cross-ASSET pairs are refused here because the ratio would
-//   pass vacuously across decimals (the on-chain across leg signs no output floor).
-// - 'acrossSwap' (fused withdraw swap-and-bridge): cross-asset by nature, so it takes the oracle value bound like a
-//   local swap — input priced on its own chain, output on the destination (the address→symbol map is chain-spanning).
-// The native marker has no priceable identity of its own (its meta symbol collapses across chains): it is priced as
-// its wrapped twin on the swap's chain (1:1 by construction).
 export async function screenSwapValue(
   swap: {
     routeKind: 'swap' | 'across' | 'acrossSwap'
     chainId: number
     inputToken: Address
     outputToken: Address
+    destinationChainId: number
     inputAmount: bigint
     outputAmount: bigint
-    acceptableRelayFee: bigint
+    relayFee: bigint
   },
   getRate: IGetRate
 ): Promise<void> {
-  const inputToken = isAddressEqual(getAddress(swap.inputToken), getAddress(PROTOCOL.nativeToken))
-    ? wrappedNativeAddressOf(swap.chainId as ChainId)
-    : swap.inputToken
-  // A native OUTPUT only occurs on LOCAL swaps (bridges never deliver the marker), so its priceable identity is the
-  // swap chain's wrapped twin — the address-keyed symbol map would collapse the shared marker to one chain's coin.
-  const outputToken = isAddressEqual(getAddress(swap.outputToken), getAddress(PROTOCOL.nativeToken))
-    ? wrappedNativeAddressOf(swap.chainId as ChainId)
-    : swap.outputToken
   if (swap.routeKind === 'across') {
-    if (symbolByAddress(inputToken) !== symbolByAddress(outputToken)) {
+    if (
+      symbolOf(swap.chainId as ChainId, swap.inputToken) !==
+      symbolOf(swap.destinationChainId as ChainId, swap.outputToken)
+    ) {
       throw new CompactError(
         'CROSS_CHAIN_ASSET_MISMATCH',
         `across must bridge the same asset; ${swap.inputToken} and ${swap.outputToken} are different assets`,
@@ -148,7 +110,7 @@ export async function screenSwapValue(
     }
     assertNavSignable(
       evaluateCrossChainSwapValue({
-        inputAmount: swap.inputAmount - swap.acceptableRelayFee,
+        inputAmount: swap.inputAmount - swap.relayFee,
         outputAmount: swap.outputAmount
       })
     )
@@ -156,8 +118,12 @@ export async function screenSwapValue(
   }
   assertNavSignable(
     await evaluateSwapValue({
-      input: { token: inputToken, amount: swap.inputAmount },
-      output: { token: outputToken, amount: swap.outputAmount },
+      input: { chainId: swap.chainId as ChainId, token: swap.inputToken, amount: swap.inputAmount - swap.relayFee },
+      output: {
+        chainId: swap.destinationChainId as ChainId,
+        token: swap.outputToken,
+        amount: swap.outputAmount
+      },
       nowSec: Math.floor(Date.now() / 1000),
       getRate
     })

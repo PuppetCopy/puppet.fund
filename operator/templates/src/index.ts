@@ -3,11 +3,6 @@ import { readdirSync } from 'node:fs'
 import { basename, join, relative, resolve } from 'node:path'
 import { Glob } from 'bun'
 
-// Scaffold one operator project from scaffolds/<venue>/<variant>. Each variant is a complete,
-// single-file starting point (base, copy-trader, trend, llm-basic, …) — drop a new folder in and
-// it's offered with no change here.
-//   bunx @puppet.fund/templates <dir> [<venue>] [<variant>]
-//   bunx @puppet.fund/templates my-op gmx copy-trader      (or: my-op gmx/copy-trader)
 const SCAFFOLDS = join(import.meta.dir, '..', 'scaffolds')
 const dirsIn = (p: string): string[] =>
   readdirSync(p, { withFileTypes: true })
@@ -15,7 +10,6 @@ const dirsIn = (p: string): string[] =>
     .map(d => d.name)
 
 const targetArg = Bun.argv[2]
-// The selector may be "<venue>" or "<venue>/<variant>"; an explicit variant arg also works.
 const [venue, variantInSelector] = (Bun.argv[3] ?? 'gmx').toLowerCase().split('/')
 const variant = (variantInSelector ?? Bun.argv[4] ?? 'base').toLowerCase()
 
@@ -31,7 +25,7 @@ if (!variants.includes(variant)) {
 }
 
 const targetDir = targetArg ?? (prompt('project directory:', `my-${variant}`) || `my-${variant}`)
-const dest = resolve(process.cwd(), targetDir) // resolve keeps an absolute targetDir, joins a relative one
+const dest = resolve(process.cwd(), targetDir)
 const scaffoldDir = join(SCAFFOLDS, venue, variant)
 
 if (await Bun.file(join(dest, 'package.json')).exists()) {
@@ -51,7 +45,6 @@ const pkg = await Bun.file(pkgPath).json()
 pkg.name = basename(dest)
 await Bun.write(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`)
 
-// Surface any REQUIRED env (uncommented VAR= lines in the variant's .env.example).
 const envFile = Bun.file(join(scaffoldDir, '.env.example'))
 const requiredEnv = (await envFile.exists())
   ? (await envFile.text())

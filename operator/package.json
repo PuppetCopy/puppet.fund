@@ -6,7 +6,7 @@
   "type": "module",
   "sideEffects": false,
   "engines": {
-    "bun": ">=1.3"
+    "bun": ">=1.4"
   },
   "exports": {
     ".": {
@@ -34,8 +34,7 @@
     "@puppet/contracts": "workspace:*",
     "@puppet/sdk": "workspace:*",
     "@types/bun": "catalog:",
-    "tsdown": "0.22.3",
-    "typescript": "catalog:"
+    "tsdown": "0.23.0"
   },
   "keywords": [
     "puppet",

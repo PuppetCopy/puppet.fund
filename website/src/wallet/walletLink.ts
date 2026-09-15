@@ -1,185 +1,182 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { predictFundAccount, predictPuppetAccount } from '@puppet/sdk/account'
+import { ACCOUNT_DOMAIN, CHAINLESS_DOMAIN, INTENTS } from '@puppet/contracts/intents'
 import { CompactError, formatThrownError } from '@puppet/sdk/compact'
-import type { ChainId } from '@puppet/sdk/const'
-import { type IPassthroughDeps, type IPassthroughTransaction, sendOperatePassthrough } from '@puppet/sdk/venue'
+import { assertDappSignable, type IDappTypedData, screenDappMessage, screenDappTypedData } from '@puppet/sdk/venue'
 import { getConnection, disconnect as wagmiDisconnect } from '@wagmi/core'
 import { SignClient } from '@walletconnect/sign-client'
 import { buildApprovedNamespaces, getSdkError } from '@walletconnect/utils'
-import { type IStream, map, op } from 'aelea/stream'
-import { fromCallback } from 'aelea/stream-extended'
-import { type Address, type Hex, isAddressEqual, numberToHex } from 'viem'
-import context from '../io/context.js'
-import { compact } from '../io/matchmaker/index.js'
-import { readSignedBalance, readTokenBalance } from '../io/onchain/account.js'
+import { createBrowserScheduler, type IStream, op } from 'aelea/stream'
+import { state } from 'aelea/stream-extended'
+import { type Address, getAddress, type Hex, hashMessage, hashTypedData, isAddressEqual, numberToHex, recoverAddress, type TypedData, type TypedDataDefinition, type TypedDataDomain, zeroAddress } from 'viem'
+import { subject } from '../utils/subject.js'
 import type { IConnectedWallet } from './connectedWallet.js'
+import type { IBodyKeys, IRootState, IWalletPair } from './root.js'
 import { publicClientMap, WALLETCONNECT_PROJECT_ID, wagmi } from './wallet.js'
 import { wcUriFromLocation } from './wcUri.js'
 
-// The whole WalletConnect dApp-link feature: reactive link state, the sign-client engine, the dApp RPC
-// responder, and the owned WC storage. Everything the app maintains elsewhere (clients, token registry,
-// balances, gas/head/rate) is consumed from the io context; this module owns only WC protocol state.
-
 declare const __WC_METADATA__: { name: string; description: string; url: string; icons: string[] }
 
-// One reactive primitive backs every piece of wallet-link state: an imperative get/set the WC
-// engine drives, a subscribe the async waiters use, and a replaying stream the UI binds to.
-interface ICell<T> {
-  get(): T
-  set(value: T): void
-  subscribe(listener: (value: T) => void): () => void
-  readonly stream: IStream<T>
-}
+const pairSubject = subject<IWalletPair>()
+const pairStream: IStream<IWalletPair> = op(pairSubject.stream, state({ wallet: null, root: Promise.resolve(null), bodyKeys: null }))
 
-function cell<T>(initial: T): ICell<T> {
-  let current = initial
-  const listeners = new Set<(value: T) => void>()
-  const subscribe = (listener: (value: T) => void): (() => void) => {
-    listeners.add(listener)
-    return () => {
-      listeners.delete(listener)
-    }
-  }
-  return {
-    get: () => current,
-    set: value => {
-      current = value
-      for (const listener of [...listeners]) listener(value)
+let latest: IWalletPair = { wallet: null, root: Promise.resolve(null), bodyKeys: null }
+let latestRoot: IRootState | null = null
+
+const scheduler = createBrowserScheduler()
+const drain = <T>(source: IStream<T>, onValue: (value: T) => void): void => {
+  source.run(
+    {
+      event: (_t, value) => onValue(value),
+      error: (_t, err) => wcLog('error', 'wallet stream error', err),
+      end: () => {}
     },
-    subscribe,
-    stream: fromCallback(cb => {
-      cb(current)
-      return subscribe(cb)
-    })
+    scheduler
+  )
+}
+
+export function activeAccount(): Address | null {
+  return latest.wallet !== null && latestRoot !== null && !isAddressEqual(latestRoot.account, zeroAddress) ? latestRoot.account : null
+}
+
+export async function signWalletLinkSession(): Promise<Address> {
+  const known = activeAccount()
+  if (known !== null) return known
+  const wallet = latest.wallet
+  if (wallet === null) throw new Error('Connect your wallet before signing a session')
+  if (latest.bodyKeys === null) throw new Error('Wallet keys are not ready yet; reconnect your wallet and retry')
+  const root = latestRoot
+  if (root === null) {
+    throw new Error('Your account state could not be read, so the session cannot be derived; check your connection and retry')
   }
+  const signer = await latest.bodyKeys.derive(wallet)
+  latestRoot = { ...root, account: signer.account }
+  if (slot.client) broadcastActiveAccount(signer.account)
+  return signer.account
 }
 
-// The connected wallet the linked dApps operate through. The WC engine reads it on every
-// session_request; the UI is the only writer (via setLinkWallet).
-const linkWallet = cell<IConnectedWallet | null>(null)
-export const setLinkWallet = linkWallet.set
-export const peekLinkWallet = linkWallet.get
-export const onLinkWalletChange = linkWallet.subscribe
-
-// A pending proposal (replayed at boot) waits here for the wallet + session to come online, so a
-// dApp deep-link that lands before the app has restored its wallet still gets approved.
-export function waitForLinkWallet(timeoutMs = 3000): Promise<IConnectedWallet | null> {
-  if (linkWallet.get()?.session) return Promise.resolve(linkWallet.get())
-  return new Promise(resolve => {
-    const unsubscribe = linkWallet.subscribe(wallet => {
-      if (!wallet?.session) return
-      unsubscribe()
-      clearTimeout(timer)
-      resolve(wallet)
-    })
-    const timer = setTimeout(() => {
-      unsubscribe()
-      resolve(linkWallet.get())
-    }, timeoutMs)
-  })
+export type IWalletLinkSession = {
+  topic: string
+  name: string
+  url: string
+  icon?: string
+  account?: Address
+  signRequests: number
+  repeatedSigns: number
+  probe: ISignProbe
+  reachable: boolean | null
 }
 
-// Which of the connected wallet's funds is active: every fund shares the same master (the puppet
-// account), so {baseToken, name} fully identifies it. The popover selects it, the engine operates
-// it, and every linked dApp follows it.
-export type IActiveFund = { baseToken: Hex; name: Hex }
+const PING_TIMEOUT_MS = 8_000
+const reachability = new Map<string, boolean>()
 
-// Persisted PER MASTER (puppet account) so a refresh restores the wallet's last-selected fund
-// instead of resetting to the first, and each wallet keeps its own active fund.
-// localStorage shape: { [masterAddress]: { baseToken, name } }.
-const ACTIVE_FUND_KEY = 'puppet.activeFundByMaster'
-type IActiveFundByMaster = Record<string, IActiveFund>
+const sessions = subject<IWalletLinkSession[]>()
+export const walletLinkSessions: IStream<IWalletLinkSession[]> = op(sessions.stream, state([]))
 
-const activeFundByMaster: IActiveFundByMaster = (() => {
+export type IWalletLinkLogLevel = 'info' | 'warn' | 'error'
+export type IWalletLinkLogEntry = { id: number; time: number; level: IWalletLinkLogLevel; text: string }
+
+const LOG_LIMIT = 60
+const logEntries: IWalletLinkLogEntry[] = []
+const logSubject = subject<IWalletLinkLogEntry[]>()
+export const walletLinkLog: IStream<IWalletLinkLogEntry[]> = op(logSubject.stream, state([]))
+let logSeq = 0
+
+const logPart = (part: unknown): string => {
+  if (typeof part === 'string') return part
+  if (part instanceof Error) return part.message
+  if (typeof part === 'bigint') return part.toString()
   try {
-    const raw = localStorage.getItem(ACTIVE_FUND_KEY)
-    return raw ? (JSON.parse(raw) as IActiveFundByMaster) : {}
+    return JSON.stringify(part, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)) ?? String(part)
   } catch {
-    return {}
+    return String(part)
   }
-})()
-
-const activeFundBump = cell(0)
-
-export function setActiveFund(master: Address, fund: IActiveFund | null): void {
-  const key = master.toLowerCase()
-  const current = activeFundByMaster[key] ?? null
-  if (current?.baseToken === fund?.baseToken && current?.name === fund?.name) return
-  if (fund) activeFundByMaster[key] = fund
-  else delete activeFundByMaster[key]
-  try {
-    localStorage.setItem(ACTIVE_FUND_KEY, JSON.stringify(activeFundByMaster))
-  } catch {}
-  activeFundBump.set(activeFundBump.get() + 1)
 }
 
-export function peekActiveFund(master: Address): IActiveFund | null {
-  return activeFundByMaster[master.toLowerCase()] ?? null
+function wcLog(level: IWalletLinkLogLevel, ...parts: unknown[]): void {
+  console[level]('[wc]', ...parts)
+  logSeq += 1
+  logEntries.unshift({ id: logSeq, time: Date.now(), level, text: parts.map(logPart).join(' ') })
+  if (logEntries.length > LOG_LIMIT) logEntries.length = LOG_LIMIT
+  logSubject.push([...logEntries])
 }
 
-export const onActiveFundChange = (cb: () => void): (() => void) => activeFundBump.subscribe(() => cb())
+const blocked = subject<number>()
+export const blockedRequest: IStream<number> = blocked.stream
+let blockedCount = 0
+const notifyBlockedRequest = (): void => blocked.push((blockedCount += 1))
 
-export const sameFund = (a: IActiveFund | null, b: IActiveFund): boolean =>
-  !!a && a.baseToken === b.baseToken && a.name === b.name
+export type IPendingSign = { id: number; topic: string; name: string; method: string; payload: string }
 
-// The active fund resolution shared by the UI: an explicit in-session selection wins (while it's
-// still in the list), else the per-master remembered fund (survives refresh), else the first fund.
-// A wallet with no funds resolves to null, so no account is ever exposed to a linked dApp.
-export function resolveActiveFund(
-  master: Address | null,
-  funds: IActiveFund[],
-  selection: IActiveFund | null
-): IActiveFund | null {
-  const listed = (f: IActiveFund | null): f is IActiveFund => !!f && funds.some(x => sameFund(f, x))
-  const remembered = master ? peekActiveFund(master) : null
-  if (listed(selection)) return selection
-  if (listed(remembered)) return remembered
-  return funds[0] ? { baseToken: funds[0].baseToken, name: funds[0].name } : null
-}
-
-// The master (puppet account) and the resolved fund address for a wallet. Both the UI and the WC
-// engine derive them the same way, so a linked dApp and the popover always agree on the account.
-export function masterOf(wallet: IConnectedWallet | null): Address | null {
-  return wallet?.session ? predictPuppetAccount({ user: wallet.session.user, signer: wallet.session.signer }) : null
-}
-
-export function fundAddress(wallet: IConnectedWallet | null): Address | null {
-  const master = masterOf(wallet)
-  if (!master) return null
-  const active = peekActiveFund(master)
-  return active ? predictFundAccount({ master, baseToken: active.baseToken, name: active.name }) : null
-}
-
-export type IWalletLinkSession = { topic: string; name: string; url: string; icon?: string; account?: Address }
-
-const sessions = cell<IWalletLinkSession[]>([])
-export const walletLinkSessions = sessions.stream
-export const walletLinkConnected: IStream<boolean> = op(
-  walletLinkSessions,
-  map(s => s.length > 0)
-)
-
-// A blocked request (no fund selected) nudges the popover open. Deliberately non-replaying: a fresh
-// subscriber must not re-open the popover for a stale block.
-const blocked = cell(0)
-export const notifyBlockedRequest = (): void => blocked.set(blocked.get() + 1)
-export const blockedRequest: IStream<number> = fromCallback(cb => blocked.subscribe(cb))
-
-export type IPendingSign = { id: number; topic: string; name: string; method: string }
-
-const pending = cell<IPendingSign | null>(null)
-export const pendingSign = pending.stream
+const pending = subject<IPendingSign | null>()
+export const pendingSign: IStream<IPendingSign | null> = op(pending.stream, state(null))
 const signResolvers = new Map<number, (approved: boolean) => void>()
 let signSeq = 0
+let pendingRequest: IPendingSign | null = null
 
-// A dApp signature request (e.g. a Hyperliquid login) waits here for the user's explicit decision in
-// the popover, rather than signing automatically. A newer request supersedes (declines) an older one.
-export function requestSignApproval(req: { topic: string; name: string; method: string }): Promise<boolean> {
+export type ISignAlertPermission = NotificationPermission | 'unsupported' | 'insecure'
+
+function readAlertPermission(): ISignAlertPermission {
+  if (typeof Notification === 'undefined') return 'unsupported'
+  if (typeof window !== 'undefined' && !window.isSecureContext) return 'insecure'
+  return Notification.permission
+}
+
+const alertPermission = subject<ISignAlertPermission>()
+export const signAlertPermission: IStream<ISignAlertPermission> = op(alertPermission.stream, state(readAlertPermission()))
+
+if (typeof navigator !== 'undefined' && navigator.permissions !== undefined) {
+  void navigator.permissions.query({ name: 'notifications' as PermissionName }).then(
+    status => {
+      const publish = (): void => {
+        if (readAlertPermission() === 'insecure') return
+        alertPermission.push(status.state === 'prompt' ? 'default' : status.state)
+      }
+      publish()
+      status.addEventListener('change', publish)
+    },
+    () => {}
+  )
+}
+
+export function enableSignAlerts(): void {
+  const current = readAlertPermission()
+  if (current === 'unsupported' || current === 'insecure') return
+  if (current !== 'default') {
+    alertPermission.push(current)
+    return
+  }
+  void Notification.requestPermission().then(granted => alertPermission.push(granted))
+}
+
+function surfacePendingSign(request: IPendingSign): void {
+  if (typeof document === 'undefined') return
+  window.focus()
+  void navigator.setAppBadge?.(1)
+  if (document.hasFocus()) return
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
+  void navigator.serviceWorker.ready.then(registration =>
+    registration.showNotification(`Approve in Puppet`, {
+      body: `${request.name} requested ${request.method}`,
+      tag: 'puppet-pending-sign',
+      requireInteraction: true
+    })
+  )
+}
+
+function requestSignApproval(req: { topic: string; name: string; method: string; payload: string }, expiresAt: number | undefined): Promise<boolean> {
   signSeq += 1
-  const prior = pending.get()
-  if (prior) resolveSignApproval(prior.id, false)
+  if (pendingRequest) resolveSignApproval(pendingRequest.id, false)
   const request: IPendingSign = { ...req, id: signSeq }
-  pending.set(request)
+  pendingRequest = request
+  pending.push(request)
+  surfacePendingSign(request)
+  if (expiresAt !== undefined && expiresAt * 1000 > Date.now()) {
+    window.setTimeout(() => {
+      if (!signResolvers.has(request.id)) return
+      wcLog('warn', 'sign request expired unanswered', request.method)
+      resolveSignApproval(request.id, false)
+    }, expiresAt * 1000 - Date.now())
+  }
   return new Promise<boolean>(resolve => signResolvers.set(request.id, resolve))
 }
 
@@ -189,7 +186,18 @@ export function resolveSignApproval(id: number, approved: boolean): void {
     signResolvers.delete(id)
     resolve(approved)
   }
-  if (pending.get()?.id === id) pending.set(null)
+  if (pendingRequest?.id === id) {
+    pendingRequest = null
+    pending.push(null)
+  }
+  if (typeof navigator !== 'undefined') {
+    void navigator.clearAppBadge?.()
+    void navigator.serviceWorker.ready
+      .then(registration => registration.getNotifications({ tag: 'puppet-pending-sign' }))
+      .then(list => {
+        for (const notification of list) notification.close()
+      })
+  }
 }
 
 const SUPPORTED_METHODS = [
@@ -204,62 +212,64 @@ const SUPPORTED_METHODS = [
   'wallet_addEthereumChain'
 ]
 
-function passthroughDeps(wallet: IConnectedWallet): IPassthroughDeps {
-  const master = masterOf(wallet)
-  if (!master || !wallet.session) throw new Error('Enable a signing session before connecting a dApp')
-  const active = peekActiveFund(master)
-  if (!active) throw new Error('Select a fund before trading from a linked dApp')
-  // dApp transactions execute strictly through the user's selected active fund; the SDK derives
-  // its {master, baseToken, name} CREATE2 address from this session. No default fund.
-  // Every read serves from the app context: registry cache, SW-cached balance views (refresh so the
-  // amountIn math never signs a stale-high balance), gas/head caches.
-  return {
-    user: wallet.address,
-    signer: wallet.session.account,
-    baseToken: active.baseToken,
-    name: active.name,
-    compact,
-    getTokenRegistry: context.getTokenRegistry,
-    getAccountBalances: (chainId, account, tokens) =>
-      Promise.all(
-        tokens.map(async token => {
-          const [balance, signed] = await Promise.all([
-            readTokenBalance(account, chainId as ChainId, token, true),
-            readSignedBalance(account, chainId as ChainId, token, true)
-          ])
-          return { token, balance, signed }
-        })
-      ),
-    // Relaxed max-ages over the context's TTL caches: the anchor only needs to sit inside the relay's
-    // ±maxBlockDelay window and the fee quote inside its tolerance, so repeat requests pay no RPC.
-    getBlockNumber: chainId => context.getBlockNumber(chainId, 3_000),
-    getGasPrice: chainId => context.getChainGasPrice(chainId, 10_000),
-    getTokenPerNativeToken: context.getTokenPerNativeToken
-  }
-}
+const SIGN_METHODS = ['eth_sendTransaction', 'personal_sign', 'eth_signTypedData', 'eth_signTypedData_v4']
+const EXECUTION_METHODS = ['eth_sign', ...SIGN_METHODS]
 
-const SIGN_METHODS = ['personal_sign', 'eth_signTypedData', 'eth_signTypedData_v4']
-const EXECUTION_METHODS = ['eth_sendTransaction', 'eth_sign', ...SIGN_METHODS]
+const PUPPET_DOMAIN_NAMES: ReadonlySet<string> = new Set([ACCOUNT_DOMAIN.name, CHAINLESS_DOMAIN.name])
+const INTENT_PRIMARY_TYPES: ReadonlySet<string> = new Set(Object.values(INTENTS).map(spec => spec.primaryType))
 
 type ITypedData = {
-  domain: Record<string, unknown>
-  types: Record<string, { name: string; type: string }[]>
+  domain: TypedDataDomain
+  types: TypedData
   primaryType: string
   message: Record<string, unknown>
 }
 
+function assertForeignTypedData(typed: ITypedData): void {
+  const domainName = typeof typed.domain.name === 'string' ? typed.domain.name : ''
+  if (PUPPET_DOMAIN_NAMES.has(domainName) || INTENT_PRIMARY_TYPES.has(typed.primaryType)) {
+    throw new Error(
+      'This request asks your trading account to authorize a Puppet action while presenting itself as a dApp signature. Puppet will not sign it - disconnect this dApp.'
+    )
+  }
+  const verifying = typed.domain.verifyingContract
+  const own = activeAccount()
+  if (typeof verifying === 'string' && own !== null && isAddressEqual(getAddress(verifying), own)) {
+    throw new Error('This request targets your own Puppet account. Puppet will not sign it - disconnect this dApp.')
+  }
+}
+
+function describeSignRequest(method: string, params: unknown): string {
+  if (method === 'eth_sendTransaction') {
+    const [tx] = params as [{ to?: string; value?: string; data?: string }]
+    const value = tx.value && tx.value !== '0x0' ? `\nvalue ${BigInt(tx.value).toString()}` : ''
+    return `to ${tx.to ?? 'unknown'}${value}\ncalldata ${(tx.data ?? '0x').slice(0, 42)}…`
+  }
+  if (method === 'personal_sign') {
+    const [data] = params as [Hex]
+    try {
+      return new TextDecoder().decode(Uint8Array.from((data.slice(2).match(/../g) ?? []).map(b => Number.parseInt(b, 16))))
+    } catch {
+      return data
+    }
+  }
+  const [, raw] = params as [Address, string | ITypedData]
+  const typed = (typeof raw === 'string' ? JSON.parse(raw) : raw) as ITypedData
+  return `${typed.primaryType} on ${typeof typed.domain.name === 'string' ? typed.domain.name : 'unknown domain'}`
+}
+
 const DAPP_ERROR_MESSAGE: Record<string, string> = {
-  UNKNOWN_OPERATE: "Puppet doesn't recognize this as a supported trade, so your fund can't sign it.",
+  UNKNOWN_OPERATE: "Puppet doesn't recognize this as a supported trade, so your account can't sign it.",
   COLLATERAL_NOT_REGISTERED:
-    "This position's collateral isn't a token your fund supports yet. Pick a position collateralized in ETH, WETH, or USDC to withdraw from.",
-  SENDTOKENS_NOT_BASE: "This trade's collateral token isn't supported by your fund yet.",
+    "This position's collateral isn't a token your account supports yet. Pick a position collateralized in ETH, WETH, or USDC to withdraw from.",
+  SENDTOKENS_NOT_BASE: "This trade's collateral token isn't supported by your account yet.",
   FOREIGN_TARGET: 'This action calls a contract outside the supported trading venues.',
   ROUTER_FN_FORBIDDEN: "This action uses a venue operation that isn't allowed.",
   BASE_FN_FORBIDDEN: "This action uses a token operation that isn't allowed.",
   RECEIVER_NOT_ACCOUNT: 'This trade would settle to another account, so it was blocked.',
   CANCEL_RECEIVER_NOT_ACCOUNT: 'This order would refund to another account, so it was blocked.',
-  SENDTOKENS_BAD_RECEIVER: 'This trade would move funds outside your fund, so it was blocked.',
-  SENDWNT_BAD_RECEIVER: 'This trade would move ETH outside your fund, so it was blocked.',
+  SENDTOKENS_BAD_RECEIVER: 'This trade would move funds outside your account, so it was blocked.',
+  SENDWNT_BAD_RECEIVER: 'This trade would move ETH outside your account, so it was blocked.',
   NATIVE_VALUE_MISMATCH: "This trade's ETH amount doesn't match the order, so it was blocked.",
   NATIVE_VALUE_FORBIDDEN: 'This action attaches ETH where none is allowed, so it was blocked.',
   APPROVE_BAD_SPENDER: 'This approval targets an unexpected contract.',
@@ -269,58 +279,102 @@ const DAPP_ERROR_MESSAGE: Record<string, string> = {
   UI_FEE_FORBIDDEN: "This order's fee receiver isn't allowed.",
   SWAPPATH_TOO_LONG: 'This trade routes through too many markets.',
   SWAPPATH_UNKNOWN_MARKET: 'This trade routes through an unsupported market.',
-  UNDECODABLE_ROUTER_CALL: "Puppet couldn't read this trade request."
+  UNDECODABLE_ROUTER_CALL: "Puppet couldn't read this trade request.",
+  SWAP_OUTPUT_NOT_REGISTERED: "The token this trade delivers isn't registered for your account on this chain. Pick a registered token to receive, such as ETH or USDC.",
+  PNL_TOKEN_NOT_REGISTERED: "This position's profit would arrive in a token your account doesn't register on this chain. Close it into a registered token instead.",
+  REFERRAL_CODE_FORBIDDEN: 'This order carries a foreign referral code; Puppet trades under its own code only.',
+  RELEASE_BAD_RECEIVER: 'This transfer would send funds to an address that is not your own deposit route, so it was blocked.',
+  RELEASE_BAD_SHAPE: 'This release must be a token transfer, not a bare ETH send, so it was blocked.',
+  CLAIM_BAD_RECEIVER: 'This claim would pay someone other than your account, so it was blocked.',
+  VENUE_DEPOSIT_BAD_TOKEN: 'This venue only accepts USDC deposits.',
+  VENUE_DEPOSIT_BELOW_MIN: 'This venue deposit is below the minimum the venue accepts and would be forfeited.',
+  MARK_PENDING: "The chronicle is still valuing your last action; try again in a moment.",
+  CHRONICLE_BEHIND: 'The chronicle has not caught up with your last action yet; try again in a moment.'
 }
 
 function friendlyDappError(e: unknown): string {
   if (e instanceof CompactError) {
-    return DAPP_ERROR_MESSAGE[e.code] ?? `Your fund couldn't safely sign this action (${e.code}).`
+    return DAPP_ERROR_MESSAGE[e.code] ?? e.message
   }
   return formatThrownError(e)
 }
 
-// Signing is gated by an explicit user-approval prompt in registerHandlers (the fund validates any
-// session-signed digest via EIP-1271, so the user must confirm); by the time we sign here it's approved.
-export async function handleDappRequest(
+async function verifyOwnSignature(topic: string, digest: Hex, signature: Hex): Promise<void> {
+  const account = activeAccount()
+  if (!account) return
+  recordProbe(topic, await probeSignature(account, digest, signature))
+  if (slot?.client) syncSessions(slot.client)
+}
+
+async function bodySignerForDapp() {
+  const account = await signWalletLinkSession()
+  const wallet = latest.wallet
+  const root = latestRoot
+  if (wallet === null || root === null || latest.bodyKeys === null) {
+    throw new Error('Connect your wallet and create your trading account before connecting a dApp')
+  }
+  const signer = (await latest.bodyKeys.signerOf(wallet.address)) ?? (await latest.bodyKeys.derive(wallet))
+  if (!isAddressEqual(signer.account, account)) {
+    throw new Error(`your wallet derives ${signer.account}, not ${account}; only the wallet that derived it can reproduce its key`)
+  }
+  return signer
+}
+
+function assertRequestedSigner(requested: Address | undefined): void {
+  const active = activeAccount()
+  if (requested === undefined || active === null) return
+  if (!isAddressEqual(requested, active)) {
+    throw new Error(`this request names ${requested} but this wallet's account is ${active}; reconnect the dApp to the account this wallet derives`)
+  }
+}
+
+async function handleDappRequest(
   wallet: IConnectedWallet | null,
   method: string,
   params: unknown,
-  chainId: number
+  chainId: number,
+  topic?: string
 ): Promise<unknown> {
   if (method === 'eth_sendTransaction') {
-    if (!wallet?.session) throw new Error('Enable a signing session before connecting a dApp')
-    const tx = (params as IPassthroughTransaction[])[0]
-    return sendOperatePassthrough(passthroughDeps(wallet), tx)
+    if (!wallet) throw new Error('Connect your wallet before connecting a dApp')
+    if (passthrough === null) throw new Error('Trading through a linked dApp is not wired in this build.')
+    const [tx] = params as [IDappTransaction]
+    assertRequestedSigner(tx.from)
+    const root = await latest.root
+    if (root === null) throw new Error('Your account state is not loaded yet; open the app and try again.')
+    return passthrough(wallet, root, latest.bodyKeys, chainId, tx)
   }
   if (method === 'eth_accounts' || method === 'eth_requestAccounts') {
-    const active = wallet ? fundAddress(wallet) : null
+    const active = activeAccount()
     return active ? [active] : []
   }
   if (method === 'personal_sign') {
-    if (!wallet?.session) throw new Error('Enable a signing session before connecting a dApp')
-    const [data] = params as [Hex, Address]
-    return wallet.session.account.signMessage({ message: { raw: data } })
+    const [data, requested] = params as [Hex, Address]
+    assertRequestedSigner(requested)
+    const signer = await bodySignerForDapp()
+    assertDappSignable(screenDappMessage(signer.account, data))
+    const signature = await signer.sign({ kind: 'message', message: data })
+    if (topic) void verifyOwnSignature(topic, hashMessage({ raw: data }), signature)
+    return signature
   }
   if (method === 'eth_signTypedData' || method === 'eth_signTypedData_v4') {
-    if (!wallet?.session) throw new Error('Enable a signing session before connecting a dApp')
-    const [, raw] = params as [Address, string | ITypedData]
+    const [requested, raw] = params as [Address, string | ITypedData]
+    assertRequestedSigner(requested)
+    const signer = await bodySignerForDapp()
     const typed = (typeof raw === 'string' ? JSON.parse(raw) : raw) as ITypedData
-    const types = Object.fromEntries(Object.entries(typed.types).filter(([key]) => key !== 'EIP712Domain'))
-    return wallet.session.account.signTypedData({
-      domain: typed.domain,
-      types,
-      primaryType: typed.primaryType,
-      message: typed.message
-    } as Parameters<typeof wallet.session.account.signTypedData>[0])
+    assertForeignTypedData(typed)
+    const { EIP712Domain: _domainType, ...types } = typed.types
+    const typedData: TypedDataDefinition = { domain: typed.domain, types, primaryType: typed.primaryType, message: typed.message }
+    assertDappSignable(screenDappTypedData(signer.account, typedData as unknown as IDappTypedData))
+    const signature = await signer.sign({ kind: 'typedData', typedData })
+    if (topic) void verifyOwnSignature(topic, hashTypedData(typedData), signature)
+    return signature
   }
   if (method === 'eth_sign') {
     throw new Error('eth_sign is not supported. The dApp should request personal_sign.')
   }
   if (method === 'eth_chainId') return numberToHex(chainId)
   if (method === 'wallet_switchEthereumChain' || method === 'wallet_addEthereumChain') return null
-  // Reads answer on the chain the dApp scoped its request to. Sessions are approved on EVERY requested
-  // eip155 chain (multichain CREATE2 fund), so reads for chains we have no client for DO arrive; those
-  // get an error response, never a wrong-chain answer from a fallback client.
   const readClient = publicClientMap[chainId]
   if (!readClient) throw new Error(`Reads on chain ${chainId} are not supported.`)
   return (readClient.request as (a: { method: string; params: unknown }) => Promise<unknown>)({ method, params })
@@ -334,8 +388,6 @@ const WC_SLOT = Symbol.for('puppet.walletconnect.signclient')
 const registry = globalThis as unknown as Record<symbol, IWcSlot | undefined>
 const slot: IWcSlot = registry[WC_SLOT] ?? (registry[WC_SLOT] = { client: null, initPromise: null })
 
-// True if ANY session store under the prefix is non-empty: keyed on every store version, so a WC
-// version bump that leaves an empty new-version store beside a populated old one cannot hide a link.
 function hasPersistedWalletLink(): boolean {
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
@@ -346,13 +398,53 @@ function hasPersistedWalletLink(): boolean {
   return false
 }
 
-// One-time boot: the engine (and its relay socket) only starts when there is a persisted link to
-// restore or a dApp deep-link in the URL; everyone else just carries the parsed module.
+const walletWaiters = new Set<(wallet: IConnectedWallet) => void>()
+
+function waitForWallet(timeoutMs = 3000): Promise<IConnectedWallet | null> {
+  if (latest.wallet) return Promise.resolve(latest.wallet)
+  return new Promise(resolve => {
+    const settle = (wallet: IConnectedWallet): void => {
+      walletWaiters.delete(settle)
+      clearTimeout(timer)
+      resolve(wallet)
+    }
+    walletWaiters.add(settle)
+    const timer = setTimeout(() => {
+      walletWaiters.delete(settle)
+      resolve(latest.wallet)
+    }, timeoutMs)
+  })
+}
+
+export type IDappTransaction = { from?: Address; to?: string; value?: string; data?: string; gas?: string }
+export type IPassthrough = (
+  wallet: IConnectedWallet,
+  root: IRootState,
+  bodyKeys: IBodyKeys | null,
+  chainId: number,
+  tx: IDappTransaction
+) => Promise<Hex>
+let passthrough: IPassthrough | null = null
+
 let booted = false
-export function initWalletLink(): void {
+export function initWalletLink(pair: IStream<IWalletPair>, sendTransaction: IPassthrough): void {
   if (booted) return
   booted = true
-  if (hasPersistedWalletLink()) void startWalletConnect().catch(e => console.warn('[wc] restore failed', e))
+  passthrough = sendTransaction
+  drain(pair, p => {
+    pairSubject.push(p)
+    latest = p
+    latestRoot = null
+    if (p.wallet) for (const settle of [...walletWaiters]) settle(p.wallet)
+    p.root
+      .then(root => {
+        if (latest !== p) return
+        latestRoot = root
+        if (slot.client) broadcastActiveAccount(activeAccount())
+      })
+      .catch((err: unknown) => wcLog('error', 'account state unavailable for linked dApps', err))
+  })
+  if (hasPersistedWalletLink()) void startWalletConnect().catch(e => wcLog('warn', 'restore failed', e))
   if (wcUriFromLocation()) void pairFromUrl()
 }
 
@@ -366,18 +458,19 @@ export async function startWalletConnect(): Promise<ISignClient> {
       storage: wcStorage,
       metadata: { ...__WC_METADATA__, url: window.location.origin }
     })
-    console.info('[wc] SignClient init done, restored sessions:', client.session.getAll().length)
+    wcLog('info', 'SignClient init done, restored sessions:', client.session.getAll().length)
     syncSessions(client)
-    client.core.relayer.once('relayer_connect', () => console.info('[wc] relay connected'))
+    client.core.relayer.once('relayer_connect', () => wcLog('info', 'relay connected'))
     registerHandlers(client)
+    void probeSessions(client)
     slot.client = client
-    const pushFund = (w: IConnectedWallet | null) => broadcastActiveFund(w ? fundAddress(w) : null)
-    onLinkWalletChange(pushFund)
-    onActiveFundChange(() => pushFund(peekLinkWallet()))
-    pushFund(peekLinkWallet())
+    void latest.root.then(
+      () => broadcastActiveAccount(activeAccount()),
+      () => {}
+    )
     const pendingProposals = client.proposal.getAll().filter(p => p.expiryTimestamp * 1000 > Date.now())
     if (pendingProposals.length) {
-      console.info('[wc] replaying pending proposals:', pendingProposals.length)
+      wcLog('info', 'replaying pending proposals:', pendingProposals.length)
       for (const proposal of pendingProposals) void approveProposal(client, proposal)
     }
     return client
@@ -391,15 +484,12 @@ async function approveProposal(client: ISignClient, proposal: IProposalStruct): 
   if (approving.has(proposal.id)) return
   approving.add(proposal.id)
   try {
-    const wallet = await waitForLinkWallet()
-    if (!wallet?.session) {
-      console.warn('[wc] rejecting proposal: no connected Puppet account with an enabled session')
+    const wallet = await waitForWallet()
+    if (!wallet) {
+      wcLog('warn', 'rejecting proposal: no connected wallet')
       await client.reject({ id: proposal.id, reason: getSdkError('USER_REJECTED') })
       return
     }
-    // The fund is the same multichain (CREATE2) address on every EVM chain, so offer it on every
-    // eip155 chain the dApp asks for (forcing the hub makes a non-Arbitrum dApp's approve come back
-    // empty).
     const wanted = new Set<string>()
     const collectChains = (nsMap: Record<string, { chains?: string[] }>): void => {
       for (const [key, ns] of Object.entries(nsMap)) {
@@ -410,13 +500,31 @@ async function approveProposal(client: ISignClient, proposal: IProposalStruct): 
     collectChains(proposal.requiredNamespaces)
     collectChains(proposal.optionalNamespaces)
     const chains = wanted.size > 0 ? [...wanted] : [`eip155:${HUB_CHAIN_ID}`]
-    const fund = fundAddress(wallet)
-    if (!fund) {
-      console.warn('[wc] rejecting proposal: no active fund selected')
+    let account: Address | null
+    try {
+      account = await signWalletLinkSession()
+    } catch (err) {
+      wcLog('warn', 'the session signature was refused', err)
+      account = null
+    }
+    if (!account) {
+      wcLog('warn', 'rejecting proposal: no trading account; sign the session first')
       notifyBlockedRequest()
       await client.reject({ id: proposal.id, reason: getSdkError('USER_REJECTED') })
       return
     }
+    const meta = proposal.proposer?.metadata
+    const approvedByUser = await requestSignApproval({
+      topic: '',
+      name: meta?.name || 'A dApp',
+      method: 'wc_sessionProposal',
+      payload: [meta?.url ?? 'unknown origin', `chains ${chains.join(', ')}`, `account ${account}`].join('\n')
+    }, proposal.expiryTimestamp)
+    if (!approvedByUser) {
+      await client.reject({ id: proposal.id, reason: getSdkError('USER_REJECTED') })
+      return
+    }
+
     let namespaces: ReturnType<typeof buildApprovedNamespaces> | null = null
     try {
       namespaces = buildApprovedNamespaces({
@@ -426,30 +534,26 @@ async function approveProposal(client: ISignClient, proposal: IProposalStruct): 
             chains,
             methods: SUPPORTED_METHODS,
             events: ['accountsChanged', 'chainChanged'],
-            accounts: chains.map(chain => `${chain}:${fund}`)
+            accounts: chains.map(chain => `${chain}:${account}`)
           }
         }
       })
     } catch (e) {
-      console.warn('[wc] proposal not satisfiable', e)
+      wcLog('warn', 'proposal not satisfiable', e)
     }
     if (!namespaces?.eip155?.accounts?.length) {
-      console.warn('[wc] no approvable namespaces for proposal', {
+      wcLog('warn', 'no approvable namespaces for proposal', {
         required: proposal.requiredNamespaces,
         optional: proposal.optionalNamespaces
       })
       await client.reject({ id: proposal.id, reason: getSdkError('UNSUPPORTED_CHAINS') })
       return
     }
-    // Keep every existing link alive: a connection costs a copy-paste to establish, so one fund holds
-    // many dApps and several funds (one per wallet) coexist. The popover lenses to the active fund and
-    // session_request enforces the same match, so a link opened under another fund stays dormant, never
-    // disconnected.
     await client.approve({ id: proposal.id, namespaces })
     syncSessions(client)
-    console.info('[wc] session approved as', fund)
+    wcLog('info', 'session approved as', account)
   } catch (e) {
-    console.error('[wc] session_proposal failed', e)
+    wcLog('error', 'session_proposal failed', e)
     await client.reject({ id: proposal.id, reason: getSdkError('USER_REJECTED') }).catch(() => {})
   } finally {
     approving.delete(proposal.id)
@@ -458,7 +562,7 @@ async function approveProposal(client: ISignClient, proposal: IProposalStruct): 
 
 function registerHandlers(client: ISignClient): void {
   client.on('session_proposal', ({ params }) => {
-    console.info('[wc] session_proposal', {
+    wcLog('info', 'session_proposal', {
       required: params.requiredNamespaces,
       optional: params.optionalNamespaces
     })
@@ -466,43 +570,81 @@ function registerHandlers(client: ISignClient): void {
   })
   client.on('session_request', async ({ topic, id, params }) => {
     const method = params.request.method
-    console.info('[wc] session_request', method)
+    wcLog('info', 'session_request', method)
+    if (reachability.get(topic) !== true) {
+      reachability.set(topic, true)
+      syncSessions(client)
+    }
     try {
-      const wallet = peekLinkWallet()
+      const wallet = latest.wallet
       if (EXECUTION_METHODS.includes(method)) {
-        // A linked dApp operates the currently-selected fund (the user picks it in the WC popover),
-        // so any live session follows the active fund rather than the one it first paired to.
-        const fund = wallet ? fundAddress(wallet) : null
-        if (!fund) {
+        if (latest.wallet === null) throw new Error('Connect your wallet in Puppet before acting from a linked dApp.')
+        const root = await latest.root
+        if (root === null || isAddressEqual(root.account, zeroAddress)) {
           notifyBlockedRequest()
-          throw new Error('Select a fund to trade from a linked dApp.')
+          throw new Error('Create your trading account to act from a linked dApp.')
         }
       }
       if (SIGN_METHODS.includes(method)) {
         const name = client.session.get(topic).peer.metadata.name || 'This dApp'
-        const approved = await requestSignApproval({ topic, name, method })
-        if (!approved) throw new Error('Signature request declined')
+        let payload: string
+        try {
+          payload = describeSignRequest(method, params.request.params)
+        } catch {
+          throw new Error('This signature request is malformed and will not be signed.')
+        }
+        const approved = await requestSignApproval({ topic, name, method, payload }, params.request.expiryTimestamp)
+        if (!approved) throw new Error('Request declined')
+        if (method !== 'eth_sendTransaction') {
+          recordSigned(topic, payload)
+          syncSessions(client)
+        }
       }
-      // Strict chain-context parse: a malformed/non-eip155 scope must error back to the dApp, never
-      // silently answer with hub-chain data (the wrong-chain-answer bug class).
       const requestChainId = Number(params.chainId.split(':')[1])
       if (!Number.isInteger(requestChainId) || requestChainId <= 0) {
         throw new Error(`Unsupported request chain scope "${params.chainId}".`)
       }
-      const result = await handleDappRequest(wallet, method, params.request.params, requestChainId)
+      const result = await handleDappRequest(wallet, method, params.request.params, requestChainId, topic)
       await client.respond({ topic, response: { id, jsonrpc: '2.0', result } })
     } catch (e) {
-      console.error('[wc] session_request failed', method, e)
-      await client.respond({
-        topic,
-        response: { id, jsonrpc: '2.0', error: { code: 5000, message: friendlyDappError(e) } }
-      })
+      wcLog('error', 'session_request failed', method, e)
+      await client
+        .respond({
+          topic,
+          response: { id, jsonrpc: '2.0', error: { code: 5000, message: friendlyDappError(e) } }
+        })
+        .catch(err => wcLog('warn', 'the dApp could not be answered; its request had already expired', err))
     }
   })
   client.on('session_delete', () => {
-    console.info('[wc] session_delete')
+    wcLog('info', 'session_delete')
     syncSessions(client)
   })
+  client.on('session_expire', () => {
+    wcLog('info', 'session_expire')
+    syncSessions(client)
+  })
+  client.on('session_ping', ({ topic }) => {
+    reachability.set(topic, true)
+    syncSessions(client)
+  })
+}
+
+async function probeSessions(client: ISignClient): Promise<void> {
+  await Promise.all(
+    client.session.getAll().map(async session => {
+      const alive = await Promise.race([
+        client.ping({ topic: session.topic }).then(
+          () => true,
+          () => false
+        ),
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), PING_TIMEOUT_MS))
+      ])
+      reachability.set(session.topic, alive)
+      wcLog('info', `${session.peer.metadata.name || session.topic.slice(0, 8)} ${alive ? 'answered the ping' : 'did not answer the ping'}`)
+    })
+  )
+  syncSessions(client)
 }
 
 type IWcRecord = {
@@ -538,8 +680,6 @@ const readWc = (key: string): unknown => {
   }
 }
 
-// WC state lives in plain localStorage we own (instead of the SDK's default IndexedDB), so the
-// persisted-link probe and the boot prune below are trivial synchronous reads.
 const wcStorage = {
   getKeys: async (): Promise<string[]> => wcKeys(),
   getEntries: async <T,>(): Promise<[string, T][]> => wcKeys().map(key => [key, readWc(key) as T]),
@@ -548,10 +688,6 @@ const wcStorage = {
   removeItem: async (key: string): Promise<void> => localStorage.removeItem(wcKey(key))
 }
 
-// On connect the subscriber re-subscribes every persisted topic and batch-fetches its relay mailbox, while sign-client's
-// own init cleanup deletes expired sessions; that backlog then fails validation ("Record was recently deleted") and is
-// logged at error level per message. Pruning AFTER init loses that race by construction, so dead records are dropped
-// BEFORE SignClient.init: a topic that is never restored is never re-subscribed, never mailbox-fetched, never logged.
 function pruneDeadWcRecords(): void {
   try {
     indexedDB.deleteDatabase('WALLET_CONNECT_V2_INDEXED_DB')
@@ -611,106 +747,137 @@ function pruneDeadWcRecords(): void {
       })
     )
     rewrite('messages', keepMap(topic => live.has(topic)))
-    // Cleared WHOLESALE, live topics included: entries here are inbound messages whose processing did not
-    // complete last load. The engine replays them EVERY boot, and the ones that can never succeed (acks to
-    // requests whose awaiter died with the page) error-log and stay un-acked forever, so the pile only grows.
-    // Dropping a request a dApp sent moments before reload is fine: it retries, and a wallet must not replay
-    // stale execution requests anyway.
     rewrite('messages_withoutClientAck', keepMap(() => false))
     rewrite('keychain', keepMap(key => !deadKeychainKeys.has(key)))
   } catch (e) {
-    console.warn('[wc] storage prune skipped', e)
+    wcLog('warn', 'storage prune skipped', e)
   }
 }
 
+
+export type ISignProbe = 'valid' | 'rejected' | 'unknown'
+
+async function probeSignature(account: Address, digest: Hex, signature: Hex): Promise<ISignProbe> {
+  return isAddressEqual(await recoverAddress({ hash: digest, signature }), account) ? 'valid' : 'rejected'
+}
+
+const signLog = new Map<string, { last: string; count: number; repeats: number; probe: ISignProbe }>()
+
+function recordSigned(topic: string, payload: string): void {
+  const prev = signLog.get(topic)
+  signLog.set(topic, {
+    last: payload,
+    count: (prev?.count ?? 0) + 1,
+    repeats: prev && prev.last === payload ? prev.repeats + 1 : (prev?.repeats ?? 0),
+    probe: prev?.probe ?? 'unknown'
+  })
+}
+
+function recordProbe(topic: string, probe: ISignProbe): void {
+  const prev = signLog.get(topic)
+  if (!prev) return
+  signLog.set(topic, { ...prev, probe })
+}
+
 function syncSessions(client: ISignClient): void {
-  sessions.set(
+  sessions.push(
     client.session.getAll().map(session => ({
       topic: session.topic,
       name: session.peer.metadata.name,
       url: session.peer.metadata.url,
       icon: session.peer.metadata.icons?.[0],
-      account: session.namespaces.eip155?.accounts?.[0]?.split(':')[2] as Address | undefined
+      account: session.namespaces.eip155?.accounts?.[0]?.split(':')[2] as Address | undefined,
+      signRequests: signLog.get(session.topic)?.count ?? 0,
+      repeatedSigns: signLog.get(session.topic)?.repeats ?? 0,
+      probe: signLog.get(session.topic)?.probe ?? 'unknown',
+      reachable: reachability.get(session.topic) ?? null
     }))
   )
 }
 
-// Re-point every live session to the active fund WITHOUT tearing it down so it follows the fund the
-// user selects in the WC popover. WalletConnect rejects an accountsChanged for an account outside the
-// approved set, so we session_update the namespaces to the active fund FIRST, then emit
-// accountsChanged. A dApp that ignores live session updates / treats empty accounts as a hard
-// disconnect is the documented exception (it needs a re-pair).
-async function syncSessionAccounts(activeFund: Address | null): Promise<void> {
-  if (!slot.client) return
-  const data = activeFund ? [activeFund] : []
-  for (const session of slot.client.session.getAll()) {
+const heldChainsByTopic = new Map<string, string[]>()
+const UPDATE_ACK_WAIT_MS = 10_000
+
+async function syncSessionAccounts(account: Address | null): Promise<boolean> {
+  const client = slot.client
+  if (!client) return false
+  let synced = true
+  for (const session of client.session.getAll()) {
     const ns = session.namespaces.eip155
     if (!ns) continue
-    const chainIds = [...new Set((ns.accounts ?? []).map(a => a.split(':').slice(0, 2).join(':')))]
+    const current = ns.accounts ?? []
+    const held = [...new Set(current.map(a => a.split(':').slice(0, 2).join(':')))]
+    const chainIds = held.length > 0 ? held : (heldChainsByTopic.get(session.topic) ?? ns.chains ?? [])
     if (chainIds.length === 0) continue
-    // Skip sessions already pointing at the active fund: a redundant update/emit is not just noise, its
-    // peer ack lands AFTER the next reload as an orphan response the engine error-logs on every boot.
-    const target = chainIds.map(c => `${c}:${activeFund}`.toLowerCase())
-    const current = (ns.accounts ?? []).map(a => a.toLowerCase())
-    if (activeFund && target.length === current.length && target.every((a, i) => a === current[i])) continue
-    if (activeFund) {
-      const namespaces = { ...session.namespaces, eip155: { ...ns, accounts: chainIds.map(c => `${c}:${activeFund}`) } }
-      const updated = await slot.client
-        .update({ topic: session.topic, namespaces })
-        .then(() => true)
-        .catch(e => {
-          console.warn('[wc] session update failed', e)
-          return false
-        })
-      // If the namespace update did not land, the active fund is NOT in the dApp's approved set; emitting
-      // accountsChanged for it would be an out-of-namespace event the dApp rejects (possibly as a hard disconnect).
-      if (!updated) continue
+    const target = account === null ? [] : chainIds.map(c => `${c}:${account}`)
+    const same = target.length === current.length && target.every((a, i) => a.toLowerCase() === current[i]!.toLowerCase())
+    if (!same) {
+      if (account === null) heldChainsByTopic.set(session.topic, held)
+      const acknowledged = await client
+        .update({ topic: session.topic, namespaces: { ...session.namespaces, eip155: { ...ns, accounts: target } } })
+        .then(
+          r => r.acknowledged,
+          e => {
+            wcLog('warn', 'session update failed', e)
+            return null
+          }
+        )
+      if (acknowledged === null) {
+        synced = false
+        continue
+      }
+      await Promise.race([
+        acknowledged().catch(e => wcLog('warn', 'session update not acknowledged', e)),
+        new Promise<void>(resolve => window.setTimeout(resolve, UPDATE_ACK_WAIT_MS))
+      ])
     }
+    if (account === null) continue
     for (const chainId of chainIds) {
-      await slot.client
-        .emit({ topic: session.topic, chainId, event: { name: 'accountsChanged', data } })
-        .catch(e => console.warn('[wc] accountsChanged emit failed', e))
+      await client
+        .emit({ topic: session.topic, chainId, event: { name: 'accountsChanged', data: [account] } })
+        .catch(e => wcLog('warn', 'accountsChanged emit failed', e))
     }
   }
+  syncSessions(client)
+  return synced
 }
 
-let lastBroadcastFund: Address | null = null
-function broadcastActiveFund(fund: Address | null): void {
-  const same = fund === lastBroadcastFund || (!!fund && !!lastBroadcastFund && isAddressEqual(fund, lastBroadcastFund))
-  if (same) return
-  lastBroadcastFund = fund
-  void syncSessionAccounts(fund)
+let lastBroadcastAccount: Address | null | undefined
+function broadcastActiveAccount(account: Address | null): void {
+  if (account === null) return
+  if (lastBroadcastAccount !== undefined && lastBroadcastAccount !== null && isAddressEqual(account, lastBroadcastAccount)) return
+  void syncSessionAccounts(account).then(
+    synced => {
+      if (synced) lastBroadcastAccount = account
+    },
+    e => wcLog('warn', 'session account sync failed', e)
+  )
 }
 
 export async function pairDapp(uri: string): Promise<void> {
   if (!slot.client) throw new Error('WalletConnect not initialized')
-  console.info('[wc] pairing, awaiting proposal')
+  wcLog('info', 'pairing, awaiting proposal')
   try {
     await slot.client.pair({ uri })
   } catch (e) {
-    // A dApp modal can re-show its cached URI after we disconnected the session it settled; the stale
-    // local pairing record then hard-rejects the re-pair. Drop the record and retry once so the paste
-    // flow self-heals instead of demanding a fresh link.
     const staleTopic = /^wc:([0-9a-f]+)@/i.exec(uri)?.[1]
     if (!staleTopic || !(e instanceof Error) || !e.message.includes('Pairing already exists')) throw e
-    console.info('[wc] re-pairing over a stale pairing record, replacing it')
+    wcLog('info', 're-pairing over a stale pairing record, replacing it')
     await slot.client.core.pairing.disconnect({ topic: staleTopic }).catch(() => {})
     await slot.client.pair({ uri })
   }
 }
 
-export async function pairFromUrl(): Promise<void> {
+async function pairFromUrl(): Promise<void> {
   const uri = wcUriFromLocation()
   if (!uri) return
-  console.info('[wc] pairing from deep-link')
+  wcLog('info', 'pairing from deep-link')
   try {
     await startWalletConnect()
     await pairDapp(uri)
-    // Strip the URI from the address bar only AFTER a successful pair, so a transient relay/init failure leaves it in
-    // place for a reload-retry. Caught here so the fire-and-forget caller never sees an unhandled rejection.
     window.history.replaceState(null, '', `${location.pathname}${location.hash}`)
   } catch (e) {
-    console.warn('[wc] deep-link pair failed; leaving URI in URL for retry', e)
+    wcLog('warn', 'deep-link pair failed; leaving URI in URL for retry', e)
   }
 }
 
@@ -720,15 +887,13 @@ export async function disconnectDapp(topic: string): Promise<void> {
   try {
     await slot.client.disconnect({ topic, reason: getSdkError('USER_DISCONNECTED') })
   } catch (e) {
-    console.error('[wc] disconnect failed', e)
+    wcLog('error', 'disconnect failed', e)
   }
-  // Retire the ride-along pairing too, so the dApp's client stops reusing its cached URI and mints a
-  // fresh one on the next connect instead of colliding with a dead record on either side.
   if (pairingTopic) await slot.client.core.pairing.disconnect({ topic: pairingTopic }).catch(() => {})
   syncSessions(slot.client)
 }
 
-export async function teardownAllWc(): Promise<void> {
+async function teardownAllWc(): Promise<void> {
   if (!slot.client) return
   for (const s of slot.client.session.getAll()) {
     await slot.client.disconnect({ topic: s.topic, reason: getSdkError('USER_DISCONNECTED') }).catch(() => {})
@@ -736,9 +901,6 @@ export async function teardownAllWc(): Promise<void> {
   syncSessions(slot.client)
 }
 
-// Lives here (not wallet.ts) so wallet.ts never imports the engine: the engine pulls io/context.js,
-// which reads wallet.ts bindings at module scope, and a wallet.ts -> engine edge closes that cycle
-// into a load-order TDZ crash.
 export async function disconnect(): Promise<void> {
   await teardownAllWc().catch(() => {})
   const current = getConnection(wagmi)

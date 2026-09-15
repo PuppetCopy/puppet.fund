@@ -19,7 +19,6 @@ const $alertBox = (borderColor: string) =>
 
 export const $alertNegativeContainer = $alertBox(palette.negative)
 export const $alertPositiveContainer = $alertBox(palette.positive)
-export const $alertIntermediateContainer = $alertBox(palette.indeterminate)
 
 export const $alertIntermediateSpinnerContainer = (...$content: I$Node[]) =>
   $row(
@@ -99,19 +98,5 @@ export const $noteTooltip = ($tooltip: I$Slottable, $content: I$Slottable = $too
         svgOps: style({ minWidth: '12px' })
       }),
       $elipsisTextWrapper($content)
-    )
-  })({})
-
-export const $spinnerTooltip = ($content: I$Slottable) =>
-  $Tooltip({
-    $content,
-    $anchor: $alertIntermediateSpinnerContainer(
-      $icon({
-        $content: $alertIcon,
-        viewBox: '0 0 24 24',
-        width: '18px',
-        svgOps: style({ minWidth: '18px', position: 'relative' })
-      }),
-      $elipsisTextWrapper(style({ position: 'relative' }))($content)
     )
   })({})

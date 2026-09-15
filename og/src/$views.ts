@@ -1,5 +1,6 @@
+import { readableAddress } from '@puppet/sdk/core'
 import { $element, $node, $text, attr, type I$Node, style } from 'aelea/ui'
-import { type IFundCard, type ITone, type ITopFund, short } from './data.js'
+import type { IMasterCard, ITone, ITopMaster } from './data.js'
 
 const palette = {
   message: '#ffffff',
@@ -29,7 +30,7 @@ const $frame = (...children: I$Node[]) =>
       padding: '56px 64px',
       background: `linear-gradient(155deg, ${palette.background} 0%, ${palette.middleground} 60%, #161a24 100%)`,
       color: palette.message,
-      fontFamily: 'Geist'
+      fontFamily: 'Inter'
     })
   )(...children)
 
@@ -69,21 +70,6 @@ const $footer = (path: string) =>
     $element('span')(style({ color: palette.primary }))($text(path))
   )
 
-const $tokenChip = (symbol: string, size = 26) =>
-  $element('span')(
-    style({
-      display: 'flex',
-      fontSize: `${size}px`,
-      fontWeight: '600',
-      letterSpacing: '0.04em',
-      color: palette.message,
-      padding: '6px 18px',
-      borderRadius: '100px',
-      border: '1px solid rgba(148, 164, 194, 0.28)',
-      background: 'rgba(148, 164, 194, 0.12)'
-    })
-  )($text(symbol))
-
 const $avatar = (src: string, size: number) =>
   $element('img')(
     attr({ src }),
@@ -122,7 +108,7 @@ export const $brand: I$Node = $frame(
       $wordmark(104),
       $element('p')(
         style({ fontSize: '36px', color: palette.foreground, margin: '0', maxWidth: '560px', lineHeight: '1.3' })
-      )($text('Wallet for traders, platform for investors'))
+      )($text('A wallet that trades with backing'))
     )
   ),
   $footer('/')
@@ -144,15 +130,15 @@ export const $page = (title: string, subtitle: string, path: string): I$Node =>
     $footer(path)
   )
 
-export const $leaderboard = (rows: ITopFund[]): I$Node =>
+export const $masters = (rows: ITopMaster[]): I$Node =>
   $frame(
     $node(style({ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }))(
       $brandRow,
       $node(style({ display: 'flex', alignItems: 'baseline', gap: '18px' }))(
         $element('h1')(style({ fontSize: '52px', fontWeight: '700', lineHeight: '1', margin: '0' }))(
-          $text('Leaderboard')
+          $text('Masters')
         ),
-        $element('span')(style({ fontSize: '26px', color: palette.foreground }))($text('top funds · 7d'))
+        $element('span')(style({ fontSize: '26px', color: palette.foreground }))($text('ranked by backing'))
       )
     ),
     $node(
@@ -182,26 +168,23 @@ export const $leaderboard = (rows: ITopFund[]): I$Node =>
               textOverflow: 'ellipsis'
             })
           )($text(row.label)),
-          ...(row.token ? [$tokenChip(row.token, 22)] : []),
-          $element('span')(style({ color: toneColor(row.tone), fontWeight: '700' }))($text(row.value))
+          $element('span')(style({ color: palette.foreground, fontSize: '24px' }))($text(row.detail)),
+          $element('span')(style({ color: palette.message, fontWeight: '700' }))($text(row.value))
         )
       )
     ),
-    $footer('/leaderboard')
+    $footer('/masters')
   )
 
-const $fundMetric = (label: string, value: string, color = palette.message) =>
+const $metric = (label: string, value: string, color = palette.message) =>
   $node(style({ display: 'flex', flexDirection: 'column', gap: '6px' }))(
     $element('span')(style({ fontSize: '24px', color: palette.foreground }))($text(label)),
     $element('span')(style({ fontSize: '40px', fontWeight: '700', color }))($text(value))
   )
 
-export const $fund = (card: IFundCard): I$Node =>
+export const $master = (card: IMasterCard): I$Node =>
   $frame(
-    $node(style({ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }))(
-      $brandRow,
-      ...(card.token ? [$tokenChip(card.token)] : [])
-    ),
+    $brandRow,
     $node(style({ flex: '1', display: 'flex', alignItems: 'center', gap: '44px', marginTop: '12px' }))(
       $avatar(card.avatar, 168),
       $node(style({ display: 'flex', flexDirection: 'column', gap: '14px', flex: '1', minWidth: '0' }))(
@@ -217,21 +200,18 @@ export const $fund = (card: IFundCard): I$Node =>
             textOverflow: 'ellipsis'
           })
         )($text(card.label)),
-        $element('span')(style({ fontSize: '26px', color: palette.foreground }))($text(short(card.address))),
+        $element('span')(style({ fontSize: '26px', color: palette.foreground }))($text(readableAddress(card.master))),
         $node(style({ display: 'flex', alignItems: 'flex-end', gap: '52px', marginTop: '10px' }))(
           $node(style({ display: 'flex', flexDirection: 'column', gap: '6px' }))(
-            $element('span')(style({ fontSize: '24px', color: palette.foreground }))(
-              $text(card.window ? `Realised PnL · ${card.window}` : 'Realised PnL')
-            ),
-            $element('span')(style({ fontSize: '76px', fontWeight: '800', lineHeight: '1', color: toneColor(card.tone) }))(
-              $text(card.pnl)
-            )
+            $element('span')(style({ fontSize: '24px', color: palette.foreground }))($text('Backing')),
+            $element('span')(style({ fontSize: '76px', fontWeight: '800', lineHeight: '1', color: palette.message }))($text(card.backing))
           ),
-          $fundMetric('ROI', card.roi, card.roi.startsWith('+') ? palette.positive : card.roi.startsWith('-') ? palette.negative : palette.foreground),
-          $fundMetric('AUM', card.aum)
+          $metric('PnL 30d', card.pnl, toneColor(card.tone)),
+          $metric('Backers', `${card.backers}`),
+          $metric('Books', card.books)
         )
       )
     ),
     ...(card.spark.length > 1 ? [$spark(card.spark, card.tone, WIDTH - 128, 110)] : []),
-    $footer(`/fund/${short(card.address)}`)
+    $footer(`/masters/${readableAddress(card.master)}`)
   )

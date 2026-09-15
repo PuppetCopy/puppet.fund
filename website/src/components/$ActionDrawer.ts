@@ -1,35 +1,22 @@
-import { HUB_CHAIN_ID, PRECISION, PROTOCOL } from '@puppet/contracts/const'
-import {
-  predictFundAccount,
-  predictShareToken,
-} from '@puppet/sdk/account'
-import { resolveDispatchChainId } from '@puppet/sdk/attestation'
+import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import { predictDepositRoute } from '@puppet/sdk/account'
 import { formatThrownError } from '@puppet/sdk/compact'
-import { ADDRESS_ZERO, type ChainId } from '@puppet/sdk/const'
+import { type ChainId, resolveDispatchChainId } from '@puppet/sdk/const'
 import {
   getAccountExplorerUrl,
-  getChainTokenDescription,
   getDuration,
+  getTokenDescription,
   getTxExplorerUrl,
-  ignoreAll,
   readableAddress,
+  readableDate,
   readableHash,
   readablePercentage,
-  readableTokenAmount,
   readableTokenAmountLabel
 } from '@puppet/sdk/core'
-import {
-  chainHeadBlock,
-  type IChainLiveness,
-  type ISubaccountState,
-  type ITokenRegistryMap,
-  MIN_TTL_MS,
-  nativeSymbolOf,
-  type RelayFeeMap,
-  stubSubaccountState,
-  symbolByAddress,
-  tokenInfoFor
-} from '@puppet/sdk/state'
+import { VALUE_KEY } from '@puppet/sdk/evaluate'
+import { routeCalldataBytes } from '@puppet/sdk/intent'
+import { minFundedAmount } from '@puppet/sdk/mpc'
+import { bondTokenOf, chainTokenOfKey, declaredCallGas, dynamicCalldataBytes, type IChainLiveness, type IRelayFeeQuote, type ITokenRegistryMap, listedTokenAddresses, tokenInfoFor } from '@puppet/sdk/state'
 import {
   combine,
   combineMap,
@@ -43,42 +30,38 @@ import {
   map,
   merge,
   op,
-  sample,
   sampleMap,
   skipRepeats,
   skipRepeatsWith,
   start,
-  switchLatest,
   switchMap,
-  switchPromises,
   take
 } from 'aelea/stream'
-import { type IBehavior, multicast, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
-import { $node, $text, attr, component, effectRun, type I$Node, style } from 'aelea/ui'
+import { type IBehavior, multicast, PromiseStatus, promiseState, spreadArray, state } from 'aelea/stream-extended'
+import { $node, $text, attr, component, effectRun, type I$Node, type I$Slottable, style, } from 'aelea/ui'
 import { $Button, $column, $Popover, $row, designSheet, isMobileScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { type Address, getAddress, type Hex, isAddressEqual } from 'viem'
+import { type Address, getAddress, isAddressEqual } from 'viem'
 import {
-  $addressRef,
   $alertIntermediateSpinnerContainer,
   $alertNegativeContainer,
   $alertPositiveContainer,
-  $amountDisplay,
   $anchor,
   $ButtonCircular,
   $ButtonSecondary,
   $check,
   $defaultButtonCircularContainer,
   $defaultButtonPrimary,
-  $defaultButtonPrimaryOutline,
+  $defaultButtonSecondary,
   $defaultTooltipDropContainer,
+  $errorLabel,
   $icon,
   $info,
   $inlineSpinner,
-  $intermediatePromise,
+  $labeledDivider,
   $labeledValue,
-  $popoverCaret,
   $Tooltip,
+  $wallet,
   $xCross,
   fadeIn,
   text
@@ -86,87 +69,91 @@ import {
 import { $jazzicon } from '../common/$avatar.js'
 import { $chainIcon, chainName } from '../common/$chain.js'
 import { chainFor } from '../common/$contract.js'
-import { $roboAvatar } from '../common/$roboAvatar.js'
 import { $heading3 } from '../common/$text.js'
 import { $card2, } from '../common/elements/$common.js'
-import context, { DISPLAY_QUOTE_TTL_MS, displayRelayFeeMap } from '../io/context.js'
-import { fetchMasterPoolState } from '../io/datastore/query.js'
-import { findDepositTx } from '../io/datastore/reads.js'
+import context, { DISPLAY_QUOTE_TTL_MS } from '../io/context.js'
+import { journal } from '../io/journal/journal.js'
 import { formatUsd, priceFor } from '../io/price.js'
 import { subject } from '../utils/subject.js'
-import {
-  bindSession,
-  getStoredSessionKey,
-  type IConnectedWallet,
-  type ISessionKey,
-  walletQuery
-} from '../wallet/index.js'
-import { resolvedWalletPair } from '../wallet/pair.js'
-import { $profileDisplay } from './$AccountProfile.js'
-import { $enableSessionDisclaimer } from './$enableSession.js'
-import { $TokenBalanceEditor, type IEditorDraft } from './portfolio/$TokenBalanceEditor.js'
-import {
-  type IAllocateDraft,
-  type IClaimDraft,
-  type IClaimRouteDraft,
-  type IDepositDraft,
-  type IDraft,
-  type IFundSwapDraft,
-  type IRedeemDraft,
-  type ISellDraft,
-  type ISubscribeDraft,
-  type IWithdrawDraft,
-  STEP_DESCRIPTION,
-  STEP_LABEL,
-  type StepKind,
-} from './portfolio/draft.js'
-import { SESSION_BIND_KEY } from './portfolio/runner/_shared.js'
-import { type PlannedStep, planExecution, planShape, shouldRecognize } from './portfolio/runner/plan.js'
+import { type IBodyKeys, type IConnectedWallet, type IRootState, type IWalletPair, rootQuery } from '../wallet/index.js'
+import { accountDisplayName } from './$AccountProfile.js'
+import { $betaAgreement } from './$enableSession.js'
+import type { IDraft, IMandateDraft, IReportWalletTx, ITradeDraft, IUnbondDraft, IWithdrawDraft, StepKind } from './portfolio/draft.js'
+import { type IStepShape, planShape } from './portfolio/runner/plan.js'
 import { type IAttestation, runDraft, runMandateBatch } from './portfolio/runner/steps.js'
 
 export type { IDraft }
 
-interface I$ActionDrawer {
-  walletState: IStream<Promise<ISubaccountState | null>>
-  draftList: IStream<IDraft[]>
-  hideBalances: IStream<boolean>
-  title?: string
+const SIGNATURE_STEPS: ReadonlySet<StepKind> = new Set<StepKind>(['key', 'session'])
+
+const countLabel = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`
+
+const walletAsk = (shapes: readonly { kind: StepKind }[]): string => {
+  const signs = shapes.filter(s => SIGNATURE_STEPS.has(s.kind)).length
+  const sends = shapes.length - signs
+  const parts = [
+    ...(signs > 0 ? [countLabel(signs, 'signature', 'signatures')] : []),
+    ...(sends > 0 ? [countLabel(sends, 'transaction', 'transactions')] : [])
+  ]
+  const cost =
+    signs > 0 && sends > 0 ? 'Signatures are free; transactions cost gas.' : signs > 0 ? 'Signatures are free.' : 'Transactions cost gas.'
+  return `${parts.join(' and ')}${signs + sends > 1 ? ', all up front' : ' up front'}. ${cost}`
 }
 
-const DRAFT_VERB: Record<IDraft['kind'], string> = {
+const STEP_LABEL: Record<StepKind, string> = {
+  approve: 'Approve',
+  fund: 'Fund',
+  key: 'Sign account key',
+  session: 'Create session',
   deposit: 'Deposit',
+  swap: 'Swap',
+  credit: 'Credit',
   withdraw: 'Withdraw',
-  mandate: 'Fund',
-  allocate: 'Allocate',
-  fundSwap: 'Swap',
-  sell: 'Sell',
-  claim: 'Claim',
-  claimRoute: 'Claim',
-  redeem: 'Redeem',
-  recognizeFund: 'Recognize'
+  mandate: 'Mandate',
+  unbond: 'Unbond',
+  operate: 'Operate',
+  settle: 'Settle'
 }
 
-function subscribeNeedsFunding(d: IDraft, root: ISubaccountState | null, list: IDraft[]): boolean {
-  if (d.kind !== 'mandate' || d.allocationRate === 0n) return false
-  if ((root?.balances.get(d.baseToken)?.signedBalance ?? 0n) > 0n) return false
-  return !list.some(x => x.kind === 'deposit' && x.output.baseToken === d.baseToken)
+const STEP_DESCRIPTION: Record<StepKind, string> = {
+  approve: 'Lets Puppet move this token from your wallet into your account.',
+  fund: 'Sends the amount to your deposit route so the relayer can spend it for you. The route address is fixed by your wallet.',
+  key: 'Derives your account key from your wallet and stores it in this browser. The signature never leaves this device, and each wallet derives a different account.',
+  session: 'Authorises a signer to act for this wallet, for 7 days. One chainless signature, reused on every chain.',
+  deposit: 'Moves funds from your wallet straight into your account in one transaction of your own.',
+  swap: 'Converts or bridges funds from your deposit route; the output lands back on the route and is swept into your account under the same signature.',
+  credit:
+    'Sweeps a token that arrived on your deposit route into your account on that chain, recording it as an inflow of your own capital.',
+  withdraw: 'Moves funds from your account to your wallet.',
+  mandate:
+    'Signs the backing rules you set with your account key and broadcasts them once on the hub, together with any bond you are adding. A mandate is chainless: it binds wherever the master operates. The latest broadcast per master wins, and leaving is the same broadcast with an expiry of zero.',
+  unbond:
+    'Releases bond that is not backing an open cycle back into your account on the hub. Bond behind a running cycle stays locked until that cycle settles.',
+  operate:
+    'Runs a cycle action on your trading account: opening a cycle locks the credited capital and the matched backers; a trade within a cycle executes against the venue from the trading account. The attestor co-signs the marks it can verify.',
+  settle:
+    'Closes the cycle in two dispatches: on the trading chain the attestor values the book at flat and pays every backer that gained out of what the account holds there, taking your fee; then on the hub every backer that lost is drawn from the hub tokens their mandate put at risk. Positions must be closed first.'
+}
+
+interface I$ActionDrawer {
+  draftList: IStream<IDraft[]>
+  walletPair: IStream<IWalletPair>
+  walletRoot: IStream<IRootState | null>
+  title?: string
 }
 
 const chainsForDraft = (d: IDraft): number[] => {
   const chains = new Set<number>([HUB_CHAIN_ID])
-  if (d.kind === 'deposit' || d.kind === 'allocate') {
-    if (d.wallet) chains.add(d.wallet.chainId)
-    if (d.swap) chains.add(Number(d.swap.chainId))
-  } else if (d.kind === 'fundSwap') {
-    chains.add(d.chainId)
-  }
+  if (d.kind === 'deposit') chains.add(d.deposit.chainId)
+  if (d.kind === 'credit' || d.kind === 'operate') chains.add(d.chainId)
+  if (d.kind === 'withdraw') chains.add(d.chainId)
+  if (d.kind === 'settle') chains.add(d.spokeChainId)
   return [...chains]
 }
 
 const staleChainFor = (d: IDraft, health: IChainLiveness): number | null => {
   for (const chainId of chainsForDraft(d)) {
-    const chain = health.chains[resolveDispatchChainId(chainId)]
-    if (chain && !chain.reachable) return chainId
+    if (!health.chains[resolveDispatchChainId(chainId)]) return chainId
   }
   return null
 }
@@ -175,104 +162,48 @@ const firstStaleChain = (drafts: IDraft[], health: IChainLiveness): number | nul
   drafts.reduce<number | null>((found, d) => found ?? staleChainFor(d, health), null)
 
 const severitySig = (h: IChainLiveness): string =>
-  h.reachable
-    ? Object.entries(h.chains)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([id, c]) => `${id}:${c.reachable}`)
-        .join('|')
-    : 'unreachable'
+  h.reachable ? Object.keys(h.chains).sort().join('|') : 'unreachable'
 
-type BindStep = { kind: 'bind'; key: typeof SESSION_BIND_KEY; query: Promise<ISessionKey> }
-type DraftStep = {
-  kind: 'draft'
+type ResolvedHash = { txHash: string; chainId: ChainId }
+type StepOutcome = ResolvedHash | 'signed'
+type Step = {
   key: string
   draft: IDraft
+  shapes: IStepShape[]
   query: Promise<IAttestation[]>
-  submitBlockByChain: Promise<Map<number, bigint>>
+  walletTx: Map<StepKind, Promise<StepOutcome | null>>
 }
-type Step = BindStep | DraftStep
 interface Submission {
   steps: Step[]
+  account: Promise<Address | null>
+  returning: boolean
 }
 
 type SubmitEnv = {
   wallet: IConnectedWallet
-  planned: PlannedStep[]
-  root: ISubaccountState | null
+  drafts: IDraft[]
+  root: IRootState | null
+  rootQuery: Promise<IRootState | null>
+  bodyKeys: IBodyKeys | null
 }
 
 type SubmissionStatus = { kind: 'pending' } | { kind: 'error'; message: string } | { kind: 'done' }
-type ResolvedHash = { txHash: string; chainId: number }
 
-export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBalances, title = 'Pending Actions' }: I$ActionDrawer) =>
+export const $ActionDrawer = ({
+  draftList,
+  walletPair,
+  walletRoot: rootState,
+  title = 'Pending Actions'
+}: I$ActionDrawer) =>
   component(
     (
       [clickSubmit, clickSubmitTether]: IBehavior<PointerEvent>,
-      [clickEnableSession, clickEnableSessionTether]: IBehavior<PointerEvent>,
-      [popEnableSession, popEnableSessionTether]: IBehavior<PointerEvent>,
       [clickCloseRaw, clickCloseTether]: IBehavior<PointerEvent>,
-      [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>
+      [clickOnboard, clickOnboardTether]: IBehavior<PointerEvent>
     ) => {
-      const tokenRegistryValue = fromPromise(context.getTokenRegistry())
-      const walletPair = resolvedWalletPair(walletQuery, rootStateQuery)
-      const walletState: IStream<IConnectedWallet | null> = map(p => p.wallet, walletPair)
-      const rootState: IStream<ISubaccountState | null> = map(p => p.root, walletPair)
-
-      // Attestation rows captured from each runDraft return value, fed up to
-      // the parent so it can fold them into account state without a datastore round-trip.
-      const attestSubject = subject<IAttestation>()
-
-      const enableSessionFlow = op(
-        clickEnableSession,
-        sample(walletState),
-        filter((w): w is IConnectedWallet => w !== null),
-        switchMap(w => promiseState(just(bindSession(w)))),
-        state()
-      )
-      const enableSessionError: IStream<string | null> = op(
-        enableSessionFlow,
-        map(s => (s.status === PromiseStatus.ERROR ? formatThrownError(s.error) : null)),
-        state(null)
-      )
-      const sessionTick = start(
-        null,
-        op(
-          enableSessionFlow,
-          filter(s => s.status === PromiseStatus.DONE)
-        )
-      )
-      const enableSessionPending: IStream<boolean> = op(
-        enableSessionFlow,
-        map(s => s.status === PromiseStatus.PENDING),
-        skipRepeats,
-        state(false)
-      )
-      const needsBind: IStream<boolean> = op(
-        combine({ wallet: walletState, tick: sessionTick }),
-        map(p => p.wallet !== null && getStoredSessionKey(p.wallet.address) === null),
-        skipRepeats,
-        state()
-      )
-
-      const plannedSteps: IStream<PlannedStep[]> = op(
-        combine({
-          wallet: walletState,
-          list: draftList,
-          tick: sessionTick
-        }),
-        map(({ wallet, list }): PlannedStep[] => {
-          const plan: PlannedStep[] = []
-          if (!wallet) return list.map(d => ({ kind: 'draft', draft: d }))
-          if (!getStoredSessionKey(wallet.address)) plan.push({ kind: 'bind' })
-          for (const d of list) plan.push({ kind: 'draft', draft: d })
-          return plan
-        }),
-        state([])
-      )
+      const tokenRegistryValue = op(promiseState(just(context.getTokenRegistry())), state())
 
       const inFlightRef = { current: false }
-      // Escape key inside the drawer feeds the same close path as the X button,
-      // so the in-flight confirm guard below applies uniformly to both.
       const escapeRequest = subject<unknown>()
       const clickClose: IStream<unknown> = multicast(
         op(
@@ -286,80 +217,102 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
       )
 
       const submitEnv: IStream<SubmitEnv | null> = op(
-        combine({
-          pair: walletPair,
-          planned: plannedSteps
-        }),
+        combine({ pair: walletPair, drafts: draftList, root: rootState }),
         map((p): SubmitEnv | null =>
-          p.pair.wallet ? { wallet: p.pair.wallet, root: p.pair.root, planned: p.planned } : null
+          p.pair.wallet ? { wallet: p.pair.wallet, drafts: p.drafts, root: p.root, rootQuery: p.pair.root, bodyKeys: p.pair.bodyKeys } : null
         ),
         state(null)
       )
 
-      // The Submission is built SYNCHRONOUSLY at the click so the drawer flips into its running state immediately —
-      // every async requirement (session bind, fresh gas price, liveness, registry) lives INSIDE the step promise
-      // chain, where the step pills already render it as in-flight. An awaited prefetch here made Submit look stalled
-      // for the duration of an RPC round-trip before ANY feedback appeared.
+      const accountFactory = (
+        env: SubmitEnv,
+        signed: (step: 'key' | 'session') => void,
+        created: (root: IRootState) => void
+      ): (() => Promise<IRootState>) => {
+        let cached: Promise<IRootState> | null = null
+        return (): Promise<IRootState> => {
+          cached ??= (async (): Promise<IRootState> => {
+            if (env.bodyKeys === null) throw new Error('this build carries no body key service; an account cannot be created')
+            const known = env.bodyKeys.accountOf(env.wallet.address)
+            const funding = env.drafts.flatMap(d => (d.kind === 'deposit' ? [d.deposit] : []))[0]
+            const funded =
+              funding === undefined
+                ? undefined
+                : {
+                    chainId: funding.chainId,
+                    token: isAddressEqual(funding.inputToken, PROTOCOL.nativeToken) ? funding.inputToken : tokenInfoFor(await context.getTokenRegistry(), funding.chainId, funding.inputToken).token
+                  }
+            const account = known ?? (await env.bodyKeys.derive(env.wallet, funded, signed)).account
+            const built = await journal(account).root(env.wallet.address)
+            if (built === null) throw new Error(`derived ${account} but its account state could not be read`)
+            created(built)
+            return built
+          })()
+          return cached
+        }
+      }
+
       const submitEvent: IStream<Submission> = op(
-        clickSubmit,
-        sampleMap((env, _click) => env, submitEnv),
+        merge(constant('click' as const, clickSubmit), constant('proceed' as const, clickOnboard)),
+        sampleMap((env, trigger) => ({ env, trigger }), submitEnv),
+        filter(p => p.env !== null && (p.trigger === 'proceed' || (p.env.bodyKeys !== null && p.env.bodyKeys.accountOf(p.env.wallet.address) !== null))),
+        map(p => p.env),
         filterNull,
         map((env): Submission => {
-          const sessionPromise: Promise<ISessionKey> = bindSession(env.wallet)
-          // MIN_TTL_MS: the step run signs against a fresh gas price (never the 5-minute display cache) while a burst
-          // of submits inside the 20ms window still coalesces on one fetch.
-          const prep = Promise.all([
-            context.getChainGasPrice(HUB_CHAIN_ID, MIN_TTL_MS),
-            context.getChainLiveness(),
-            context.getTokenRegistry()
-          ]).then(([gasPrice, chainLiveness, tokenRegistry]) => ({ gasPrice, chainLiveness, tokenRegistry }))
+          const prep = Promise.all([context.getChainLiveness(), context.getTokenRegistry()]).then(
+            ([chainLiveness, tokenRegistry]) => ({ chainLiveness, tokenRegistry })
+          )
+          const account = env.bodyKeys === null ? null : env.bodyKeys.accountOf(env.wallet.address)
+          const route = predictDepositRoute(env.wallet.address)
+          const deployed = env.root === null ? new Set<ChainId>() : env.root.deployed
+          const legs = env.drafts.map(draft => {
+            const shapes = planShape(draft, account, route, deployed)
+            const settle = new Map<StepKind, (outcome: StepOutcome | null) => void>()
+            const walletTx = new Map(
+              shapes.map(shape => [shape.kind, new Promise<StepOutcome | null>(resolve => settle.set(shape.kind, resolve))] as const)
+            )
+            return { draft, shapes, settle, walletTx }
+          })
+          let created!: (account: Address | null) => void
+          const derived = new Promise<Address | null>(resolve => {
+            created = resolve
+          })
+          const createAccount = accountFactory(
+            env,
+            step => {
+              for (const leg of legs) leg.settle.get(step)?.('signed')
+            },
+            root => created(root.account)
+          )
           const steps: Step[] = []
-          const submitBlocksFor = (draft: IDraft): Promise<Map<number, bigint>> =>
-            prep.then(({ chainLiveness }) => {
-              const submitBlockByChain = new Map<number, bigint>()
-              if (draft.kind === 'deposit' && draft.wallet) {
-                const chainId = draft.wallet.chainId
-                try {
-                  submitBlockByChain.set(chainId, chainHeadBlock(chainLiveness, resolveDispatchChainId(chainId)))
-                } catch {
-                  // chain not in chainLiveness; txByRecipient falls back to 0n
-                }
-              }
-              return submitBlockByChain
-            })
-
-          const queryByBase = new Map<Hex, Promise<IAttestation[]>>()
-          const draftsInOrder: IDraft[] = []
-          for (const ps of env.planned) if (ps.kind === 'draft') draftsInOrder.push(ps.draft)
-
-          let chain: Promise<unknown> = Promise.all([sessionPromise, prep])
-          for (const entry of planExecution(env.planned)) {
-            if (entry.kind === 'bind') {
-              steps.push({ kind: 'bind', key: SESSION_BIND_KEY, query: sessionPromise })
-              continue
+          let chain: Promise<unknown> = prep
+          const mandateDrafts = legs.flatMap(leg => (leg.draft.kind === 'mandate' ? [leg.draft] : []))
+          let mandateQuery: Promise<IAttestation[]> | null = null
+          for (const leg of legs) {
+            const draft = leg.draft
+            const close = (): void => {
+              for (const settle of leg.settle.values()) settle(null)
             }
-            const draft = entry.draft
             let query: Promise<IAttestation[]>
-            if (draft.kind === 'mandate' && !entry.lead) {
-              query = queryByBase.get(draft.baseToken) as Promise<IAttestation[]>
-            } else {
-              const group = entry.batch
-              query = chain.then<IAttestation[]>(async () => {
-                const [session, ctx] = await Promise.all([sessionPromise, prep])
-                const runCtx = { ...ctx, wallet: env.wallet, session }
-                const events =
-                  draft.kind === 'mandate'
-                    ? await runMandateBatch(group as ISubscribeDraft[], runCtx)
-                    : await runDraft(draft, runCtx, shouldRecognize(draft, draftsInOrder))
-                for (const event of events) attestSubject.push(event)
-                return events
+            if (draft.kind === 'mandate') {
+              mandateQuery ??= chain.then<IAttestation[]>(async () => {
+                const [ctx, root] = await Promise.all([prep, env.rootQuery])
+                return [await runMandateBatch(mandateDrafts, { ...ctx, wallet: env.wallet, root, createAccount, bodyKeys: env.bodyKeys }, 'balance')]
               })
-              chain = query
-              if (draft.kind === 'mandate') queryByBase.set(draft.baseToken, query)
+              query = mandateQuery
+            } else {
+              const report: IReportWalletTx = (kind, hash, chainId) => leg.settle.get(kind)?.(hash === null ? null : { txHash: hash, chainId })
+              query = chain.then<IAttestation[]>(async () => {
+                const [ctx, root] = await Promise.all([prep, env.rootQuery])
+                return runDraft(draft, { ...ctx, wallet: env.wallet, root, createAccount, bodyKeys: env.bodyKeys }, report)
+              })
             }
-            steps.push({ kind: 'draft', key: draft.id, draft, query, submitBlockByChain: submitBlocksFor(draft) })
+            query.then(close, close)
+            chain = query
+            steps.push({ key: draft.id, draft, shapes: leg.shapes, query, walletTx: leg.walletTx })
           }
-          return { steps }
+          Promise.allSettled(steps.map(st => st.query)).then(() => created(null))
+          return { steps, account: derived, returning: env.root !== null }
         })
       )
 
@@ -367,15 +320,7 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
         merge(submitEvent, constant(null, clickClose) as IStream<Submission | null>),
         switchMap((s): IStream<Submission | null> => {
           if (s === null) return just(null)
-          // Once the run fully SUCCEEDS, the first fresh draft resets the drawer back to drafting: the settled drafts
-          // were already released, so dropping the submission lets the new plan render and submit instead of leaving
-          // the drawer stuck on the completed view. Freshness is OBJECT identity, not id — editors mint STABLE ids
-          // (`allocate:${master}`, …), so a repeat action reuses the id with a new draft object, while a settled
-          // draft still awaiting its release event is the exact same reference. A failed run never auto-resets — the
-          // error must stay visible and Submit-retry keeps owning it.
-          const submitted = new Map(
-            s.steps.filter((st): st is DraftStep => st.kind === 'draft').map(st => [st.key, st.draft])
-          )
+          const submitted = new Map(s.steps.map(st => [st.key, st.draft]))
           const resetOnNextDraft: IStream<Submission | null> = op(
             fromPromise(Promise.all(s.steps.map(st => st.query)).then(() => true, () => false)),
             filter(ok => ok),
@@ -412,9 +357,8 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
           submission,
           switchMap((s): IStream<DraftResolve | null> => {
             if (!s) return empty
-            const drafts = s.steps.filter((st): st is DraftStep => st.kind === 'draft')
             return merge(
-              ...drafts.map(step =>
+              ...s.steps.map(step =>
                 fromPromise(
                   step.query.then(
                     events => ({ key: step.key, events }) as DraftResolve,
@@ -429,9 +373,8 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
       )
 
       const releaseDraft: IStream<string> = map(ev => ev.key, draftSuccess)
-      const settled: IStream<unknown> = constant(null, draftSuccess)
+      const attest: IStream<IAttestation> = spreadArray(map(ev => ev.events, draftSuccess))
 
-      // Promise.allSettled([]) resolves immediately so empty submissions report not-in-flight.
       const anyInFlight: IStream<boolean> = op(
         submission,
         map(s => Promise.allSettled(s ? s.steps.map(st => st.query) : [])),
@@ -465,9 +408,6 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
         state(null)
       )
 
-      // A failed submission is recoverable: it must NOT permanently block Submit,
-      // so we can retry the remaining (unreleased) drafts. Only a pending or done
-      // submission blocks re-submission.
       const submissionErrored: IStream<boolean> = op(
         submissionStatus,
         map(s => s?.kind === 'error'),
@@ -475,199 +415,242 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
         state(false)
       )
 
+      const feeTokenOf = (d: IDraft): Address =>
+        d.kind === 'deposit'
+          ? d.deposit.inputToken
+          : d.kind === 'withdraw'
+            ? d.inputAmount.token
+            : d.kind === 'credit'
+              ? d.creditList[0]!
+              : d.kind === 'operate'
+                ? d.feeToken
+                : chainTokenOfKey(HUB_CHAIN_ID, VALUE_KEY)
+      const feeChainOf = (d: IDraft): ChainId =>
+        d.kind === 'deposit' ? d.deposit.chainId : d.kind === 'credit' || d.kind === 'operate' || d.kind === 'withdraw' ? d.chainId : HUB_CHAIN_ID
+      const feeCoordOf = (d: IDraft): string => `${feeChainOf(d)}:${feeTokenOf(d)}`
+
+      const underfunded: IStream<string | null> = op(
+        draftList,
+        map(list => {
+          const dep = list.find((d): d is Extract<IDraft, { kind: 'deposit' }> => d.kind === 'deposit')
+          if (dep === undefined) return null
+          const token = getAddress(dep.deposit.inputToken)
+          const min = minFundedAmount(dep.deposit.chainId, token)
+          return dep.deposit.inputAmount < min ? readableTokenAmountLabel(getTokenDescription(dep.deposit.chainId, token), min) : null
+        }),
+        skipRepeats,
+        state(null)
+      )
+
+      const deployedChains: IStream<ReadonlySet<ChainId>> = op(
+        rootState,
+        map(r => (r === null ? new Set<ChainId>() : r.deployed)),
+        state(new Set<ChainId>())
+      )
+
+      const feeByToken: IStream<Map<string, PromiseSettledResult<IRelayFeeQuote>>> = op(
+        switchMap((list: IDraft[]) => {
+          const coords = [...new Set(list.map(feeCoordOf))]
+          if (coords.length === 0) return just(new Map<string, PromiseSettledResult<IRelayFeeQuote>>())
+          return fromPromise(
+            Promise.allSettled(
+              coords.map(coord => {
+                const [chainId, token] = coord.split(':')
+                return context.getRelayFeeQuote(resolveDispatchChainId(Number(chainId)), token as Address, DISPLAY_QUOTE_TTL_MS)
+              })
+            ).then(results => new Map<string, PromiseSettledResult<IRelayFeeQuote>>(coords.map((coord, i) => [coord, results[i]!])))
+          )
+        }, draftList),
+        state(new Map<string, PromiseSettledResult<IRelayFeeQuote>>())
+      )
+
+      const derivedAccount: IStream<Address> = op(
+        submission,
+        filterNull,
+        switchMap(s => fromPromise(s.account)),
+        filterNull,
+        skipRepeats,
+        multicast
+      )
+      const keyless: IStream<boolean> = op(
+        combine({ root: rootState, pair: walletPair, derived: start(null, derivedAccount) }),
+        map(p => p.pair.wallet !== null && (p.pair.bodyKeys === null || p.pair.bodyKeys.accountOf(p.pair.wallet.address) === null)),
+        skipRepeats,
+        state(false)
+      )
+      const rootPending: IStream<boolean> = op(
+        rootQuery(walletPair),
+        map(s => s.status === PromiseStatus.PENDING),
+        skipRepeats
+      )
       const submitDisabled = op(
         combine({
+          keyless,
           list: draftList,
           submission,
           errored: submissionErrored,
-          needsBind,
           chainLiveness: chainLivenessValue,
-          root: rootState
+          root: rootState,
+          rootPending,
+          underfunded
         }),
         map(p => {
           if (p.submission !== null && !p.errored) return true
           if (p.list.length === 0) return true
-          if (p.needsBind) return true
+          if (p.rootPending) return true
           if (!p.chainLiveness.reachable) return true
           if (firstStaleChain(p.list, p.chainLiveness) !== null) return true
-          if (p.list.some(d => d.alert !== null)) return true
-          if (p.list.some(d => subscribeNeedsFunding(d, p.root, p.list))) return true
-          return false
+          if (p.keyless) return p.root === null && p.underfunded !== null
+          return p.root === null
         })
       )
-
-      const showEnableSession: IStream<boolean> = op(
-        combine({ needsBind, submission }),
-        map(p => p.needsBind && p.submission === null),
-        skipRepeats
-      )
-
-      const baseTokenIdFor = (d: IDraft): Address | null => {
-        if (d.kind === 'deposit' || d.kind === 'withdraw') return d.inputAmount.baseToken
-        if (d.kind === 'mandate') return d.baseToken
-        if (d.kind === 'fundSwap') return d.tokenIn
-        if ('baseToken' in d) return d.baseToken
-        return null
-      }
 
       type FeeBreakdown = {
         relayUsd: bigint
         swapFeeUsd: bigint
-        // true if any pending draft's relay fee is unpriceable (oracle has no rate) -> the total can't be summed
-        // honestly, so the row shows '-' rather than an understated figure.
         feeUnavailable: boolean
+        feeFailure: PromiseRejectedResult | null
       }
 
-      const feeBreakdown: IStream<FeeBreakdown> = switchMap(({ list }) => {
-        // Price EVERY token toUsd touches below, not just baseTokenIdFor: bridge legs price step.input.token,
-        // and deposit/withdraw approx prices the input and output base tokens. A narrower set silently zeroes those
-        // swap-fee terms (the old shared price map covered all registered tokens). Deduped, so extras are harmless.
-        const tokens = [
-          ...new Set(
-            list.flatMap((d): Address[] => {
-              const ts: Address[] = []
-              const base = baseTokenIdFor(d)
-              if (base !== null) ts.push(base)
-              if (d.kind === 'allocate') {
-                if (d.swap) ts.push(d.swap.inputToken, d.baseToken)
-              } else if (d.kind === 'deposit' || d.kind === 'withdraw') {
-                ts.push(d.inputAmount.baseToken)
-                if (d.output.approx) ts.push(d.output.baseToken)
-              }
-              return ts
-            })
-          )
+      const feeBreakdown: IStream<FeeBreakdown> = switchMap((list: IDraft[]) => {
+        const priceCoordinates = [
+          ...new Map(
+            list
+              .flatMap((d): { chainId: ChainId; token: Address }[] => {
+                const coords = [{ chainId: feeChainOf(d), token: feeTokenOf(d) }]
+                if (d.kind === 'deposit' && d.deposit.route !== null) {
+                  coords.push({ chainId: resolveDispatchChainId(Number(d.deposit.destinationChainId)), token: d.deposit.outputToken })
+                } else if (d.kind === 'withdraw') {
+                  if (d.output.approx) {
+                    coords.push({ chainId: d.output.chainId, token: d.output.token })
+                  }
+                }
+                return coords
+              })
+              .map(c => [`${c.chainId}:${c.token}`, c] as const)
+          ).values()
         ]
-        const tokenFeeStreams = tokens.map(t => fromPromise(displayRelayFeeMap(t)))
 
-        // Per-token prices arrive as their own 10s-refreshing streams. The hub
-        // addresses come from the registry, so resolve it first then fan the
-        // distinct base tokens out into priceFor streams (positional, by index).
-        return switchMap((registry: ITokenRegistryMap) => {
-          const tokenPriceStreams = tokens.map(t => {
-            // A chain-scoped token (a fund-swap leg on a spoke chain) has no hub-registry row; price it by its own
-            // address — getPrice resolves the symbol itself. Without this, spoke-chain fund swaps sum to $0 -> '-'.
-            const info = registry.get(HUB_CHAIN_ID)?.get(getAddress(t))
-            return priceFor(getAddress(info ? info.token : t))
-          })
-          return op(
-            combineMap(
-              (_gas: bigint, ...rest: (RelayFeeMap | bigint | null)[]): FeeBreakdown => {
-                const feeMaps = rest.slice(0, tokens.length) as (RelayFeeMap | null)[]
-                const prices = rest.slice(tokens.length) as (bigint | null)[]
-                const feeMapByToken = new Map<Address, RelayFeeMap | null>()
-                const priceByToken = new Map<Address, bigint | null>()
-                tokens.forEach((t, i) => {
-                  feeMapByToken.set(t, feeMaps[i]!)
-                  priceByToken.set(t, prices[i] ?? null)
-                })
-                const toUsd = (amount: bigint, token: Address): bigint => {
-                  const price = priceByToken.get(token) ?? null
-                  return price === null ? 0n : amount * price
-                }
-                let relayUsd = 0n
-                let swapFeeUsd = 0n
-                let feeUnavailable = false
-                for (const d of list) {
-                  const token = baseTokenIdFor(d)
-                  if (!token) continue
-                  const feeMap = feeMapByToken.get(token)
-                  if (feeMap === undefined) continue
-                  // Unpriceable fee for a pending draft -> the summed total is incomplete; flag it so the row shows '-'.
-                  if (feeMap === null) {
-                    feeUnavailable = true
-                    continue
-                  }
-                  let relayToken = 0n
-                  if (d.kind === 'mandate') relayToken = feeMap.mandate.relayFee
-                  else if (d.kind === 'allocate') {
-                    relayToken = feeMap.allocate.relayFee
-                    if (d.swap) {
-                      relayToken += feeMap.swap?.relayFee ?? 0n
-                      const lost = toUsd(d.swap.inputAmount, d.swap.inputToken) - toUsd(d.swap.outputAmount, d.baseToken)
-                      if (lost > 0n) swapFeeUsd += lost
-                    }
-                  } else if (d.kind === 'fundSwap') relayToken = feeMap.swap.relayFee
-                  else if (d.kind === 'sell') relayToken = feeMap.sell.relayFee
-                  else if (d.kind === 'claim') relayToken = feeMap.claim.relayFee
-                  else if (d.kind === 'claimRoute') relayToken = feeMap.recognize.relayFee
-                  else if (d.kind === 'redeem') relayToken = feeMap.redeem.relayFee
-                  else if (d.kind === 'deposit') {
-                    if (d.swap) relayToken += feeMap.swap?.relayFee ?? 0n
-                    if (shouldRecognize(d, list)) relayToken += feeMap.recognize?.relayFee ?? 0n
-                    if (d.output.approx) {
-                      const lost =
-                        toUsd(d.inputAmount.amount, d.inputAmount.baseToken) -
-                        toUsd(d.output.amount, d.output.baseToken)
-                      if (lost > 0n) swapFeeUsd += lost
-                    }
-                  } else if (d.kind === 'withdraw') {
-                    relayToken += feeMap.withdraw?.relayFee ?? 0n
-                  }
-                  relayUsd += toUsd(relayToken, token)
-                }
-                return { relayUsd, swapFeeUsd, feeUnavailable }
-              },
-              fromPromise(context.getChainGasPrice(HUB_CHAIN_ID, DISPLAY_QUOTE_TTL_MS)),
-              ...tokenFeeStreams,
-              ...tokenPriceStreams
+        return combineMap(
+          (
+            feeMapByToken: Map<string, PromiseSettledResult<IRelayFeeQuote>>,
+            deployed: ReadonlySet<ChainId>,
+            ...prices: (bigint | null)[]
+          ): FeeBreakdown => {
+            const priceByCoordinate = new Map<string, bigint | null>(
+              priceCoordinates.map((c, i) => [`${c.chainId}:${c.token}`, prices[i] ?? null])
             )
-          )
-        }, tokenRegistryValue)
-      }, combine({ list: draftList }))
+            const toUsd = (chainId: ChainId, token: Address, amount: bigint): bigint | null => {
+              const price = priceByCoordinate.get(`${chainId}:${token}`)
+              return price === undefined || price === null ? null : amount * price
+            }
+            let relayUsd = 0n
+            let swapFeeUsd = 0n
+            let feeUnavailable = false
+            let feeFailure: PromiseRejectedResult | null = null
+            for (const d of list) {
+              const settled = feeMapByToken.get(feeCoordOf(d))
+              if (settled === undefined) {
+                feeUnavailable = true
+                continue
+              }
+              if (settled.status === 'rejected') {
+                feeFailure = settled
+                continue
+              }
+              const feeMap = settled.value
+              if (d.kind === 'mandate' && list.findIndex(x => x.kind === 'mandate') !== list.indexOf(d)) continue
+              const relayToken =
+                d.kind === 'deposit'
+                  ? d.deposit.route === null
+                    ? deployed.has(feeChainOf(d))
+                      ? 0n
+                      : feeMap('credit', true, 0n, 0n, 0n)
+                    : feeMap('depositAcross', !deployed.has(feeChainOf(d)), 0n, 0n, routeCalldataBytes(d.deposit.route))
+                  : d.kind === 'credit'
+                    ? feeMap('credit', !deployed.has(feeChainOf(d)), 0n, 0n, 0n)
+                    : d.kind === 'withdraw'
+                      ? feeMap('withdraw', false, 0n, 0n, 0n)
+                      : d.kind === 'operate'
+                        ? feeMap('operate', false, 0n, declaredCallGas(d.callList), dynamicCalldataBytes(d.callList.map(c => c.callData)))
+                        : d.kind === 'settle'
+                          ? feeMap('settle', false, 0n, 0n, 0n)
+                          : feeMap('mandate', !deployed.has(HUB_CHAIN_ID), BigInt(list.filter(x => x.kind === 'mandate').length), 0n, 0n)
+              const charged = toUsd(feeChainOf(d), feeTokenOf(d), relayToken)
+              if (charged === null) {
+                feeUnavailable = true
+                continue
+              }
+              relayUsd += charged
+              const conversion =
+                d.kind === 'deposit' && d.deposit.route !== null
+                  ? {
+                      sent: toUsd(d.deposit.chainId, d.deposit.inputToken, d.deposit.inputAmount),
+                      received: toUsd(resolveDispatchChainId(Number(d.deposit.destinationChainId)), d.deposit.outputToken, d.expectedOutput)
+                    }
+                  : null
+              if (conversion === null) continue
+              if (conversion.sent === null || conversion.received === null) {
+                feeUnavailable = true
+                continue
+              }
+              const lost = conversion.sent - conversion.received - charged
+              if (lost > 0n) swapFeeUsd += lost
+            }
+            return { relayUsd, swapFeeUsd, feeUnavailable, feeFailure }
+          },
+          feeByToken,
+          deployedChains,
+          ...priceCoordinates.map(c => priceFor(c.chainId, c.token))
+        )
+      }, draftList)
 
-      // The fee breakdown (per-token bridge/relay + gas). Used as the hover
-      // tooltip on desktop and rendered inline on touch (mobile) where there is
-      // no hover. A factory so each placement gets a fresh node.
       const $executionFeesBreakdown = (): I$Node =>
         switchMap(p => {
           const rows: I$Node[] = []
           if (p.swapFeeUsd > 0n) rows.push($labeledValue('Swap fee', formatUsd(p.swapFeeUsd, 1n)))
           rows.push(
-            $labeledValue('Relay fees', p.feeUnavailable || p.relayUsd === 0n ? '-' : formatUsd(p.relayUsd, 1n))
+            $labeledValue('Relay fee, paid from your funds (no gas)', p.feeFailure !== null ? style({ whiteSpace: 'normal' })($errorLabel(p.feeFailure.reason)) : p.feeUnavailable || p.relayUsd === 0n ? '-' : formatUsd(p.relayUsd, 1n))
           )
           return $column(spacing.small, style({ minWidth: '200px', fontSize: text.sm }))(...rows)
         }, feeBreakdown)
 
       const $executionFees = (): I$Node =>
         $labeledValue(
-          'Execution fees',
-          $text(
-            map(p => {
-              if (p.feeUnavailable) return '-'
-              const total = p.relayUsd + p.swapFeeUsd
-              return total === 0n ? '-' : formatUsd(total, 1n)
-            }, feeBreakdown)
-          ),
+          'Net fee',
+          switchMap((p): I$Slottable => {
+            if (p.feeFailure !== null) return style({ whiteSpace: 'normal' })($errorLabel(p.feeFailure.reason))
+            if (p.feeUnavailable) return $text('-')
+            const total = p.relayUsd + p.swapFeeUsd
+            return $text(total === 0n ? '-' : formatUsd(total, 1n))
+          }, feeBreakdown),
           $executionFeesBreakdown()
-        )
-
-      // ── render primitives ─────────────────────────────────────────────────
-
-      const $addressOnChain = (addr: Address, chainId: number): I$Node =>
-        $row(spacing.small, style({ alignItems: 'center', color: palette.foreground, fontSize: text.xs }))(
-          $chainIcon(chainId, 14),
-          $addressRef(addr, chainFor(chainId))
         )
 
       const $metaText = (label: string): I$Node =>
         $node(style({ color: palette.foreground, fontSize: text.xs }))($text(label))
 
-      const $stepIndex = (i: number): I$Node =>
-        $node(
-          style({
-            minWidth: '22px',
-            height: '22px',
-            borderRadius: '50%',
-            backgroundColor: colorShade(palette.foreground, 15),
-            color: palette.foreground,
-            fontSize: text.xs,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontWeight: '600'
-          })
-        )($text(String(i + 1)))
+      const branchLine = `1px solid ${colorShade(palette.foreground, 60)}`
+      const $branch = (isLast: boolean, $content: I$Node): I$Node =>
+        $row(style({ marginLeft: '10px', minWidth: '0' }))(
+          $column(style({ width: '14px', flexShrink: '0', alignSelf: 'stretch' }))(
+            $node(
+              style({
+                flex: '1 1 50%',
+                borderLeft: branchLine,
+                borderBottom: branchLine,
+                borderBottomLeftRadius: '6px'
+              })
+            )(),
+            $node(style({ flex: '1 1 50%', ...(isLast ? {} : { borderLeft: branchLine }) }))()
+          ),
+          $row(style({ flex: '1', minWidth: '0', alignItems: 'center', padding: '5px 0 5px 8px' }))($content)
+        )
+      const $branchList = ($children: I$Node[]): I$Node =>
+        $column(style({ minWidth: '0', marginTop: '-14px' }))(
+          $node(style({ height: '14px', marginLeft: '10px', borderLeft: branchLine }))(),
+          ...$children.map(($c, i) => $branch(i === $children.length - 1, $c))
+        )
 
       type StepStatus = 'queued' | 'current' | 'done' | 'failed'
       const $trailingGlyph = (status: StepStatus): I$Node => {
@@ -681,26 +664,53 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
       }
       const $stepPill = (
         kind: StepKind,
+        wallet: boolean,
         status: StepStatus,
         tx: ResolvedHash | null,
-        recipient: { address: Address; chainId: number } | null,
-        hasAlert: boolean,
-        label: string
+        destination: { chainId: ChainId; address: Address | null } | null,
+        label: string,
+        origin?: { chainId: ChainId; symbol: string },
+        description?: string
       ): I$Node => {
-        // An alert is a failure to proceed — render it with the same dashed-border + ✕ treatment
-        // as a runtime failure so the drawer has one failure design, not two.
-        const effectiveStatus: StepStatus = hasAlert ? 'failed' : status
-        const content: I$Node[] = [
-          $node(style({ color: palette.foreground, fontSize: text.xs }))($text(label)),
-          $trailingGlyph(effectiveStatus)
-        ]
+        const $labelText = $node(style({ color: palette.foreground, fontSize: text.xs }))
+        const [verb, ...symbolRest] = label.split(' ')
+        const content: I$Node[] = destination
+          ? [
+              wallet
+                ? $row(spacing.tiny, style({ alignItems: 'center' }))(
+                    $icon({ $content: $wallet, viewBox: '0 0 32 32', fill: palette.foreground, size: '14px' }),
+                    $labelText($text(verb))
+                  )
+                : $labelText($text(verb)),
+              $row(spacing.tiny, style({ alignItems: 'center' }))(
+                ...(origin === undefined
+                  ? []
+                  : [
+                      ...(origin.chainId === destination.chainId ? [] : [$chainIcon(origin.chainId, 14)]),
+                      $labelText($text(origin.symbol)),
+                      $labelText($text('→'))
+                    ]),
+                $chainIcon(destination.chainId, 14),
+                ...(symbolRest.length > 0 ? [$labelText($text(symbolRest.join(' ')))] : [])
+              ),
+              $trailingGlyph(status)
+            ]
+          : [
+              wallet
+                ? $row(spacing.tiny, style({ alignItems: 'center' }))(
+                    $icon({ $content: $wallet, viewBox: '0 0 32 32', fill: palette.foreground, size: '14px' }),
+                    $labelText($text(label))
+                  )
+                : $labelText($text(label)),
+              $trailingGlyph(status)
+            ]
         const pillBg = style({ backgroundColor: palette.background, cursor: 'help' })
         const $pillNode =
-          effectiveStatus === 'done'
+          status === 'done'
             ? pillBg($alertPositiveContainer(...content))
-            : effectiveStatus === 'failed'
+            : status === 'failed'
               ? pillBg($alertNegativeContainer(...content))
-              : effectiveStatus === 'current'
+              : status === 'current'
                 ? pillBg($alertIntermediateSpinnerContainer(...content))
                 : $row(
                   spacing.small,
@@ -714,18 +724,18 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
                     cursor: 'help'
                   })
                 )(...content)
-        const recipientChain = recipient ? chainFor(recipient.chainId) : null
+        const destinationChain = destination ? chainFor(destination.chainId) : null
         const txChain = tx ? chainFor(tx.chainId) : null
         return $Tooltip({
           $dropContainer: $defaultTooltipDropContainer,
           $content: $column(spacing.tiny, style({ maxWidth: '260px', fontSize: text.sm, whiteSpace: 'normal' }))(
-            $text(STEP_DESCRIPTION[kind]),
-            recipient && recipientChain
+            $text(description ?? STEP_DESCRIPTION[kind]),
+            destination && destinationChain && destination.address !== null
               ? $row(spacing.tiny, style({ alignItems: 'center', color: palette.foreground, fontSize: text.xs }))(
                 $text('To'),
-                $chainIcon(recipient.chainId, 14),
-                $anchor(attr({ href: getAccountExplorerUrl(recipient.address, recipientChain), target: '_blank' }))(
-                  $text(readableAddress(recipient.address))
+                $chainIcon(destination.chainId, 14),
+                $anchor(attr({ href: getAccountExplorerUrl(destination.address, destinationChain), target: '_blank' }))(
+                  $text(readableAddress(destination.address))
                 )
               )
               : $node(),
@@ -743,195 +753,68 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
         })({})
       }
 
-      const $sequencedStepRow = (
-        steps: ReadonlyArray<{
-          kind: StepKind
-          nonce: bigint | null
-          recipient: { address: Address; chainId: number } | null
-          label?: string
-        }>,
-        query: Promise<unknown> | null,
-        priorQuery: Promise<unknown> | null,
-        submitBlockByChain: Promise<Map<number, bigint>>,
-        hasAlert: boolean
-      ): I$Node => {
-        const $container = $row(spacing.tiny, style({ alignItems: 'center', flexWrap: 'wrap' }))
-        const labelOf = (s: { kind: StepKind; label?: string }): string => s.label ?? STEP_LABEL[s.kind]
-        if (query === null) {
-          return $container(...steps.map(s => $stepPill(s.kind, 'queued', null, s.recipient, hasAlert, labelOf(s))))
-        }
-        const txStreams: IStream<ResolvedHash | null>[] = steps.map(s => {
-          if (s.nonce !== null) {
-            return op(
-              rootState,
-              map((root): ResolvedHash | null => {
-                if (root?.lastNonce === s.nonce) {
-                  return { txHash: root.lastTransactionHash, chainId: Number(root.chainId) }
-                }
-                return null
-              }),
-              filterNull,
-              take(1),
-              start(null as ResolvedHash | null)
-            )
-          }
-          if (s.recipient !== null && s.kind === 'walletTransfer') {
-            const recipient = s.recipient
-            return op(
-              rootState,
-              switchMap(async (): Promise<ResolvedHash | null> => {
-                const minBlock = (await submitBlockByChain).get(recipient.chainId) ?? 0n
-                const txHash = await findDepositTx(recipient.address, recipient.chainId, minBlock)
-                return txHash ? { txHash, chainId: recipient.chainId } : null
-              }),
-              filterNull,
-              take(1),
-              start(null as ResolvedHash | null)
-            )
-          }
-          return just(null as ResolvedHash | null)
+      type PillState = { status: StepStatus; tx: ResolvedHash | null }
+      type Row = {
+        draft: IDraft
+        shapes: readonly IStepShape[]
+        query: Promise<unknown> | null
+        priorQuery: Promise<unknown> | null
+        walletTx: Map<StepKind, Promise<StepOutcome | null>>
+      }
+
+      const progressOf = (row: Row): IStream<PillState[]> => {
+        if (row.query === null) return just(row.shapes.map((): PillState => ({ status: 'queued', tx: null })))
+        const legs = row.shapes.map(shape => {
+          const leg = row.walletTx.get(shape.kind)
+          return leg === undefined ? just(null as StepOutcome | null) : op(fromPromise(leg), start(null as StepOutcome | null))
         })
-        const draftActive$: IStream<boolean> =
-          priorQuery === null
+        const active: IStream<boolean> =
+          row.priorQuery === null
             ? just(true)
             : op(
-              promiseState(just(priorQuery)),
+              promiseState(just(row.priorQuery)),
               map(s => s.status === PromiseStatus.DONE),
               skipRepeats
             )
-        const combined = combineMap(
-          (qs, draftActive: boolean, ...txs: (ResolvedHash | null)[]) => ({ qs, draftActive, txs }),
-          promiseState(just(query)),
-          draftActive$,
-          ...txStreams
-        )
-        return $container(
-          ...steps.map((step, i) =>
-            switchMap(p => {
-              const stepDone = (j: number) => p.txs[j] !== null || p.txs.slice(j + 1).some(t => t !== null)
-              if (p.qs.status === PromiseStatus.DONE || stepDone(i))
-                return $stepPill(step.kind, 'done', p.txs[i], step.recipient, false, labelOf(step))
-              const priorAllDone = p.txs.slice(0, i).every((_t, j) => stepDone(j))
-              if (p.qs.status === PromiseStatus.ERROR)
-                return $stepPill(
-                  step.kind,
-                  p.draftActive && priorAllDone ? 'failed' : 'queued',
-                  null,
-                  step.recipient,
-                  false,
-                  labelOf(step)
-                )
-              return $stepPill(
-                step.kind,
-                p.draftActive && priorAllDone ? 'current' : 'queued',
-                null,
-                step.recipient,
-                hasAlert,
-                labelOf(step)
-              )
-            }, combined)
-          )
-        )
-      }
-
-      // ── per-draft-kind description ────────────────────────────────────────
-
-      // Base-token descriptions live on the hub, so chainId defaults there; a cross-chain swap leg carries a token on its
-      // OWN chain (a Polygon USDC output isn't on the Monad registry) and MUST pass that chain, or tokenInfoFor throws
-      // Intent__TokenNotRegistered and crashes the whole draft-item render.
-      const renderToken = (registry: ITokenRegistryMap, token: Address, chainId: number = HUB_CHAIN_ID) => {
-        const homeToken = tokenInfoFor(registry, chainId as ChainId, token).token
-        const desc = getChainTokenDescription(chainId as ChainId, homeToken)
-        // The native marker shares one address on every chain, so its symbol is per-chain (MON on Monad, ETH
-        // elsewhere) — the address-keyed symbolByAddress collapses it to 'ETH' and mislabels a MON swap.
-        const symbol = isAddressEqual(getAddress(token), getAddress(PROTOCOL.nativeToken))
-          ? nativeSymbolOf(chainId as ChainId)
-          : symbolByAddress(token)
-        return { symbol, desc }
-      }
-
-      const $accountProfile = (address: Address, fundName?: Hex, avatarSeed?: Address): I$Node =>
-        switchLatest(
-          map(root => {
-            return root && isAddressEqual(root.account, address)
-              ? $profileDisplay({ address, isFund: false, user: root.user, profileSize: 24 })
-              : $profileDisplay({
-                address,
-                name: fundName,
-                profileSize: 24,
-                $avatar: avatarSeed ? $roboAvatar(avatarSeed, 24) : undefined
+        return op(
+          combineMap(
+            (qs, active: boolean, ...outcomes: (StepOutcome | null)[]): PillState[] => {
+              const done = (j: number): boolean => outcomes[j] !== null || outcomes.slice(j + 1).some(o => o !== null)
+              return outcomes.map((outcome, i): PillState => {
+                if (qs.status === PromiseStatus.DONE || done(i)) return { status: 'done', tx: outcome === null || outcome === 'signed' ? null : outcome }
+                const priorAllDone = outcomes.slice(0, i).every((_o, j) => done(j))
+                if (!active || !priorAllDone) return { status: 'queued', tx: null }
+                return { status: qs.status === PromiseStatus.ERROR ? 'failed' : 'current', tx: null }
               })
-          }, rootState)
-        )
-
-      const fundStateCache = new Map<string, ReturnType<typeof fetchMasterPoolState>>()
-      const $fundIdentity = (fundAccount: Address): I$Node =>
-        switchLatest(
-          map(root => {
-            const owned = root?.funds.find(f => isAddressEqual(f.fund as Address, fundAccount)) ?? null
-            if (owned) return $accountProfile(fundAccount, owned.name as Hex, getAddress(owned.shareToken as Address))
-            const key = fundAccount.toLowerCase()
-            let fetched = fundStateCache.get(key)
-            if (!fetched) {
-              fetched = fetchMasterPoolState(fundAccount)
-              fundStateCache.set(key, fetched)
-              // Never cache a not-yet-indexed (undefined) fund or a getPriceead forever: evict so a later render
-              // re-queries once the fund is indexed, instead of pinning the bare on-chain address for the session.
-              void fetched.then(
-                fund => {
-                  if (!fund) fundStateCache.delete(key)
-                },
-                () => fundStateCache.delete(key)
-              )
-            }
-            return $intermediatePromise({
-              $loader: $inlineSpinner,
-              $display: map(async () => {
-                const fund = await fetched
-                return fund
-                  ? $accountProfile(fundAccount, fund.name as Hex, getAddress(fund.shareToken as Address))
-                  : $addressOnChain(fundAccount, HUB_CHAIN_ID)
-              }, just(null))
-            })
-          }, rootState)
-        )
-
-      const $depositDesc = (draft: IDepositDraft): I$Node => {
-        if (draft.inputAmount.amount === 0n) {
-          return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))($text('Sweep all'))
-        }
-        const $amount = $text(map(price => `≈ ${formatUsd(draft.inputAmount.amount, price)}`, priceFor(draft.inputAmount.baseToken)))
-        if (!draft.output.approx) {
-          return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))($amount)
-        }
-        // Approx delivery = a swap/bridge leg: surface its cost on the row itself (input value − estimated delivery,
-        // the same math the footer's Swap fee total sums). Empty while a price is still loading or the quote favors.
-        const swapFeeText: IStream<string> = map(p => {
-          if (p.input === null || p.output === null) return ''
-          const lost = draft.inputAmount.amount * p.input - draft.output.amount * p.output
-          return lost > 0n ? `· swap fee ${formatUsd(lost, 1n)}` : ''
-        }, combine({ input: priceFor(draft.inputAmount.baseToken), output: priceFor(draft.output.baseToken) }))
-        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $amount,
-          $node(style({ color: palette.foreground, fontSize: text.xs }))($text(swapFeeText))
+            },
+            promiseState(just(row.query)),
+            active,
+            ...legs
+          ),
+          state()
         )
       }
+
+      const $pill = (shape: IStepShape, progress: IStream<PillState[]>, i: number): I$Node =>
+        switchMap(p => {
+          const pill = p[i]!
+          return $stepPill(
+            shape.kind,
+            shape.wallet === true,
+            pill.status,
+            pill.tx,
+            shape.destination,
+            shape.label ?? STEP_LABEL[shape.kind],
+            shape.origin,
+            shape.description
+          )
+        }, progress)
 
       const $withdrawDesc = (draft: IWithdrawDraft, registry: ITokenRegistryMap): I$Node => {
-        const input = draft.input
-        const isBridge = input.route.kind === 'across'
-        const isSweep = isBridge && input.inputAmount === 0n
-        const { symbol, desc } = renderToken(registry, draft.inputAmount.baseToken)
+        const desc = getTokenDescription(draft.output.chainId, isAddressEqual(draft.output.token, PROTOCOL.nativeToken) ? draft.output.token : tokenInfoFor(registry, draft.output.chainId, draft.output.token).token)
         const approx = draft.output.approx ? '≈ ' : ''
-        const sweep = isSweep ? 'Sweep all · ' : ''
-        const amountText = `${sweep}${approx}${readableTokenAmount(desc, draft.output.amount)} ${symbol}`
-        const tooltip = isSweep
-          ? isBridge
-            ? 'Sweeps puppet balance at execution; includes late-arriving deposits or reward drips. The bridge fill may deliver slightly less after bridge fees.'
-            : 'Sweeps puppet balance at execution; includes late-arriving deposits or reward drips.'
-          : isBridge
-            ? 'The bridge fill may deliver slightly less after bridge fees.'
-            : 'Exact partial withdraw; relay fee is paid separately from the puppet balance.'
+        const amountText = `${approx}${readableTokenAmountLabel(desc, draft.output.amount)}`
+        const tooltip = 'Delivered to your wallet; the relay fee is deducted from the withdrawn amount.'
         return $row(spacing.small, style({ alignItems: 'center' }))(
           $node(attr({ title: tooltip }))($text(amountText)),
           $row(spacing.small, style({ alignItems: 'center', color: palette.foreground, fontSize: text.xs }))(
@@ -950,170 +833,118 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
         )
       }
 
-      const $subscribeDesc = (draft: ISubscribeDraft, registry: ITokenRegistryMap): I$Node => {
-        const trader = $fundIdentity(
-          predictFundAccount({ master: draft.master, baseToken: draft.baseToken, name: draft.name })
-        )
-        if (draft.allocationRate === 0n) {
-          return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))($text('Stop funding'), trader)
-        }
-        const { symbol, desc } = renderToken(registry, draft.baseToken)
-        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          trader,
-          $metaText('·'),
-          $text(`${readablePercentage(draft.allocationRate)} of your ${symbol} per funding request`),
-          ...(draft.throttlePeriod > 0n ? [$metaText(`max 1 / ${getDuration(Number(draft.throttlePeriod))}`)] : []),
-          ...(draft.rateLimit > 0n ? [$metaText(`cap ${readableTokenAmount(desc, draft.rateLimit)}`)] : []),
-          ...(draft.symmetry > 0n ? [$metaText(`≤ ${readablePercentage(draft.symmetry)} of trader`)] : [])
-        )
-      }
-
-      const $allocateDesc = (draft: IAllocateDraft, registry: ITokenRegistryMap): I$Node => {
-        const { desc } = renderToken(registry, draft.baseToken)
-        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $amountDisplay({
-            hideBalances,
-            usd: map(price => formatUsd(draft.masterAmount, price), priceFor(getAddress(draft.baseToken))),
-            amount: readableTokenAmountLabel(desc, draft.masterAmount),
-            align: 'flex-end'
-          }),
-          $metaText('to'),
-          $accountProfile(
-            draft.master,
-            draft.name,
-            predictShareToken({ master: draft.masterSigner, baseToken: draft.baseToken, name: draft.name })
+      const $mandateDesc = (draft: IMandateDraft, registry: ITokenRegistryMap): I$Node => {
+        const mandate = draft.mandate
+        const bondToken = getTokenDescription(HUB_CHAIN_ID, bondTokenOf(HUB_CHAIN_ID))
+        if (mandate === null) {
+          return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
+            $text(`bond ${readableTokenAmountLabel(bondToken, draft.bond)}`),
+            $metaText('·'),
+            $text('moves into the bond pool on the hub, matchable by every trader you name')
           )
+        }
+        const symbols = listedTokenAddresses(registry, HUB_CHAIN_ID, mandate.tokenIdList)
+          .map(t => getTokenDescription(HUB_CHAIN_ID, t).symbol)
+          .join('/')
+        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
+          $text(accountDisplayName(mandate.master)),
+          $metaText('·'),
+          mandate.expiry === 0n
+            ? $text('stop backing this trader')
+            : $text(
+                `${readablePercentage(mandate.allocationRate)} of your matchable bond per match in ${symbols} · ≤ ${readablePercentage(mandate.skin)} of the trader's own · until ${readableDate(Number(mandate.expiry))}`
+              ),
+          ...(draft.bond > 0n ? [$metaText(`bond +${readableTokenAmountLabel(bondToken, draft.bond)}`)] : []),
+          ...(mandate.expiry !== 0n && mandate.cooldownPeriod > 0n ? [$metaText(`cooldown ${getDuration(Number(mandate.cooldownPeriod))}`)] : [])
         )
       }
 
-      const $sellDesc = (draft: ISellDraft): I$Node =>
+      const $unbondDesc = (draft: IUnbondDraft): I$Node =>
         $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $text(`${readableTokenAmount(PRECISION.shareTokenDecimals, draft.sharesOut)} shares`),
-          $metaText('queued from'),
-          $addressOnChain(draft.masterAccount, HUB_CHAIN_ID)
+          $text(`release ${readableTokenAmountLabel(getTokenDescription(HUB_CHAIN_ID, bondTokenOf(HUB_CHAIN_ID)), draft.amount)} of bond`)
         )
 
-      const $claimDesc = (draft: IClaimDraft, registry: ITokenRegistryMap): I$Node => {
-        const { symbol } = renderToken(registry, draft.baseToken)
+      const $tradeDesc = (draft: ITradeDraft): I$Node => {
+        if (draft.kind === 'settle') {
+          return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
+            $text(`close the cycle on ${chainFor(draft.spokeChainId).name}, pay gains there and draw losses on the hub`)
+          )
+        }
+        if (draft.kind === 'credit') {
+          const symbols = draft.creditList.map(t => getTokenDescription(draft.chainId, t).symbol).join(', ')
+          return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
+            $text(`sweep the ${symbols} that arrived on your deposit route on ${chainFor(draft.chainId).name}`)
+          )
+        }
         return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $text(`all claimable ${symbol}`),
-          $metaText('from'),
-          $addressOnChain(draft.masterAccount, HUB_CHAIN_ID)
-        )
-      }
-
-      const $redeemDesc = (draft: IRedeemDraft, registry: ITokenRegistryMap): I$Node => {
-        const { symbol, desc } = renderToken(registry, draft.baseToken)
-        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $text(
-            draft.liquidate
-              ? 'entire fund at the closing price, all assets'
-              : draft.fulfill
-                ? 'full queue'
-                : `${readableTokenAmount(desc, draft.assetsOut)} ${symbol}`
-          ),
-          ...(draft.sharesOut > 0n
-            ? [$metaText(`incl. ${readableTokenAmount(PRECISION.shareTokenDecimals, draft.sharesOut)} of your shares queued`)]
-            : []),
-          $metaText('from'),
-          $fundIdentity(draft.masterAccount)
-        )
-      }
-
-      const $swapDesc = (draft: IFundSwapDraft, registry: ITokenRegistryMap): I$Node => {
-        const tokenIn = renderToken(registry, draft.tokenIn, draft.chainId)
-        const tokenOut = renderToken(registry, draft.tokenOut, draft.destinationChainId ?? draft.chainId)
-        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $text(`${readableTokenAmount(tokenIn.desc, draft.amountIn)} ${tokenIn.symbol}`),
-          $metaText('to at least'),
-          $text(`${readableTokenAmount(tokenOut.desc, draft.minOut)} ${tokenOut.symbol}`),
-          $metaText('in'),
-          $fundIdentity(draft.account)
-        )
-      }
-
-      const $claimRouteDesc = (draft: IClaimRouteDraft, registry: ITokenRegistryMap): I$Node => {
-        const token = renderToken(registry, draft.token, draft.chainId)
-        return $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-          $text(`${readableTokenAmount(token.desc, draft.amount)} ${token.symbol}`),
-          $metaText(`waiting on ${chainName(draft.chainId)}, into`),
-          $fundIdentity(draft.account)
+          $text(`${draft.callList.length} venue call${draft.callList.length === 1 ? '' : 's'} on ${chainFor(draft.chainId).name}`)
         )
       }
 
       const $draftDescription = (draft: IDraft, registry: ITokenRegistryMap): I$Node => {
-        if (draft.kind === 'mandate') return $subscribeDesc(draft, registry)
-        if (draft.kind === 'deposit') return $depositDesc(draft)
-        if (draft.kind === 'withdraw') return $withdrawDesc(draft, registry)
-        if (draft.kind === 'allocate') return $allocateDesc(draft, registry)
-        if (draft.kind === 'fundSwap') return $swapDesc(draft, registry)
-        if (draft.kind === 'sell') return $sellDesc(draft)
-        if (draft.kind === 'claim') return $claimDesc(draft, registry)
-        if (draft.kind === 'claimRoute') return $claimRouteDesc(draft, registry)
-        if (draft.kind === 'redeem') return $redeemDesc(draft, registry)
-        return $metaText((draft as { title?: string; kind: string }).title ?? (draft as { kind: string }).kind)
+        if (draft.kind === 'mandate') return $mandateDesc(draft, registry)
+        if (draft.kind === 'unbond') return $unbondDesc(draft)
+        if (draft.kind === 'credit' || draft.kind === 'operate' || draft.kind === 'settle') return $tradeDesc(draft)
+        if (draft.kind === 'deposit') return empty
+        return $withdrawDesc(draft, registry)
       }
 
-      const $item = (
-        step: PlannedStep | Step,
-        idx: number | null,
-        registry: ITokenRegistryMap,
-        query: Promise<unknown> | null,
-        priorQuery: Promise<unknown> | null,
-        submitBlockByChain: Promise<Map<number, bigint>>,
-        showIndex: boolean,
-        recognize: boolean,
-        liveSigner: Address | null
-      ): I$Node => {
-        if (step.kind === 'bind') return empty
-        const draft = step.draft
-        // The step pills already name every action; the trailing bold verb is only kept for kinds whose
-        // description alone is ambiguous without it (deposit/withdraw amounts read directionless).
-        const isMultiStep = draft.kind === 'deposit' || draft.kind === 'withdraw'
-        return $row(spacing.small, style({ alignItems: 'center', padding: '6px 0' }))(
-          ...(showIndex ? [$stepIndex(idx ?? 0)] : []),
-          $sequencedStepRow(planShape(draft, registry, recognize, liveSigner), query, priorQuery, submitBlockByChain, draft.alert !== null),
-          $node(style({ flex: 1, minWidth: '16px' }))(),
-          ...(isMultiStep
-            ? [$node(style({ color: palette.message, fontWeight: '600' }))($text(DRAFT_VERB[draft.kind]))]
+      const $plan = (rows: readonly Row[], registry: ITokenRegistryMap, returning: boolean): I$Node => {
+        const tracked = rows.map(row => ({ ...row, progress: progressOf(row) }))
+        const walletPills = tracked.flatMap(row =>
+          row.shapes.flatMap((shape, i) => (shape.wallet === true ? [{ shape, i, progress: row.progress }] : []))
+        )
+        const relayRows = tracked.flatMap(row => {
+          const pills = row.shapes.flatMap((shape, i) => (shape.wallet === true ? [] : [{ shape, i }]))
+          return pills.length === 0 ? [] : [{ row, pills }]
+        })
+        const signs = walletPills.some(p => SIGNATURE_STEPS.has(p.shape.kind))
+        const ask = walletAsk(walletPills.map(p => p.shape))
+        return $column(spacing.default)(
+          ...(walletPills.length === 0
+            ? []
+            : [
+                $column(spacing.small)(
+                  $column(spacing.tiny, style({ minWidth: 0 }))(
+                    $node(style({ fontSize: text.base, color: palette.message }))(
+                      $text(signs ? (returning ? 'Restore your account on this device' : 'Set up your account') : 'From your wallet')
+                    ),
+                    $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.4' }))(
+                      $text(
+                        signs
+                          ? `${returning ? 'The same wallet signature derives the same account.' : 'One account per wallet, derived from the one you connected.'} ${ask}`
+                          : ask
+                      )
+                    )
+                  ),
+                  $row(spacing.tiny, style({ alignItems: 'center', flexWrap: 'wrap' }))(
+                    ...walletPills.map(p => $pill(p.shape, p.progress, p.i))
+                  )
+                )
+              ]),
+          ...(walletPills.length > 0 && relayRows.length > 0
+            ? [$labeledDivider($node(style({ fontSize: text.xs, whiteSpace: 'nowrap' }))($text('Rest is relayed for you')))]
             : []),
-          $draftDescription(draft, registry)
+          ...(relayRows.length === 0
+            ? []
+            : [
+                $column(spacing.small)(
+                  ...relayRows.map(x =>
+                    $row(spacing.small, style({ alignItems: 'center', padding: '6px 0' }))(
+                      $row(spacing.tiny, style({ alignItems: 'center', flexWrap: 'wrap' }))(
+                        ...x.pills.map(p => $pill(p.shape, x.row.progress, p.i))
+                      ),
+                      $node(style({ flex: 1, minWidth: '16px' }))(),
+                      $draftDescription(x.row.draft, registry)
+                    )
+                  )
+                )
+              ])
         )
       }
-
-      // The drawer hosts the REAL balance editor so a missing balance is fixable in place (deposit/withdraw popovers
-      // emit drafts straight into this cart) — the old display-only row with a redirect to the portfolio page (and its
-      // ?action auto-open hack) is deprecated. Pre-session the stub signer is the zero-address sentinel: that
-      // placeholder PA can never hold funds (the editor derives its own behavior from it), and the runner re-quotes
-      // any staged swap leg for the live session at submit.
-      const $depositHeader = (
-        token: Hex,
-        wallet: IConnectedWallet,
-        root: ISubaccountState | null,
-        registry: ITokenRegistryMap,
-        existingDraft: IEditorDraft | null
-      ): I$Node => {
-        const sessionSigner = wallet.session?.signer ?? root?.signer
-        const accountState: IStream<ISubaccountState> = op(
-          rootState,
-          map(r => r ?? stubSubaccountState({ user: wallet.address, signer: sessionSigner ?? ADDRESS_ZERO }))
-        )
-        return $TokenBalanceEditor({
-          hideBalances,
-          accountState,
-          token,
-          tokenRegistry: registry,
-          walletAccount: wallet,
-          draft: just(existingDraft)
-        })({ changeDraft: changeDraftTether() })
-      }
-
-      // ── layout ────────────────────────────────────────────────────────────
 
       const drawerTitleId = 'action-drawer-title'
 
-      // Modal dialog behavior: trap Tab/Shift+Tab within the drawer, route
-      // Escape to the close path, move focus in on open and restore it on close.
       const focusTrap = (root: unknown): Disposable | void => {
         if (!(root instanceof HTMLElement)) return
         const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -1183,146 +1014,83 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
             style({ overflow: 'auto', maxHeight: '35vh', padding: '0 24px' })
           )(
             switchMap(
-              p => {
-                const steps: ReadonlyArray<PlannedStep | Step> = p.submission ? p.submission.steps : p.planned
-                if (steps.length === 0) return empty
-                const liveSigner = p.wallet?.session?.signer ?? p.root?.signer ?? null
-                const isSub = (s: PlannedStep | Step): boolean => s.kind === 'draft' && s.draft.kind === 'mandate'
-
-                const priorQueryByDraft = new Map<string, Promise<unknown> | null>()
-                let prevQuery: Promise<unknown> | null = null
-                for (const st of steps) {
-                  const q = 'query' in st ? st.query : null
-                  if (st.kind === 'draft' && q) priorQueryByDraft.set(st.draft.id, prevQuery)
-                  if (q) prevQuery = q
-                }
-
-                const firstSub = steps.findIndex(isSub)
-                const lastSub = firstSub < 0 ? -1 : steps.reduce((acc, s, i) => (isSub(s) ? i : acc), firstSub)
-                const groups = new Map<Hex, (PlannedStep | Step)[]>()
-                for (const s of steps.slice(firstSub < 0 ? 0 : firstSub, lastSub + 1)) {
-                  if (!isSub(s)) continue
-                  const tid = ((s as DraftStep).draft as ISubscribeDraft).baseToken
-                  groups.set(tid, [...(groups.get(tid) ?? []), s])
-                }
-                const nonSubDraftCount = steps.filter(s => s.kind === 'draft' && !isSub(s)).length
-                const showIndex = nonSubDraftCount + groups.size > 1
-
-                const draftsInOrder: IDraft[] = []
-                for (const s of steps) if (s.kind === 'draft') draftsInOrder.push(s.draft)
-
-                let idx = 0
-                const renderStep = (s: PlannedStep | Step): I$Node => {
-                  const stepIdx = s.kind === 'draft' ? idx++ : null
-                  const query = 'query' in s ? s.query : null
-                  const priorQuery =
-                    s.kind === 'draft' && 'query' in s ? (priorQueryByDraft.get(s.draft.id) ?? null) : null
-                  const submitBlocks =
-                    'submitBlockByChain' in s ? s.submitBlockByChain : Promise.resolve(new Map<number, bigint>())
-                  const recognize = s.kind === 'draft' ? shouldRecognize(s.draft, draftsInOrder) : true
-                  return $item(s, stepIdx, p.registry, query, priorQuery, submitBlocks, showIndex, recognize, liveSigner)
-                }
-                if (firstSub < 0) return $column(spacing.small)(...steps.map(renderStep))
-
-                const $group = (token: Hex, group: (PlannedStep | Step)[]): I$Node => {
-                  const first = group[0]!
-                  const draft = (first as DraftStep).draft
-                  const query = 'query' in first ? first.query : null
-                  const priorQuery = priorQueryByDraft.get(draft.id) ?? null
-                  const stepIdx = idx++
-                  const existingEditorDraft =
-                    draftsInOrder.find(
-                      (d): d is IEditorDraft =>
-                        (d.kind === 'deposit' && d.output.baseToken === token) ||
-                        (d.kind === 'withdraw' && d.inputAmount.baseToken === token)
-                    ) ?? null
-                  return $column(spacing.small)(
-                    ...(p.wallet ? [$depositHeader(token, p.wallet, p.root, p.registry, existingEditorDraft)] : []),
-                    $row(spacing.small, style({ alignItems: 'center', padding: '6px 0' }))(
-                      ...(showIndex ? [$stepIndex(stepIdx)] : []),
-                      $sequencedStepRow(planShape(draft, p.registry, true, liveSigner), query, priorQuery, Promise.resolve(new Map<number, bigint>()), draft.alert !== null)
-                    ),
-                    $column(
-                      spacing.small,
-                      style({
-                        paddingLeft: '14px',
-                        marginLeft: '10px',
-                        borderLeft: `1px solid ${colorShade(palette.foreground, 15)}`
+              sub =>
+                sub === null
+                  ? switchMap(
+                      p => {
+                        if (p.registry.status === PromiseStatus.PENDING) return $inlineSpinner
+                        if (p.registry.status === PromiseStatus.ERROR) return $errorLabel(p.registry.error)
+                        if (p.drafts.length === 0) return empty
+                        const wallet = p.pair.wallet
+                        const account = wallet === null || p.pair.bodyKeys === null ? null : p.pair.bodyKeys.accountOf(wallet.address)
+                        const route = wallet === null ? null : predictDepositRoute(wallet.address)
+                        const deployed = p.root === null ? new Set<ChainId>() : p.root.deployed
+                        const rows = p.drafts.map(
+                          (draft): Row => ({ draft, shapes: planShape(draft, account, route, deployed), query: null, priorQuery: null, walletTx: new Map() })
+                        )
+                        return $plan(rows, p.registry.value, p.root !== null)
+                      },
+                      combine({ drafts: draftList, registry: tokenRegistryValue, pair: walletPair, root: rootState })
+                    )
+                  : switchMap(registry => {
+                      if (registry.status === PromiseStatus.PENDING) return $inlineSpinner
+                      if (registry.status === PromiseStatus.ERROR) return $errorLabel(registry.error)
+                      let prior: Promise<unknown> | null = null
+                      const rows = sub.steps.map((st): Row => {
+                        const row: Row = { ...st, priorQuery: prior }
+                        prior = st.query
+                        return row
                       })
-                    )(...group.map(s => $draftDescription((s as DraftStep).draft, p.registry)))
-                  )
-                }
-                return $column(spacing.small)(
-                  ...steps.slice(0, firstSub).map(renderStep),
-                  ...[...groups.entries()].map(([token, group]) => $group(token, group)),
-                  ...steps.slice(lastSub + 1).map(renderStep)
-                )
-              },
-              combine({
-                submission,
-                planned: plannedSteps,
-                registry: tokenRegistryValue,
-                wallet: walletState,
-                root: rootState
-              })
+                      return $plan(rows, registry.value, sub.returning)
+                    }, tokenRegistryValue),
+              submission
             )
           ),
 
           (() => {
-            // The status / error one-liner. On touch (mobile) there is no hover,
-            // so the ellipsised + tooltip-only treatment is dropped in favour of
-            // a full-width, wrapping message on its own line.
-            const $noticeLine = (full: string, positive: boolean): I$Node => {
-              const color = positive ? palette.positive : palette.negative
-              const weight = positive ? '600' : '500'
-              return isMobileScreen
-                ? $node(style({ color, fontSize: text.xs, fontWeight: weight, minWidth: 0, whiteSpace: 'normal' }))(
-                  $text(full)
-                )
-                : $node(
-                  style({
+            const $noticeLine = (full: string, tone: 'positive' | 'negative'): I$Node => {
+              const color = tone === 'positive' ? palette.positive : palette.negative
+              const weight = tone === 'positive' ? '600' : '500'
+              const base = isMobileScreen
+                ? { color, fontSize: text.xs, fontWeight: weight, minWidth: '0', whiteSpace: 'normal' as const }
+                : {
                     display: 'block',
                     color,
                     fontSize: text.xs,
                     fontWeight: weight,
-                    whiteSpace: 'nowrap',
+                    whiteSpace: 'nowrap' as const,
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
-                    minWidth: 0
-                  })
-                )($text(full))
+                    minWidth: '0'
+                  }
+              return $node(style(base))($text(full))
             }
 
-            const footerNotice: IStream<{ text: string; positive: boolean } | null> = op(
+            const footerNotice: IStream<{ text: string; tone: 'positive' | 'negative' } | null> = op(
               map(
                 p => {
-                  if (p.status?.kind === 'done') return { text: 'Done', positive: true }
-                  if (p.status?.kind === 'error') return { text: p.status.message, positive: false }
+                  if (p.status?.kind === 'done') return { text: 'Done', tone: 'positive' as const }
+                  if (p.status?.kind === 'error') return { text: p.status.message, tone: 'negative' as const }
+                  if (p.status?.kind === 'pending') return null
+                  if (p.keyless && p.root === null && p.underfunded !== null)
+                    return { text: `Deposit at least ${p.underfunded} to set up your account`, tone: 'negative' as const }
                   if (!p.chainLiveness.reachable)
-                    return { text: 'Service unreachable, cannot submit', positive: false }
+                    return { text: 'Service unreachable, cannot submit', tone: 'negative' as const }
                   const staleChain = firstStaleChain(p.list, p.chainLiveness)
                   if (staleChain !== null)
-                    return { text: `${chainName(staleChain)} out of sync, cannot submit yet`, positive: false }
-                  const offending = p.list.find(d => d.alert !== null)
-                  if (offending) return { text: offending.alert as string, positive: false }
-                  const unfunded = p.list.find(d => subscribeNeedsFunding(d, p.root, p.list))
-                  if (unfunded && unfunded.kind === 'mandate') {
-                    const sym = getChainTokenDescription(HUB_CHAIN_ID, unfunded.baseToken).symbol
-                    return {
-                      text: `Deposit ${sym} above to fund this allocation before you can submit`,
-                      positive: false
-                    }
-                  }
+                    return { text: `${chainName(staleChain)} out of sync, cannot submit yet`, tone: 'negative' as const }
                   return null
                 },
                 combine({
                   list: draftList,
                   status: submissionStatus,
                   chainLiveness: chainLivenessValue,
+                  keyless,
+                  underfunded,
                   root: rootState
                 })
               ),
-              skipRepeatsWith((a, b) => a?.text === b?.text && a?.positive === b?.positive)
+              skipRepeatsWith((a, b) => a?.text === b?.text && a?.tone === b?.tone)
             )
 
             const $feesContent = (): I$Node =>
@@ -1332,80 +1100,39 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
                   $executionFeesBreakdown()
                 )
                 : $node(style({ fontSize: text.sm, whiteSpace: 'nowrap' }))($executionFees())
-            const $fees = switchMap(
-              notice => (notice === null ? $feesContent() : $noticeLine(notice.text, notice.positive)),
-              footerNotice
-            )
+            const $fees = switchMap(notice => (notice === null ? $feesContent() : $noticeLine(notice.text, notice.tone)), footerNotice)
 
-            const $enableSessionButton = switchMap(
-              show =>
-                show
-                  ? $Popover({
-                    $container: isMobileScreen
-                      ? $node(style({ display: 'flex', width: '100%' }))
-                      : $node(style({ display: 'flex' })),
-                    $open: map(
-                      () =>
-                        $column(spacing.default, style({ maxWidth: '320px' }))(
-                          ...$enableSessionDisclaimer(),
-                          $Button({
-                            $container: $defaultButtonPrimaryOutline(style({ alignSelf: 'flex-end', minHeight: '40px' })),
-                            disabled: enableSessionPending,
-                            $content: switchMap(
-                              pending => $node($text(pending ? 'Enabling…' : 'Enable session')),
-                              enableSessionPending
-                            )
-                          })({ click: clickEnableSessionTether() }),
-                          switchMap(
-                            err => (err ? $alertNegativeContainer(style({ fontSize: text.sm }))($text(err)) : empty),
-                            enableSessionError
-                          )
-                        ),
-                      popEnableSession
-                    ),
-                    dismiss: op(
-                      enableSessionFlow,
-                      filter(s => s.status === PromiseStatus.DONE)
-                    ),
-                    $target: $ButtonSecondary({
-                      $container: isMobileScreen
-                        ? $defaultButtonPrimaryOutline(style({ width: '100%', minHeight: '44px' }))
-                        : $defaultButtonPrimaryOutline,
-                      $content: $row(spacing.tiny, style({ alignItems: 'center' }))(
-                        $text('Enable Session'),
-                        $popoverCaret()
-                      )
-                    })({ click: popEnableSessionTether() })
-                  })({})
-                  : empty,
-              showEnableSession
+            const agreementOpens = op(
+              sampleMap((k: boolean, _click: PointerEvent) => k, keyless, clickSubmit),
+              filter(k => k)
             )
-
-            const $submitButton = $Button({
-              $container: isMobileScreen
-                ? $defaultButtonPrimary(style({ width: '100%', minHeight: '44px' }))
-                : $defaultButtonPrimary,
-              disabled: submitDisabled,
-              $content: switchMap(planned => {
-                if (planned.some(ps => ps.kind === 'draft' && ps.draft.alert !== null)) {
-                  return $node($text('Resolve alerts'))
-                }
-                const count = planExecution(planned).filter(e => e.kind === 'exec' && e.lead).length
-                return $node($text(count > 1 ? `Submit ${count} actions` : 'Submit'))
-              }, plannedSteps)
-            })({
-              click: clickSubmitTether()
-            })
+            const $submitButton = $Popover({
+              $container: $node(style({ display: 'flex', flexShrink: '0', ...(isMobileScreen ? { width: '100%' } : {}) })),
+              $open: constant(
+                $column(spacing.default, style({ maxWidth: '320px' }))(
+                  $node(style({ fontSize: text.base, color: palette.message }))($text('Before you begin')),
+                  $betaAgreement(),
+                  $ButtonSecondary({
+                    $container: $defaultButtonSecondary(style({ alignSelf: 'flex-end', minHeight: '40px' })),
+                    $content: $text('Proceed')
+                  })({ click: clickOnboardTether() })
+                ),
+                agreementOpens
+              ),
+              $target: $Button({
+                $container: isMobileScreen
+                  ? $defaultButtonPrimary(style({ width: '100%', minHeight: '44px' }))
+                  : $defaultButtonPrimary,
+                disabled: submitDisabled,
+                $content: $text('Submit')
+              })({ click: clickSubmitTether() }),
+              dismiss: clickOnboard
+            })({})
 
             return isMobileScreen
-              ? $column(spacing.small, style({ padding: '0 24px', minWidth: 0 }))(
-                $fees,
-                $enableSessionButton,
-                $submitButton
-              )
+              ? $column(spacing.small, style({ padding: '0 24px', minWidth: 0 }))($fees, $submitButton)
               : $row(spacing.small, style({ padding: '0 24px', alignItems: 'center', minWidth: 0 }))(
-                $node(style({ flex: 1, minWidth: 0 }))($fees),
-                $enableSessionButton,
+                $node(style({ flex: 1, minWidth: 0, display: 'flex', justifyContent: 'flex-end' }))($fees),
                 $submitButton
               )
           })()
@@ -1415,14 +1142,13 @@ export const $ActionDrawer = ({ walletState: rootStateQuery, draftList, hideBala
       return [
         $node(style({ display: 'contents' }))(
           switchMap(open => (open ? fadeIn($drawerContent) : empty), isOpen),
-          ignoreAll(anyInFlight)
+          filter((_): _ is never => false, anyInFlight)
         ),
         {
           clearDrafts: constant(null, clickClose),
-          settled,
-          releaseDraft,
-          changeAttest: attestSubject.stream,
-          changeDraft
+          deriveAccount: derivedAccount,
+          attest,
+          releaseDraft
         }
       ]
     }

@@ -12,9 +12,5 @@ yarn.lock
 package-lock.json
 pnpm-lock.yaml
 
-# Akash SDL deploy files (keep templates only)
-sdl-*.yml
-!sdl-*.tmpl.yml
-
 .DS_Store
 .claude/

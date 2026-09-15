@@ -10,7 +10,7 @@ export interface IColumn<T = unknown, Opt extends boolean = false, Ix extends bo
   flags: { pk: boolean; indexed: boolean; optional: boolean }
 }
 
-type IColumnType = 'text' | 'hex' | 'address' | 'bigint' | 'int' | 'bool' | 'bigint[]' | 'int[]'
+type IColumnType = 'text' | 'hex' | 'address' | 'bigint' | 'int' | 'bool' | 'bigint[]' | 'int[]' | 'hex[]'
 
 interface ITypeMap {
   text: string
@@ -21,6 +21,7 @@ interface ITypeMap {
   bool: boolean
   'bigint[]': bigint[]
   'int[]': number[]
+  'hex[]': Hex[]
 }
 
 interface ICodec<T> {
@@ -41,7 +42,8 @@ const codecs: { [K in IColumnType]: ICodec<ITypeMap[K]> } = {
     encode: v => JSON.stringify(v.map(x => x.toString())),
     parse: v => (v as (string | number)[]).map(x => BigInt(x))
   },
-  'int[]': { sqlType: 'text', encode: v => JSON.stringify(v), parse: v => v as number[] }
+  'int[]': { sqlType: 'text', encode: v => JSON.stringify(v), parse: v => v as number[] },
+  'hex[]': { sqlType: 'text', encode: v => JSON.stringify(v), parse: v => v as Hex[] }
 }
 
 export function t<const Ty extends IColumnType, const Opt extends boolean = false, const Ix extends boolean = false>(
@@ -73,12 +75,8 @@ export type IndexedKeys<Cols extends IColumns> = {
 }[keyof Cols] &
   string
 
-// Marks a table object so it can be picked out of an `import * as schema` namespace (which also holds row types, helper
-// consts, …). Symbol.for keeps the marker identity stable across module/bundle instances.
 export const TABLE: unique symbol = Symbol.for('puppet.digest.table')
 
-// A table carries NO name — the name is the export-const key it is bound to in the schema, recovered via tableNames (a
-// reverse table→key map) at each instantiation. The objects stay immutable; nothing is stamped onto them.
 export interface ITable<Cols extends IColumns> {
   [TABLE]: true
   columns: Cols
@@ -92,10 +90,6 @@ export function table<Cols extends IColumns>(
   return { [TABLE]: true, columns, key: opts?.key }
 }
 
-// A table's SQL name IS the export const it is bound to in a schema namespace (`import * as schema`). isTable picks the
-// tables out of that namespace (skipping row types — erased at runtime — and helper consts); a consumer builds the
-// table→name reverse map inline at instantiation (openDigest / createClient), so a name is never written as a literal
-// nor stamped onto the object, and every consumer derives the same name (same key) so the wire `t: name` matches.
 export const isTable = (v: unknown): v is ITable<IColumns> =>
   typeof v === 'object' && v !== null && (v as Record<symbol, unknown>)[TABLE] === true
 

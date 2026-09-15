@@ -1,131 +1,172 @@
-import { router__gasLimit } from '@puppet/contracts'
+import { router__accountGenesisGas, router__gasLimit } from '@puppet/contracts'
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { FUND_GATE_INTENTS, HUB_GATE_INTENTS, PUPPET_GATE_INTENTS } from '@puppet/contracts/intents'
-import type { Chain, Client, Transport } from 'viem'
-import { nativePrecisionOf } from './tokenRegistry.js'
+import { type Address, type Chain, type Client, type Hex, size, type Transport } from 'viem'
+import { type ChainId, deploymentAddress } from '../const/index.js'
+import type { IGetRate } from '../evaluate/types.js'
+import type { IActionKind } from '../intent/shared.js'
+import { nativePrecisionOf, nativeSymbolOf, symbolOf } from './tokenRegistry.js'
 
-// Minimum client shape we rely on: transport + chain. Accepts viem's
-// PublicClient, wagmi's raw client (from Config.getClient), and any other
-// viem-compatible client used to call getGasPrice / readContract actions.
-// chain is `Chain | undefined` to match viem's PublicClient default.
 export type FeeClient = Client<Transport, Chain | undefined>
 
-const ROUTER_GAS = {
-  PuppetGate: router__gasLimit.PuppetGate,
-  FundGate: router__gasLimit.FundGate,
-  HubGate: router__gasLimit.HubGate
-} as const
+export type RelayGate = 'CoreGate' | 'HubGate'
 
-export type RelayRouter = keyof typeof ROUTER_GAS
-export type RelayMethod = { [R in RelayRouter]: keyof (typeof ROUTER_GAS)[R] }[RelayRouter]
-export type RelayFeeMap = Record<RelayMethod, FeeQuote>
+const GATE_GAS = { ...router__gasLimit.CoreGate, ...router__gasLimit.HubGate } as const satisfies Record<
+  IActionKind,
+  bigint
+>
 
-// Marginal gas per scaling unit: per matched puppet (allocate), per forwarded call
-// (operate), per rule (mandate). The base already covers the single-unit path;
-// this is added on top as gas(n) = base + perUnit*n. Hardcoded estimates until
-// per-unit benches exist; biased high so the relay fee never under-quotes a large batch.
-const PER_UNIT_GAS: Partial<Record<RelayMethod, bigint>> = {
-  allocate: 45_000n,
-  operate: 15_000n,
-  mandate: 10_000n
+const LOOP_GAS: Partial<Record<IActionKind, bigint>> = {}
+
+const ACTION_GATE = {
+  ...Object.fromEntries(Object.keys(router__gasLimit.CoreGate).map(action => [action, 'CoreGate'])),
+  ...Object.fromEntries(Object.keys(router__gasLimit.HubGate).map(action => [action, 'HubGate']))
+} as Record<IActionKind, RelayGate>
+
+export const ACTION_KIND_LIST = Object.keys(ACTION_GATE) as IActionKind[]
+
+export function gateOf(kind: IActionKind): RelayGate {
+  return ACTION_GATE[kind]
 }
 
-// A dispatched intent kind resolves to the gate that hosts it (router) and the on-chain function /
-// gas-limit key (method). `swap` and `recognize` each live on BOTH gates, so the kind disambiguates
-// where membership can't: PA kinds (swap/recognize) → PuppetGate, FA kinds (fundSwap/fundRecognize) →
-// FundGate's same-named function. Everything else is method === kind, routed by membership.
-const KIND_DISPATCH: Partial<Record<string, { router: RelayRouter; method: RelayMethod }>> = {
-  swap: { router: 'PuppetGate', method: 'swap' },
-  fundSwap: { router: 'FundGate', method: 'swap' },
-  wrap: { router: 'FundGate', method: 'wrap' },
-  recognize: { router: 'PuppetGate', method: 'recognize' },
-  fundRecognize: { router: 'FundGate', method: 'recognize' },
-  operate: { router: 'FundGate', method: 'operate' }
+const BODY_SAFETY_FACTOR = 2n
+
+const SUBCALL_GAS_BUDGET: Partial<Record<IActionKind, bigint>> = {
+  depositAcross: 4_300_894n,
+  withdraw: 4_726_690n
 }
 
-export function relayDispatch(kind: string): { router: RelayRouter; method: RelayMethod } {
-  const explicit = KIND_DISPATCH[kind]
-  if (explicit) return explicit
-  if (kind in HUB_GATE_INTENTS) return { router: 'HubGate', method: kind as RelayMethod }
-  if (kind in PUPPET_GATE_INTENTS) return { router: 'PuppetGate', method: kind as RelayMethod }
-  if (kind in FUND_GATE_INTENTS) return { router: 'FundGate', method: kind as RelayMethod }
-  throw new Error(`unknown relay kind ${kind}`)
+const GAS_LIMIT_BILLED_CHAIN: Record<ChainId, boolean> = {
+  143: true,
+  42161: false
 }
 
-function relayGas(router: RelayRouter, method: RelayMethod, unitCount: bigint): bigint {
-  const base = (ROUTER_GAS[router] as Record<string, bigint>)[method]
-  if (base === undefined) throw new Error(`no gas limit for ${router}.${method}`)
-  return base + (PER_UNIT_GAS[method] ?? 0n) * unitCount
-}
+const CALLDATA_GAS_PER_BYTE = 16n
 
-// Methods that invoke EXTERNAL protocols (a DEX/bridge for swap, GMX for operate), whose real execution cost the
-// single-shape forge base under-reports and the per-unit estimate can't capture (one GMX createOrder is ~400-600k, a
-// deploy-on-first-use swap adds ~300k). A floor keeps a real call from OOGing while the base+perUnit shape still scales
-// past it for large batches.
-const DISPATCH_GAS_FLOOR: Partial<Record<RelayMethod, bigint>> = {
-  operate: 2_000_000n,
-  swap: 2_000_000n
-}
-
-// The gas cap for DISPATCH (writeContract), sized from the SAME scaling model the fee is quoted from
-// (base + perUnit*unitCount) so a large batch never OOGs the tx the fee was collected for — a static base*N ignored
-// unitCount and OOG'd a >~46-puppet allocate mid-loop. 2x headroom absorbs the hardcoded-estimate error; a per-method
-// floor covers external-protocol calls. Never eth_call/estimateGas (that reintroduces the node-anomaly veto the sim
-// deletion removed) — this is a pure static formula.
-export function dispatchGasLimit(router: RelayRouter, method: RelayMethod, unitCount: bigint): bigint {
-  const scaled = relayGas(router, method, unitCount) * 2n
-  const floor = DISPATCH_GAS_FLOOR[method] ?? 0n
-  return scaled > floor ? scaled : floor
-}
-
-// The fee scale: every supported chain's native is 18-decimals, so one precision constant serves all dispatch chains
-// (the RATE is what must be chain-native-keyed, see getTokenPerNativeToken).
-export const NATIVE_PRECISION = nativePrecisionOf(HUB_CHAIN_ID)
-
-// CEILING division: a real gas cost must never floor to a ZERO fee (a sub-unit quote on a cheap chain once rounded to
-// 0, was signed, co-signed and charged as 0 — the relayer worked for free and the anomaly stayed invisible). Rounding
-// up costs the user at most one token unit and keeps "fee exists" an invariant of every priced dispatch.
-const ceilByPrecision = (n: bigint): bigint => (n + NATIVE_PRECISION - 1n) / NATIVE_PRECISION
-
-// User-side ceiling buffer over the base quote. The matchmaker requotes against
-// live gas/rate at submit time; this margin absorbs drift between sign and
-// submit. The matchmaker still charges the live base — not the ceiling — so the
-// surplus is only "headroom we didn't need" not extra fee paid.
-const ACCEPTABLE_FEE_MARGIN_BPS = 2500n
-const withMargin = (base: bigint): bigint => (base * (10_000n + ACCEPTABLE_FEE_MARGIN_BPS)) / 10_000n
-
-
-export interface FeeQuote {
-  relayFee: bigint
-}
-
-export function getAcceptableRelayFee(
-  gasPrice: bigint,
-  router: RelayRouter,
-  method: RelayMethod,
-  tokenPerNativeToken: bigint,
-  unitCount = 0n
-): bigint {
-  return withMargin(ceilByPrecision(relayGas(router, method, unitCount) * gasPrice * tokenPerNativeToken))
-}
-
-export function getRelayFeeQuoteSource(tokenPerNativeToken: bigint, gasPrice: bigint): RelayFeeMap {
-  const map = {} as RelayFeeMap
-  for (const router of ['PuppetGate', 'FundGate', 'HubGate'] as const) {
-    for (const [method, gas] of Object.entries(ROUTER_GAS[router])) {
-      map[method as RelayMethod] = { relayFee: withMargin(ceilByPrecision(gas * gasPrice * tokenPerNativeToken)) }
+export const declaredCallGas = (callList: readonly { gasLimit: bigint }[]): bigint =>
+  callList.reduce((total, call) => {
+    if (call.gasLimit === 0n) {
+      throw new Error('a relayed call must declare a gasLimit; 0 forwards the whole remaining budget unpriced')
     }
+    return total + call.gasLimit
+  }, 0n)
+
+export const dynamicCalldataBytes = (parts: readonly Hex[]): bigint =>
+  parts.reduce((total, part) => total + BigInt(size(part)), 0n)
+
+const SUBCALL_RESERVE_NUMERATOR = 64n
+const SUBCALL_RESERVE_DENOMINATOR = 63n
+
+export function gateAddress(kind: IActionKind, chainId: ChainId): Address {
+  const gate: RelayGate = ACTION_GATE[kind]
+  if (gate === 'HubGate' && chainId !== HUB_CHAIN_ID) {
+    throw new Error(`${kind} dispatches on HubGate, hub chain only; got ${chainId}`)
   }
-  return map
+  return deploymentAddress(gate, chainId)
 }
 
-/** Canonical formula. fee = relayGas(router, method, unitCount) * gas * tokenPerNativeToken / 1e18 */
-export function computeRelayFee(
-  router: RelayRouter,
-  method: RelayMethod,
-  gasPrice: bigint,
-  tokenPerNativeToken: bigint,
-  unitCount = 0n
-): bigint {
-  return ceilByPrecision(relayGas(router, method, unitCount) * gasPrice * tokenPerNativeToken)
+export function resolveDispatchChain(kind: IActionKind, requestChainId: ChainId): ChainId {
+  if (ACTION_GATE[kind] !== 'HubGate') return requestChainId
+  if (requestChainId !== HUB_CHAIN_ID) {
+    throw new Error(`${kind} dispatches on HubGate, hub chain only; got ${requestChainId}`)
+  }
+  return HUB_CHAIN_ID
 }
+
+function gateBodyGas(kind: IActionKind, unitCount: bigint): bigint {
+  const loop = LOOP_GAS[kind]
+  return loop === undefined ? GATE_GAS[kind] : GATE_GAS[kind] - loop + loop * unitCount
+}
+
+const genesisGas = (carriesGenesis: boolean): bigint => (carriesGenesis ? router__accountGenesisGas : 0n)
+
+function subcallGas(kind: IActionKind, innerGasLimit: bigint): bigint {
+  const budget = SUBCALL_GAS_BUDGET[kind]
+  if (budget === undefined) return innerGasLimit
+  if (innerGasLimit > 0n) {
+    throw new Error(`${kind} carries a declared subcall budget; innerGasLimit must be 0, got ${innerGasLimit}`)
+  }
+  return budget
+}
+
+export function dispatchGasLimit(
+  kind: IActionKind,
+  carriesGenesis: boolean,
+  unitCount: bigint,
+  innerGasLimit: bigint,
+  calldataByteLength: bigint
+): bigint {
+  const reserved =
+    gateBodyGas(kind, unitCount) * BODY_SAFETY_FACTOR +
+    genesisGas(carriesGenesis) +
+    subcallGas(kind, innerGasLimit) +
+    CALLDATA_GAS_PER_BYTE * calldataByteLength
+  return (reserved * SUBCALL_RESERVE_NUMERATOR) / SUBCALL_RESERVE_DENOMINATOR + 1n
+}
+
+export function billedRelayGas(
+  chainId: ChainId,
+  kind: IActionKind,
+  carriesGenesis: boolean,
+  unitCount: bigint,
+  innerGasLimit: bigint,
+  calldataByteLength: bigint
+): bigint {
+  const billsGasLimit = GAS_LIMIT_BILLED_CHAIN[chainId]
+  if (billsGasLimit === undefined) throw new Error(`no relay gas billing model declared for chain ${chainId}`)
+  if (billsGasLimit) return dispatchGasLimit(kind, carriesGenesis, unitCount, innerGasLimit, calldataByteLength)
+  return (
+    gateBodyGas(kind, unitCount) * BODY_SAFETY_FACTOR +
+    genesisGas(carriesGenesis) +
+    innerGasLimit +
+    CALLDATA_GAS_PER_BYTE * calldataByteLength
+  )
+}
+
+export const RELAY_RATE_MAX_STALE_MS = 60_000
+
+export async function tokenPerNativeToken(
+  getRate: IGetRate,
+  chainId: ChainId,
+  token: Address,
+  maxStaleMs: number
+): Promise<bigint> {
+  const nativeSymbol = nativeSymbolOf(chainId)
+  const feeSymbol = symbolOf(chainId, token)
+  if (feeSymbol === nativeSymbol) return nativePrecisionOf(chainId)
+  const rate = await getRate(nativeSymbol, feeSymbol, maxStaleMs)
+  const ageMs = Date.now() - rate.time * 1000
+  if (ageMs > maxStaleMs) {
+    throw new Error(
+      `${nativeSymbol}/${feeSymbol} rate is ${ageMs}ms old, past the ${maxStaleMs}ms this fee quote asked for`
+    )
+  }
+  return (nativePrecisionOf(chainId) * rate.token0) / rate.token1
+}
+
+export function computeRelayFee(
+  chainId: ChainId,
+  kind: IActionKind,
+  carriesGenesis: boolean,
+  gasPrice: bigint,
+  tokenPerNativeTokenRate: bigint,
+  unitCount: bigint,
+  innerGasLimit: bigint,
+  calldataByteLength: bigint
+): bigint {
+  const gas = billedRelayGas(chainId, kind, carriesGenesis, unitCount, innerGasLimit, calldataByteLength)
+  const nativePrecision = nativePrecisionOf(chainId)
+  return (gas * gasPrice * tokenPerNativeTokenRate + nativePrecision - 1n) / nativePrecision
+}
+
+export type IRelayFeeQuote = (
+  kind: IActionKind,
+  carriesGenesis: boolean,
+  unitCount: bigint,
+  innerGasLimit: bigint,
+  calldataByteLength: bigint
+) => bigint
+
+export const getRelayFeeQuoteSource =
+  (chainId: ChainId, gasPrice: bigint, tokenPerNativeTokenRate: bigint): IRelayFeeQuote =>
+  (kind, carriesGenesis, unitCount, innerGasLimit, calldataByteLength) =>
+    computeRelayFee(chainId, kind, carriesGenesis, gasPrice, tokenPerNativeTokenRate, unitCount, innerGasLimit, calldataByteLength)

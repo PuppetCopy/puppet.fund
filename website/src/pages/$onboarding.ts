@@ -1,10 +1,13 @@
 import { map, nowWith, switchLatest } from 'aelea/stream'
 import { state } from 'aelea/stream-extended'
 import { $element, $node, $text, attr, effectProp, type I$Node, style, stylePseudo } from 'aelea/ui'
-import { $column, $row, spacing } from 'aelea/ui-components'
+import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $check, $copy, $icon, text } from '@/ui-components'
-import { $card } from '../common/elements/$common.js'
+import { $Link, href, pushUrl, type Route } from 'aelea/ui-router'
+import { $check, $copy, $icon, $throne, text } from '@/ui-components'
+import { routeSchema } from '../app/routeSchema.js'
+import { $puppetLogo } from '../common/$icons.js'
+import { promptInstallApp } from '../utils/pwaInstall.js'
 import { subject } from '../utils/subject.js'
 
 export const $stageHeader = (n: number, title: string): I$Node =>
@@ -27,17 +30,11 @@ export const $stageHeader = (n: number, title: string): I$Node =>
     $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text(title))
   )
 
-export const $stage = (n: number, title: string, $content: I$Node): I$Node =>
-  $card(spacing.default)($stageHeader(n, title), $content)
-
 export const $body = (s: string): I$Node =>
   $node(style({ color: palette.message, fontSize: text.sm, lineHeight: '1.6' }))($text(s))
 
 export const $bulletList = (items: [string, string][]): I$Node =>
-  $column(
-    spacing.small,
-    style({ paddingLeft: '4px' })
-  )(
+  $column(spacing.small, style({ paddingLeft: '4px' }))(
     ...items.map(([k, v]) =>
       $row(spacing.default, style({ alignItems: 'baseline' }))(
         $node(style({ color: palette.foreground, fontSize: text.sm, minWidth: '4px' }))($text('•')),
@@ -49,9 +46,34 @@ export const $bulletList = (items: [string, string][]): I$Node =>
     )
   )
 
-// A terminal-style command card: a header (>_ label + copy button) over a dark body where each line
-// renders as a `$ ` prompt + the command (leading binary tinted). The copy button writes all lines to
-// the clipboard. Used for scaffold / setup commands in the onboarding guide.
+export const $callout = (s: string): I$Node =>
+  $node(
+    style({
+      background: colorShade(palette.foreground, 8),
+      borderLeft: `3px solid ${palette.indeterminate}`,
+      padding: '12px 16px',
+      borderRadius: '4px',
+      color: palette.message,
+      fontSize: text.sm,
+      lineHeight: '1.5'
+    })
+  )($text(s))
+
+export const $linkButton = (label: string, hrefValue: string, internal: boolean): I$Node => {
+  const a = $element('a')(
+    style({
+      padding: '8px 14px',
+      borderRadius: '8px',
+      border: `1px solid ${colorShade(palette.foreground, 30)}`,
+      color: palette.message,
+      fontSize: text.sm,
+      textDecoration: 'none',
+      cursor: 'pointer'
+    })
+  )
+  return internal ? a(attr({ href: hrefValue }))($text(label)) : a(attr({ href: hrefValue, target: '_blank' }))($text(label))
+}
+
 export const $terminal = (lines: string[], label = 'terminal'): I$Node => {
   const copied = subject<boolean>()
   return $column(
@@ -62,9 +84,9 @@ export const $terminal = (lines: string[], label = 'terminal'): I$Node => {
     })
   )(
     $row(
+      spacing.small,
       style({
         alignItems: 'baseline',
-        gap: '8px',
         padding: '8px 14px',
         color: palette.foreground,
         fontSize: text.sm,
@@ -95,7 +117,6 @@ export const $terminal = (lines: string[], label = 'terminal'): I$Node => {
           )
         })
       ),
-      // Copy button lives inside the command box, pinned to its top-right corner.
       $node(
         attr({ role: 'button', 'aria-label': 'Copy command' }),
         style({
@@ -134,32 +155,65 @@ export const $terminal = (lines: string[], label = 'terminal'): I$Node => {
   )
 }
 
-export const $callout = (s: string): I$Node =>
-  $node(
+export const $pillAnchor = (filled: boolean, borderColor?: string) =>
+  $element('a')(
     style({
-      background: colorShade(palette.foreground, 8),
-      borderLeft: `3px solid ${palette.indeterminate}`,
-      padding: '12px 16px',
-      borderRadius: '4px',
-      color: palette.message,
-      fontSize: text.sm,
-      lineHeight: '1.5'
-    })
-  )($text(s))
-
-export const $linkButton = (label: string, hrefValue: string, internal: boolean): I$Node => {
-  const a = $element('a')(
-    style({
-      padding: '8px 14px',
-      borderRadius: '8px',
-      border: `1px solid ${colorShade(palette.foreground, 30)}`,
-      color: palette.message,
-      fontSize: text.sm,
+      display: 'inline-flex',
+      cursor: 'pointer',
+      alignItems: 'center',
+      height: '48px',
+      padding: '0 28px',
+      borderRadius: '30px',
+      backgroundColor: filled ? palette.primary : palette.background,
+      color: filled ? 'white' : palette.message,
+      fontWeight: 'bold',
+      fontSize: text.base,
       textDecoration: 'none',
-      cursor: 'pointer'
-    })
+      whiteSpace: 'nowrap',
+      border: filled ? 'none' : `1px solid ${borderColor ?? colorShade(palette.foreground, 30)}`
+    }),
+    stylePseudo(
+      ':hover',
+      filled
+        ? { filter: 'brightness(1.1)' }
+        : borderColor
+          ? { backgroundColor: colorShade(palette.primary, 12) }
+          : { borderColor: colorShade(palette.foreground, 60) }
+    )
   )
-  return internal
-    ? a(attr({ href: hrefValue }))($text(label))
-    : a(attr({ href: hrefValue, target: '_blank' }))($text(label))
+
+const $pillLabel = (label: string, $glyph: I$Node | undefined, filled: boolean): I$Node =>
+  $row(spacing.small, style({ alignItems: 'center' }))(
+    ...($glyph ? [$icon({ $content: $glyph, width: '20px', viewBox: '0 0 32 32', fill: filled ? 'white' : palette.message })] : []),
+    $text(label)
+  )
+
+export const $navPill = (label: string, route: Route, filled: boolean, borderColor?: string, $glyph?: I$Node): I$Node =>
+  $Link({ route, $content: $pillLabel(label, $glyph, filled), $anchor: $pillAnchor(filled, borderColor) })({})
+
+export const $launchCta = (): I$Node => {
+  const portfolioUrl = href(routeSchema.portfolio)
+  return $row(
+    spacing.default,
+    style({
+      flexDirection: isDesktopScreen ? 'row' : 'column',
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingTop: '4px'
+    })
+  )(
+    $pillAnchor(true)(
+      attr({ href: portfolioUrl }),
+      effectProp(
+        'onclick',
+        nowWith(() => (ev: MouseEvent) => {
+          if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return
+          ev.preventDefault()
+          void promptInstallApp().finally(() => pushUrl(portfolioUrl))
+        })
+      )
+    )($pillLabel('Launch wallet', $puppetLogo, true)),
+    $node(style({ fontSize: text.xs, fontWeight: 'bold', color: palette.foreground }))($text('OR')),
+    $navPill('Explore traders', routeSchema.traders, false, palette.primary, $throne)
+  )
 }

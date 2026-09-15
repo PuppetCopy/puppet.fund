@@ -1,49 +1,29 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.35;
+pragma solidity ^0.8.36;
 
 import {Access} from "../utils/auth/Access.sol";
 import {Error} from "../utils/Error.sol";
-import {IAuthority} from "../utils/interfaces/IAuthority.sol";
-import {IWNT} from "../utils/interfaces/IWNT.sol";
+import {NATIVE_TOKEN} from "../utils/Native.sol";
 
 contract Register is Access {
-    mapping(address token => uint cap) public tokenCapMap;
-    mapping(address provider => uint cap) public providerCapMap;
-    address public wntToken;
+    event Registered(address indexed token, uint cap, bytes32 tokenId);
+
+    mapping(address token => uint cap) public capMap;
+    mapping(address token => bytes32 id) public tokenIdMap;
 
     constructor(
-        IAuthority _authority
+        address _authority
     ) Access(_authority) {}
 
-    function getWnt() external view returns (IWNT) {
-        address _wnt = wntToken;
-        if (_wnt == address(0)) revert Error.Register__WntNotSet();
-        return IWNT(_wnt);
-    }
-
-    function registerToken(
+    function setRegistered(
         address _token,
-        uint _cap
+        uint _cap,
+        bytes32 _tokenId
     ) external auth {
-        if (_token == address(0)) revert Error.Register__InvalidToken();
-        tokenCapMap[_token] = _cap;
-        _logEvent("RegisterToken", abi.encode(block.chainid, _token, _cap));
-    }
-
-    function setProvider(
-        address _provider,
-        uint _cap
-    ) external auth {
-        if (_provider == address(0)) revert Error.Register__InvalidProvider();
-        providerCapMap[_provider] = _cap;
-        _logEvent("SetProvider", abi.encode(block.chainid, _provider, _cap));
-    }
-
-    function setWnt(
-        address _token
-    ) external auth {
-        if (tokenCapMap[_token] == 0) revert Error.Register__UnknownToken(_token);
-        wntToken = _token;
-        _logEvent("SetWnt", abi.encode(block.chainid, _token));
+        if (_token != NATIVE_TOKEN && _token.code.length == 0) revert Error.Register__InvalidToken();
+        if (_cap != 0 && _tokenId == bytes32(0)) revert Error.Register__InvalidToken();
+        capMap[_token] = _cap;
+        tokenIdMap[_token] = _cap == 0 ? bytes32(0) : _tokenId;
+        emit Registered(_token, _cap, _tokenId);
     }
 }

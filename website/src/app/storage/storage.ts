@@ -31,10 +31,6 @@ function openConnection(name: string, version: number, storeNames: readonly stri
 
     const request = indexedDB.open(name, version)
 
-    // Two-generation retention: orphaned stores survive one upgrade as a
-    // backup, then get removed on the next. The meta store remembers what
-    // was declared last upgrade so this one can tell "newly orphaned" from
-    // "already-2-gen-old".
     request.onupgradeneeded = () => {
       const db = request.result
       const upgradeTx = request.transaction
@@ -48,8 +44,6 @@ function openConnection(name: string, version: number, storeNames: readonly stri
       const prevReq = metaStore?.get(META_KEY)
 
       const applyMigration = (previousDeclared: ReadonlySet<string>) => {
-        // Delete stores that are neither declared now nor were declared at
-        // the last upgrade — they're at least two generations old.
         for (const existing of Array.from(db.objectStoreNames)) {
           if (existing === META_STORE) continue
           if (declared.has(existing)) continue
@@ -77,7 +71,6 @@ function openConnection(name: string, version: number, storeNames: readonly stri
 
     request.onsuccess = () => {
       const db = request.result
-      // Yield this connection so another tab's higher-version upgrade isn't blocked.
       db.onversionchange = () => {
         db.close()
         if (dbConnectionMap.get(name) === promise) dbConnectionMap.delete(name)
@@ -109,7 +102,7 @@ async function requireDb(dbName: string): Promise<IDBDatabase> {
   return openConnection(dbName, config.version, config.storeNames)
 }
 
-async function getValue<T>(storeKey: IStreamStoreKey<T>): Promise<T> {
+export async function getValue<T>(storeKey: IStreamStoreKey<T>): Promise<T> {
   const db = await requireDb(storeKey.dbName)
 
   return new Promise<T>((resolve, reject) => {
@@ -134,7 +127,7 @@ async function getValue<T>(storeKey: IStreamStoreKey<T>): Promise<T> {
   })
 }
 
-async function putValue<T>(storeKey: IStreamStoreKey<T>, value: T): Promise<void> {
+export async function putValue<T>(storeKey: IStreamStoreKey<T>, value: T): Promise<void> {
   const db = await requireDb(storeKey.dbName)
 
   return new Promise<void>((resolve, reject) => {
@@ -146,7 +139,6 @@ async function putValue<T>(storeKey: IStreamStoreKey<T>, value: T): Promise<void
       return
     }
     tx.objectStore(storeKey.storeName).put(value, storeKey.key)
-    // Resolve on commit, not request-success — the write isn't durable until oncomplete.
     tx.oncomplete = () => resolve()
     tx.onerror = () => reject(wrapError(tx.error, 'IndexedDB write failed'))
     tx.onabort = () => reject(wrapError(tx.error, 'IndexedDB write aborted'))

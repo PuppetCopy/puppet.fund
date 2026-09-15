@@ -1,16 +1,9 @@
-// Schema entity types + the query DESCRIPTORS (IQuery/IWhere/runRows) surface here too (canonical home is
-// @puppet/sdk/schema); select/find live in @puppet/sdk/datastore.
 export * from '../schema/index.js'
 export * from './cache.js'
 export * from './context.js'
-export * from './dispatch.js'
 export * from './fee.js'
 export * from './health.js'
-export * from './metric.js'
 export * from './metricMath.js'
-export * from './nonce.js'
-export * from './redeem.js'
 export * from './route.js'
 export * from './rpc.js'
-export * from './scale.js'
 export * from './tokenRegistry.js'

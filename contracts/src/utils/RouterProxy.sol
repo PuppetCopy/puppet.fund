@@ -1,17 +1,16 @@
 // SPDX-License-Identifier: BUSL-1.1
-pragma solidity ^0.8.35;
+pragma solidity ^0.8.36;
 
 import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 import {Proxy} from "@openzeppelin/contracts/proxy/Proxy.sol";
 
 import {Error} from "./Error.sol";
-import {IAuthority} from "./interfaces/IAuthority.sol";
 
 contract RouterProxy is Proxy {
-    IAuthority private immutable authority;
+    address private immutable authority;
 
     constructor(
-        IAuthority _authority
+        address _authority
     ) payable {
         authority = _authority;
     }
@@ -20,7 +19,7 @@ contract RouterProxy is Proxy {
         address _impl,
         bytes memory _data
     ) external {
-        if (msg.sender != address(authority)) revert Error.Module__CallerNotAuthority();
+        if (msg.sender != authority) revert Error.Access__CallerNotAuthority();
         ERC1967Utils.upgradeToAndCall(_impl, _data);
     }
 
@@ -28,5 +27,7 @@ contract RouterProxy is Proxy {
         return ERC1967Utils.getImplementation();
     }
 
-    receive() external payable {}
+    receive() external payable {
+        revert Error.Balance__ValueMismatch(msg.value, 0);
+    }
 }
