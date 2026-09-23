@@ -12,7 +12,7 @@ the custodian.
 
 ## Demo
 
-[![Puppet demo](https://img.youtube.com/vi/5kJtlNgPiNs/maxresdefault.jpg)](https://youtu.be/5kJtlNgPiNs)
+[![Puppet demo](https://img.youtube.com/vi/5kJtlNgPiNs/sddefault.jpg)](https://youtu.be/5kJtlNgPiNs)
 
 _Create a wallet, deposit, connect to GMX, and open a perp position, all self-custodial._
 
