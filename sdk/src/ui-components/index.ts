@@ -1,5 +1,1 @@
-export * from './avatarEngine.js'
-export { INK } from './avatarEngine.js'
-export * from './roboAvatar.js'
-export * from './roboName.js'
-export * from './roboTraits.js'
+export * from './fundAvatar.js'

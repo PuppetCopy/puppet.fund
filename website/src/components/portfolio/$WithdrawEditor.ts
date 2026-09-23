@@ -1,3 +1,4 @@
+import { predictUserAccount } from '@puppet/sdk/account'
 import { formatThrownError } from '@puppet/sdk/compact'
 import { ADDRESS_ZERO, type ChainId, resolveDispatchChainId } from '@puppet/sdk/const'
 import { getTokenDescription, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
@@ -29,8 +30,6 @@ import { $column, $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { type Hex, isAddressEqual } from 'viem'
 import { $ButtonPrimaryOutline, $noteTooltip, $TokenAmountInput, text } from '@/ui-components'
-import { uiStorage } from '@/ui-storage'
-import { originChainKey } from '../../app/localStoreSchema.js'
 import type { ISwapRequest } from '../../io/bridge/swapQuote.js'
 import context, { DISPLAY_QUOTE_TTL_MS } from '../../io/context.js'
 import { priceFor } from '../../io/price.js'
@@ -95,8 +94,6 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       const receiveOptions = withdrawTargetOptions(tokenRegistry, chainId, token)
       const isDestChainId = (id: number): id is ChainId => receiveOptions.some(o => o.chainId === id)
       const optionsOn = (chainId: ChainId): readonly ISwapTargetOption[] => receiveOptions.filter(o => o.chainId === chainId)
-      const walletChainId = walletAccount.walletClient.chain?.id
-      const defaultChainId = walletChainId !== undefined && isDestChainId(walletChainId) ? walletChainId : chainId
       const userChain: IStream<ChainId> = op(
         pickReceive,
         map(o => {
@@ -112,15 +109,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
         filter((d): d is IWithdrawDraft => d !== null && isDestChainId(d.output.chainId)),
         map(d => d.output.chainId)
       )
-      const persistedChain: IStream<number | null> = uiStorage.replayWrite(
-        originChainKey(to),
-        filter(isDestChainId, userChain)
-      )
-      const initialChain: IStream<ChainId> = op(
-        persistedChain,
-        map(saved => (saved !== null && isDestChainId(saved) ? saved : defaultChainId))
-      )
-      const chainSelection = state(defaultChainId, merge(userChain, draftChain, initialChain))
+      const chainSelection = state(chainId, merge(userChain, draftChain))
 
       const draftReceiveToken: IStream<Hex> = op(
         existingDraft,
@@ -184,7 +173,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
             inputToken: token,
             outputToken: params.sel.id,
             inputAmount: input,
-            account: from,
+            depositor: predictUserAccount(to),
             recipient: to
           }
         }, combine({ balance, sel: receiveSel, draft: draftAmount, raw: amountValue, fee: relayFee }))
@@ -296,30 +285,38 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
 
       const $maxButton = $maxAmountButton(amountValue, balance, clickMaxTether(nodeEvent('click')))
 
-      const $topSection = $SwapTargetFlow({
+      const $amount = $editorAmountLabel(
+        $crumbTrail([{ label: 'Withdraw' }]),
+        $row(spacing.small, style({ alignItems: 'center' }))($field, $maxButton),
+        $alert
+      )
+      const $topSection = $editorFlowContainer($amount)
+
+      const hidden: IStream<boolean> = start(false, selectingDest)
+
+      const $receive = $SwapTargetFlow({
         value: receiveSel,
         optionList: just(receiveOptions),
         source: just({ chainId, symbol: symbolOf(chainId, token) }),
-        $container: $editorFlowContainer,
+        $container: $row(
+          style({ margin: '0 -28px', padding: '0 28px', gap: '12px', alignItems: 'center', fontSize: text.sm }),
+          styleBehavior(map(h => (h ? { background: palette.background, padding: '20px 28px' } : null), hidden))
+        ),
         $inputContent: $anchor =>
           $node(style({ display: 'contents' }))(
-            $editorAmountLabel(
-              $crumbTrail([{ label: 'Withdraw' }]),
-              $row(spacing.small, style({ alignItems: 'center' }))($field, $maxButton),
-              $alert
-            ),
+            $node(style({ color: palette.foreground, fontWeight: '500', whiteSpace: 'nowrap' }))($text('Receive')),
             $anchor
           )
       })({ select: pickReceiveTether(), selecting: selectingDestTether() })
 
       return [
-        $column(spacing.default, style({ minWidth: '380px' }))(
-          $topSection,
-          $node(
-            style({ display: 'contents' }),
-            styleBehavior(map(s => (s ? { display: 'none' } : { display: 'contents' }), selectingDest))
-          )(
-            $node(style({ margin: '0 -26px', display: 'flex' }))($percentSlider),
+        $column(spacing.default, style({ width: '394px', maxWidth: '100%' }))(
+          $node(style({ display: 'contents' }), styleBehavior(map(h => (h ? { display: 'none' } : { display: 'contents' }), hidden)))(
+            $topSection,
+            $node(style({ margin: '0 -26px', display: 'flex' }))($percentSlider)
+          ),
+          $receive,
+          $node(style({ display: 'contents' }), styleBehavior(map(h => (h ? { display: 'none' } : { display: 'contents' }), hidden)))(
             $row(style({ fontSize: text.sm }))($bridgeFeeRow),
             $row(spacing.default, style({ alignItems: 'center' }))(
               $node(style({ flex: 1 }))(),

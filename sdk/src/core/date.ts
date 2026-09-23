@@ -1,7 +1,7 @@
 import { IntervalTime } from '../const/common.js'
 
 export const readableDate = (timestamp: number, intlOptions: Intl.DateTimeFormatOptions = { dateStyle: 'short' }) =>
-  new Date(timestamp * 1000).toLocaleDateString(undefined, intlOptions)
+  new Date(timestamp * 1000).toLocaleString(undefined, intlOptions)
 
 const intervals = [
   { label: 'year', seconds: IntervalTime.MONTH * 12 },

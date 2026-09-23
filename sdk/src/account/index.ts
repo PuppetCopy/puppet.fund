@@ -1,5 +1,3 @@
 export * from './accountLog.js'
-export * from './commitment.js'
 export * from './createAccount.js'
-export * from './entryDeltas.js'
 export * from './pairing.js'

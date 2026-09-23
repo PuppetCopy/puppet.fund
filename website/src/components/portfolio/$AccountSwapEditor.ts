@@ -1,5 +1,5 @@
-import { CHAIN_IDS, HUB_CHAIN_ID, PRECISION, PROTOCOL } from '@puppet/contracts/const'
-import { predictDepositRoute } from '@puppet/sdk/account'
+import { HUB_CHAIN_ID, PRECISION, PROTOCOL } from '@puppet/contracts/const'
+import { predictUserAccount } from '@puppet/sdk/account'
 import { formatThrownError } from '@puppet/sdk/compact'
 import { type ChainId, resolveDispatchChainId } from '@puppet/sdk/const'
 import { getTokenDescription, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
@@ -67,18 +67,10 @@ export const $AccountSwapEditor = ({ accountState, chainId, token, tokenRegistry
       const balance: IStream<bigint> = map(s => s.balance ?? 0n, source)
       const sourcePrice: IStream<bigint | null> = op(source, switchMap(s => priceFor(s.chainId, s.token)), state())
 
-      const targetsFor = (s: ITokenInputOption): ISwapTargetOption[] => {
-        const chains = s.chainId === HUB_CHAIN_ID ? [HUB_CHAIN_ID, ...([...CHAIN_IDS] as ChainId[]).filter(c => c !== HUB_CHAIN_ID)] : [s.chainId, HUB_CHAIN_ID]
-        return chains.flatMap(chainId =>
-          [...(tokenRegistry.get(chainId as ChainId)?.keys() ?? [])]
-            .filter(id => {
-              if (chainId === s.chainId && isAddressEqual(id, s.token)) return false
-              if (isAddressEqual(id, PROTOCOL.nativeToken)) return chainId === s.chainId
-              return true
-            })
-            .map(id => ({ chainId: chainId as ChainId, id: id as Hex, symbol: tokenKeyOf(chainId as ChainId, id) }))
-        )
-      }
+      const targetsFor = (s: ITokenInputOption): ISwapTargetOption[] =>
+        [...(tokenRegistry.get(HUB_CHAIN_ID)?.keys() ?? [])]
+          .filter(id => !isAddressEqual(id, PROTOCOL.nativeToken) && !(s.chainId === HUB_CHAIN_ID && isAddressEqual(id, s.token)))
+          .map(id => ({ chainId: HUB_CHAIN_ID, id: id as Hex, symbol: tokenKeyOf(HUB_CHAIN_ID, id) }))
       const targetOptions: IStream<readonly ISwapTargetOption[]> = map(targetsFor, source)
       const draftTarget: IStream<ISwapTargetOption> = op(
         existingDraft,
@@ -95,7 +87,7 @@ export const $AccountSwapEditor = ({ accountState, chainId, token, tokenRegistry
           const options = targetsFor(p.s)
           const valid = p.picked !== null && options.some(o => o.chainId === p.picked!.chainId && isAddressEqual(o.id, p.picked!.id))
           if (valid) return p.picked
-          const twin = options.find(o => o.chainId === HUB_CHAIN_ID && tokenKeyOf(o.chainId, o.id) === tokenKeyOf(p.s.chainId, p.s.token))
+          const twin = options.find(o => tokenKeyOf(o.chainId, o.id) === tokenKeyOf(p.s.chainId, p.s.token))
           return twin ?? null
         }),
         state()
@@ -141,8 +133,8 @@ export const $AccountSwapEditor = ({ accountState, chainId, token, tokenRegistry
             inputToken: providerToken(p.s.token, p.s.chainId),
             outputToken: tokenInfoFor(tokenRegistry, p.t.chainId, p.t.id).token,
             inputAmount: p.value - p.fee,
-            account,
-            recipient: p.s.chainId === p.t.chainId ? account : predictDepositRoute(accountState.user)
+            depositor: predictUserAccount(accountState.user),
+            recipient: predictUserAccount(accountState.user)
           }
         }),
         skipRepeatsWith((a, b) => JSON.stringify(a, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)) === JSON.stringify(b, (_k, v) => (typeof v === 'bigint' ? v.toString() : v))),
@@ -218,23 +210,29 @@ export const $AccountSwapEditor = ({ accountState, chainId, token, tokenRegistry
 
       const $swapProviderFee = $SwapProviderFeeEditor({ active: map(r => r !== null, request), request, maxLegs: 1 })({ selectRoute: selectedRouteTether() })
 
-      const $sourceSection = $SwapTargetFlow({
+      const $amount = $editorAmountLabel(
+        $crumbTrail([{ label: 'Swap' }]),
+        $row(spacing.small, style({ alignItems: 'center' }))($field, $maxButton),
+        $alert
+      )
+      const $topSection = $editorFlowContainer($amount)
+
+      const hidden: IStream<boolean> = start(false, selectingTarget)
+
+      const $receive = $SwapTargetFlow({
         value: target,
         optionList: targetOptions,
         source: just({ chainId: rowSource.chainId, symbol: symbolOf(rowSource.chainId, rowSource.token) }),
-        $container: $editorFlowContainer,
+        $container: $row(
+          style({ margin: '0 -28px', padding: '0 28px', gap: '12px', alignItems: 'center', fontSize: text.sm }),
+          styleBehavior(map(h => (h ? { background: palette.background, padding: '20px 28px' } : null), hidden))
+        ),
         $inputContent: $anchor =>
           $node(style({ display: 'contents' }))(
-            $editorAmountLabel(
-              $crumbTrail([{ label: 'Swap' }]),
-              $row(spacing.small, style({ alignItems: 'center' }))($field, $maxButton),
-              $alert
-            ),
+            $node(style({ color: palette.foreground, fontWeight: '500', whiteSpace: 'nowrap' }))($text('Receive')),
             $anchor
           )
       })({ select: pickTargetTether(), selecting: selectingTargetTether() })
-
-      const hidden: IStream<boolean> = start(false, selectingTarget)
 
       const submitResolved = sampleMap(
         (p: { value: bigint; s: ITokenInputOption; t: ISwapTargetOption | null; route: ISelectedRoute; dis: boolean; fee: bigint | null }) => p,
@@ -248,31 +246,35 @@ export const $AccountSwapEditor = ({ accountState, chainId, token, tokenRegistry
           const signed = p.route.plan![0]
           return {
             kind: 'deposit',
-            arrival: 'credit',
             id: `deposit:${account}`,
+            source: 'account',
+            toEscrow: false,
             deposit: {
               chainId: p.s.chainId,
               inputToken: providerToken(p.s.token, p.s.chainId),
               outputToken: signed.outputToken,
               inputAmount: p.value,
+              routeInput: signed.inputAmount,
               outputAmount: signed.outputAmount,
               destinationChainId: BigInt(p.t!.chainId),
               route: signed.route,
               fillDeadline: signed.fillDeadline
             },
             nativeValue: 0n,
-            expectedOutput: signed.expectedOutputAmount,
-            hub: null
+            expectedOutput: signed.expectedOutputAmount
           }
         }),
         multicast
       )
 
       return [
-        $column(spacing.default, style({ minWidth: '380px' }))(
-          $sourceSection,
+        $column(spacing.default, style({ width: '394px', maxWidth: '100%' }))(
           $node(style({ display: 'contents' }), styleBehavior(map(h => (h ? { display: 'none' } : { display: 'contents' }), hidden)))(
-            $node(style({ margin: '0 -28px', display: 'flex' }))($percentSlider),
+            $topSection,
+            $node(style({ margin: '0 -28px', display: 'flex' }))($percentSlider)
+          ),
+          $receive,
+          $node(style({ display: 'contents' }), styleBehavior(map(h => (h ? { display: 'none' } : { display: 'contents' }), hidden)))(
             $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm }))(
               $node(
                 style({ display: 'flex' }),

@@ -16,14 +16,14 @@ bun run dev
 
 Create a trading account on the site first and deposit the WETH it trades with into it on
 Arbitrum. **WETH** collateral is simplest (GMX's keeper fee and the collateral are one token); any
-other registered token works too, it just needs a little native ETH in the account for keeper fees. Relay fees are paid in USDC by the account that acts (the
-trading body for orders, your puppet account for credits), so keep a little USDC in each.
+other registered token works too, it just needs a little native ETH in the account for keeper fees. Order relay fees are paid in USDC by
+the trading body (each order's fee also prepays its distribution on the hub), so keep a little USDC in it.
 `bun run dev` prints a pairing link: approve it
 on the site; the operator receives your session key (memory only) **and** the site's
-matchmaker endpoint over the tunnel, so there's nothing to configure. RPC defaults to the
-public Arbitrum endpoint; set `ARBITRUM_RPC_URL` for anything beyond a first run. Copy
-`.env.example` to `.env` only for that, to override an endpoint, pair a local site, or run
-headless. The operator can open and manage positions but **can never withdraw**. To edit, Ctrl-C
+matchmaker endpoint over the tunnel. `cp .env.example .env` first: it names the chronicle
+(`CHRONICLE_URL`, where backing rows are composed from) and the Arbitrum and Optimism (hub) RPC
+endpoints (`ARBITRUM_RPC_URL`, `OPTIMISM_RPC_URL`; set your own for anything beyond a first run).
+Edit it to override an endpoint, pair a local site, or run headless. The operator can open and manage positions but **can never withdraw**. To edit, Ctrl-C
 and re-run (no hot-reload; a restart re-prints the pair link).
 
 ## Write your operator
@@ -35,7 +35,7 @@ actions on `connector`, chain actions on `gmx.operator`, GMX actions on `gmx`. N
 webhook, or an event subscription all work.
 
 - **connector** (connection + identity): `account` (your trading account: it signs, holds what you deposit, and trades) · `close()` (runOperator handles it)
-- **gmx.operator** (chain-bound): `account` · `readBalance(token)` · `credit(token)` (sweep a bridged arrival in from the deposit route) · `convert(inputToken, outputToken, inputAmount)` · `operate(callList, open)` · `settle()`
+- **gmx.operator** (chain-bound): `account` · `readBalance(token)` · `credit(token)` (sweep a bridged arrival in from the deposit route) · `convert(inputToken, outputToken, inputAmount)` · `operate(callList)` · `poolSwap(inputToken, outputToken, inputAmount, destinationChainId)` (swap or bridge fund balances to any supported chain, landing on your own account) · `redeem(retire, drain)` (on the hub: drain the sell queue and pay puppets who sold)
 - **gmx** (venue): `getPositions(account?)` · `getOrders(account?)` · `getMarket(indexToken)` · `markets` · `createOrder(order)` · `cancelOrder` · `updateOrder`
 
 `gmx.createOrder` is the single primitive for every order type (market/limit/stop via `orderType` +

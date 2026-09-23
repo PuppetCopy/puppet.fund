@@ -25,7 +25,6 @@ export function viewUrl(p: {
   net: string
   to: string
   data?: string
-  code?: boolean
   owner?: string | null
   maxAge?: number
   block?: string
@@ -33,8 +32,7 @@ export function viewUrl(p: {
   const q = new URLSearchParams()
   q.set('net', p.net)
   q.set('to', p.to)
-  if (p.code) q.set('m', 'code')
-  else if (p.data !== undefined) q.set('data', p.data)
+  if (p.data !== undefined) q.set('data', p.data)
   if (p.owner) q.set('w', p.owner)
   if (p.block) q.set('b', p.block)
   if (p.maxAge !== undefined) q.set('ttl', String(p.maxAge))
@@ -45,7 +43,6 @@ export interface IViewRequest {
   net: string | null
   to: string | null
   data: string | null
-  isCode: boolean
   block: string | null
   bucket: string
   cacheKey: string
@@ -63,7 +60,6 @@ export function parseViewRequest(url: URL): IViewRequest | null {
     net: u.searchParams.get('net'),
     to: u.searchParams.get('to'),
     data: u.searchParams.get('data'),
-    isCode: u.searchParams.get('m') === 'code',
     block,
     bucket: viewBucket(u.searchParams.get('w')),
     cacheKey: u.href,
@@ -80,13 +76,6 @@ export async function deleteStaleUniverseCaches(): Promise<void> {
   if (!store) return
   const keys = await store.keys()
   await Promise.all(
-    keys.filter(k => !k.startsWith(UNIVERSE) && /^(u\d+:|view:|api)/.test(k)).map(k => store.delete(k))
+    keys.filter(k => !k.startsWith(UNIVERSE) && /^u\d+:/.test(k)).map(k => store.delete(k))
   )
-}
-
-export async function writeCacheJson<T>(bucket: string, key: string, value: T): Promise<void> {
-  try {
-    const cache = await cacheStorage()?.open(bucket)
-    await cache?.put(key, stampedJson(value))
-  } catch {}
 }

@@ -52,7 +52,7 @@ const server = Bun.serve({
     '/health': new Response('ok'),
     '/og': await png($brand, STATIC_CACHE),
     '/og/masters': async () => png(await mastersCard(), LIST_CACHE),
-    '/og/portfolio': await png($page('Portfolio', 'Your account, balances, backing and books', '/portfolio'), STATIC_CACHE),
+    '/og/portfolio': await png($page('Portfolio', 'Your account, balances and backing', '/portfolio'), STATIC_CACHE),
     '/og/masters/:master': async req => {
       const { master } = req.params
       if (!isAddress(master)) return new Response('invalid master', { status: 400 })

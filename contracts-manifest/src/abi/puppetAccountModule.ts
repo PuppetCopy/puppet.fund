@@ -13,17 +13,17 @@ export default [
         "internalType": "contract IChain"
       },
       {
-        "name": "_accountImpl",
+        "name": "_userImpl",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "_routeImpl",
+        "name": "_bodyImpl",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "_resetPeriod",
+        "name": "_withdrawDelay",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -32,7 +32,7 @@ export default [
   },
   {
     "type": "function",
-    "name": "accountBlockMap",
+    "name": "accountTipMap",
     "inputs": [
       {
         "name": "account",
@@ -42,16 +42,21 @@ export default [
     ],
     "outputs": [
       {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "blockNumber",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "digest",
+        "type": "bytes24",
+        "internalType": "bytes24"
       }
     ],
     "stateMutability": "view"
   },
   {
     "type": "function",
-    "name": "accountImpl",
+    "name": "authority",
     "inputs": [],
     "outputs": [
       {
@@ -64,7 +69,20 @@ export default [
   },
   {
     "type": "function",
-    "name": "authority",
+    "name": "bodyHash",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "bodyImpl",
     "inputs": [],
     "outputs": [
       {
@@ -98,19 +116,9 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_user",
+        "name": "_parent",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "_signer",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_expiry",
-        "type": "uint256",
-        "internalType": "uint256"
       },
       {
         "name": "_keySignature",
@@ -118,7 +126,7 @@ export default [
         "internalType": "bytes"
       },
       {
-        "name": "_userSignature",
+        "name": "_approval",
         "type": "bytes",
         "internalType": "bytes"
       }
@@ -128,16 +136,22 @@ export default [
   },
   {
     "type": "function",
-    "name": "designatorHash",
-    "inputs": [],
-    "outputs": [
+    "name": "createUserAccount",
+    "inputs": [
       {
-        "name": "",
-        "type": "bytes32",
-        "internalType": "bytes32"
+        "name": "_user",
+        "type": "address",
+        "internalType": "address"
       }
     ],
-    "stateMutability": "view"
+    "outputs": [
+      {
+        "name": "account_",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -154,12 +168,12 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_digest",
+        "name": "_structHash",
         "type": "bytes32",
         "internalType": "bytes32"
       },
       {
-        "name": "_signature",
+        "name": "_coSig",
         "type": "bytes",
         "internalType": "bytes"
       },
@@ -194,51 +208,21 @@ export default [
             "internalType": "bytes"
           }
         ]
+      },
+      {
+        "name": "_tokenList",
+        "type": "address[]",
+        "internalType": "address[]"
       }
     ],
-    "outputs": [],
-    "stateMutability": "payable"
-  },
-  {
-    "type": "function",
-    "name": "forcedWithdrawal",
-    "inputs": [
-      {
-        "name": "_account",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_to",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "lastAttestedAt",
-    "inputs": [],
     "outputs": [
       {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "digest_",
+        "type": "bytes32",
+        "internalType": "bytes32"
       }
     ],
-    "stateMutability": "view"
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -255,20 +239,7 @@ export default [
   },
   {
     "type": "function",
-    "name": "markConsumed",
-    "inputs": [
-      {
-        "name": "_digest",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "predictDepositRoute",
+    "name": "predictUserAccount",
     "inputs": [
       {
         "name": "_user",
@@ -303,6 +274,11 @@ export default [
         "name": "_executionData",
         "type": "bytes",
         "internalType": "bytes"
+      },
+      {
+        "name": "_tokenList",
+        "type": "address[]",
+        "internalType": "address[]"
       }
     ],
     "outputs": [],
@@ -310,29 +286,21 @@ export default [
   },
   {
     "type": "function",
-    "name": "resetPeriod",
-    "inputs": [],
-    "outputs": [
+    "name": "recordSelf",
+    "inputs": [
       {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "_executionData",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_tokenList",
+        "type": "address[]",
+        "internalType": "address[]"
       }
     ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "routeImpl",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -354,19 +322,26 @@ export default [
   },
   {
     "type": "function",
-    "name": "userOf",
-    "inputs": [
-      {
-        "name": "_account",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
+    "name": "userImpl",
+    "inputs": [],
     "outputs": [
       {
         "name": "",
         "type": "address",
         "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "withdrawDelay",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -388,12 +363,6 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "digest",
-        "type": "bytes32",
-        "indexed": false,
-        "internalType": "bytes32"
-      },
-      {
         "name": "modulePrevBlock",
         "type": "uint256",
         "indexed": false,
@@ -410,6 +379,12 @@ export default [
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
+      },
+      {
+        "name": "digest",
+        "type": "bytes32",
+        "indexed": false,
+        "internalType": "bytes32"
       },
       {
         "name": "signature",
@@ -456,6 +431,24 @@ export default [
         "type": "bytes[]",
         "indexed": false,
         "internalType": "bytes[]"
+      },
+      {
+        "name": "balanceList",
+        "type": "tuple[]",
+        "indexed": false,
+        "internalType": "struct BalanceLib.Balance[]",
+        "components": [
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "amount",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "anonymous": false
@@ -482,34 +475,7 @@ export default [
   },
   {
     "type": "error",
-    "name": "Account__AttestorAlive",
-    "inputs": [
-      {
-        "name": "quietSince",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Account__DigestConsumed",
-    "inputs": [
-      {
-        "name": "digest",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      }
-    ]
-  },
-  {
-    "type": "error",
     "name": "Account__InvalidImpl",
-    "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "Account__InvalidResetPeriod",
     "inputs": []
   },
   {
@@ -530,38 +496,6 @@ export default [
         "name": "account",
         "type": "address",
         "internalType": "address"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Account__SessionExpired",
-    "inputs": [
-      {
-        "name": "expiry",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "nowTs",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Account__SessionTooLong",
-    "inputs": [
-      {
-        "name": "expiry",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "maxTtl",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ]
   },

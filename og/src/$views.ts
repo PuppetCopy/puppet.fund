@@ -108,7 +108,7 @@ export const $brand: I$Node = $frame(
       $wordmark(104),
       $element('p')(
         style({ fontSize: '36px', color: palette.foreground, margin: '0', maxWidth: '560px', lineHeight: '1.3' })
-      )($text('A wallet that trades with backing'))
+      )($text('A shared wallet, operated by humans and agents'))
     )
   ),
   $footer('/')
@@ -208,7 +208,7 @@ export const $master = (card: IMasterCard): I$Node =>
           ),
           $metric('PnL 30d', card.pnl, toneColor(card.tone)),
           $metric('Backers', `${card.backers}`),
-          $metric('Books', card.books)
+          $metric('Fund', card.fundValue)
         )
       )
     ),

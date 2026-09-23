@@ -12,8 +12,6 @@ contract Dictate {
 
     address public immutable owner;
 
-    mapping(bytes32 name => address proxy) public gateMap;
-
     modifier onlyOwner() {
         _onlyOwner();
         _;
@@ -30,19 +28,21 @@ contract Dictate {
         owner = _owner;
     }
 
+    function gateOf(
+        bytes32 _name
+    ) public view returns (address) {
+        return Create2.computeAddress(
+            _name, keccak256(abi.encodePacked(type(RouterProxy).creationCode, abi.encode(address(this))))
+        );
+    }
+
     function setGate(
         bytes32 _name,
         address _impl
     ) external onlyOwner returns (address proxy_) {
-        proxy_ = gateMap[_name];
-        if (proxy_ == address(0)) {
-            proxy_ = Create2.computeAddress(
-                _name, keccak256(abi.encodePacked(type(RouterProxy).creationCode, abi.encode(address(this))))
-            );
-            if (proxy_.code.length == 0) proxy_ = address(new RouterProxy{salt: _name}(address(this)));
-            gateMap[_name] = proxy_;
-        }
-        RouterProxy(payable(proxy_)).upgrade(_impl, "");
+        proxy_ = gateOf(_name);
+        if (proxy_.code.length == 0) new RouterProxy{salt: _name}(address(this));
+        RouterProxy(payable(proxy_)).upgrade(_impl);
     }
 
     function setAccess(

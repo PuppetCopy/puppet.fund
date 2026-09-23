@@ -1,14 +1,15 @@
 import { empty } from 'aelea/stream'
 import type { IBehavior } from 'aelea/stream-extended'
 import {
+  $element,
   component,
   type I$Node,
   type I$Slottable,
   type INode,
-  type INodeCompose,
+  type INodeCompose,type IStyleCSS, 
   nodeEvent,
   style,
-  stylePseudo
+  stylePseudo 
 } from 'aelea/ui'
 import {
   $ButtonToggle as $AeleaButtonToggle,
@@ -21,10 +22,10 @@ import {
   type I$Button,
   type I$ButtonToggle
 } from 'aelea/ui-components'
-import { colorShade, palette, text } from 'aelea/ui-components-theme'
+import { colorShade, interaction, palette, text } from 'aelea/ui-components-theme'
 import { $icon } from '../$common.js'
 
-const $buttonToggleBtn = $defaultButtonToggleBtn(
+export const $defaultToggleButton = $defaultButtonToggleBtn(
   style({
     fontSize: text.xs,
     fontWeight: 'bold'
@@ -42,7 +43,7 @@ const $buttonContainer = $defaultButtonToggleContainer(
 )
 
 export const $ButtonToggle = <T>(config: I$ButtonToggle<T>) =>
-  $AeleaButtonToggle({ $button: $buttonToggleBtn, ...config, $container: $buttonContainer })
+  $AeleaButtonToggle({ $button: $defaultToggleButton, $container: $buttonContainer, ...config })
 
 export const $defaultButtonPrimary = $defaultButtonContainer(
   style({
@@ -76,20 +77,31 @@ const secondaryButtonStyle = style({
   borderColor: palette.message
 })
 
+export const engagedSecondary: IStyleCSS = { borderColor: palette.foreground, borderWidth: '1px', filter: interaction.hoverFilter }
+
 export const $defaultButtonSecondary = $defaultButtonContainer(
   secondaryButtonStyle,
-  stylePseudo(':hover', { borderColor: palette.foreground, borderWidth: '1px' })
+  stylePseudo(':hover', { borderColor: palette.foreground, borderWidth: '1px' }),
+  stylePseudo('[aria-expanded="true"]', engagedSecondary)
 )
 
-export const $defaultMiniButtonSecondary = $defaultButtonSecondary(
-  style({
-    alignSelf: 'center',
-    borderWidth: '1px',
-    height: '28px',
-    padding: '0 10px',
-    fontSize: text.xs,
-    borderColor: colorShade(palette.foreground, 35)
-  })
+const miniSecondaryStyle = style({
+  alignSelf: 'center',
+  borderWidth: '1px',
+  height: '28px',
+  padding: '0 10px',
+  fontSize: text.xs,
+  borderColor: colorShade(palette.foreground, 35)
+})
+
+export const $defaultMiniButtonSecondary = $defaultButtonSecondary(miniSecondaryStyle)
+
+export const $defaultMiniLabelSecondary = $element('label')(
+  style({ fontFamily: 'inherit', flexShrink: 0, cursor: 'pointer', display: 'flex', alignItems: 'center', boxSizing: 'border-box' }),
+  secondaryButtonStyle,
+  miniSecondaryStyle,
+  stylePseudo(':hover', { borderColor: palette.foreground, borderWidth: '1px', filter: interaction.hoverFilter }),
+  stylePseudo(':focus-visible', engagedSecondary)
 )
 
 export const $defaultButtonPrimaryOutline = $defaultButtonPrimary(
@@ -100,7 +112,8 @@ export const $defaultButtonPrimaryOutline = $defaultButtonPrimary(
     color: palette.message,
     fill: palette.message
   }),
-  stylePseudo(':hover', { borderColor: palette.primary })
+  stylePseudo(':hover', { borderColor: palette.primary }),
+  stylePseudo('[aria-expanded="true"]', { borderColor: palette.primary, filter: interaction.hoverFilter })
 )
 
 export const $defaultMiniButtonPrimary = $defaultButtonPrimaryOutline(
@@ -139,7 +152,8 @@ export const $defaultButtonCircularContainer = $defaultButtonContainer(
     justifyContent: 'center',
     flexShrink: '0'
   }),
-  stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) })
+  stylePseudo(':hover', { borderColor: colorShade(palette.foreground, 50) }),
+  stylePseudo('[aria-expanded="true"]', { borderColor: colorShade(palette.foreground, 50), filter: interaction.hoverFilter })
 )
 
 const $clickSurfacingButton = (

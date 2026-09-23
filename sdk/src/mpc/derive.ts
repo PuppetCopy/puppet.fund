@@ -2,24 +2,35 @@ import { concatBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { type Hex, hexToBytes, keccak256, parseSignature, serializeSignature } from 'viem'
 import { hashScalar } from './core.js'
 
-export const BODY_KEY_DOMAIN = { name: 'Puppet', version: '1' } as const
-export const BODY_KEY_TYPES = { BodyKey: [{ name: 'statement', type: 'string' }] } as const
-export const BODY_KEY_STATEMENT =
-  'Derive and store my https://puppet.fund account key in this browser.\n\nVerify the website address.'
+const KEY_DOMAIN = { name: 'Puppet', version: '1' } as const
 
-export const bodyKeyTypedData = () =>
-  ({ domain: BODY_KEY_DOMAIN, types: BODY_KEY_TYPES, primaryType: 'BodyKey', message: { statement: BODY_KEY_STATEMENT } }) as const
+const FUND_KEY_TYPES = {
+  FundKey: [
+    { name: 'universe', type: 'uint256' },
+    { name: 'fund', type: 'uint256' },
+    { name: 'statement', type: 'string' }
+  ]
+} as const
+const FUND_KEY_STATEMENT =
+  'Derive and store the trading key of my https://puppet.fund fund in this browser.\n\nVerify the website address.'
 
-export function bodyKeyMaterial(signature: Hex): { sid: Hex; sk: bigint; signer: bigint } {
+export const fundKeyTypedData = (universe: bigint, fund: bigint) =>
+  ({
+    domain: KEY_DOMAIN,
+    types: FUND_KEY_TYPES,
+    primaryType: 'FundKey',
+    message: { universe, fund, statement: FUND_KEY_STATEMENT }
+  }) as const
+
+export function fundKeyMaterial(signature: Hex): { sid: Hex; sk: bigint } {
   const canonical = hexToBytes(serializeSignature(parseSignature(signature)))
   return {
-    sid: keccak256(concatBytes(utf8ToBytes('puppet-body-sid'), canonical)),
-    sk: hashScalar('body-share-alice', canonical),
-    signer: hashScalar('body-signer', canonical)
+    sid: keccak256(concatBytes(utf8ToBytes('puppet-fund-sid'), canonical)),
+    sk: hashScalar('fund-share-alice', canonical)
   }
 }
 
-export const BODY_BINDING_TYPES = { BodyBinding: [{ name: 'sid', type: 'bytes32' }] } as const
+const FUND_BINDING_TYPES = { FundBinding: [{ name: 'sid', type: 'bytes32' }] } as const
 
-export const bodyBindingTypedData = (sid: Hex) =>
-  ({ domain: BODY_KEY_DOMAIN, types: BODY_BINDING_TYPES, primaryType: 'BodyBinding', message: { sid } }) as const
+export const fundBindingTypedData = (sid: Hex) =>
+  ({ domain: KEY_DOMAIN, types: FUND_BINDING_TYPES, primaryType: 'FundBinding', message: { sid } }) as const

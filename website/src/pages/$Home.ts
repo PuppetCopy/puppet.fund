@@ -247,7 +247,7 @@ const $hero = (): I$Node => {
     )(
       $custom('h1')(
         style({
-          fontSize: text.display,
+          fontSize: isDesktopScreen ? text.display : text.xxl,
           fontWeight: '900',
           letterSpacing: '0.01em',
           lineHeight: '1.12',
@@ -256,12 +256,12 @@ const $hero = (): I$Node => {
           color: palette.message
         })
       )(
-        $text('A network wallet.'),
-        $node(style({ display: 'block' }))($text('Back the best traders. Or become one.'))
+        $text('A shared wallet,'),
+        $node(style({ display: 'block' }))($text('operated by humans and agents'))
       ),
       $node(style({ fontSize: text.lg, lineHeight: '1.6', color: palette.message, maxWidth: '660px' }))(
         $text(
-          'Back the traders you trust and share their gains, or trade as you do today and get backed as you perform. Rules are signed once and the chain enforces them every cycle. Your keys stay yours, and an agent can trade for you.'
+          'Top traders seamlessly earn more. Puppets (investors) add capital and share the gains, within rules they set once and any EVM chain enforces.'
         )
       ),
       $node(
@@ -272,7 +272,7 @@ const $hero = (): I$Node => {
           color: palette.foreground,
           paddingTop: '8px'
         })
-      )($text('Your keys. Your rules. Human or agent.')),
+      )($text('Back the best. Or become one.')),
       $launchCta()
     ),
     $node(
@@ -355,19 +355,19 @@ const $pillars = (): I$Node =>
         $wallet,
         '0 0 32 32',
         'One address everywhere',
-        'A self-custody wallet with the same address on every chain and venue. Trade GMX on Arbitrum today; the hub on Monad keeps the books and settles every cycle.'
+        'A self-custody wallet with the same address on every chain and venue. Trade GMX on Arbitrum today; the hub on Optimism keeps every fund and pays every redemption.'
       ),
       $pillar(
         $puppetLogo,
         '0 0 32 32',
-        'Backing that never moves',
-        'Backers bond capital once on the hub under mandates they sign: which trader, how much per cycle, how often, until when. One bond backs every trader they name, matched when a cycle opens and drawn only at settlement.'
+        'Backing under your rules',
+        'Backers deposit once on the hub under mandates they sign: which trader, how much per round, how often, until when. Each round the trader funds takes their share and buys them units in the trader\'s fund.'
       ),
       $pillar(
         $smartContract,
         '0 0 24 24',
-        'One settlement for everyone',
-        'A cycle opens with the trader\'s own stake and settles once, at the marks the attestor verified. Gains split by the protocol fee, and nobody exits ahead of anyone else.'
+        'One price for everyone',
+        'Every unit in a fund is priced at the valuation the attestor verified. Stakes buy units and redemptions pay them out at that price, so nobody exits ahead of anyone else.'
       )
     )
   )
@@ -399,12 +399,12 @@ const STORY_BEATS: IStoryBeat[] = [
     t: 0.18,
     master: {
       title: 'Open your account',
-      body: 'One signature derives it. Deposit on Arbitrum and your first cycle opens the moment you trade, carrying as much backing as your own stake allows.',
+      body: 'One signature derives it. Deposit on Arbitrum and your first trade opens your fund, carrying as much backing as your own stake allows.',
       vs: 'Instead of a Telegram group and a screenshot.'
     },
     puppet: {
       title: 'Deposit',
-      body: 'Bond on the Monad hub and browse the leaderboard. Every trader shows their marks, books and settlements straight from the chain.',
+      body: 'Deposit on the Optimism hub and browse the leaderboard. Every trader shows their fund, valuations and redemptions straight from the chain.',
       vs: 'Instead of wiring funds to a stranger.'
     }
   },
@@ -412,25 +412,25 @@ const STORY_BEATS: IStoryBeat[] = [
     t: 0.42,
     master: {
       title: 'Get backed',
-      body: 'Mandates match your cycle as it opens. Backing stays locked in the backers\' own wallets, is never transferred to you, and can never exceed what your own stake covers.',
+      body: 'Mandates match your trades as you make them. Backing is escrowed on the hub, is never transferred to you, and can never exceed the share of your pool your skin allows.',
       vs: 'Instead of holding anyone else\'s money.'
     },
     puppet: {
       title: 'Sign a mandate',
-      body: 'One signature sets your rules: which trader, how much of your bond per match, how often, and when it expires. Nothing moves until a cycle opens, and signing a new mandate replaces the old one.',
+      body: 'One signature sets your rules: which trader, how much of your deposit per round, how often, and when it expires. Nothing moves until the trader funds a round, and signing a new mandate replaces the old one.',
       vs: 'Instead of trusting a promise.'
     }
   },
   {
     t: 0.66,
     master: {
-      title: 'Trade, then settle',
-      body: 'By hand on GMX or through your agent, exactly as you do today. Every order is checked against the open cycle before it signs, and your fee is paid at settlement.',
+      title: 'Trade, then redeem',
+      body: 'By hand on GMX or through your agent, exactly as you do today. Every order is checked before it signs, and your fee is paid when backer units pay out.',
       vs: 'Instead of winning quietly, alone.'
     },
     puppet: {
-      title: 'Collect at settlement',
-      body: 'The cycle settles at flat on the hub and pays your claim straight to your hub balance, gains and losses alike, in the same transaction as everyone else.',
+      title: 'Sell when you choose',
+      body: 'Sell units into the trader\'s redemption queue and get paid to your hub deposit as it drains, at the same price as everyone else, gains and losses alike.',
       vs: 'Instead of asking for a payout.'
     }
   }
@@ -784,11 +784,11 @@ const $storyConverge = (): I$Node =>
   $column(spacing.default, style({ alignItems: 'center', textAlign: 'center', width: '100%' }))(
     $heading2($text('One wallet between them.')),
     $node(style({ fontSize: text.base, lineHeight: '1.6', color: palette.foreground, maxWidth: '520px' }))(
-      $text('The trader operates it, the backer rules it, the chain settles both.')
+      $text('The trader operates it, the backer rules it, the chain prices both.')
     ),
     $row(spacing.small, style({ flexWrap: 'wrap', justifyContent: 'center' }))(
-      $chip('Backing capped by the trader\'s own stake'),
-      $chip('One settlement per cycle, for everyone'),
+      $chip('Backing capped by the trader\'s skin'),
+      $chip('One unit price, for everyone'),
       $chip('Your keys on both sides')
     )
   )
@@ -896,12 +896,12 @@ const $venues = (): I$Node =>
           'Connect the wallet to app.gmx.io over WalletConnect and it shows up as the connected account. You trade by hand, exactly as before, and the same address signs into Hyperliquid.'
         ),
         $body(
-          'Every order is signed with the wallet\'s joint key: your share on your device, the attestor\'s share at the protocol. The attestor can refuse an order that breaks your open cycle. It cannot place one, and it cannot move value.'
+          'Every order is signed with the wallet\'s joint key: your share on your device, the attestor\'s share at the protocol. The attestor can refuse an order that breaks your rules. It cannot place one, and it cannot move value.'
         ),
         $row(spacing.small, style({ flexWrap: 'wrap', paddingTop: '4px' }))(
           $venueChip($icon({ $content: $gmx, width: '18px', viewBox: '0 0 32 32', fill: palette.message }), 'GMX'),
           $venueChip($chainLogo(42161, 'Arbitrum'), 'Arbitrum'),
-          $venueChip($chainLogo(143, 'Monad'), 'Monad hub')
+          $venueChip($chainLogo(10, 'Optimism'), 'Optimism hub')
         )
       ),
       $node(style({ flex: '1 1 320px', minWidth: '280px' }))($video('assets/video/trade-adjust.mp4'))
@@ -916,7 +916,7 @@ const $guard = (label: string): I$Node =>
 
 const $agents = (): I$Node =>
   $section(
-    $sectionHeading('Or hand it to an agent', 'The operator does not have to be human.'),
+    $sectionHeading('Or hand it to an agent', 'The master does not have to be human.'),
     $row(spacing.big, style({ flexWrap: 'wrap', alignItems: 'center' }))(
       $column(spacing.default, style({ flex: '1 1 320px', minWidth: '280px' }))(
         $terminal(['bunx @puppet.fund/templates my-operator gmx', 'bun run dev'], 'scaffold an operator'),
@@ -926,7 +926,7 @@ const $agents = (): I$Node =>
       ),
       $column(spacing.default, style({ flex: '1 1 260px', minWidth: '240px' }))(
         $guard('Your key share stays in its memory, never on disk'),
-        $guard('Every order is screened against the open cycle before it signs'),
+        $guard('Every order is screened against your rules before it signs'),
         $guard('Value can only ever return to your own wallet'),
         $node(style({ fontSize: text.base, fontWeight: '700', color: palette.message, paddingTop: '8px' }))(
           $text('Back the agent. Don\'t trust it.')

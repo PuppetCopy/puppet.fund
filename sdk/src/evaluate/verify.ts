@@ -1,19 +1,12 @@
-import { PRECISION } from '@puppet/contracts/const'
 import { CompactError } from '../compact/error.js'
-import { abs, delta, max } from '../core/math.js'
-import type { IEvaluationConfig, INavBreakdown, INavGate, INavGateReason, INavKind } from './types.js'
-
-function navDriftBps(clientNav: bigint, computedNav: bigint): bigint {
-  const denom = max(abs(clientNav), abs(computedNav))
-  if (denom === 0n) return 0n
-  return (delta(clientNav, computedNav) * PRECISION.basisPoints) / denom
-}
+import { driftVerdict } from './gain.js'
+import type { IEvaluationConfig, INavBreakdown, INavGate, INavGateReason, INavKind, ISignerGain } from './types.js'
 
 export function checkNavGate(
   breakdown: INavBreakdown,
   navMark: bigint,
   config: IEvaluationConfig,
-  opts?: { clientNav?: bigint; kind?: INavKind }
+  opts?: { clientNav?: bigint; kind?: INavKind; signerGain?: ISignerGain | null }
 ): INavGate {
   const reasons: INavGateReason[] = []
 
@@ -59,20 +52,15 @@ export function checkNavGate(
     }
   }
 
-  const exposed = breakdown.positions.filter(p => p.facets?.kind !== 'venue-cash' && p.facets?.kind !== 'claimable-funding')
-  if (opts?.kind === 'settle' && exposed.length > 0) {
-    reasons.push({
-      code: 'OPEN_POSITIONS',
-      detail: `${exposed.length} venue position(s) still open; a cycle settles only once every position is closed`
-    })
-  }
-
   if (opts?.clientNav !== undefined && opts.kind !== 'view') {
-    const drift = navDriftBps(opts.clientNav, navMark)
-    if (drift > config.driftToleranceBps) {
+    const gain = opts.signerGain ?? null
+    const { drift, allowed, profits, above } = driftVerdict(opts.clientNav, navMark, gain, config.driftToleranceBps)
+    if (drift > allowed) {
       reasons.push({
         code: 'NAV_MISMATCH',
-        detail: `client NAV ${opts.clientNav} diverges from computed ${navMark} by ${drift}bps for ${opts.kind} (consensus max ${config.driftToleranceBps}bps)`
+        detail: profits
+          ? `client NAV ${opts.clientNav} sits ${above ? 'above' : 'below'} computed ${navMark} by ${drift}bps for ${opts.kind}, the side the signer profits from (share ${above ? gain?.above : gain?.below} against ${above ? gain?.below : gain?.above}), where no drift is allowed`
+          : `client NAV ${opts.clientNav} diverges from computed ${navMark} by ${drift}bps for ${opts.kind} (consensus max ${config.driftToleranceBps}bps)`
       })
     }
   }

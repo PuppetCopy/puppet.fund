@@ -6,7 +6,8 @@ export const accountTable = table(
     chainId: t('bigint'),
     account: t('address', { indexed: true }),
     owner: t('address', { indexed: true }),
-    signer: t('address'),
+    epoch: t('bigint'),
+    revokedAt: t('int'),
     createdAt: t('int'),
     lastBlock: t('int'),
     lastLogIndex: t('int')
@@ -14,33 +15,6 @@ export const accountTable = table(
   { key: row => `${row.chainId}-${getAddress(row.account)}` }
 )
 export type IAccountRow = InferRow<(typeof accountTable)['columns']>
-
-export const accountBalanceTable = table({
-  id: t('text', { pk: true }),
-  chainId: t('bigint'),
-  account: t('address', { indexed: true }),
-  token: t('address'),
-  book: t('bigint')
-})
-export type IAccountBalanceRow = InferRow<(typeof accountBalanceTable)['columns']>
-
-export const bondTable = table({
-  id: t('text', { pk: true }),
-  chainId: t('bigint'),
-  account: t('address', { indexed: true }),
-  token: t('address'),
-  bond: t('bigint')
-})
-export type IBondRow = InferRow<(typeof bondTable)['columns']>
-
-export const depositTable = table({
-  id: t('text', { pk: true }),
-  chainId: t('bigint'),
-  account: t('address', { indexed: true }),
-  token: t('address'),
-  deposit: t('bigint')
-})
-export type IDepositRow = InferRow<(typeof depositTable)['columns']>
 
 export const flowTable = table({
   id: t('text', { pk: true }),
@@ -53,87 +27,185 @@ export const flowTable = table({
   blockTimestamp: t('int'),
   logIndex: t('int'),
   transactionHash: t('hex'),
-  settlement: t('bool'),
   pending: t('bool', { indexed: true }),
   value: t('bigint', { optional: true })
 })
 export type IFlowRow = InferRow<(typeof flowTable)['columns']>
 
-export const bookTable = table({
+export const fundTable = table(
+  {
+    master: t('address', { indexed: true }),
+    share: t('address'),
+    symbol: t('hex'),
+    pixels: t('hex'),
+    performanceFee: t('bigint'),
+    totalUnits: t('bigint'),
+    skin: t('bigint'),
+    value: t('bigint'),
+    lastBlock: t('int'),
+    lastLogIndex: t('int')
+  },
+  { key: row => getAddress(row.master) }
+)
+export type IFundRow = InferRow<(typeof fundTable)['columns']>
+
+export const escrowTable = table(
+  {
+    parent: t('address', { indexed: true }),
+    master: t('address', { indexed: true }),
+    chainId: t('bigint'),
+    token: t('address'),
+    escrowed: t('bigint'),
+    fulfilled: t('bigint'),
+    feeBilled: t('bigint'),
+    lastBlock: t('int'),
+    lastLogIndex: t('int')
+  },
+  { key: row => `${getAddress(row.parent)}-${getAddress(row.master)}-${row.chainId}-${getAddress(row.token)}` }
+)
+export type IEscrowRow = InferRow<(typeof escrowTable)['columns']>
+
+export const creditTable = table(
+  {
+    master: t('address', { indexed: true }),
+    creditChainId: t('bigint'),
+    token: t('address'),
+    round: t('hex'),
+    credited: t('bigint'),
+    feeOwed: t('bigint'),
+    lastBlock: t('int'),
+    lastLogIndex: t('int')
+  },
+  { key: row => `${getAddress(row.master)}-${row.creditChainId}-${getAddress(row.token)}` }
+)
+export type ICreditRow = InferRow<(typeof creditTable)['columns']>
+
+export const holdingTable = table(
+  {
+    master: t('address', { indexed: true }),
+    holder: t('address', { indexed: true }),
+    units: t('bigint'),
+    basis: t('bigint'),
+    allocatedAt: t('bigint'),
+    lastBlock: t('int'),
+    lastLogIndex: t('int')
+  },
+  { key: row => `${getAddress(row.master)}-${getAddress(row.holder)}` }
+)
+export type IHoldingRow = InferRow<(typeof holdingTable)['columns']>
+
+export const queueTable = table(
+  {
+    master: t('address', { indexed: true }),
+    epoch: t('bigint'),
+    units: t('bigint'),
+    weight: t('bigint'),
+    masterWeight: t('bigint'),
+    accrued: t('bigint'),
+    lastBlock: t('int'),
+    lastLogIndex: t('int')
+  },
+  { key: row => getAddress(row.master) }
+)
+export type IQueueRow = InferRow<(typeof queueTable)['columns']>
+
+export const closedAccruedTable = table(
+  {
+    master: t('address', { indexed: true }),
+    epoch: t('bigint'),
+    accrued: t('bigint')
+  },
+  { key: row => `${getAddress(row.master)}-${row.epoch}` }
+)
+export type IClosedAccruedRow = InferRow<(typeof closedAccruedTable)['columns']>
+
+export const positionTable = table(
+  {
+    master: t('address', { indexed: true }),
+    holder: t('address', { indexed: true }),
+    epoch: t('bigint'),
+    weight: t('bigint'),
+    units: t('bigint'),
+    basis: t('bigint'),
+    cursor: t('bigint'),
+    lastBlock: t('int'),
+    lastLogIndex: t('int')
+  },
+  { key: row => `${getAddress(row.master)}-${getAddress(row.holder)}` }
+)
+export type IPositionRow = InferRow<(typeof positionTable)['columns']>
+
+export const valuationTable = table(
+  {
+    master: t('address', { indexed: true }),
+    kind: t('text'),
+    value: t('bigint'),
+    totalUnits: t('bigint'),
+    contribution: t('bigint'),
+    assetChainIdList: t('bigint[]'),
+    assetTokenList: t('hex[]'),
+    assetAmountList: t('bigint[]'),
+    positionChainIdList: t('bigint[]'),
+    positionVenueList: t('hex[]'),
+    positionIdList: t('hex[]'),
+    positionValueList: t('bigint[]'),
+    block: t('int'),
+    blockTimestamp: t('int'),
+    logIndex: t('int'),
+    transactionHash: t('hex')
+  },
+  { key: row => `${getAddress(row.master)}-${row.block}-${row.logIndex}` }
+)
+export type IValuationRow = InferRow<(typeof valuationTable)['columns']>
+
+export const allocationTable = table({
   id: t('text', { pk: true }),
-  chainId: t('bigint'),
   master: t('address', { indexed: true }),
-  owner: t('address', { indexed: true }),
-  cycle: t('bigint'),
-  token: t('address'),
-  backed: t('bigint'),
-  collateral: t('bigint'),
+  contribution: t('bigint'),
+  staked: t('bigint'),
+  minted: t('bigint'),
   skin: t('bigint'),
-  totalShares: t('bigint'),
-  totalPending: t('bigint'),
-  masterShares: t('bigint'),
-  masterPending: t('bigint'),
-  feeTokens: t('hex[]'),
-  feeAmounts: t('bigint[]'),
-  backerList: t('hex[]'),
-  lastMark: t('text'),
-  lastBlock: t('int'),
-  lastLogIndex: t('int')
-})
-export type IBookRow = InferRow<(typeof bookTable)['columns']>
-
-export const backerTable = table({
-  id: t('text', { pk: true }),
-  chainId: t('bigint'),
-  master: t('address', { indexed: true }),
-  puppet: t('address', { indexed: true }),
-  stake: t('bigint'),
-  pending: t('bigint'),
-  shares: t('bigint'),
-  committedAt: t('int')
-})
-export type IBackerRow = InferRow<(typeof backerTable)['columns']>
-
-export const backingTable = table({
-  id: t('text', { pk: true }),
-  chainId: t('bigint'),
-  puppet: t('address', { indexed: true }),
-  master: t('address', { indexed: true }),
-  cycle: t('bigint'),
-  stake: t('bigint'),
+  value: t('bigint'),
   block: t('int'),
   blockTimestamp: t('int'),
   logIndex: t('int'),
   transactionHash: t('hex')
 })
-export type IBackingRow = InferRow<(typeof backingTable)['columns']>
+export type IAllocationRow = InferRow<(typeof allocationTable)['columns']>
 
-export const markTable = table({
+export const fundSwapTable = table({
   id: t('text', { pk: true }),
   chainId: t('bigint'),
-  book: t('text', { indexed: true }),
-  master: t('address', { indexed: true }),
-  cycle: t('bigint'),
+  digest: t('hex', { indexed: true }),
+  account: t('address', { indexed: true }),
+  destinationChainId: t('bigint'),
+  inputToken: t('address'),
+  inputAmount: t('bigint'),
+  outputToken: t('address'),
+  outputAmount: t('bigint'),
   block: t('int'),
   blockTimestamp: t('int'),
   logIndex: t('int'),
-  transactionHash: t('hex'),
-  openValue: t('bigint'),
-  ledgerPuppetValue: t('bigint'),
-  collateral: t('bigint'),
-  inflow: t('bigint'),
-  opening: t('bool'),
-  feeTokens: t('hex[]'),
-  feeAmounts: t('bigint[]'),
-  pending: t('bool', { indexed: true }),
-  closeValue: t('bigint', { optional: true }),
-  closeRate0: t('bigint', { optional: true }),
-  closeRate1: t('bigint', { optional: true }),
-  nextPuppetValue: t('bigint', { optional: true }),
-  priceTime: t('int', { optional: true }),
-  evaluatedAt: t('int', { optional: true })
+  transactionHash: t('hex')
 })
-export type IMarkRow = InferRow<(typeof markTable)['columns']>
+
+export const transitTable = table({
+  id: t('text', { pk: true }),
+  chainId: t('bigint'),
+  account: t('address', { indexed: true }),
+  destinationChainId: t('bigint'),
+  relayHash: t('hex'),
+  fillDeadline: t('int'),
+  inputToken: t('address'),
+  inputAmount: t('bigint'),
+  outputToken: t('address'),
+  outputAmount: t('bigint'),
+  block: t('int'),
+  blockTimestamp: t('int'),
+  logIndex: t('int'),
+  transactionHash: t('hex')
+})
+export type ITransitRow = InferRow<(typeof transitTable)['columns']>
 
 export const masterMetricTable = table({
   id: t('text', { pk: true }),
@@ -152,39 +224,6 @@ export const masterMetricTable = table({
 })
 export type IMasterMetricRow = InferRow<(typeof masterMetricTable)['columns']>
 
-export const settlementTable = table({
-  id: t('text', { pk: true }),
-  master: t('address', { indexed: true }),
-  spokeChainId: t('bigint'),
-  cycle: t('bigint'),
-  kind: t('text'),
-  token: t('address', { optional: true }),
-  value: t('bigint', { optional: true }),
-  block: t('int'),
-  blockTimestamp: t('int'),
-  logIndex: t('int'),
-  transactionHash: t('hex')
-})
-export type ISettlementRow = InferRow<(typeof settlementTable)['columns']>
-
-export const settleRowTable = table({
-  id: t('text', { pk: true }),
-  chainId: t('bigint'),
-  spokeChainId: t('bigint'),
-  master: t('address', { indexed: true }),
-  puppet: t('address', { indexed: true }),
-  cycle: t('bigint'),
-  kind: t('text'),
-  token: t('address'),
-  amount: t('bigint'),
-  moved: t('bigint'),
-  block: t('int'),
-  blockTimestamp: t('int'),
-  logIndex: t('int'),
-  transactionHash: t('hex')
-})
-export type ISettleRowRow = InferRow<(typeof settleRowTable)['columns']>
-
 export const mandateTable = table(
   {
     chainId: t('bigint'),
@@ -194,7 +233,6 @@ export const mandateTable = table(
     allocationRate: t('bigint'),
     cooldownPeriod: t('bigint'),
     expiry: t('bigint'),
-    tokenIdList: t('hex[]'),
     signature: t('hex'),
     block: t('int'),
     blockTimestamp: t('int')

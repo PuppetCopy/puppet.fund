@@ -1,122 +1,118 @@
-import { PROTOCOL } from '@puppet/contracts/const'
-import type { ICoreGate__OperateIntent } from '@puppet/contracts/types'
-import { type Address, decodeAbiParameters, getAddress, isAddressEqual, size, slice, type TypedDataDefinition } from 'viem'
-import { backingCap, listsToken, verifySkin } from '../backing/index.js'
+import type { ISpokeGate__OperateIntent } from '@puppet/contracts/types'
+import { type Address, decodeAbiParameters, getAddress, type Hex, isAddressEqual, size, slice, type TypedDataDefinition } from 'viem'
 import { CompactContractError, CompactError } from '../compact/error.js'
-import { tokenInfoFor } from '../state/tokenRegistry.js'
-import { GMX_TOKEN_SPENDER } from '../venue/gmx/contracts.js'
+import { deploymentAddress } from '../const/deployments.js'
+import type { ChainId } from '../const/index.js'
 import { operateOutflows } from '../venue/screen.js'
-import { type ICreditListContext, verifyCreditList } from './credit.js'
+import { venueSpenders } from '../venue/venues.js'
 import * as IntentLib from './intentLib.js'
-import { backingListHash, type IHeaderContext, intentTypedData, mandateDigest, verifyHeader, verifyMandateRow } from './shared.js'
-import { type IOperateTermsContext, operateTermsOf } from './terms.js'
+import { type IDraftContext, type IGenesisContext, intentTypedData, verifyHeaderOrGenesis } from './shared.js'
 
 const APPROVE = '0x095ea7b3'
 const INCREASE_ALLOWANCE = '0x39509351'
 const PERMIT = '0xd505accf'
 const DAI_PERMIT = '0x8fcbaf0c'
 
-export interface IOperateAttestContext extends ICreditListContext, IHeaderContext, IOperateTermsContext {
-  feeTokenBalance: bigint
+interface IOperateAttestContext extends IDraftContext, IGenesisContext {
+  balances: ReadonlyMap<Address, bigint>
 }
 
-export function attestOperateIntent(ctx: IOperateAttestContext, intent: ICoreGate__OperateIntent): TypedDataDefinition {
-  const master = intent.header.account
-  verifyHeader(ctx, intent.header)
+function outflowsOf(callList: ISpokeGate__OperateIntent['callList']): Map<Address, bigint> {
+  const totals = new Map<Address, bigint>()
+  for (const outflow of operateOutflows(callList)) {
+    const token = getAddress(outflow.token)
+    totals.set(token, (totals.get(token) ?? 0n) + outflow.amount)
+  }
+  return totals
+}
+
+function balanceOf(ctx: Pick<IOperateAttestContext, 'balances'>, token: Address): bigint {
+  const balance = ctx.balances.get(getAddress(token))
+  if (balance === undefined) throw new CompactError('BALANCE_UNREAD', `the master's ${token} balance was not read`, 'soft')
+  return balance
+}
+
+export async function attestOperateIntent(ctx: IOperateAttestContext, intent: ISpokeGate__OperateIntent): Promise<TypedDataDefinition> {
+  await verifyHeaderOrGenesis(ctx, intent.header, 'operate')
   IntentLib.verifyRegisteredTokenCap(ctx.tokenRegistry, ctx.chainId, intent.header.feeToken, intent.header.fee)
-  const swept = intent.creditList.length > 0 ? verifyCreditList(ctx, intent.creditList, getAddress(intent.header.feeToken)) : 0n
-  verifyStandingAllowance(intent.callList)
-
-  const rows = intent.backingList
-  if (BigInt(rows.length) > PROTOCOL.maxCohortSize) {
-    throw new CompactContractError('Operate__BackingListTooLong', [BigInt(rows.length), PROTOCOL.maxCohortSize])
-  }
-  if (!isAddressEqual(ctx.master, master)) throw new CompactError('BAD_REQUEST', `the terms were composed for ${ctx.master}, not ${master}`, 'hard')
-  if (ctx.book !== undefined && !isAddressEqual(ctx.book.master, master)) {
-    throw new CompactError('BAD_REQUEST', `book ${ctx.book.id} belongs to ${ctx.book.master}, not ${master}`, 'hard')
-  }
-  if (intent.cycle !== ctx.cycle) {
-    throw new CompactError('CYCLE_MISMATCH', `intent carries cycle ${intent.cycle}; the book is at cycle ${ctx.cycle}`, 'hard')
-  }
-  IntentLib.verifyRegisteredTokenCap(ctx.tokenRegistry, ctx.chainId, intent.token, 0n)
-  const tokenId = tokenInfoFor(ctx.tokenRegistry, ctx.chainId, intent.token).tokenId
-  const expected = operateTermsOf(ctx, tokenId, intent.skin)
-  if (intent.value !== expected.value) {
-    throw new CompactError('MARK_MISMATCH', `intent carries value ${intent.value}; the attestor values the book at ${expected.value}`, 'hard')
-  }
-  if (intent.collateral !== expected.collateral) {
-    throw new CompactError('COLLATERAL_MISMATCH', `intent attests ${intent.collateral} collateral; the valued deposits say ${expected.collateral}`, 'hard')
-  }
-  if (intent.backed !== expected.backed) {
-    throw new CompactError('BACKED_MISMATCH', `intent attests ${intent.backed} backed; the chronicle holds ${expected.backed}`, 'hard')
-  }
-  if (backingListHash(rows) !== backingListHash(expected.backingList)) {
-    throw new CompactError('COHORT_MISMATCH', 'the backing rows differ from the cohort the attestor composes; compose again on fresh state', 'hard')
-  }
-
-  const bookCycle = ctx.book === undefined ? 0n : ctx.book.cycle
-  const opening = intent.cycle > bookCycle
-  const stakeOf = new Map(opening ? [] : ctx.backers.map(b => [getAddress(b.puppet), b.stake] as const))
-  let next = expected.backed
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i]!
-    const puppet = getAddress(row.puppet)
-    if (i > 0 && BigInt(puppet) <= BigInt(rows[i - 1]!.puppet)) throw new CompactContractError('Operate__BackingListNotSorted', [rows[i - 1]!.puppet, puppet])
-    if (isAddressEqual(puppet, master)) throw new CompactContractError('Gate__MasterAsPuppet', [master])
-    if (!isAddressEqual(row.mandate.master, master)) throw new CompactContractError('Mandate__Mismatch', [puppet, mandateDigest(puppet, row.mandate)])
-    verifyMandateRow(ctx.mandates.get(puppet), puppet, row.mandate)
-    if (row.mandate.expiry < BigInt(ctx.nowSec)) throw new CompactContractError('Mandate__Expired', [row.mandate.expiry])
-    if (!listsToken(row.mandate, tokenId)) throw new CompactContractError('Mandate__TokenNotListed', [puppet, intent.token])
-    const matchable = ctx.matchable.get(puppet)
-    if (matchable === undefined) throw new CompactError('BALANCE_UNREAD', `${puppet}'s matchable bond was not read`, 'soft')
-    if (row.matchable !== matchable) throw new CompactError('BALANCE_MISMATCH', `${puppet} lists matchable ${row.matchable} but the pool holds ${matchable}`, 'hard')
-    const cap = backingCap(row.mandate, intent.collateral, matchable)
-    if (row.stake === 0n || row.stake > cap) throw new CompactContractError('Operate__BackingExceedsCap', [puppet, row.stake, cap])
-    const committedAt = ctx.backers.find(b => isAddressEqual(b.puppet, puppet))?.committedAt ?? 0
-    if (committedAt + Number(row.mandate.cooldownPeriod) > ctx.nowSec) {
-      throw new CompactError('COOLDOWN', `${puppet} committed at ${committedAt}; the mandate allows the next commit at ${committedAt + Number(row.mandate.cooldownPeriod)}`, 'soft')
+  const account = getAddress(intent.header.account)
+  const module = deploymentAddress('AccountModule', ctx.chainId)
+  for (const call of intent.callList) {
+    const target = getAddress(call.target)
+    if (isAddressEqual(target, account) || isAddressEqual(target, module)) {
+      throw new CompactContractError('Account__ForbiddenTarget', [target])
     }
-    if (stakeOf.get(puppet) !== undefined && opening) throw new CompactError('BAD_REQUEST', `${puppet} carries a stake into an opening cycle`, 'hard')
-    next += row.stake
   }
-  verifySkin(next, intent.collateral, intent.skin)
-
-  IntentLib.verifyRelayFeeRatio(intent.header.fee, ctx.feeTokenBalance)
+  const outflows = outflowsOf(intent.callList)
   const feeToken = getAddress(intent.header.feeToken)
-  const feeTokenOutflow = operateOutflows(intent.callList).reduce(
-    (total, outflow) => (isAddressEqual(outflow.token, feeToken) ? total + outflow.amount : total),
-    0n
-  )
-  const payable = ctx.feeTokenBalance + swept - feeTokenOutflow
-  if (payable < intent.header.fee) throw new CompactContractError('Balance__InsufficientBalance', [payable, intent.header.fee])
-
+  const spent = outflows.get(feeToken) ?? 0n
+  const fundBalance = balanceOf(ctx, feeToken)
+  if (fundBalance < spent + intent.header.fee) throw new CompactContractError('Balance__InsufficientBalance', [fundBalance, spent + intent.header.fee])
+  verifyStandingAllowance(ctx, ctx.chainId, intent)
   return intentTypedData('operate', ctx.chainId, intent)
 }
 
-function verifyStandingAllowance(callList: ICoreGate__OperateIntent['callList']): void {
+export function allowanceTokensOf(callList: ISpokeGate__OperateIntent['callList']): Address[] {
+  return [...new Set(callList.filter(call => grantOf(call.callData) !== null).map(call => getAddress(call.target)))]
+}
+
+function grantOf(grant: Hex): { spender: Address; amount: bigint | null } | null {
+  if (size(grant) < 68) return null
+  const selector = slice(grant, 0, 4)
+  if (selector === APPROVE) {
+    const [spender, amount] = decodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], slice(grant, 4, 68))
+    return amount === 0n ? null : { spender: getAddress(spender), amount }
+  }
+  if (selector === INCREASE_ALLOWANCE) {
+    const [spender, amount] = decodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], slice(grant, 4, 68))
+    return amount === 0n ? null : { spender: getAddress(spender), amount: null }
+  }
+  if (selector === PERMIT) {
+    if (size(grant) < 100) return null
+    const [, spender, value] = decodeAbiParameters(
+      [{ type: 'address' }, { type: 'address' }, { type: 'uint256' }],
+      slice(grant, 4, 100)
+    )
+    return { spender: getAddress(spender), amount: value }
+  }
+  if (selector === DAI_PERMIT) {
+    const [, spender] = decodeAbiParameters([{ type: 'address' }, { type: 'address' }], slice(grant, 4, 68))
+    return { spender: getAddress(spender), amount: null }
+  }
+  return null
+}
+
+function verifyStandingAllowance(
+  ctx: Pick<IOperateAttestContext, 'balances'>,
+  chainId: ChainId,
+  intent: Pick<ISpokeGate__OperateIntent, 'header' | 'callList'>
+): void {
+  const spenders = venueSpenders(chainId)
+  const feeToken = getAddress(intent.header.feeToken)
+  const callList = intent.callList
   for (let i = 0; i < callList.length; i++) {
-    const grant = callList[i]!.callData
-    if (size(grant) < 68) continue
-    const selector = slice(grant, 0, 4)
-    let spender: Address
-    if (selector === APPROVE || selector === INCREASE_ALLOWANCE) {
-      const [to, amount] = decodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], slice(grant, 4, 68))
-      if (amount === 0n) continue
-      spender = to
-    } else if (selector === PERMIT || selector === DAI_PERMIT) {
-      spender = decodeAbiParameters([{ type: 'address' }, { type: 'address' }], slice(grant, 4, 68))[1]
-    } else {
+    const grant = grantOf(callList[i]!.callData)
+    if (grant === null) continue
+    const spender = grant.spender
+    const token = getAddress(callList[i]!.target)
+    if (spenders.some(venueSpender => isAddressEqual(venueSpender, spender))) {
+      const fundBalance = balanceOf(ctx, token) - (isAddressEqual(token, feeToken) ? intent.header.fee : 0n)
+      if (grant.amount === null || grant.amount > fundBalance) {
+        throw new CompactError(
+          'STANDING_ALLOWANCE',
+          `${token} grants ${grant.amount === null ? 'an allowance whose result this check cannot bound' : grant.amount} to ${spender} while the fund balance after this operate's relay fee is ${fundBalance}; an allowance is capped at that balance, set with approve`,
+          'hard'
+        )
+      }
       continue
     }
-    if (isAddressEqual(spender, GMX_TOKEN_SPENDER)) continue
-    const token = callList[i]!.target
     let reset = false
     for (let j = i + 1; j < callList.length; j++) {
       if (!isAddressEqual(callList[j]!.target, token)) continue
       const later = callList[j]!.callData
       if (size(later) < 68 || slice(later, 0, 4) !== APPROVE) continue
       const [target, clears] = decodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], slice(later, 4, 68))
-      if (isAddressEqual(target, spender) && clears === 0n) {
+      if (isAddressEqual(getAddress(target), spender) && clears === 0n) {
         reset = true
         break
       }

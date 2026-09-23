@@ -10,7 +10,7 @@ export interface IChainLiveness {
   fetchedAtSec: number
 }
 
-export interface IChainLivenessDeps {
+interface IChainLivenessDeps {
   chainIds: readonly ChainId[]
   chainHead(chainId: ChainId): Promise<bigint>
 }

@@ -4,10 +4,6 @@ export function factor(a: bigint, b: bigint): bigint {
   return a ? (a * PRECISION.floatPrecisionExp) / b : 0n
 }
 
-export function applyFactor(factor: bigint, value: bigint): bigint {
-  return (value * factor) / PRECISION.floatPrecisionExp
-}
-
 export function toBasisPoints(numerator: bigint, denominator: bigint) {
   if (denominator === 0n) throw new Error('toBasisPoints: zero denominator')
   return (numerator * PRECISION.basisPoints) / denominator

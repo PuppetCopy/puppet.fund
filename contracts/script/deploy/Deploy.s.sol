@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.36;
 
+import {GateConfig} from "src/utils/GateConfig.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Vm} from "forge-std/src/Vm.sol";
 import {console2} from "forge-std/src/console2.sol";
@@ -11,8 +12,6 @@ import {BaseScript} from "./shared/BaseScript.s.sol";
 import {Dictate} from "src/core/Dictate.sol";
 import {Register} from "src/core/Register.sol";
 import {Chain as ChainProxy} from "src/core/Chain.sol";
-import {AccountModule as AccountContract} from "src/core/AccountModule.sol";
-import {BaseGate} from "src/utils/BaseGate.sol";
 import {Access} from "src/utils/auth/Access.sol";
 
 contract Deploy is BaseScript {
@@ -60,8 +59,7 @@ contract Deploy is BaseScript {
         _resetBroadcastForUniverse();
         vm.startBroadcast(_deployerKey());
         _executePlan();
-        _wireCore();
-        if (isHub) _wireHub();
+        _wireGate(isHub);
         _registerTokens();
         vm.stopBroadcast();
     }
@@ -75,8 +73,7 @@ contract Deploy is BaseScript {
             require(!_plan[i].deployNeeded, string.concat("Deploy: not deployed, run deploy(): ", _plan[i].name));
         }
         vm.startBroadcast(_deployerKey());
-        _wireCore();
-        if (isHub) _wireHub();
+        _wireGate(isHub);
         _registerTokens();
         vm.stopBroadcast();
     }
@@ -85,21 +82,29 @@ contract Deploy is BaseScript {
         bool isHub
     ) internal {
         string[] memory core = _coreContracts();
-        string[] memory names = core;
-        if (isHub) {
-            string[] memory hub = _hubContracts();
-            names = new string[](core.length + hub.length);
-            for (uint i; i < core.length; ++i) {
-                names[i] = core[i];
-            }
-            for (uint i; i < hub.length; ++i) {
-                names[core.length + i] = hub[i];
-            }
+        string[] memory stores = _storeNames(isHub);
+        string[] memory names = new string[](core.length + stores.length + 1);
+        for (uint i; i < core.length; ++i) {
+            names[i] = core[i];
         }
+        for (uint i; i < stores.length; ++i) {
+            names[core.length + i] = stores[i];
+        }
+        names[core.length + stores.length] = _gateName(isHub);
         uint version = _getVersion();
         string memory storeAck = vm.envOr("MIGRATE_STORES", string(""));
         bytes32 salt = bytes32(version);
         bool refused;
+        string memory hubRecord = "";
+        if (!isHub) {
+            string[] memory metaKeys = vm.parseTomlKeys(_const, ".CHAIN_META");
+            for (uint i; i < metaKeys.length; ++i) {
+                if (_const.readUint(string.concat(".CHAIN_META.", metaKeys[i], ".id")) == _getHubChainId()) {
+                    hubRecord = string.concat(".chain.", metaKeys[i], ".");
+                }
+            }
+        }
+        string memory deployed = vm.readFile(DEPLOYMENTS_PATH);
         console2.log("=== deploy plan | version:", version, _universe ? "| UNIVERSE MIGRATION" : "");
         require(
             !_universe || vm.envOr("ALLOW_UNIVERSE_MIGRATION", false),
@@ -121,6 +126,16 @@ contract Deploy is BaseScript {
                 ),
                 predicted
             );
+            if (
+                !isHub && m.class != Class.Logic
+                    && (
+                        !vm.keyExistsToml(deployed, string.concat(hubRecord, names[i]))
+                            || deployed.readAddress(string.concat(hubRecord, names[i])) != predicted
+                    )
+            ) {
+                console2.log("    REFUSED: a shared root or store must sit at the hub's recorded address", names[i]);
+                refused = true;
+            }
             if (drift && !_universe) {
                 if (m.class == Class.Root) {
                     console2.log("    REFUSED: root re-key orphans derived addresses; bump protocol.version");
@@ -167,14 +182,6 @@ contract Deploy is BaseScript {
             if (_isRouter(p.name)) continue;
             _setChainAddress(p.name, p.predicted);
         }
-    }
-
-    function _grantAccess(
-        Dictate dictate,
-        string memory targetName,
-        string memory granteeName
-    ) internal {
-        dictate.setAccess(Access(_specAddr(targetName)), _specAddr(granteeName));
     }
 
     function _classLabel(
@@ -247,9 +254,10 @@ contract Deploy is BaseScript {
         string[] memory symbols = vm.parseTomlKeys(_const, string.concat(".TOKEN_ADDRESS.", _chainKey()));
         dictate.setAccess(register, vm.addr(_deployerKey()));
         for (uint i; i < symbols.length; ++i) {
-            uint cap = _getChainTokenCap(symbols[i]);
-            if (cap == 0) continue;
-            register.setRegistered(address(_getChainToken(symbols[i])), cap, bytes32(bytes(symbols[i])));
+            register.setRegistered(
+                address(_getChainToken(symbols[i])),
+                _getChainTokenCap(symbols[i]) == 0 ? bytes32(0) : bytes32(bytes(symbols[i]))
+            );
         }
         dictate.removeAccess(register, vm.addr(_deployerKey()));
     }
@@ -261,10 +269,10 @@ contract Deploy is BaseScript {
         Dictate dictate = Dictate(_specAddr("Dictate"));
         Register register = Register(_specAddr("Register"));
         IERC20 token = _getChainToken(symbol);
-        uint cap = _getChainTokenCap(symbol);
+        bytes32 tokenId = _getChainTokenCap(symbol) == 0 ? bytes32(0) : bytes32(bytes(symbol));
         vm.startBroadcast(_deployerKey());
         dictate.setAccess(register, vm.addr(_deployerKey()));
-        register.setRegistered(address(token), cap, bytes32(bytes(symbol)));
+        register.setRegistered(address(token), tokenId);
         dictate.removeAccess(register, vm.addr(_deployerKey()));
         vm.stopBroadcast();
     }
@@ -274,10 +282,12 @@ contract Deploy is BaseScript {
         for (uint i; i < core.length; ++i) {
             _verify(core[i]);
         }
-        string[] memory hub = _hubContracts();
-        for (uint i; i < hub.length; ++i) {
-            _verify(hub[i]);
+        bool isHub = block.chainid == _getHubChainId();
+        string[] memory stores = _storeNames(isHub);
+        for (uint i; i < stores.length; ++i) {
+            _verify(stores[i]);
         }
+        _verify(_gateName(isHub));
     }
 
     function verify(
@@ -287,24 +297,47 @@ contract Deploy is BaseScript {
     }
 
     function _coreContracts() internal pure returns (string[] memory names) {
-        names = new string[](8);
+        names = new string[](7);
         names[0] = "Dictate";
         names[1] = "Register";
         names[2] = "Chain";
-        names[3] = "Account";
-        names[4] = "DepositRoute";
+        names[3] = "UserAccount";
+        names[4] = "FundAccount";
         names[5] = "AccountModule";
         names[6] = "Deposit";
-        names[7] = "CoreGate";
     }
 
-    function _hubContracts() internal pure returns (string[] memory names) {
-        names = new string[](2);
-        names[0] = "BondStore";
-        names[1] = "HubGate";
+    function _gateName(
+        bool isHub
+    ) internal pure returns (string memory) {
+        return isHub ? "HubGate" : "SpokeGate";
     }
 
-    function _wireCore() internal {
+    function _gateKey(
+        bool isHub
+    ) internal pure returns (bytes32) {
+        return isHub ? bytes32("HubGate") : bytes32("SpokeGate");
+    }
+
+    function _storeNames(
+        bool isHub
+    ) internal pure returns (string[] memory names) {
+        if (!isHub) {
+            names = new string[](1);
+            names[0] = "EscrowStore";
+            return names;
+        }
+        names = new string[](5);
+        names[0] = "MandateStore";
+        names[1] = "FundStore";
+        names[2] = "EscrowStore";
+        names[3] = "Share";
+        names[4] = "Fund";
+    }
+
+    function _wireGate(
+        bool isHub
+    ) internal {
         Dictate dictate = Dictate(_specAddr("Dictate"));
         ChainProxy chain = ChainProxy(_specAddr("Chain"));
         if (chain.implementation() == address(0)) {
@@ -319,47 +352,53 @@ contract Deploy is BaseScript {
             dictate.removeAccess(chain, vm.addr(_deployerKey()));
             _setChainAddress("ChainImpl", impl);
         }
-        address coreGateImpl = _specAddr("CoreGate");
-        address coreGateProxy = dictate.gateMap("CoreGate");
-        if (coreGateProxy == address(0)) coreGateProxy = dictate.setGate("CoreGate", coreGateImpl);
+        address depositImpl = _specAddr("Deposit");
+        address depositProxy = dictate.setGate(bytes32("Deposit"), depositImpl);
+        require(depositProxy == _proxyAddr(bytes32("Deposit")), "Deploy: Deposit proxy address drift");
+        string memory gate = _gateName(isHub);
+        address gateImpl = _specAddr(gate);
+        address gateProxy = dictate.setGate(_gateKey(isHub), gateImpl);
 
-        dictate.setAccess(Access(_specAddr("AccountModule")), coreGateProxy);
-        dictate.setAccess(Access(_specAddr("AccountModule")), _specAddr("Deposit"));
-        dictate.setAccess(Access(_specAddr("Deposit")), coreGateProxy);
+        dictate.setAccess(Access(_specAddr("AccountModule")), gateProxy);
+        dictate.setAccess(Access(_specAddr("AccountModule")), depositProxy);
+        dictate.setAccess(Access(depositProxy), gateProxy);
+        dictate.setAccess(Access(_specAddr("EscrowStore")), gateProxy);
+        if (isHub) {
+            dictate.setAccess(Access(_specAddr("MandateStore")), gateProxy);
+            address fundImpl = _specAddr("Fund");
+            address fundProxy = dictate.setGate(bytes32("Fund"), fundImpl);
+            require(fundProxy == _proxyAddr(bytes32("Fund")), "Deploy: Fund proxy address drift");
+            dictate.setAccess(Access(_specAddr("AccountModule")), fundProxy);
+            dictate.setAccess(Access(_specAddr("FundStore")), fundProxy);
+            dictate.setAccess(Access(_specAddr("FundStore")), gateProxy);
+            dictate.setAccess(Access(_specAddr("EscrowStore")), fundProxy);
+            dictate.setAccess(Access(fundProxy), gateProxy);
+            _setChainAddress("FundImpl", fundImpl);
+            _setChainAddress("Fund", fundProxy);
+        }
 
-        dictate.setGate("CoreGate", coreGateImpl);
-        _setChainAddress("CoreGateImpl", coreGateImpl);
-        _setChainAddress("CoreGate", coreGateProxy);
-    }
-
-    function _wireHub() internal {
-        Dictate dictate = Dictate(_specAddr("Dictate"));
-        address hubImpl = _specAddr("HubGate");
-        address hubProxy = dictate.gateMap("HubGate");
-        if (hubProxy == address(0)) hubProxy = dictate.setGate("HubGate", hubImpl);
-
-        dictate.setAccess(Access(_specAddr("AccountModule")), hubProxy);
-        dictate.setAccess(Access(_specAddr("Deposit")), hubProxy);
-        dictate.setAccess(Access(_specAddr("BondStore")), hubProxy);
-
-        dictate.setGate("HubGate", hubImpl);
-        _setChainAddress("HubGateImpl", hubImpl);
-        _setChainAddress("HubGate", hubProxy);
+        _setChainAddress("DepositImpl", depositImpl);
+        _setChainAddress("Deposit", depositProxy);
+        _setChainAddress(string.concat(gate, "Impl"), gateImpl);
+        _setChainAddress(gate, gateProxy);
     }
 
     function _getMaxCohortSize() internal view returns (uint) {
         return _const.readUint(".PROTOCOL.maxCohortSize");
     }
 
-    function _gateConfig() internal view returns (BaseGate.Config memory) {
-        return BaseGate.Config({
+    function _gateConfig() internal view returns (GateConfig memory) {
+        uint _withdrawDelay = _const.readUint(".PROTOCOL.withdrawDelay");
+        require(
+            _withdrawDelay == 0 || _withdrawDelay >= _const.readUint(".PROTOCOL.maxIntentTtlSec"),
+            "Deploy: withdrawDelay must be zero or cover maxIntentTtlSec"
+        );
+        return GateConfig({
             attestor: _attestorAddress(),
             feeReceiver: RELAYER_ADDRESS,
             transferGasLimit: _getTransferGasLimit(),
             maxIntentTtl: _const.readUint(".PROTOCOL.maxIntentTtlSec"),
-            maxRelayFeeBps: _getMaxRelayFeeBps(),
-            performanceFee: _const.readUint(".PROTOCOL.performanceFee"),
-            maxCohortSize: _getMaxCohortSize()
+            maxRelayFeeBps: _getMaxRelayFeeBps()
         });
     }
 
@@ -388,8 +427,19 @@ contract Deploy is BaseScript {
         string memory name
     ) internal pure returns (bool) {
         bytes memory n = bytes(name);
+        if (
+            keccak256(n) == keccak256("Deposit") || keccak256(n) == keccak256("Fund")
+        ) return true;
         return n.length >= 4 && n[n.length - 4] == "G" && n[n.length - 3] == "a" && n[n.length - 2] == "t"
             && n[n.length - 1] == "e";
+    }
+
+    function _proxyAddr(
+        bytes32 key
+    ) internal view returns (address) {
+        address dictate = _specAddr("Dictate");
+        bytes32 initCodeHash = keccak256(abi.encodePacked(_creationCode("RouterProxy"), abi.encode(dictate)));
+        return address(uint160(uint(keccak256(abi.encodePacked(bytes1(0xff), dictate, key, initCodeHash)))));
     }
 
     // Load the PROD artifact by path, never type(X).creationCode and never a bare "File.sol:Name" qualifier: test/ and
@@ -420,10 +470,10 @@ contract Deploy is BaseScript {
             return
                 Meta({creationCode: _creationCode(name), ctorArgs: abi.encode(_specAddr("Dictate")), class: Class.Root});
         }
-        if (k == keccak256("Account")) {
+        if (k == keccak256("UserAccount")) {
             return Meta({creationCode: _creationCode(name), ctorArgs: "", class: Class.Root});
         }
-        if (k == keccak256("DepositRoute")) {
+        if (k == keccak256("FundAccount")) {
             return Meta({creationCode: _creationCode(name), ctorArgs: "", class: Class.Root});
         }
         if (k == keccak256("AccountModule")) {
@@ -432,9 +482,9 @@ contract Deploy is BaseScript {
                 ctorArgs: abi.encode(
                     _specAddr("Dictate"),
                     _specAddr("Chain"),
-                    _specAddr("Account"),
-                    _specAddr("DepositRoute"),
-                    _const.readUint(".PROTOCOL.resetPeriodSec")
+                    _specAddr("UserAccount"),
+                    _specAddr("FundAccount"),
+                    _const.readUint(".PROTOCOL.withdrawDelay")
                 ),
                 class: Class.Root
             });
@@ -448,26 +498,49 @@ contract Deploy is BaseScript {
                     _specAddr("Register"),
                     address(_getChainToken(_wntSymbol()))
                 ),
+                class: Class.Logic
+            });
+        }
+        if (k == keccak256("Fund")) {
+            return Meta({
+                creationCode: _creationCode(name),
+                ctorArgs: abi.encode(
+                    _specAddr("Dictate"),
+                    _specAddr("AccountModule"),
+                    _specAddr("MandateStore"),
+                    _specAddr("FundStore"),
+                    _specAddr("EscrowStore"),
+                    _specAddr("Register"),
+                    _specAddr("Share")
+                ),
+                class: Class.Logic
+            });
+        }
+        if (k == keccak256("Share")) {
+            return Meta({
+                creationCode: _creationCode(name),
+                ctorArgs: abi.encode(_proxyAddr(bytes32("Fund"))),
                 class: Class.Root
             });
         }
-        if (k == keccak256("CoreGate")) {
+        if (k == keccak256("FundStore") || k == keccak256("MandateStore") || k == keccak256("EscrowStore")) {
+            return
+                Meta({
+                    creationCode: _creationCode(name), ctorArgs: abi.encode(_specAddr("Dictate")), class: Class.Store
+                });
+        }
+        if (k == keccak256("SpokeGate")) {
             return Meta({
                 creationCode: _creationCode(name),
                 ctorArgs: abi.encode(
                     _specAddr("AccountModule"),
                     _specAddr("Register"),
-                    _specAddr("Deposit"),
+                    _proxyAddr(bytes32("Deposit")),
+                    _specAddr("EscrowStore"),
                     _gateConfig()
                 ),
                 class: Class.Logic
             });
-        }
-        if (k == keccak256("BondStore")) {
-            return
-                Meta({
-                    creationCode: _creationCode(name), ctorArgs: abi.encode(_specAddr("Dictate")), class: Class.Store
-                });
         }
         if (k == keccak256("HubGate")) {
             return Meta({
@@ -475,10 +548,13 @@ contract Deploy is BaseScript {
                 ctorArgs: abi.encode(
                     _specAddr("AccountModule"),
                     _specAddr("Register"),
-                    _specAddr("Deposit"),
-                    _specAddr("BondStore"),
-                    address(_getChainToken(_const.readString(".PROTOCOL.bondToken"))),
-                    _gateConfig()
+                    _proxyAddr(bytes32("Deposit")),
+                    _specAddr("MandateStore"),
+                    _proxyAddr(bytes32("Fund")),
+                    _specAddr("EscrowStore"),
+                    _gateConfig(),
+                    _getMaxCohortSize(),
+                    _const.readUint(".PROTOCOL.performanceFee")
                 ),
                 class: Class.Logic
             });
@@ -514,12 +590,7 @@ contract Deploy is BaseScript {
             console2.log("skip (not on chain):", artifact);
             return;
         }
-        string memory verifierPath = string.concat(".VERIFIER.", _chainKey());
-        bool custom = vm.keyExistsToml(_const, verifierPath);
-        // A custom verifier carries its chain in the URL and MUST NOT get --chain: forge resolves that flag against its
-        // own built-in chain table, which has no Monad mainnet (143), so passing it fails with "Chain not supported"
-        // before the request is ever sent.
-        string[] memory cmd = new string[](custom ? 15 : 11);
+        string[] memory cmd = new string[](11);
         cmd[0] = "forge";
         cmd[1] = "verify-contract";
         cmd[2] = vm.toString(addr);
@@ -531,17 +602,8 @@ contract Deploy is BaseScript {
         // src unit's profile the verifier refuses with "Ambiguous compilation profiles found in cache".
         cmd[7] = "--compilation-profile";
         cmd[8] = "default";
-        if (custom) {
-            cmd[9] = "--verifier";
-            cmd[10] = _const.readString(string.concat(verifierPath, ".verifier"));
-            cmd[11] = "--verifier-url";
-            cmd[12] = _const.readString(string.concat(verifierPath, ".url"));
-            cmd[13] = "--etherscan-api-key";
-            cmd[14] = vm.envString("ETHERSCAN_API_KEY");
-        } else {
-            cmd[9] = "--chain";
-            cmd[10] = _chainKey();
-        }
+        cmd[9] = "--chain";
+        cmd[10] = _chainKey();
         Vm.FfiResult memory r = vm.tryFfi(cmd);
         if (r.exitCode == 0) {
             console2.log("verified:", artifact, vm.toString(addr));

@@ -1,14 +1,12 @@
-export { createBodyKeys } from './bodyKeys.js'
+
 export type { IConnectedWallet } from './connectedWallet.js'
 export {
-  applyAttest,
   balanceAt,
   balanceId,
   type IAccountBalance,
-  type IBodyKeys,
   type IFold,
-  type IPendingCredit,
   type IRootState,
+  type ISettledTx,
   type IWalletPair,
   rootQuery
 } from './root.js'
@@ -21,4 +19,12 @@ export {
   WALLETCONNECT_PROJECT_ID,
   wagmi
 } from './wallet.js'
+export {
+  createWalletKeys,
+  type IFund,
+  type IFundRecord,
+  type IFundSigner,
+  type ISessionSigner,
+  type IWalletKeys
+} from './walletKeys.js'
 export { disconnect } from './walletLink.js'

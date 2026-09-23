@@ -1,6 +1,7 @@
+import type { Hex } from 'viem'
 import { chainTokenOfKey, symbolOfKey } from '../state/tokenRegistry.js'
+import { VENUES } from '../venue/venues.js'
 import { composeBreakdown } from './compose.js'
-import { gmxEvaluator } from './platform/gmx.js'
 import {
   DEFAULT_EVALUATION_CONFIG,
   type IEvaluateAccountParams,
@@ -8,11 +9,10 @@ import {
   type IGetRate,
   type INavHolding,
   type INavResult,
-  type INavValuedHolding
+  type INavValuedHolding,
+  type IPlatformValuation
 } from './types.js'
 import { checkNavGate } from './verify.js'
-
-const DEFAULT_PLATFORMS = [gmxEvaluator]
 
 async function valueHoldings(
   holdings: INavHolding[],
@@ -37,34 +37,58 @@ async function valueHoldings(
   )
 }
 
+const ALLOWANCE_PLATFORM = 'allowance'
+
 export async function evaluateAccountNav(params: IEvaluateAccountParams): Promise<INavResult> {
   const config: IEvaluationConfig = { ...DEFAULT_EVALUATION_CONFIG, ...params.config }
   const nowSec = params.nowSec ?? Math.floor(Date.now() / 1000)
-  const platforms = params.platforms ?? DEFAULT_PLATFORMS
+  const platforms = VENUES.filter(venue => venue.chains.includes(params.chainId))
 
   const baseSymbol = symbolOfKey(params.baseKey)
-  const [valuations, holdings] = await Promise.all([
+  const [valuations, holdings, reserved] = await Promise.all([
     Promise.all(
-      platforms.map(p =>
-        p.evaluate({
-          chainId: p.chainId,
+      platforms.map(venue =>
+        venue.value({
+          chainId: params.chainId,
           account: params.master,
-          baseToken: chainTokenOfKey(p.chainId, params.baseKey),
+          baseToken: chainTokenOfKey(params.chainId, params.baseKey),
           blockNumber: params.blockNumber,
           blockTimestamp: params.blockTimestamp,
           nowSec,
           publicClient: params.publicClient,
-          getRate: params.getRate,
-          positions: params.positions,
-          orders: params.orders,
-          claimables: params.claimables
+          getRate: params.getRate
         })
       )
     ),
-    valueHoldings(params.holdings, baseSymbol, params.getRate, nowSec, config.maxPriceAgeSec)
+    valueHoldings(params.holdings, baseSymbol, params.getRate, nowSec, config.maxPriceAgeSec),
+    valueHoldings(
+      params.reserved.map(r => r.holding),
+      baseSymbol,
+      params.getRate,
+      nowSec,
+      config.maxPriceAgeSec
+    )
   ])
+  const reservedValuation: IPlatformValuation = {
+    platform: ALLOWANCE_PLATFORM,
+    positions: reserved.map((h, i) => {
+      const spender = params.reserved[i]!.spender
+      return {
+        platform: ALLOWANCE_PLATFORM,
+        positionKey: `${h.token}${spender.slice(2)}` as Hex,
+        market: h.token,
+        collateralBase: h.mark.valueBase,
+        pnlBase: 0n,
+        netBase: h.mark.valueBase,
+        priceAgeSec: h.mark.priceAgeSec,
+        facets: { kind: 'allowance', token: h.token, spender }
+      }
+    }),
+    inFlight: [],
+    available: true
+  }
 
-  const breakdown = composeBreakdown(params.cashLeg, valuations, holdings)
+  const breakdown = composeBreakdown(params.cashLeg, [...valuations, reservedValuation], holdings)
   const navMark = breakdown.unitedCashBase + breakdown.holdingMarkBase + breakdown.positionMarkBase
   const gate = checkNavGate(breakdown, navMark, config, { clientNav: params.clientNav, kind: params.kind })
 

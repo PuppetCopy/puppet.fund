@@ -61,7 +61,7 @@ export function t<const Ty extends IColumnType, const Opt extends boolean = fals
 
 export type IColumns = Record<string, IColumn<any, boolean, boolean>>
 
-export type ColType<C> = C extends { __t?: infer T } ? T : never
+type ColType<C> = C extends { __t?: infer T } ? T : never
 type IsOpt<C> = C extends { __opt?: true } ? true : false
 type ReqKeys<Cols extends IColumns> = { [K in keyof Cols]: IsOpt<Cols[K]> extends true ? never : K }[keyof Cols]
 type OptKeys<Cols extends IColumns> = { [K in keyof Cols]: IsOpt<Cols[K]> extends true ? K : never }[keyof Cols]
@@ -70,10 +70,6 @@ export type InferRow<Cols extends IColumns> = { [K in ReqKeys<Cols>]: ColType<Co
   [K in OptKeys<Cols>]?: ColType<Cols[K]>
 }
 
-export type IndexedKeys<Cols extends IColumns> = {
-  [K in keyof Cols]: Cols[K] extends { __ix?: true } ? K : never
-}[keyof Cols] &
-  string
 
 export const TABLE: unique symbol = Symbol.for('puppet.digest.table')
 

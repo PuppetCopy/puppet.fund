@@ -1,4 +1,5 @@
-import type { ChainId, IntervalTime } from '@puppet/sdk/const'
+import { predictUserAccount } from '@puppet/sdk/account'
+import type { IntervalTime } from '@puppet/sdk/const'
 import type { IMandateRow } from '@puppet/sdk/schema'
 import { awaitPromises, combine, filter, fromPromise, type IStream, just, map, merge, op, reduce, skip, skipRepeats, skipRepeatsWith, start, switchLatest, switchMap, switchPromises, tap } from 'aelea/stream'
 import { type IBehavior, PromiseStatus, state } from 'aelea/stream-extended'
@@ -16,26 +17,22 @@ import { $midContainer } from '../common/$common.js'
 import { $ActionDrawer, type IDraft } from '../components/$ActionDrawer.js'
 import { $MainMenu } from '../components/$MainMenu.js'
 import { $PairBanner } from '../components/$PairBanner.js'
-import type { IDepositDraft, IMandateDraft, ITradeDraft, IUnbondDraft, IWithdrawDraft } from '../components/portfolio/draft.js'
-import { passthroughOperate } from '../components/portfolio/runner/passthrough.js'
-import type { IAttestation } from '../components/portfolio/runner/steps.js'
-import { ownBackingViews, ownMarks, ownTradeViews } from '../io/datastore/own.js'
-import { fetchOwnedAccount } from '../io/datastore/reads.js'
+import type { IDepositDraft, IMandateDraft, ITradeDraft, IWithdrawDraft } from '../components/portfolio/draft.js'
+import { passthroughOperate, prepareDappTransaction } from '../components/portfolio/runner/passthrough.js'
+import { escrowSurplus, type IHoldingView, ownHoldingViews } from '../io/datastore/own.js'
 import { accountHistory, type IAccountAction } from '../io/journal/history.js'
 import { journal } from '../io/journal/journal.js'
-import type { IOwnState } from '../io/journal/localFold.js'
+import { foldOwnAccount, type IJournalEntries, type IOwnState } from '../io/journal/localFold.js'
 import { matchmakerUrl } from '../io/matchmaker/index.js'
 import { setViewCacheOwner } from '../io/onchain/viewRead.js'
 import { walletValueUsd } from '../io/walletValue.js'
 import { enableSmoothScroll } from '../utils/smoothScroll.js'
 import { subject } from '../utils/subject.js'
-import { fundedFromChronicle } from '../wallet/fundedCoordinate.js'
+import { fundedFromStake } from '../wallet/fundedCoordinate.js'
+import type { ISettledTx } from '../wallet/index.js'
 import {
-  applyAttest,
-  balanceId,
-  createBodyKeys, 
+  createWalletKeys,
   type IFold,
-  type IPendingCredit,
   type IRootState,
   type IWalletPair,
   rootQuery,
@@ -50,7 +47,7 @@ import { $Traders } from './$Traders.js'
 
 interface IApp {}
 
-const bodyKeys = createBodyKeys(matchmakerUrl, fundedFromChronicle)
+const walletKeys = createWalletKeys(matchmakerUrl, fundedFromStake)
 
 export const $Main = (_config: IApp = {}) =>
   component(
@@ -60,16 +57,14 @@ export const $Main = (_config: IApp = {}) =>
       [changeHideBalances, changeHideBalancesTether]: IBehavior<boolean>,
       [changeDraft, changeDraftTether]: IBehavior<IDepositDraft | IWithdrawDraft>,
       [changeMandateDraft, changeMandateDraftTether]: IBehavior<IMandateDraft>,
-      [changeUnbondDraft, changeUnbondDraftTether]: IBehavior<IUnbondDraft>,
       [changeTradeDraft, changeTradeDraftTether]: IBehavior<ITradeDraft>,
       [clearDrafts, clearDraftsTether]: IBehavior<null>,
       [releaseDraft, releaseDraftTether]: IBehavior<string>,
-      [changeAttest, attestTether]: IBehavior<IAttestation>,
-      [deriveAccount, deriveAccountTether]: IBehavior<Address>,
+      [changeSettled, settledTether]: IBehavior<ISettledTx>,
       [drawerSize, drawerSizeTether]: IBehavior<any, number>
     ) => {
-      const dappAttest = subject<IAttestation>()
-      const attested: IStream<IAttestation> = merge(changeAttest, dappAttest.stream)
+      const dappSettled = subject<ISettledTx>()
+      const settledTx: IStream<ISettledTx> = merge(changeSettled, dappSettled.stream)
       const activityTimeframe = uiStorage.replayWrite(localStoreSchema.global.activityTimeframe, changeActivityTimeframe)
       const hideBalances = state(false, uiStorage.replayWrite(localStoreSchema.global.hideBalances, changeHideBalances))
 
@@ -80,11 +75,10 @@ export const $Main = (_config: IApp = {}) =>
       )
 
       const accountQuery: IStream<Promise<Address | null>> = op(
-        combine({ wallet: walletQuery, derived: start(null, deriveAccount), settled: start(null, attested) }),
+        combine({ wallet: walletQuery, settled: start(null, settledTx) }),
         map(async p => {
           const wallet = await p.wallet
-          if (wallet === null) return null
-          return bodyKeys.accountOf(wallet.address) ?? (await fetchOwnedAccount(wallet.address))
+          return wallet === null ? null : predictUserAccount(wallet.address)
         }),
         state()
       )
@@ -103,24 +97,23 @@ export const $Main = (_config: IApp = {}) =>
           const seeded = p.wallet.then(async (wallet): Promise<IRootState | null> => {
             setViewCacheOwner(wallet?.address ?? null)
             if (wallet === null || account === null) return null
-            return journal(account).root(wallet.address)
+            return journal(account, wallet.address).root(wallet.address)
           })
           return op(
             fromPromise(seeded),
             switchMap(root => {
               if (root === null) return just(root)
-              const attests = op(attested, map((settled): IFold => ({ attest: settled })))
               const settles = op(
-                attested,
+                settledTx,
                 map(
-                  (): Promise<IFold> =>
-                    journal(root.account)
-                      .settle()
+                  (settled): Promise<IFold> =>
+                    journal(root.account, root.user)
+                      .settle({ chainId: settled.chainId, block: settled.block })
                       .then(
-                        (journal): IFold => ({ journal }),
-                        (err: unknown): IFold => {
-                          console.error('settle fold failed; keeping last-synced state', err)
-                          return { syncFailed: true }
+                        (journal): IFold => ({ settled, journal }),
+                        (syncError: unknown): IFold => {
+                          console.error('settle fold failed; keeping last-synced state', syncError)
+                          return { settled, syncError }
                         }
                       )
                 ),
@@ -129,35 +122,12 @@ export const $Main = (_config: IApp = {}) =>
               return reduce(
                 (acc: IRootState | null, fold: IFold): IRootState | null => {
                   if (acc === null) return null
-                  if ('syncFailed' in fold) return { ...acc }
-                  if ('journal' in fold) {
-                    const { balances, deployed, unreachable, chronicle, heads } = fold.journal
-                    const stillPending: IPendingCredit[] = []
-                    const deltaByCoordinate = new Map<string, { chainId: ChainId; token: Address; delta: bigint }>()
-                    for (const p of acc.pending) {
-                      if (p.block > (heads.get(p.chainId) ?? 0n)) {
-                        stillPending.push(p)
-                        const key = balanceId(p)
-                        const d = deltaByCoordinate.get(key)
-                        deltaByCoordinate.set(key, { chainId: p.chainId, token: p.token, delta: (d?.delta ?? 0n) + p.delta })
-                      }
-                    }
-                    const merged = [...balances]
-                    for (const { chainId, token, delta } of deltaByCoordinate.values()) {
-                      const i = merged.findIndex(b => b.chainId === chainId && isAddressEqual(b.token, token))
-                      const row = i < 0 ? undefined : merged[i]!
-                      const balance = (row?.balance ?? 0n) + delta
-                      if (balance <= 0n) {
-                        if (i >= 0) merged.splice(i, 1)
-                      } else if (row === undefined) merged.push({ chainId, token, balance })
-                      else merged[i] = { ...row, balance }
-                    }
-                    return { ...acc, deployed, unreachable, chronicle, balances: merged, pending: stillPending }
-                  }
-                  return applyAttest(acc, fold.attest)
+                  if ('syncError' in fold) return { ...acc, settled: fold.settled }
+                  const { balances, deployed, unreachable, chronicle, fund } = fold.journal
+                  return { ...acc, deployed, unreachable, chronicle, balances, fund, settled: fold.settled }
                 },
                 root,
-                merge(attests, settles)
+                settles
               )
             }),
             map(root => Promise.resolve(root)),
@@ -168,7 +138,7 @@ export const $Main = (_config: IApp = {}) =>
       )
       const walletPair: IStream<IWalletPair> = op(
         combine({ wallet: walletQuery, root: walletState }),
-        map(async (p): Promise<IWalletPair> => ({ wallet: await p.wallet, root: p.root, bodyKeys })),
+        map(async (p): Promise<IWalletPair> => ({ wallet: await p.wallet, root: p.root, keys: walletKeys })),
         switchPromises,
         state()
       )
@@ -178,51 +148,67 @@ export const $Main = (_config: IApp = {}) =>
         skipRepeats,
         state()
       )
-      initWalletLink(walletPair, async (wallet, root, bodyKeys, chainId, tx) => {
-        const attestation = await passthroughOperate(wallet, root, bodyKeys, chainId, tx)
-        dappAttest.push(attestation)
-        return attestation.result.txHash
-      })
+      initWalletLink(
+        walletPair,
+        async (pair, root, chainId, tx) => {
+          const attestation = await passthroughOperate(pair, root, chainId, tx)
+          dappSettled.push({ chainId: attestation.request.chainId, block: attestation.settledBlock, txHash: attestation.result.txHash })
+          return attestation.result.txHash
+        },
+        prepareDappTransaction
+      )
 
       const settledRoot: IStream<IRootState | null> = op(
         walletRootResolved,
-        skipRepeatsWith((a, b) => a?.account === b?.account && a?.settled?.txHash === b?.settled?.txHash && a?.settled?.nonce === b?.settled?.nonce),
+        skipRepeatsWith((a, b) => a?.account === b?.account && a?.settled?.txHash === b?.settled?.txHash),
         state()
       )
-      const syncedAccountQuery: IStream<Promise<Address | null>> = op(
-        combine({ account: selectedAccount, settled: settledRoot }),
+      const journalQuery: IStream<Promise<{ own: IJournalEntries; bodyList: IJournalEntries[] } | null>> = op(
+        combine({ account: selectedAccount, settled: settledRoot, wallet: walletQuery }),
         map(async p => {
-          if (p.account === null) return null
+          const wallet = await p.wallet
+          if (p.account === null || wallet === null) return null
           const account = getAddress(p.account)
-          await journal(account).sync()
-          return account
+          await journal(account, wallet.address).sync()
+          const fund = p.settled === null ? null : p.settled.fund
+          if (fund !== null) await journal(fund.account, wallet.address).sync()
+          return {
+            own: { account, entries: await journal(account, wallet.address).entries() },
+            bodyList: fund === null ? [] : [{ account: fund.account, entries: await journal(fund.account, wallet.address).entries() }]
+          }
         }),
         state()
       )
       const ownStateQuery: IStream<Promise<IOwnState | null>> = op(
-        syncedAccountQuery,
+        journalQuery,
         map(async q => {
-          const account = await q
-          return account === null ? null : journal(account).own()
+          const held = await q
+          return held === null ? null : foldOwnAccount(held.own, held.bodyList)
         }),
         state()
       )
-      const walletValueQuery: IStream<Promise<number | null>> = op(
-        ownStateQuery,
-        map(async q => {
-          const own = await q
-          if (own === null) return null
-          const [views, backings] = await Promise.all([ownTradeViews(own), ownBackingViews(own)])
-          return walletValueUsd(views, backings, own.deposits, own.bonds)
+      const ownValueQuery: IStream<{ holdings: Promise<IHoldingView[]>; value: Promise<number | null> }> = op(
+        combine({ own: ownStateQuery, pair: walletPair }),
+        map(q => {
+          const holdings = q.own.then(own => (own === null ? [] : ownHoldingViews(own, own.account)))
+          const value = Promise.all([q.own, holdings, q.pair.root]).then(async ([own, list, root]) => {
+            if (own === null || root === null) return null
+            const fund = root.fund
+            return fund === null
+              ? walletValueUsd(list, root.balances, [])
+              : walletValueUsd([...list, ...(await ownHoldingViews(own, fund.account))], root.balances, escrowSurplus(own, fund.account))
+          })
+          return { holdings, value }
         }),
         state()
       )
+      const holdingsQuery: IStream<Promise<IHoldingView[]>> = map(p => p.holdings, ownValueQuery)
+      const walletValueQuery: IStream<Promise<number | null>> = map(p => p.value, ownValueQuery)
       const historyQuery: IStream<Promise<IAccountAction[]>> = op(
-        combine({ account: syncedAccountQuery, own: ownStateQuery }),
-        map(async p => {
-          const [account, own] = await Promise.all([p.account, p.own])
-          if (account === null || own === null) return []
-          return accountHistory([{ account, entries: await journal(account).entries() }], ids => ownMarks(own, ids))
+        journalQuery,
+        map(async q => {
+          const held = await q
+          return held === null ? [] : accountHistory([held.own, ...held.bodyList])
         }),
         state()
       )
@@ -234,10 +220,10 @@ export const $Main = (_config: IApp = {}) =>
 
       type DraftEvent =
         | { type: 'upsert'; draft: IDepositDraft | IWithdrawDraft }
-        | { type: 'byId'; draft: IMandateDraft | IUnbondDraft | ITradeDraft }
+        | { type: 'byId'; draft: IMandateDraft | ITradeDraft }
         | { type: 'release'; key: string }
         | { type: 'clear' }
-      const KIND_ORDER: Record<IDraft['kind'], number> = { deposit: 0, credit: 0, mandate: 1, unbond: 1, operate: 2, settle: 2, withdraw: 3 }
+      const KIND_ORDER: Record<IDraft['kind'], number> = { deposit: 0, mandate: 1, allocate: 2, operate: 2, fundSwap: 2, sell: 2, redeem: 3, withdraw: 4 }
 
       const draftList: IStream<IDraft[]> = state(
         [],
@@ -266,7 +252,6 @@ export const $Main = (_config: IApp = {}) =>
           merge(
             map((draft): DraftEvent => ({ type: 'upsert', draft }), changeDraft),
             map((draft): DraftEvent => ({ type: 'byId', draft }), changeMandateDraft),
-            map((draft): DraftEvent => ({ type: 'byId', draft }), changeUnbondDraft),
             map((draft): DraftEvent => ({ type: 'byId', draft }), changeTradeDraft),
             map((key): DraftEvent => ({ type: 'release', key }), releaseDraft),
             map((): DraftEvent => ({ type: 'clear' }), clearDrafts),
@@ -283,9 +268,12 @@ export const $Main = (_config: IApp = {}) =>
       const draftDepositList: IStream<IDepositDraft[]> = map(list => list.filter((d): d is IDepositDraft => d.kind === 'deposit'), draftList)
       const draftWithdrawList: IStream<IWithdrawDraft[]> = map(list => list.filter((d): d is IWithdrawDraft => d.kind === 'withdraw'), draftList)
       const draftMandateList: IStream<IMandateDraft[]> = map(list => list.filter((d): d is IMandateDraft => d.kind === 'mandate'), draftList)
-      const draftUnbondList: IStream<IUnbondDraft[]> = map(list => list.filter((d): d is IUnbondDraft => d.kind === 'unbond'), draftList)
       const draftTradeList: IStream<ITradeDraft[]> = map(
-        list => list.filter((d): d is ITradeDraft => d.kind === 'credit' || d.kind === 'operate' || d.kind === 'settle'),
+        list =>
+          list.filter(
+            (d): d is ITradeDraft =>
+              d.kind === 'allocate' || d.kind === 'operate' || d.kind === 'sell' || d.kind === 'redeem' || d.kind === 'fundSwap'
+          ),
         draftList
       )
 
@@ -391,9 +379,9 @@ export const $Main = (_config: IApp = {}) =>
           match(routeSchema.quickstart)(
             $midContainer(
               fadeIn(
-                $Quickstart({ hideBalances, walletPair, walletRoot: walletRootResolved, ownStateQuery, draftDepositList })({
+                $Quickstart({ hideBalances, walletPair, ownStateQuery, draftDepositList })({
                   changeDraft: changeDraftTether(),
-                  deriveAccount: deriveAccountTether()
+                  changeTradeDraft: changeTradeDraftTether()
                 })
               )
             )
@@ -407,18 +395,18 @@ export const $Main = (_config: IApp = {}) =>
                   walletRoot: walletRootResolved,
                   historyQuery,
                   ownStateQuery,
+                  holdingsQuery,
+                  walletValueQuery,
                   mandatesQuery,
                   draftDepositList,
                   draftWithdrawList,
                   draftMandateList,
-                  draftUnbondList,
                   draftTradeList,
                   activityTimeframe
                 })({
                   changeHideBalances: changeHideBalancesTether(),
                   changeDraft: changeDraftTether(),
                   changeMandateDraft: changeMandateDraftTether(),
-                  changeUnbondDraft: changeUnbondDraftTether(),
                   changeTradeDraft: changeTradeDraftTether()
                 })
               )
@@ -441,11 +429,10 @@ export const $Main = (_config: IApp = {}) =>
                 map(entries => entries[0]?.borderBoxSize?.[0]?.blockSize ?? entries[0]?.contentRect.height ?? 0)
               )
             )(
-              $ActionDrawer({ draftList, walletPair, walletRoot: walletRootResolved })({
+              $ActionDrawer({ draftList, walletPair, walletRoot: walletRootResolved, ownStateQuery })({
                 clearDrafts: clearDraftsTether(),
-                deriveAccount: deriveAccountTether(),
                 releaseDraft: releaseDraftTether(),
-                attest: attestTether()
+                settled: settledTether()
               })
             )
           )

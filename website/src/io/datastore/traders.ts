@@ -1,100 +1,99 @@
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import type { ChainId } from '@puppet/sdk/const'
 import { formatFixed, getTokenDescription } from '@puppet/sdk/core'
-import { type IGmxPositionRow, VALUE_KEY } from '@puppet/sdk/evaluate'
-import { bookIdOf } from '@puppet/sdk/fold'
-import { GMX_V2_CHAIN_ID, makeOnchainGmxPositionProvider } from '@puppet/sdk/gmx'
-import type { IBackerRow, IBookRow, IMasterMetricRow, ISettlementRow } from '@puppet/sdk/schema'
-import { accountTable, backingTable, settleRowTable } from '@puppet/sdk/schema'
+import { VALUE_KEY } from '@puppet/sdk/evaluate'
+import { cashFor, VIRTUAL_UNITS } from '@puppet/sdk/pool'
+import {
+  accountTable,
+  fundTable,
+  holdingTable,
+  type IFundRow,
+  type IHoldingRow,
+  type IMasterMetricRow,
+  type IQueueRow,
+  type IValuationRow,
+  queueTable,
+  valuationTable
+} from '@puppet/sdk/schema'
 import { chainTokenOfKey, PNL_SLOT_COUNT } from '@puppet/sdk/state'
-import { type Address, getAddress, type PublicClient } from 'viem'
+import type { IGmxPositionRow } from '@puppet/sdk/venue'
+import { GMX_V2_CHAIN_ID, makeOnchainGmxPositionProvider } from '@puppet/sdk/venue'
+import { type Address, getAddress, isAddressEqual, type PublicClient } from 'viem'
 import { publicClientMap } from '../../wallet/index.js'
 import { getRate } from '../context.js'
-import type { IAccountAction } from '../journal/history.js'
-import { client, fetchAllBooks, fetchBackings, fetchBooks, fetchMarks, fetchSettlements } from './reads.js'
-import { type ITradeView, tradeViews } from './trading.js'
-import { walletTimeline } from './walletTimeline.js'
+import { client } from './reads.js'
+import { resample } from './walletTimeline.js'
 
-export interface ICycleOutcome {
-  opening: bigint
-  pnl: bigint
-}
+const VALUE_DECIMALS = getTokenDescription(HUB_CHAIN_ID, chainTokenOfKey(HUB_CHAIN_ID, VALUE_KEY)).decimals
+
+export const POOL_UNIT_DECIMALS = VALUE_DECIMALS + VIRTUAL_UNITS.toString().length - 1
+const POOL_UNIT = 10n ** BigInt(POOL_UNIT_DECIMALS)
 
 export interface ITraderView {
   master: Address
+  user: Address | null
   createdAt: number | null
-  books: ITradeView[]
-  backers: IBackerRow[]
-  settlements: ISettlementRow[]
-  outcomes: Map<string, ICycleOutcome | null>
+  fundRow: IFundRow | undefined
+  queue: IQueueRow | undefined
+  holdings: IHoldingRow[]
+  valuations: IValuationRow[]
 }
 
 export async function traderView(master: Address): Promise<ITraderView | undefined> {
-  const books = await fetchBooks({ master })
-  if (books.length === 0) return undefined
-  const [views, backers, settlements, accounts] = await Promise.all([
-    tradeViews(books),
-    fetchBackings({ master }),
-    fetchSettlements({ master }),
+  const [fundRow, queue, holdings, valuations, accounts] = await Promise.all([
+    client.find(fundTable, { master }),
+    client.find(queueTable, { master }),
+    client.select(holdingTable, { where: { master } }),
+    client.select(valuationTable, { where: { master }, orderBy: { col: 'block', dir: 'asc' } }),
     client.select(accountTable, { where: { account: master } })
   ])
-  const marksByBook = new Map(await Promise.all(views.map(async b => [b.book.id, await fetchMarks(b.book.id)] as const)))
-  const outcomes = new Map(
-    settlements.map(s => {
-      const marks = (marksByBook.get(bookIdOf(Number(s.spokeChainId) as ChainId, s.master)) ?? [])
-        .filter(m => m.cycle === s.cycle)
-        .sort((a, b) => a.block - b.block || a.logIndex - b.logIndex)
-      const opening = marks[0]
-      if (opening === undefined || opening.closeValue === undefined || s.value === undefined) return [s.id, null] as const
-      const inflow = marks.reduce((acc, m) => acc + m.inflow, 0n)
-      return [s.id, { opening: opening.closeValue, pnl: s.value - opening.closeValue - inflow }] as const
-    })
-  )
+  if (fundRow === undefined) return undefined
+  const parent = accounts[0]?.owner
+  const parents = parent === undefined ? [] : await client.select(accountTable, { where: { account: getAddress(parent) } })
   const created = accounts.map(a => a.createdAt)
   return {
     master: getAddress(master),
+    user: parents.length === 0 ? null : getAddress(parents[0]!.owner),
     createdAt: created.length === 0 ? null : Math.min(...created),
-    books: views,
-    backers: backers.filter(b => b.stake > 0n || b.pending > 0n || b.shares > 0n),
-    settlements,
-    outcomes
+    fundRow,
+    queue,
+    holdings: holdings.filter(h => h.units > 0n),
+    valuations
   }
 }
 
 export interface ILeaderboardEntry {
   master: Address
-  books: IBookRow[]
-  settledCycle: Map<string, bigint>
-  settlements: ISettlementRow[]
+  fundRow: IFundRow
   backers: number
+  backing: bigint
   createdAt: number | null
+  valuations: IValuationRow[]
 }
 
 export async function leaderboardEntries(): Promise<ILeaderboardEntry[]> {
-  const books = await fetchAllBooks()
-  const masters = [...new Set(books.map(b => getAddress(b.master)))]
+  const fundRows = await client.select(fundTable)
+  const masters = fundRows.map(p => getAddress(p.master))
   if (masters.length === 0) return []
-  const [accounts, settlements] = await Promise.all([
+  const [accounts, holdings, valuations] = await Promise.all([
     client.select(accountTable, { where: { account: { in: masters } } }),
-    fetchSettlements({ master: { in: masters } })
+    client.select(holdingTable, { where: { master: { in: masters } } }),
+    client.select(valuationTable, { where: { master: { in: masters } }, orderBy: { col: 'block', dir: 'asc' } })
   ])
-  return masters.map(master => {
-    const mine = books.filter(b => getAddress(b.master) === master)
-    const settled = settlements.filter(s => getAddress(s.master) === master)
-    const settledCycle = new Map<string, bigint>()
-    for (const s of settled) {
-      if (s.kind !== 'settle') continue
-      const id = bookIdOf(Number(s.spokeChainId) as ChainId, s.master)
-      if (s.cycle > (settledCycle.get(id) ?? 0n)) settledCycle.set(id, s.cycle)
-    }
-    const created = accounts.filter(a => getAddress(a.account) === master).map(a => a.createdAt)
+  return fundRows.map(fundRow => {
+    const master = getAddress(fundRow.master)
+    const backers = holdings.filter(h => isAddressEqual(h.master, master) && !isAddressEqual(h.holder, master) && h.units > 0n)
+    const created = accounts.filter(a => isAddressEqual(a.account, master)).map(a => a.createdAt)
     return {
       master,
-      books: mine,
-      settledCycle,
-      settlements: settled,
-      backers: new Set(mine.flatMap(b => b.backerList.map(u => getAddress(u)))).size,
-      createdAt: created.length === 0 ? null : Math.min(...created)
+      fundRow,
+      backers: backers.length,
+      backing: cashFor(
+        backers.reduce((total, h) => total + h.units, 0n),
+        fundRow.totalUnits,
+        fundRow.value
+      ),
+      createdAt: created.length === 0 ? null : Math.min(...created),
+      valuations: valuations.filter(v => isAddressEqual(v.master, master))
     }
   })
 }
@@ -104,21 +103,19 @@ export interface ITimelinePoint {
   value: number
 }
 
-export function traderTimeline(view: ITraderView, sinceSec: number, untilSec: number): Promise<ITimelinePoint[]> {
-  return walletTimeline(
-    [view.master],
-    view.books.map(b => b.book),
-    sinceSec,
-    untilSec
-  )
+export const unitPriceOf = (row: Pick<IValuationRow, 'value' | 'totalUnits'>): bigint => cashFor(POOL_UNIT, row.totalUnits, row.value)
+
+export function traderTimeline(valuations: readonly IValuationRow[], sinceSec: number, untilSec: number): ITimelinePoint[] {
+  const first = valuations[0]
+  if (first === undefined) return []
+  const points = valuations.map(v => ({ time: v.blockTimestamp, total: unitPriceOf(v) }))
+  return resample(points, Math.max(sinceSec, first.blockTimestamp), untilSec)
 }
 
 export interface IMasterMetric {
   pnl: bigint
   points: ITimelinePoint[]
 }
-
-const VALUE_DECIMALS = getTokenDescription(HUB_CHAIN_ID, chainTokenOfKey(HUB_CHAIN_ID, VALUE_KEY)).decimals
 
 export function masterMetric(rows: readonly IMasterMetricRow[], interval: number, sinceSec: number, untilSec: number): IMasterMetric {
   const slotSize = Math.max(1, Math.ceil(interval / PNL_SLOT_COUNT))
@@ -142,56 +139,33 @@ export function masterMetric(rows: readonly IMasterMetricRow[], interval: number
   return { pnl: cum, points }
 }
 
-export async function traderOperations(view: ITraderView): Promise<IAccountAction[]> {
-  const master = view.master
-  const [backings, settleRows, marksByBook] = await Promise.all([
-    client.select(backingTable, { where: { master } }),
-    client.select(settleRowTable, { where: { master } }),
-    Promise.all(view.books.map(async b => [b.book, await fetchMarks(b.book.id)] as const))
-  ])
-  const out: IAccountAction[] = []
-  for (const [book, marks] of marksByBook) {
-    const chainId = Number(book.chainId) as ChainId
-    for (const m of marks) {
-      const rows = backings.filter(r => Number(r.chainId) === chainId && r.cycle === m.cycle && r.block === m.block && r.transactionHash === m.transactionHash)
-      out.push({
-        chainId,
-        account: master,
-        block: BigInt(m.block),
-        logIndex: m.logIndex,
-        time: m.blockTimestamp,
-        txHash: m.transactionHash,
-        fee: null,
-        kind: 'operate',
-        cycle: m.cycle,
-        token: getAddress(book.token),
-        value: m.openValue,
-        collateral: m.collateral,
-        skin: book.skin,
-        backed: rows.reduce((total, r) => total + r.stake, 0n),
-        backers: rows.length,
-        steps: [],
-        mark: m
-      })
-    }
+export function traderPerformance(
+  fundRow: Pick<IFundRow, 'value' | 'totalUnits'>,
+  valuations: readonly IValuationRow[],
+  rows: readonly IMasterMetricRow[],
+  interval: number,
+  sinceSec: number,
+  untilSec: number
+) {
+  const profit = masterMetric(rows, interval, sinceSec, untilSec)
+  const pnl = rows.length === 0 ? null : profit.pnl
+  const capital = rows.reduce((acc, row) => acc + row.capital, 0n)
+  const unitPrice = unitPriceOf(fundRow)
+  const opening = valuations.findLast(v => v.blockTimestamp <= sinceSec) ?? { value: 0n, totalUnits: 0n }
+  const openingPrice = unitPriceOf(opening)
+  return {
+    pnl,
+    roi: pnl === null || capital <= 0n ? null : (Number(pnl) / Number(capital)) * 100,
+    unitPrice,
+    change: valuations.length === 0 || openingPrice === 0n ? null : (Number(unitPrice - openingPrice) / Number(openingPrice)) * 100,
+    pnlPoints: profit.points,
+    pricePoints: traderTimeline(valuations, sinceSec, untilSec)
   }
-  for (const s of view.settlements) {
-    const spokeChainId = Number(s.spokeChainId) as ChainId
-    const base = { account: master, block: BigInt(s.block), logIndex: s.logIndex, time: s.blockTimestamp, txHash: s.transactionHash, fee: null }
-    const rows = settleRows.filter(r => Number(r.spokeChainId) === spokeChainId && r.cycle === s.cycle)
-    if (s.kind === 'settle') {
-      if (s.token === undefined || s.value === undefined) continue
-      out.push({ ...base, chainId: spokeChainId, kind: 'settle', cycle: s.cycle, token: getAddress(s.token), value: s.value, backers: rows.filter(r => r.kind === 'gain').length })
-      continue
-    }
-    out.push({ ...base, chainId: HUB_CHAIN_ID as ChainId, kind: 'draw', spokeChainId: s.spokeChainId, cycle: s.cycle, backers: rows.filter(r => r.kind === 'loss').length })
-  }
-  return out.sort((a, b) => b.time - a.time || (b.block > a.block ? 1 : b.block < a.block ? -1 : 0) || b.logIndex - a.logIndex)
 }
+export type ITraderPerformance = ReturnType<typeof traderPerformance>
 
-export async function traderPositions(view: ITraderView): Promise<IGmxPositionRow[]> {
-  if (!view.books.some(b => Number(b.book.chainId) === GMX_V2_CHAIN_ID)) return []
+export async function traderPositions(master: Address): Promise<IGmxPositionRow[]> {
   const gmxClient = publicClientMap[GMX_V2_CHAIN_ID]
-  if (!gmxClient) return []
-  return makeOnchainGmxPositionProvider(gmxClient as PublicClient, getRate)(view.master)
+  if (!gmxClient) throw new Error(`no public client for chain ${GMX_V2_CHAIN_ID}`)
+  return makeOnchainGmxPositionProvider(gmxClient as PublicClient, getRate)(master)
 }

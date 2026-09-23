@@ -8,7 +8,7 @@ export interface IPartialSignature {
   etaSig: Hex
 }
 
-export interface IJointSignature {
+interface IJointSignature {
   r: Hex
   s: Hex
   v: 27 | 28

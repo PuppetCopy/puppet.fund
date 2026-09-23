@@ -4,7 +4,7 @@ import { sha256, sha512 } from '@noble/hashes/sha2.js'
 import { randomBytes, utf8ToBytes } from '@noble/hashes/utils.js'
 import { type Hex, hexToBytes, toHex } from 'viem'
 
-export const Point = secp256k1.Point
+const Point = secp256k1.Point
 export type IPoint = typeof Point.BASE
 export const Fn = Point.Fn
 export const G = Point.BASE

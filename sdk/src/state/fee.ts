@@ -1,42 +1,55 @@
-import { router__accountGenesisGas, router__gasLimit } from '@puppet/contracts'
+import { router__accountGenesisGas, router__gasLimit, router__loopGas, router__withdrawProviderGas } from '@puppet/contracts'
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { type Address, type Chain, type Client, type Hex, size, type Transport } from 'viem'
 import { type ChainId, deploymentAddress } from '../const/index.js'
 import type { IGetRate } from '../evaluate/types.js'
-import type { IActionKind } from '../intent/shared.js'
+import type { IActionKind, IScheduledKind } from '../intent/shared.js'
 import { nativePrecisionOf, nativeSymbolOf, symbolOf } from './tokenRegistry.js'
 
 export type FeeClient = Client<Transport, Chain | undefined>
 
-export type RelayGate = 'CoreGate' | 'HubGate'
+export type RelayGate = 'SpokeGate' | 'HubGate'
 
-const GATE_GAS = { ...router__gasLimit.CoreGate, ...router__gasLimit.HubGate } as const satisfies Record<
-  IActionKind,
-  bigint
->
+const GATE_GAS = { ...router__gasLimit.SpokeGate, ...router__gasLimit.HubGate } as const
 
-const LOOP_GAS: Partial<Record<IActionKind, bigint>> = {}
+export type IGasKind = keyof typeof GATE_GAS
 
-const ACTION_GATE = {
-  ...Object.fromEntries(Object.keys(router__gasLimit.CoreGate).map(action => [action, 'CoreGate'])),
-  ...Object.fromEntries(Object.keys(router__gasLimit.HubGate).map(action => [action, 'HubGate']))
-} as Record<IActionKind, RelayGate>
+const LOOP_GAS: Partial<Record<IGasKind, bigint>> = router__loopGas
 
-export const ACTION_KIND_LIST = Object.keys(ACTION_GATE) as IActionKind[]
+export const GAS_KIND_LIST = Object.keys(GATE_GAS) as IGasKind[]
 
-export function gateOf(kind: IActionKind): RelayGate {
-  return ACTION_GATE[kind]
+export interface IFollowUp {
+  chainId: ChainId
+  kind: IScheduledKind
+}
+
+export function followUpOf(kind: IGasKind, creditChainId: ChainId | null): IFollowUp | null {
+  if (kind === 'sell') return { chainId: HUB_CHAIN_ID, kind: 'claim' }
+  if ((kind === 'allocate' || kind === 'createFund') && creditChainId !== null && creditChainId !== HUB_CHAIN_ID) {
+    return { chainId: creditChainId, kind: 'fulfil' }
+  }
+  return null
+}
+
+export function gateOf(kind: IGasKind, chainId: ChainId): RelayGate {
+  const hosted: RelayGate = chainId === HUB_CHAIN_ID ? 'HubGate' : 'SpokeGate'
+  if (!(kind in router__gasLimit[hosted])) throw new Error(`${kind} does not dispatch on ${hosted}, the gate chain ${chainId} hosts`)
+  return hosted
 }
 
 const BODY_SAFETY_FACTOR = 2n
 
-const SUBCALL_GAS_BUDGET: Partial<Record<IActionKind, bigint>> = {
+export const FEE_MARGIN_BPS = 1_000n
+const BASIS_POINTS = 10_000n
+
+const SUBCALL_GAS_BUDGET: Partial<Record<IGasKind, bigint>> = {
   depositAcross: 4_300_894n,
+  fundSwap: 4_300_894n,
   withdraw: 4_726_690n
 }
 
 const GAS_LIMIT_BILLED_CHAIN: Record<ChainId, boolean> = {
-  143: true,
+  10: false,
   42161: false
 }
 
@@ -56,30 +69,18 @@ export const dynamicCalldataBytes = (parts: readonly Hex[]): bigint =>
 const SUBCALL_RESERVE_NUMERATOR = 64n
 const SUBCALL_RESERVE_DENOMINATOR = 63n
 
-export function gateAddress(kind: IActionKind, chainId: ChainId): Address {
-  const gate: RelayGate = ACTION_GATE[kind]
-  if (gate === 'HubGate' && chainId !== HUB_CHAIN_ID) {
-    throw new Error(`${kind} dispatches on HubGate, hub chain only; got ${chainId}`)
-  }
-  return deploymentAddress(gate, chainId)
-}
+export const gateAddress = (kind: IGasKind, chainId: ChainId): Address => deploymentAddress(gateOf(kind, chainId), chainId)
 
-export function resolveDispatchChain(kind: IActionKind, requestChainId: ChainId): ChainId {
-  if (ACTION_GATE[kind] !== 'HubGate') return requestChainId
-  if (requestChainId !== HUB_CHAIN_ID) {
-    throw new Error(`${kind} dispatches on HubGate, hub chain only; got ${requestChainId}`)
-  }
-  return HUB_CHAIN_ID
-}
-
-function gateBodyGas(kind: IActionKind, unitCount: bigint): bigint {
+function gateBodyGas(kind: IGasKind, unitCount: bigint, calldataByteLength: bigint): bigint {
   const loop = LOOP_GAS[kind]
-  return loop === undefined ? GATE_GAS[kind] : GATE_GAS[kind] - loop + loop * unitCount
+  const base = loop === undefined ? GATE_GAS[kind] : GATE_GAS[kind] - loop + loop * unitCount
+  return kind === 'withdraw' && calldataByteLength > 0n ? base + router__withdrawProviderGas : base
 }
 
-const genesisGas = (carriesGenesis: boolean): bigint => (carriesGenesis ? router__accountGenesisGas : 0n)
+const genesisGas = (kind: IGasKind, carriesGenesis: boolean): bigint =>
+  carriesGenesis && kind !== 'createFund' ? router__accountGenesisGas : 0n
 
-function subcallGas(kind: IActionKind, innerGasLimit: bigint): bigint {
+function subcallGas(kind: IGasKind, innerGasLimit: bigint): bigint {
   const budget = SUBCALL_GAS_BUDGET[kind]
   if (budget === undefined) return innerGasLimit
   if (innerGasLimit > 0n) {
@@ -89,23 +90,23 @@ function subcallGas(kind: IActionKind, innerGasLimit: bigint): bigint {
 }
 
 export function dispatchGasLimit(
-  kind: IActionKind,
+  kind: IGasKind,
   carriesGenesis: boolean,
   unitCount: bigint,
   innerGasLimit: bigint,
   calldataByteLength: bigint
 ): bigint {
   const reserved =
-    gateBodyGas(kind, unitCount) * BODY_SAFETY_FACTOR +
-    genesisGas(carriesGenesis) +
+    gateBodyGas(kind, unitCount, calldataByteLength) * BODY_SAFETY_FACTOR +
+    genesisGas(kind, carriesGenesis) +
     subcallGas(kind, innerGasLimit) +
     CALLDATA_GAS_PER_BYTE * calldataByteLength
   return (reserved * SUBCALL_RESERVE_NUMERATOR) / SUBCALL_RESERVE_DENOMINATOR + 1n
 }
 
-export function billedRelayGas(
+function billedRelayGas(
   chainId: ChainId,
-  kind: IActionKind,
+  kind: IGasKind,
   carriesGenesis: boolean,
   unitCount: bigint,
   innerGasLimit: bigint,
@@ -114,12 +115,12 @@ export function billedRelayGas(
   const billsGasLimit = GAS_LIMIT_BILLED_CHAIN[chainId]
   if (billsGasLimit === undefined) throw new Error(`no relay gas billing model declared for chain ${chainId}`)
   if (billsGasLimit) return dispatchGasLimit(kind, carriesGenesis, unitCount, innerGasLimit, calldataByteLength)
-  return (
-    gateBodyGas(kind, unitCount) * BODY_SAFETY_FACTOR +
-    genesisGas(carriesGenesis) +
+  const measured =
+    gateBodyGas(kind, unitCount, calldataByteLength) +
+    genesisGas(kind, carriesGenesis) +
     innerGasLimit +
     CALLDATA_GAS_PER_BYTE * calldataByteLength
-  )
+  return (measured * (BASIS_POINTS + FEE_MARGIN_BPS)) / BASIS_POINTS
 }
 
 export const RELAY_RATE_MAX_STALE_MS = 60_000
@@ -145,7 +146,7 @@ export async function tokenPerNativeToken(
 
 export function computeRelayFee(
   chainId: ChainId,
-  kind: IActionKind,
+  kind: IGasKind,
   carriesGenesis: boolean,
   gasPrice: bigint,
   tokenPerNativeTokenRate: bigint,

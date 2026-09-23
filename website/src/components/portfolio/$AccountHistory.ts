@@ -1,9 +1,9 @@
 import { CHAIN_IDS, HUB_CHAIN_ID } from '@puppet/contracts/const'
-import type { ChainId } from '@puppet/sdk/const'
-import { getDuration, getTokenDescription, getUnixTimestamp, readableAddress, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { type ChainId, resolveDispatchChainId } from '@puppet/sdk/const'
+import { getDuration, getTokenDescription, getTxExplorerUrl, getUnixTimestamp, readableAddress, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { VALUE_KEY } from '@puppet/sdk/evaluate'
-import { markPeriodPnl } from '@puppet/sdk/fold'
 import { bondTokenOf, chainTokenOfKey, tokenMetaByChainToken, tokenMetaKey } from '@puppet/sdk/state'
+import { VENUES } from '@puppet/sdk/venue'
 import { combine, constant, empty, type IStream, just, map, merge, op } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $node, $text, attr, component, type I$Node, type I$Slottable, style } from 'aelea/ui'
@@ -19,7 +19,6 @@ import {
   $defaultTableRowContainer,
   $defaultVScrollContainer,
   $external,
-  $gmx,
   $infoTooltip,
   $intermediatePromise,
   $popoverCaret,
@@ -29,57 +28,78 @@ import {
   text
 } from '@/ui-components'
 import { routeSchema } from '../../app/routeSchema.js'
-import { $chainIcon, chainExplorerTxUrl, chainName } from '../../common/$chain.js'
+import { $chainIcon, chainName } from '../../common/$chain.js'
+import { chainFor } from '../../common/$contract.js'
+import { $venueFields, $venueHeadline } from '../../common/$operationView.js'
 import { type ITokenFlow, type IVenueAction, operationSummary, readableFlow } from '../../common/operation.js'
 import type { IAccountAction } from '../../io/journal/history.js'
-import { gmxOrderOutcome, type IGmxOrderOutcome } from '../../io/onchain/gmxOrder.js'
-import { accountDisplayName } from '../$AccountProfile.js'
-
-const creditedList = (a: IAccountAction & { kind: 'credit' }): { token: Address; credited: bigint }[] =>
-  a.creditList.map(c => ({
-    token: c.token,
-    credited: c.amount - (a.fee !== null && isAddressEqual(a.fee.token, c.token) ? a.fee.amount : 0n)
-  }))
+import { publicClientMap } from '../../wallet/wallet.js'
 
 const KIND: Record<IAccountAction['kind'], { label: string; color: string }> = {
   genesis: { label: 'Deployed', color: palette.message },
   deposit: { label: 'Deposit', color: palette.positive },
+  selfWithdraw: { label: 'Withdraw', color: palette.negative },
+  withdrawRequest: { label: 'Withdrawal requested', color: palette.message },
+  revoke: { label: 'Signers revoked', color: palette.message },
   swap: { label: 'Swap', color: palette.primary },
   withdraw: { label: 'Withdraw', color: palette.negative },
-  credit: { label: 'Credit', color: palette.positive },
   operate: { label: 'Operate', color: palette.primary },
-  backing: { label: 'Backing', color: palette.primary },
-  settle: { label: 'Settle', color: palette.indeterminate },
-  gain: { label: 'Gain', color: palette.positive },
-  mandate: { label: 'Mandate', color: palette.message },
-  unbond: { label: 'Unbond', color: palette.message },
-  draw: { label: 'Draw', color: palette.indeterminate },
-  loss: { label: 'Loss', color: palette.negative },
-  forcedWithdrawal: { label: 'Forced withdrawal', color: palette.negative }
+  fundSwap: { label: 'Account swap', color: palette.primary },
+  createFund: { label: 'Fund opened', color: palette.message },
+  escrow: { label: 'Escrowed', color: palette.indeterminate },
+  fulfil: { label: 'Escrow released', color: palette.positive },
+  refund: { label: 'Escrow refunded', color: palette.negative },
+  allocate: { label: 'Allocate', color: palette.indeterminate },
+  allocation: { label: 'Allocation', color: palette.primary },
+  sell: { label: 'Sell', color: palette.indeterminate },
+  sellFee: { label: 'Sell fee', color: palette.positive },
+  redeem: { label: 'Redeem', color: palette.indeterminate },
+  claim: { label: 'Claim', color: palette.positive },
+  claimFee: { label: 'Claim fee', color: palette.positive },
+  mandate: { label: 'Mandate', color: palette.message }
 }
 
-type IFamily = 'all' | 'funding' | 'trading' | 'account'
+export type IFamily = 'all' | 'funding' | 'trading' | 'account'
 
-const FAMILY: Record<IAccountAction['kind'], Exclude<IFamily, 'all'>> = {
+export const FAMILY: Record<IAccountAction['kind'], Exclude<IFamily, 'all'>> = {
   genesis: 'account',
   deposit: 'funding',
+  selfWithdraw: 'funding',
+  withdrawRequest: 'funding',
+  revoke: 'account',
   swap: 'funding',
   withdraw: 'funding',
-  credit: 'funding',
   operate: 'trading',
-  backing: 'trading',
-  settle: 'trading',
-  gain: 'trading',
-  draw: 'trading',
-  loss: 'trading',
-  mandate: 'account',
-  unbond: 'funding',
-  forcedWithdrawal: 'funding'
+  fundSwap: 'funding',
+  createFund: 'account',
+  escrow: 'trading',
+  fulfil: 'trading',
+  refund: 'funding',
+  allocate: 'trading',
+  allocation: 'trading',
+  sell: 'trading',
+  sellFee: 'trading',
+  redeem: 'trading',
+  claim: 'trading',
+  claimFee: 'trading',
+  mandate: 'account'
 }
 
-const FAMILY_LABEL: Record<IFamily, string> = { all: 'All', funding: 'Funding', trading: 'Trading', account: 'Account' }
+export const FAMILY_LABEL: Record<IFamily, string> = { all: 'All', funding: 'Funding', trading: 'Trading', account: 'Account' }
 
-const OUTCOME: Record<IGmxOrderOutcome, { label: string; color: string }> = {
+export const $FamilyToggle = ({ family }: { family: IStream<IFamily> }) =>
+  component(([selectFamily, selectFamilyTether]: IBehavior<IFamily>) => [
+    $ButtonToggle({
+      value: family,
+      optionList: ['all', 'funding', 'trading', 'account'] as const,
+      $container: $defaultButtonToggleContainer(style({ flexWrap: 'wrap' })),
+      $button: $defaultButtonToggleBtn(style({ padding: '4px 12px', fontSize: text.xs })),
+      $$option: map((f: IFamily) => $node($text(FAMILY_LABEL[f])))
+    })({ select: selectFamilyTether() }),
+    { selectFamily }
+  ])
+
+const OUTCOME: Record<string, { label: string; color: string }> = {
   open: { label: 'open', color: palette.message },
   frozen: { label: 'frozen', color: palette.indeterminate },
   executed: { label: 'executed', color: palette.positive },
@@ -87,12 +107,13 @@ const OUTCOME: Record<IGmxOrderOutcome, { label: string; color: string }> = {
   unknown: { label: 'no outcome found', color: palette.foreground }
 }
 
-const PAGE = 25
+export const PAGE = 25
 
 const value = getTokenDescription(HUB_CHAIN_ID, chainTokenOfKey(HUB_CHAIN_ID, VALUE_KEY))
 const bond = getTokenDescription(HUB_CHAIN_ID, bondTokenOf(HUB_CHAIN_ID))
 
 const backerCount = (n: number): string => `${n} backer${n === 1 ? '' : 's'}`
+
 
 const tokenChainOf = (home: ChainId, token: Address): ChainId => {
   const chain = [home, ...([...CHAIN_IDS] as ChainId[]).filter(c => c !== home)].find(c => tokenMetaByChainToken.has(tokenMetaKey(c, token)))
@@ -105,7 +126,7 @@ const $traderLink = (master: Address): I$Slottable =>
     route: routeSchema.traders.detail,
     params: { master },
     $anchor: $defaultAnchor(style({ color: palette.message, textDecoration: 'none' })),
-    $content: $text(accountDisplayName(master))
+    $content: $text(readableAddress(master))
   })({})
 
 const $tooltipLine = (label: string, content: string): I$Node =>
@@ -151,84 +172,72 @@ const $secondary = (content: string | I$Slottable): I$Node =>
 const $lines = (primary: string | I$Slottable, secondary?: string | I$Slottable): I$Node =>
   $column(style({ gap: '2px', minWidth: 0 }))($primary(primary), ...(secondary === undefined ? [] : [$secondary(secondary)]))
 
-const $venueIcon = (venue: string): I$Node => {
-  if (venue === 'GMX') return $icon({ $content: $gmx, size: '16px', viewBox: '0 0 32 32', fill: palette.message })
-  if (venue === 'Hyperliquid') {
-    return $node(
-      style({
-        width: '16px',
-        height: '16px',
-        borderRadius: '50%',
-        backgroundColor: colorShade(palette.message, 20),
-        color: palette.message,
-        fontSize: '8px',
-        fontWeight: '700',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        flexShrink: '0'
-      })
-    )($text('HL'))
-  }
-  return empty
-}
-
-const $outcomePill = (o: IGmxOrderOutcome): I$Node =>
-  $node(
+const $outcomePill = (o: string): I$Node => {
+  const pill = OUTCOME[o] ?? { label: o, color: palette.foreground }
+  return $node(
     style({
       fontSize: text.xs,
       padding: '0 6px',
       borderRadius: '4px',
       whiteSpace: 'nowrap',
-      color: OUTCOME[o].color,
-      backgroundColor: colorShade(OUTCOME[o].color, 12)
+      color: pill.color,
+      backgroundColor: colorShade(pill.color, 12)
     })
-  )($text(OUTCOME[o].label))
+  )($text(pill.label))
+}
+
+const venueOutcome = async (a: IAccountAction, x: IVenueAction): Promise<string> => {
+  const venue = VENUES.find(v => v.venueId === x.venueId)
+  if (venue?.outcome === undefined || x.orderKey === null) return 'unknown'
+  const outcome = await venue.outcome({
+    chainId: a.chainId,
+    account: a.account,
+    key: x.orderKey,
+    fromBlock: a.block,
+    publicClient: publicClientMap[a.chainId]
+  })
+  return outcome ?? 'unknown'
+}
 
 const $venueAction = (a: IAccountAction, x: IVenueAction): I$Node =>
-  $row(spacing.small, style({ alignItems: 'center', minWidth: 0 }))(
-    $venueIcon(x.venue),
-    $node(style({ fontSize: text.sm, color: palette.message, whiteSpace: 'nowrap' }))($text(x.venue)),
-    $node(style({ fontSize: text.sm, color: palette.message, whiteSpace: 'nowrap' }))($text(x.label)),
-    $node(style({ fontSize: text.xs, color: palette.foreground, fontFamily: 'monospace', whiteSpace: 'nowrap' }))($text(x.call)),
+  $venueHeadline(
+    x,
+    ...(x.fields.length === 0
+      ? []
+      : [$infoTooltip($column(style({ maxWidth: '280px' }))($venueFields(x.fields)), colorShade(palette.foreground, 60))]),
     ...(x.orderKey === null || x.call !== 'createOrder'
       ? []
       : [
           $intermediatePromise({
             $loader: $node(style({ fontSize: text.xs, color: palette.foreground }))($text('checking')),
-            $display: map(async o => $outcomePill(await o), just(gmxOrderOutcome(a.account, x.orderKey, a.block)))
+            $display: map(async o => $outcomePill(await o), just(venueOutcome(a, x)))
           })
-        ]),
-    $infoTooltip(
-      $column(spacing.tiny, style({ maxWidth: '280px', whiteSpace: 'normal' }))(
-        $node(style({ fontSize: text.sm, color: palette.message }))($text(x.title)),
-        ...x.details.map(d => $node(style({ fontSize: text.xs, color: palette.foreground }))($text(d))),
-        ...(x.orderKey === null ? [] : [$node(style({ fontSize: text.xs, color: palette.foreground, fontFamily: 'monospace', wordBreak: 'break-all' }))($text(x.orderKey))])
-      ),
-      colorShade(palette.foreground, 60))
+        ])
   )
-
-const $markLine = (a: Extract<IAccountAction, { kind: 'operate' }>): I$Node => {
-  if (a.mark === null) return $secondary('mark not folded yet')
-  const inflow = a.mark.inflow > 0n ? ` · +${readableTokenAmountLabel(value, a.mark.inflow)} inflow` : ''
-  const at = `at ${readableTokenAmountLabel(value, a.mark.openValue)}${inflow}`
-  if (a.mark.closeValue === undefined) return $secondary(`${at} · evaluating`)
-  const pnl = markPeriodPnl(a.mark, a.mark.closeValue)
-  return $row(spacing.tiny, style({ alignItems: 'baseline', fontSize: text.xs }))(
-    $node(style({ color: palette.foreground }))($text(`${at} ·`)),
-    $node(style({ color: pnl > 0n ? palette.positive : pnl < 0n ? palette.negative : palette.foreground }))(
-      $text(`${pnl > 0n ? '+' : ''}${readableTokenAmountLabel(value, pnl)}`)
-    ),
-    $node(style({ color: palette.foreground }))($text('until the next mark'))
-  )
-}
 
 const $details = (a: IAccountAction): I$Node => {
   switch (a.kind) {
     case 'genesis':
-      return $lines(accountDisplayName(a.account), `signer ${readableAddress(a.signer)}`)
+      return $lines(readableAddress(a.account), a.parent === null ? 'your account' : `fund of ${readableAddress(a.parent)}`)
     case 'deposit':
-      return a.bond === 0n ? empty : $lines(`bonded ${readableTokenAmountLabel(getTokenDescription(a.chainId, a.token), a.bond)}`)
+      return $lines('to your account')
+    case 'selfWithdraw':
+      return $lines('to your wallet')
+    case 'withdrawRequest':
+      return $lines('a direct withdrawal opens once the module delay has passed; relayed actions pause until it is used')
+    case 'revoke':
+      return $lines('every session signed before now stopped acting for this account')
+    case 'createFund':
+      return $lines(`share ${readableAddress(a.share)}`)
+    case 'escrow':
+      return $lines($row(spacing.tiny)($text('committed to'), $traderLink(a.master)))
+    case 'refund':
+      return $lines($row(spacing.tiny)($text('returned to your wallet from the escrow of'), $traderLink(a.master)))
+    case 'fulfil':
+      return $lines(
+        `${readableTokenAmountLabel(getTokenDescription(a.chainId, a.token), a.amount)} released from escrow`,
+        ...(a.fee === null || a.fee.amount === 0n ? [] : [`${readableTokenAmountLabel(getTokenDescription(a.chainId, a.fee.token), a.fee.amount)} round fee billed here`])
+      )
     case 'swap': {
       const chain = tokenChainOf(a.chainId, a.outputToken)
       return chain === a.chainId ? empty : $lines(`bridged to ${chainName(chain)}`)
@@ -239,77 +248,83 @@ const $details = (a: IAccountAction): I$Node => {
         ? empty
         : $lines(`received ${readableTokenAmountLabel(getTokenDescription(chain, a.outputToken), a.outputAmount)}${chain === a.chainId ? '' : ` on ${chainName(chain)}`}`)
     }
-    case 'credit':
-      return $lines(
-        creditedList(a)
-          .map(c => readableTokenAmountLabel(getTokenDescription(a.chainId, c.token), c.credited))
-          .join(' · '),
-        a.fee === null
-          ? 'swept from the deposit route'
-          : `swept ${a.creditList.map(c => readableTokenAmountLabel(getTokenDescription(a.chainId, c.token), c.amount)).join(' · ')} from the deposit route, less ${readableTokenAmountLabel(getTokenDescription(a.chainId, a.fee.token), a.fee.amount)} relay fee`
-      )
     case 'operate': {
       const summary = operationSummary(a.chainId, a.steps)
-      return $column(spacing.tiny, style({ minWidth: 0 }))(
-        ...summary.actions.map(x => $venueAction(a, x)),
-        $secondary(`cycle ${a.cycle} · ${backerCount(a.backers)} · ${readableTokenAmountLabel(value, a.backed)} backed`),
-        $markLine(a)
-      )
+      return $column(spacing.tiny, style({ minWidth: 0 }))(...summary.actions.map(x => $venueAction(a, x)), $secondary('from the fund'))
     }
-    case 'backing':
+    case 'fundSwap':
       return $lines(
-        $row(spacing.tiny)($text('backing'), $traderLink(a.master), $text(`· cycle ${a.cycle}`)),
-        `${readableTokenAmountLabel(bond, a.stake)} of your matchable bond`
+        Number(a.destinationChainId) === a.chainId ? 'funds swapped' : `funds to ${chainName(Number(a.destinationChainId))}`,
+        `at least ${readableTokenAmountLabel(getTokenDescription(resolveDispatchChainId(Number(a.destinationChainId)), a.outputToken), a.outputAmount)} out`
       )
-    case 'settle':
+    case 'allocate':
       return $lines(
-        `cycle ${a.cycle} closed at ${readableTokenAmountLabel(getTokenDescription(a.chainId, a.token), a.value)}`,
-        `${backerCount(a.backers)} paid`
+        `round valued at ${readableTokenAmountLabel(value, a.value)} · ${readableTokenAmountLabel(bond, a.credited)} of yours credited`,
+        backerCount(a.backers)
       )
-    case 'gain':
+    case 'allocation':
+      return $lines($row(spacing.tiny)($text(`${readableTokenAmountLabel(bond, a.stake)} allocated to`), $traderLink(a.master)))
+    case 'sell':
       return $lines(
-        $row(spacing.tiny)($text('gain from'), $traderLink(a.master), $text(`· cycle ${a.cycle}`)),
-        `${readableTokenAmountLabel(getTokenDescription(a.chainId, a.token), a.owed)} owed before the trader's fee`
+        $row(spacing.tiny)($text('sold part of your share in'), $traderLink(a.master)),
+        `${readableTokenAmountLabel(bond, a.payoutFee)} performance fee`
       )
+    case 'sellFee':
+      return $lines($row(spacing.tiny)($text('performance fee from'), $traderLink(a.puppet)))
+    case 'redeem':
+      return $lines(
+        `${readableTokenAmountLabel(bond, a.cash)} redeemed from the queue${a.retire > 0n ? ', including your retired share' : ''}`,
+        `valued at ${readableTokenAmountLabel(value, a.value)} · ${readableTokenAmountLabel(bond, a.payout)} to backers`
+      )
+    case 'claim':
+      return $lines(
+        $row(spacing.tiny)($text('claimed from'), $traderLink(a.master)),
+        `${readableTokenAmountLabel(bond, a.payoutFee)} performance fee`
+      )
+    case 'claimFee':
+      return $lines($row(spacing.tiny)($text('performance fee from'), $traderLink(a.holder)))
     case 'mandate':
       return $lines(
         a.masters.length === 0 ? 'no mandate carried' : `${a.masters.length} mandate${a.masters.length === 1 ? '' : 's'} broadcast`,
         $row(spacing.small, style({ flexWrap: 'wrap' }))(...a.masters.map(m => $traderLink(m.master)))
       )
-    case 'unbond':
-      return $lines(`released ${readableTokenAmountLabel(bond, a.amount)} of bond`)
-    case 'draw':
-      return $lines(`cycle ${a.cycle} on ${chainName(Number(a.spokeChainId))}`, `${backerCount(a.backers)} drawn on the hub`)
-    case 'loss':
-      return $lines(
-        $row(spacing.tiny)($text('loss to'), $traderLink(a.master), $text(`· cycle ${a.cycle} on ${chainName(Number(a.spokeChainId))}`)),
-        `${readableTokenAmountLabel(bond, a.owed)} owed under your mandate`
-      )
-    case 'forcedWithdrawal':
-      return $lines(`to ${readableAddress(a.to)}`)
   }
 }
 
 const flowsOf = (a: IAccountAction): ITokenFlow[] => {
   switch (a.kind) {
     case 'deposit':
-      return [{ token: getTokenDescription(a.chainId, a.token), delta: a.amount - a.bond }]
+      return [{ token: getTokenDescription(a.chainId, a.token), delta: a.amount }]
+    case 'selfWithdraw':
+      return [{ token: getTokenDescription(a.chainId, a.token), delta: -a.amount }]
+    case 'withdrawRequest':
+      return []
     case 'swap':
       return []
     case 'withdraw':
       return [{ token: getTokenDescription(a.chainId, a.token), delta: -a.amount }]
-    case 'credit':
-      return creditedList(a).map(c => ({ token: getTokenDescription(a.chainId, c.token), delta: c.credited }))
     case 'operate':
       return operationSummary(a.chainId, a.steps).flows
-    case 'gain':
-      return [{ token: getTokenDescription(a.chainId, a.token), delta: a.net }]
-    case 'loss':
-      return [{ token: bond, delta: -a.drawn }]
-    case 'unbond':
-      return [{ token: bond, delta: a.amount }]
-    case 'forcedWithdrawal':
+    case 'fundSwap':
       return [{ token: getTokenDescription(a.chainId, a.token), delta: -a.amount }]
+    case 'escrow':
+      return [{ token: getTokenDescription(a.chainId, a.token), delta: -a.amount }]
+    case 'refund':
+      return [{ token: getTokenDescription(a.chainId, a.token), delta: a.amount }]
+    case 'fulfil':
+      return [{ token: getTokenDescription(a.chainId, a.token), delta: a.fee === null ? a.amount : a.amount - a.fee.amount }]
+    case 'allocate':
+      return a.credit === null ? [] : [{ token: getTokenDescription(a.credit.chainId, a.credit.token), delta: -a.credit.amount }]
+    case 'allocation':
+      return [{ token: bond, delta: -a.stake }]
+    case 'sell':
+    case 'claim':
+      return [{ token: bond, delta: a.payout - a.payoutFee }]
+    case 'sellFee':
+    case 'claimFee':
+      return [{ token: bond, delta: a.payoutFee }]
+    case 'redeem':
+      return [{ token: bond, delta: a.cash - a.payout }]
     default:
       return []
   }
@@ -328,7 +343,7 @@ const $flow = (a: IAccountAction): I$Node => {
 
 const $when = (a: IAccountAction, now: number): I$Node =>
   $anchor(
-    attr({ href: chainExplorerTxUrl(a.chainId, a.txHash), target: '_blank', title: new Date(a.time * 1000).toLocaleString() }),
+    attr({ href: getTxExplorerUrl(a.txHash, chainFor(a.chainId)), target: '_blank', title: new Date(a.time * 1000).toLocaleString() }),
     spacing.small,
     style({ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', fontSize: text.xs, color: palette.foreground, whiteSpace: 'nowrap', textDecoration: 'none' })
   )(
@@ -348,7 +363,11 @@ const csvOf = (list: readonly IAccountAction[]): string => {
       new Date(a.time * 1000).toISOString(),
       chainName(a.chainId),
       KIND[a.kind].label,
-      a.kind === 'operate' ? operationSummary(a.chainId, a.steps).actions.map(x => x.title).join(' | ') : '',
+      a.kind === 'operate'
+        ? operationSummary(a.chainId, a.steps)
+            .actions.map(x => [`${x.venue} ${x.label}`, ...x.fields.map(f => `${f.label} ${f.value}`)].join('; '))
+            .join(' | ')
+        : '',
       flowsOf(a).map(readableFlow).join(' | '),
       a.fee === null ? '' : readableTokenAmountLabel(getTokenDescription(a.chainId, a.fee.token), a.fee.amount),
       a.txHash
@@ -383,13 +402,7 @@ export const $AccountHistory = (historyQuery: IStream<Promise<IAccountAction[]>>
           $column(spacing.default, style({ minWidth: '240px' }))(
             $column(spacing.small)(
               $node(style({ color: palette.foreground, fontSize: text.sm }))($text('Show')),
-              $ButtonToggle({
-                value: family,
-                optionList: ['all', 'funding', 'trading', 'account'] as const,
-                $container: $defaultButtonToggleContainer(style({ flexWrap: 'wrap' })),
-                $button: $defaultButtonToggleBtn(style({ padding: '4px 12px', fontSize: text.xs })),
-                $$option: map((f: IFamily) => $node($text(FAMILY_LABEL[f])))
-              })({ select: selectFamilyTether() })
+              $FamilyToggle({ family })({ selectFamily: selectFamilyTether() })
             ),
             $intermediatePromise({
               $loader: empty,

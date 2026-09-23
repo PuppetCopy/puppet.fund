@@ -1,26 +1,24 @@
-import { ARBITRUM_MARKET_LIST, GMX_V2_CONTRACT_MAP } from '@puppet/contracts/gmx'
 import type { IIAccount__Call } from '@puppet/contracts/types'
-import { calculateExecutionFee, getGasLimitsConfig, getPositionPnlUsd, } from '@puppet/sdk/gmx'
-import { providerToken, registeredTokenAddresses, symbolOf } from '@puppet/sdk/state'
+import { providerToken, registeredTokenAddresses, symbolOf, tokenInfoFor } from '@puppet/sdk/state'
 import {
+  ARBITRUM_MARKET_LIST,
   assertOperateSignable,
-  buildGmxOrderCalls,
+  buildGmxOrderCalls,calculateExecutionFee, 
   GMX_DECREASE_SWAP_TYPE,
   GMX_DECREASE_TYPES,
   GMX_INCREASE_TYPES,
   GMX_ROUTER,
   GMX_ROUTER_ABI,
   GMX_V2_CHAIN_ID,
+  GMX_V2_CONTRACT_MAP,getGasLimitsConfig, getPositionPnlUsd, 
   type IGmxOrder,
   screenOperate,
-  selectGmxMarket
-} from '@puppet/sdk/venue'
+  selectGmxMarket} from '@puppet/sdk/venue'
 import { type Address, encodeFunctionData, formatUnits, getAddress, type Hex, isAddressEqual, parseUnits } from 'viem'
 import type { IConnector } from '../connector.js'
 import { createOperator, type IOperatorConfig } from '../operator.js'
 
-export { calculateExecutionFee, getGasLimitsConfig, getPositionPnlUsd, type IGasLimitsConfig } from '@puppet/sdk/gmx'
-export { GMX_DECREASE_SWAP_TYPE, GMX_ORDER_TYPE, GMX_V2_CHAIN_ID, type IGmxOrder } from '@puppet/sdk/venue'
+export { calculateExecutionFee, GMX_DECREASE_SWAP_TYPE, GMX_ORDER_TYPE, GMX_V2_CHAIN_ID, getGasLimitsConfig, getPositionPnlUsd, type IGasLimitsConfig, type IGmxOrder } from '@puppet/sdk/venue'
 
 const READER = GMX_V2_CONTRACT_MAP.GmxReaderV2.address
 const READER_ABI = GMX_V2_CONTRACT_MAP.GmxReaderV2.abi
@@ -100,18 +98,19 @@ export interface IUpdateOrder {
   autoCancel: boolean
 }
 
-export type IGmxOperatorConfig = Omit<IOperatorConfig, 'chainId'>
+export type IGmxOperatorConfig = Omit<IOperatorConfig, 'chainId'> & { token: Address }
 
 export async function gmxOperator(connector: IConnector, config: IGmxOperatorConfig) {
   const operator = await createOperator(connector, { ...config, chainId: GMX_V2_CHAIN_ID })
   const { publicClient, account } = operator
   const registeredTokens = registeredTokenAddresses(connector.tokenRegistry, GMX_V2_CHAIN_ID)
   const collateral = getAddress(config.token)
+  tokenInfoFor(connector.tokenRegistry, GMX_V2_CHAIN_ID, collateral)
   const marketBase = providerToken(collateral, GMX_V2_CHAIN_ID)
 
-  function operate(callList: IIAccount__Call[], open = false) {
-    assertOperateSignable(screenOperate({ chainId: GMX_V2_CHAIN_ID, callList, account, releaseTargets: [], baseTokens: registeredTokens, registeredTokens }))
-    return operator.operate(callList, open)
+  function operate(callList: IIAccount__Call[]) {
+    assertOperateSignable(screenOperate({ chainId: GMX_V2_CHAIN_ID, callList, account, registeredTokens }))
+    return operator.operate(callList)
   }
 
   async function quoteExecutionFee(order: IGmxOrder): Promise<bigint> {
@@ -134,7 +133,7 @@ export async function gmxOperator(connector: IConnector, config: IGmxOperatorCon
     return (fee * (10_000n + EXECUTION_FEE_BUFFER_BPS)) / 10_000n
   }
 
-  async function createOrder(p: IGmxOrder, open = false) {
+  async function createOrder(p: IGmxOrder) {
     const executionFee = p.executionFee ?? (await quoteExecutionFee(p))
     const { callList, outflows } = buildGmxOrderCalls(p, { master: account, baseToken: collateral, executionFee })
     await Promise.all(
@@ -148,7 +147,7 @@ export async function gmxOperator(connector: IConnector, config: IGmxOperatorCon
         }
       })
     )
-    return operate(callList, open)
+    return operate(callList)
   }
 
   return {

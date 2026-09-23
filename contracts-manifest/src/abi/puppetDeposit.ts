@@ -26,10 +26,6 @@ export default [
     "stateMutability": "nonpayable"
   },
   {
-    "type": "receive",
-    "stateMutability": "payable"
-  },
-  {
     "type": "function",
     "name": "accountModule",
     "inputs": [],
@@ -60,12 +56,12 @@ export default [
     "name": "deposit",
     "inputs": [
       {
-        "name": "_user",
+        "name": "_account",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "_to",
+        "name": "_user",
         "type": "address",
         "internalType": "address"
       },
@@ -80,9 +76,36 @@ export default [
         "internalType": "uint256"
       },
       {
-        "name": "_gasLimit",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "_config",
+        "type": "tuple",
+        "internalType": "struct GateConfig",
+        "components": [
+          {
+            "name": "attestor",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "feeReceiver",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "transferGasLimit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxIntentTtl",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "outputs": [],
@@ -100,7 +123,7 @@ export default [
       {
         "name": "_intent",
         "type": "tuple",
-        "internalType": "struct Deposit.DepositSwap",
+        "internalType": "struct Deposit.SwapIntent",
         "components": [
           {
             "name": "header",
@@ -140,6 +163,11 @@ export default [
             ]
           },
           {
+            "name": "destinationChainId",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
             "name": "swap",
             "type": "tuple",
             "internalType": "struct SwapLib.SwapParams",
@@ -175,43 +203,261 @@ export default [
                 "internalType": "bytes"
               }
             ]
+          }
+        ]
+      },
+      {
+        "name": "_structHash",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "_coSig",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_config",
+        "type": "tuple",
+        "internalType": "struct GateConfig",
+        "components": [
+          {
+            "name": "attestor",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "feeReceiver",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "transferGasLimit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxIntentTtl",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "depositEscrow",
+    "inputs": [
+      {
+        "name": "_store",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_user",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_master",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_config",
+        "type": "tuple",
+        "internalType": "struct GateConfig",
+        "components": [
+          {
+            "name": "attestor",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "feeReceiver",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "transferGasLimit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxIntentTtl",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "fundSwap",
+    "inputs": [
+      {
+        "name": "_account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_intent",
+        "type": "tuple",
+        "internalType": "struct Deposit.SwapIntent",
+        "components": [
+          {
+            "name": "header",
+            "type": "tuple",
+            "internalType": "struct AccountLib.IntentHeader",
+            "components": [
+              {
+                "name": "account",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "user",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "nonce",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "deadline",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "feeToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "fee",
+                "type": "uint256",
+                "internalType": "uint256"
+              }
+            ]
           },
           {
             "name": "destinationChainId",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "swap",
+            "type": "tuple",
+            "internalType": "struct SwapLib.SwapParams",
+            "components": [
+              {
+                "name": "inputToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "inputAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "outputToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "outputAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "provider",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "providerCallData",
+                "type": "bytes",
+                "internalType": "bytes"
+              }
+            ]
           }
         ]
       },
       {
-        "name": "_digest",
+        "name": "_structHash",
         "type": "bytes32",
         "internalType": "bytes32"
       },
       {
-        "name": "_intentSignature",
+        "name": "_coSig",
         "type": "bytes",
         "internalType": "bytes"
       },
       {
-        "name": "_attestor",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_feeReceiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_maxRelayFeeBps",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_gasLimit",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "_config",
+        "type": "tuple",
+        "internalType": "struct GateConfig",
+        "components": [
+          {
+            "name": "attestor",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "feeReceiver",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "transferGasLimit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxIntentTtl",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "outputs": [],
@@ -237,7 +483,7 @@ export default [
   },
   {
     "type": "function",
-    "name": "settleCredit",
+    "name": "withdraw",
     "inputs": [
       {
         "name": "_account",
@@ -245,66 +491,132 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_user",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_claim",
+        "name": "_intent",
         "type": "tuple",
-        "internalType": "struct Deposit.ScheduledCredit",
+        "internalType": "struct Deposit.SwapIntent",
         "components": [
           {
-            "name": "token",
-            "type": "address",
-            "internalType": "address"
+            "name": "header",
+            "type": "tuple",
+            "internalType": "struct AccountLib.IntentHeader",
+            "components": [
+              {
+                "name": "account",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "user",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "nonce",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "deadline",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "feeToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "fee",
+                "type": "uint256",
+                "internalType": "uint256"
+              }
+            ]
           },
           {
-            "name": "amount",
+            "name": "destinationChainId",
             "type": "uint256",
             "internalType": "uint256"
           },
           {
-            "name": "expiry",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "fee",
-            "type": "uint256",
-            "internalType": "uint256"
+            "name": "swap",
+            "type": "tuple",
+            "internalType": "struct SwapLib.SwapParams",
+            "components": [
+              {
+                "name": "inputToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "inputAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "outputToken",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "outputAmount",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "provider",
+                "type": "address",
+                "internalType": "address"
+              },
+              {
+                "name": "providerCallData",
+                "type": "bytes",
+                "internalType": "bytes"
+              }
+            ]
           }
         ]
       },
       {
-        "name": "_digest",
+        "name": "_structHash",
         "type": "bytes32",
         "internalType": "bytes32"
       },
       {
-        "name": "_signature",
+        "name": "_coSig",
         "type": "bytes",
         "internalType": "bytes"
       },
       {
-        "name": "_attestor",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_feeReceiver",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_maxRelayFeeBps",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_gasLimit",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "_config",
+        "type": "tuple",
+        "internalType": "struct GateConfig",
+        "components": [
+          {
+            "name": "attestor",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "feeReceiver",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "transferGasLimit",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxIntentTtl",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "outputs": [],
@@ -374,8 +686,44 @@ export default [
   },
   {
     "type": "error",
+    "name": "Balance__InvalidSwap",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Balance__InvalidWithdraw",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "Balance__NothingToSwap",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Balance__NothingToWithdraw",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Balance__SwapOutputNotReceived",
+    "inputs": [
+      {
+        "name": "outputToken",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "received",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "signed",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",
@@ -407,22 +755,6 @@ export default [
     "type": "error",
     "name": "Gate__InvalidModule",
     "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "Intent__AmountExceedsCap",
-    "inputs": [
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "cap",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
   },
   {
     "type": "error",
@@ -474,54 +806,6 @@ export default [
         "name": "token",
         "type": "address",
         "internalType": "address"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Intent__ZeroRelayFee",
-    "inputs": [
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Schedule__Expired",
-    "inputs": [
-      {
-        "name": "expiry",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "timestamp",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Schedule__NotArrived",
-    "inputs": [
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "held",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ]
   },

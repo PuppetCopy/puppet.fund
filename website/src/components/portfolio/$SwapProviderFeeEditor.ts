@@ -38,12 +38,12 @@ import { palette } from 'aelea/ui-components-theme'
 import { formatUnits, } from 'viem'
 import { $DropSelect, $dropSelectJoinedListContainer, $infoTooltip, $inlineSpinner, text } from '@/ui-components'
 import { type ISwapRequest, swapRouteCandidates } from '../../io/bridge/swapQuote.js'
-import { priceFor } from '../../io/price.js'
+import { formatUsdNumber, priceFor } from '../../io/price.js'
 
-const HIGH_SWAP_FEE_PCT = 1
 
 const ROUTE_LABEL: Record<string, string> = {
   lifi: 'LI.FI',
+  kyber: 'KyberSwap',
   across: 'Across',
   acrossSwap: 'AcrossSwap',
   composed: 'Composed'
@@ -73,7 +73,8 @@ interface IRouteOption {
   feeUsd: string
   feePct: string
   minReceived: string
-  high: boolean
+  net: number | null
+  fetching: boolean
   eta: string
   etaWarn: boolean
   isBest: boolean
@@ -110,10 +111,10 @@ const usdNumber = (amount: bigint, price: bigint) => Number(formatUnits(amount *
 
 const etaLabel = (plan: IRoutePlan, crossChain: boolean): { text: string; warn: boolean } => {
   const sec = bridgeLeg(plan).etaSec
-  if (sec !== undefined && sec > 0) {
-    return { text: sec < 60 ? `~${sec}s` : `~${Math.round(sec / 60)}m`, warn: false }
+  if (sec !== undefined) {
+    return { text: sec < 1 ? '<1s' : sec < 60 ? `~${sec}s` : `~${Math.round(sec / 60)}m`, warn: false }
   }
-  if (!crossChain) return { text: '', warn: false }
+  if (!crossChain) return { text: 'instant', warn: false }
   const untilDeadlineSec = Math.max(0, Math.floor(plan[0].fillDeadline) - Math.floor(Date.now() / 1000))
   return { text: `≤${Math.max(1, Math.round(untilDeadlineSec / 60))}m`, warn: true }
 }
@@ -127,7 +128,7 @@ const sameRequest = (a: ISwapRequest | null, b: ISwapRequest | null) =>
     a.inputToken === b.inputToken &&
     a.outputToken === b.outputToken &&
     a.inputAmount === b.inputAmount &&
-    a.account === b.account &&
+    a.depositor === b.depositor &&
     a.recipient === b.recipient)
 
 const okRows = (rows: IRouteRow[]) => rows.filter((r): r is IRouteRowOk => r.status === 'ok')
@@ -156,13 +157,14 @@ const routeError = (rows: IRouteRow[]): string | null => {
   return 'No swap route is available right now. Adjust the amount or retry shortly'
 }
 
-const feeParts = (inUsd: number, outUsd: number): { amount: string; pct: string; high: boolean } => {
-  const fee = inUsd - outUsd
-  const amount = fee <= 0 ? '$0.00' : fee < 0.01 ? '< $0.01' : `$${fee.toFixed(2)}`
-  const pctVal = inUsd > 0 ? (fee / inUsd) * 100 : 0
-  const pct = fee <= 0 || inUsd <= 0 ? '' : pctVal < 0.1 ? '< 0.1%' : `${pctVal.toFixed(1)}%`
-  return { amount, pct, high: pctVal > HIGH_SWAP_FEE_PCT }
+const feeParts = (inUsd: number, outUsd: number): { amount: string; pct: string; net: number } => {
+  const net = outUsd - inUsd
+  const sign = net > 0 ? '+' : ''
+  const pctVal = inUsd > 0 ? (net / inUsd) * 100 : 0
+  const pct = net === 0 || inUsd <= 0 ? '' : `${sign}${Math.abs(pctVal) < 1 ? pctVal.toFixed(2) : pctVal.toFixed(1)}%`
+  return { amount: `${sign}${formatUsdNumber(net)}`, pct, net }
 }
+const feeColor = (net: number | null): string => (net === null || net === 0 ? palette.message : net > 0 ? palette.positive : palette.negative)
 
 const feeDisplay = (opt: IRouteOption) => (opt.feePct === '' ? opt.feeUsd : `${opt.feeUsd} (${opt.feePct})`)
 
@@ -179,21 +181,20 @@ const toOption = (
     feeUsd: '-',
     feePct: '',
     minReceived: '-',
-    high: false,
+    net: null,
+    fetching: false,
     eta: '',
     etaWarn: false,
     isBest,
     isSelected,
     detail: ''
   }
-  if (row.status === 'pending' || (row.status === 'ok' && !sameRequest(row.req, req))) {
-    return { ...base, status: 'pending', label: routeLabel(row.id) }
-  }
+  if (row.status === 'pending') return { ...base, status: 'pending', label: routeLabel(row.id) }
   if (row.status === 'error') return { ...base, status: 'error', label: routeLabel(row.id), detail: row.message }
   const displayOut = deliveredLeg(row.plan).expectedOutputAmount
   const fee =
     inPrice === null || outPrice === null
-      ? { amount: '-', pct: '', high: false }
+      ? { amount: '-', pct: '', net: null }
       : feeParts(usdNumber(req.inputAmount, inPrice), usdNumber(displayOut, outPrice))
   const eta = etaLabel(row.plan, req.originChainId !== req.destinationChainId)
   return {
@@ -202,7 +203,8 @@ const toOption = (
     label: row.plan.map(leg => leg.tool).join(' + '),
     feeUsd: fee.amount,
     feePct: fee.pct,
-    high: fee.high,
+    net: fee.net,
+    fetching: !sameRequest(row.req, req),
     minReceived: readableTokenAmountLabel(
       getTokenDescription(req.destinationChainId, req.outputToken),
       deliveredLeg(row.plan).outputAmount
@@ -214,7 +216,7 @@ const toOption = (
 
 const $defaultDisclaimer = $node(style({ maxWidth: '240px', lineHeight: '1.4', fontSize: text.sm }))(
   $text(
-    'The all-in cost of converting through the selected route: what you send minus what the route expects to deliver (routing fee + price impact); the guaranteed floor is shown as Min. received. It goes to the third-party route, not to Puppet. Each route shows its estimated arrival; without an estimate a cross-chain transfer can take up to its fill deadline (the ≤ time shown) before it is treated as failed and the funds surface back as recoverable balance.'
+    'What the route delivers minus what you send, at market prices. Negative is your cost (route fee and price impact, paid to the route, not Puppet); positive means the route beats market. Min. received is the guaranteed floor. Without an arrival estimate (≤ time), a cross-chain transfer may take up to its fill deadline before it counts as failed and the funds return as recoverable balance.'
   )
 )
 
@@ -225,7 +227,8 @@ const PLACEHOLDER: IRouteOption = {
   feeUsd: '-',
   feePct: '',
   minReceived: '-',
-  high: false,
+  net: null,
+  fetching: false,
   eta: '',
   etaWarn: false,
   isBest: false,
@@ -264,12 +267,13 @@ const rowsFor = (
 
 const $feeEta = (opt: IRouteOption, fee: string): I$Node =>
   $row(style({ alignItems: 'baseline', gap: '6px' }))(
-    $node(style({ fontSize: text.xs, color: opt.high ? palette.negative : palette.message }))($text(fee)),
+    $node(style({ fontSize: text.xs, color: feeColor(opt.net) }))($text(fee)),
     opt.eta
       ? $node(style({ fontSize: text.xs, color: opt.etaWarn ? palette.indeterminate : palette.foreground }))(
           $text(opt.eta)
         )
-      : empty
+      : empty,
+    opt.fetching ? $node(style({ alignSelf: 'center', display: 'flex' }))($inlineSpinner) : empty
   )
 
 const $anchorLine = (opt: IRouteOption): I$Node =>
@@ -433,7 +437,7 @@ export const $SwapProviderFeeEditor = ({
       ),
       $detailRow(
         $row(style({ alignItems: 'center', gap: '2px' }))($detailLabel('Fee'), $infoTooltip($disclaimer, palette.foreground)),
-        $node(styleBehavior(map(o => ({ color: o.status === 'ok' && o.high ? palette.negative : palette.message }), value)))(
+        $node(styleBehavior(map(o => ({ color: feeColor(o.status === 'ok' ? o.net : null) }), value)))(
           $text(detailText(feeDisplay))
         )
       ),

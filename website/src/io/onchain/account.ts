@@ -14,6 +14,18 @@ const ETH_BALANCE_ABI = [
   }
 ] as const
 
+export function readTokenAllowance(
+  account: Address,
+  chainId: ChainId,
+  token: Address,
+  spender: Address,
+  maxAge?: number
+): Promise<bigint> {
+  return isNativeToken(token)
+    ? Promise.resolve(0n)
+    : viewCall({ chainId, address: token, abi: erc20Abi, functionName: 'allowance', args: [account, spender], maxAge })
+}
+
 export function readTokenBalance(
   account: Address,
   chainId: ChainId,

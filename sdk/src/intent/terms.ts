@@ -1,36 +1,44 @@
-import { bondstoreAbi } from '@puppet/contracts/abi'
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import type { IAccountLib__Mandate, ICoreGate__OperateIntent, ICoreGate__Outcome, IHubGate__Loss } from '@puppet/contracts/types'
-import { type Address, getAddress, type Hex, isAddressEqual, type PublicClient } from 'viem'
-import { readContract } from 'viem/actions'
-import { composeCohort, type ICohortCandidate, type ISettleValuation, listsToken, owedFor } from '../backing/index.js'
-import { CompactContractError, CompactError, formatThrownError } from '../compact/error.js'
-import { type ChainId, deploymentAddress } from '../const/index.js'
+import { accountmoduleAbi, escrowstoreAbi, fundaccountAbi, fundstoreAbi, mandatestoreAbi, shareAbi, useraccountAbi } from '@puppet/contracts/abi'
+import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
+import type {
+  IAccountLib__Mandate,
+  IFund__Allocation,
+  IFund__Asset,
+  IFund__Position,
+  IFund__Valuation,
+  IFundStore__Holding,
+  IFundStore__Position,
+  IFundStore__Queue
+} from '@puppet/contracts/types'
+import { type Address, erc20Abi, getAddress, type Hex, isAddressEqual, keccak256, type PublicClient, parseAbi, parseAbiItem, toHex, } from 'viem'
+import { accountModuleAddress } from '../account/createAccount.js'
+import { composeAllocation } from '../allocation/index.js'
+import { CompactError, formatThrownError } from '../compact/error.js'
+import { CHAIN_ID_LIST, type ChainId, deploymentAddress } from '../const/index.js'
 import type { IDigestClient } from '../datastore/index.js'
-import { type IGetRate, type IRate, VALUE_KEY } from '../evaluate/index.js'
-import { bookIdOf, settlementIdOf } from '../fold/fold.js'
-import {
-  backerTable,
-  backingTable,
-  bookTable,
-  flowTable,
-  type IBackerRow,
-  type IBookRow,
-  type IMandateRow,
-  type IMarkRow,
-  type ISettlementRow,
-  mandateTable,
-  markTable,
-  settlementTable,
-  settleRowTable
-} from '../schema/index.js'
-import { fetchTokenBalance } from '../state/route.js'
-import { bondTokenOf, type ITokenRegistryMap, symbolOf, symbolOfKey, tokenInfoFor } from '../state/tokenRegistry.js'
+import { evaluateFundAt, type IGetRate, type IRate, VALUE_KEY } from '../evaluate/index.js'
+import { cashFor, floorOf, unitsFor } from '../pool/index.js'
+import { accountTable, type IMandateRow, type ITransitRow, mandateTable, transitTable } from '../schema/index.js'
+import { bondTokenOf, type ITokenRegistryMap, registeredTokenAddresses, symbolOf, symbolOfKey } from '../state/tokenRegistry.js'
+import { VENUES } from '../venue/venues.js'
+import { acrossSpokePoolOf } from './route/acrossDeposit.js'
+import { mandateDigest, mandateOfRow } from './shared.js'
 
-export const COHORT_MIN_STAKE = 1_000_000n
+const COHORT_MIN_STAKE = 1_000_000n
 
 const HUB = HUB_CHAIN_ID as ChainId
 const VALUE_SYMBOL = symbolOfKey(VALUE_KEY)
+const ACROSS_VENUE = keccak256(toHex('across'))
+const VENUE_BOOK_DUST = 10_000n
+const ACROSS_FILLED = 2n
+const REFUND_LOG_WINDOW = 5_000n
+const SPOKE_POOL_ABI = parseAbi([
+  'function fillStatuses(bytes32 relayHash) view returns (uint256)',
+  'function getRelayerRefund(address l2TokenAddress, address refundAddress) view returns (uint256)'
+])
+const EXECUTED_RELAYER_REFUND_ROOT = parseAbiItem(
+  'event ExecutedRelayerRefundRoot(uint256 amountToReturn, uint256 indexed chainId, uint256[] refundAmounts, uint32 indexed rootBundleId, uint32 indexed leafId, address l2TokenAddress, address[] refundAddresses, bool deferredRefunds, address caller)'
+)
 
 export interface ITermsDeps {
   chronicle: IDigestClient
@@ -39,363 +47,485 @@ export interface ITermsDeps {
   getTokenRegistry: () => Promise<ITokenRegistryMap>
 }
 
-export const fromChronicle = <T>(what: string, read: Promise<T>): Promise<T> =>
+const fromChronicle = <T>(what: string, read: Promise<T>): Promise<T> =>
   read.catch(err => {
     throw new CompactError('CHRONICLE_UNAVAILABLE', `${what} could not be read from the chronicle: ${formatThrownError(err)}`, 'server')
   })
 
-const fromChain = <T>(what: string, chainId: number, read: Promise<T>): Promise<T> =>
+export const fromChain = <T>(what: string, chainId: number, read: Promise<T>): Promise<T> =>
   read.catch(err => {
     throw new CompactError('CHAIN_UNREACHABLE', `${what} read failed on chain ${chainId}; nothing can be signed against it: ${formatThrownError(err)}`, 'server')
   })
 
-function clientOf(deps: ITermsDeps, chainId: ChainId): PublicClient {
+export function clientOf(deps: Pick<ITermsDeps, 'clients'>, chainId: ChainId): PublicClient {
   const client = deps.clients[chainId]
   if (client === undefined) throw new CompactError('CHAIN_UNAVAILABLE', `no client for chain ${chainId}`, 'server')
   return client
 }
 
-export const mandateOf = (row: IMandateRow): IAccountLib__Mandate => ({
-  master: getAddress(row.master),
-  skin: row.skin,
-  allocationRate: row.allocationRate,
-  cooldownPeriod: row.cooldownPeriod,
-  expiry: row.expiry,
-  tokenIdList: [...row.tokenIdList]
-})
+const mandateOf = (row: IMandateRow): IAccountLib__Mandate => ({ ...mandateOfRow(row), master: getAddress(row.master) })
 
-export interface IBookState {
-  book: IBookRow | undefined
-  backers: IBackerRow[]
-  mark: IMarkRow | undefined
-}
-
-export async function readBookState(chronicle: IDigestClient, chainId: ChainId, master: Address): Promise<IBookState> {
-  const id = bookIdOf(chainId, master)
-  const book = await fromChronicle(`book ${id}`, chronicle.find(bookTable, { id }))
-  if (!book) return { book: undefined, backers: [], mark: undefined }
-  const [backers, mark] = await fromChronicle(
-    `book ${id}`,
-    Promise.all([chronicle.select(backerTable, { where: { chainId: BigInt(chainId), master } }), chronicle.find(markTable, { id: book.lastMark })])
-  )
-  return { book, backers, mark }
-}
-
-export const readSettlement = (
-  chronicle: IDigestClient,
-  master: Address,
-  spokeChainId: ChainId,
-  cycle: bigint,
-  kind: 'settle' | 'draw'
-): Promise<ISettlementRow | undefined> =>
-  fromChronicle(
-    `${kind} of ${master} cycle ${cycle} on chain ${spokeChainId}`,
-    chronicle.find(settlementTable, { id: settlementIdOf(master, spokeChainId, cycle, kind) })
-  )
-
-export async function openCycleOf(chronicle: IDigestClient, chainId: ChainId, book: IBookRow | undefined): Promise<IBookRow | null> {
-  if (book === undefined) return null
-  return (await readSettlement(chronicle, getAddress(book.master), chainId, book.cycle, 'settle')) === undefined ? book : null
-}
-
-export function carriedValue(mark: IMarkRow | undefined): bigint {
-  if (mark === undefined) throw new CompactError('MARK_MISSING', 'the book has no mark to carry; open a cycle first', 'hard')
-  if (mark.pending || mark.closeValue === undefined) {
-    throw new CompactError('MARK_PENDING', `mark ${mark.id} is not evaluated yet; the chronicle values it lazily`, 'soft')
-  }
-  return mark.closeValue
-}
-
-export async function assertCycleSettled(
-  chronicle: IDigestClient,
-  spokeChainId: ChainId,
-  book: IBookRow,
-  backers: readonly IBackerRow[],
-  mark: IMarkRow | undefined
-): Promise<void> {
-  if (book.backed === 0n) return
-  const master = getAddress(book.master)
-  const [settled, drawn] = await Promise.all([
-    readSettlement(chronicle, master, spokeChainId, book.cycle, 'settle'),
-    readSettlement(chronicle, master, spokeChainId, book.cycle, 'draw')
-  ])
-  if (settled === undefined || settled.value === undefined) {
-    throw new CompactError('CYCLE_UNSETTLED', `${master} must settle cycle ${book.cycle} on chain ${spokeChainId} before opening the next one`, 'hard')
-  }
-  if (drawn !== undefined) return
-  const ledger = { totalShares: book.totalShares, totalPending: book.totalPending, backing: book.backed, masterShares: book.masterShares, masterPending: book.masterPending }
-  if (owedFor(ledger, carriedValue(mark), settled.value, backers).some(o => o.owed < 0n)) {
-    throw new CompactError('CYCLE_UNDRAWN', `${master} must draw the losses of cycle ${book.cycle} on the hub before opening the next one`, 'hard')
-  }
-}
-
-export async function readMandates(chronicle: IDigestClient, master: Address): Promise<Map<Address, IMandateRow>> {
+async function readMandates(chronicle: IDigestClient, master: Address): Promise<Map<Address, IMandateRow>> {
   const rows = await fromChronicle(`mandates naming ${master}`, chronicle.select(mandateTable, { where: { master } }))
   return new Map(rows.map(r => [getAddress(r.puppet), r]))
 }
 
-export async function readOpenBacking(chronicle: IDigestClient, puppets: readonly Address[]): Promise<Map<Address, Map<Address, bigint>>> {
-  const open = new Map(puppets.map(puppet => [getAddress(puppet), new Map<Address, bigint>()] as const))
-  if (puppets.length === 0) return open
-  const [stakes, settled] = await fromChronicle(
-    `backing of ${puppets.length} puppets`,
-    Promise.all([
-      chronicle.select(backingTable, { where: { puppet: { in: [...puppets] } } }),
-      chronicle.select(settleRowTable, { where: { puppet: { in: [...puppets] } } })
-    ])
-  )
-  const closed = new Set(settled.map(r => `${getAddress(r.puppet)}-${getAddress(r.master)}-${r.spokeChainId}-${r.cycle}`))
-  for (const row of stakes) {
-    const puppet = getAddress(row.puppet)
-    const master = getAddress(row.master)
-    if (closed.has(`${puppet}-${master}-${row.chainId}-${row.cycle}`)) continue
-    const byMaster = open.get(puppet)
-    if (byMaster === undefined) {
-      throw new CompactError('CHRONICLE_UNAVAILABLE', `the chronicle returned a backing row of ${puppet}, who was not in the queried set`, 'server')
-    }
-    byMaster.set(master, (byMaster.get(master) ?? 0n) + row.stake)
-  }
-  return open
+export interface IFundState {
+  skin: bigint
+  queue: IFundStore__Queue
+  share: Address
+  supply: bigint
+  queued: bigint
+  masterUnits: bigint
 }
 
-export async function readBonds(client: PublicClient, puppets: readonly Address[]): Promise<Map<Address, bigint>> {
-  if (puppets.length === 0) return new Map()
-  const bondToken = bondTokenOf(HUB)
-  let bondStore: Address
-  try {
-    bondStore = deploymentAddress('BondStore', HUB)
-  } catch (err) {
-    throw new CompactError(
-      'BOND_STORE_UNDEPLOYED',
-      `the BondStore has no deployment on the hub chain ${HUB}, so no puppet's bond can be read and no backing can be composed: ${formatThrownError(err)}`,
-      'server'
-    )
-  }
-  return new Map(
-    await fromChain(
-      `bonds of ${puppets.length} puppets in ${bondToken}`,
+export async function readFundState(deps: Pick<ITermsDeps, 'clients'>, master: Address, share: Address): Promise<IFundState> {
+  const address = deploymentAddress('FundStore', HUB)
+  const client = clientOf(deps, HUB)
+  const [skin, queue] = await fromChain(
+    `the fund of ${master}`,
+    HUB,
+    client.multicall({
+      allowFailure: false,
+      contracts: [
+        { address, abi: fundstoreAbi, functionName: 'skinMap', args: [master] },
+        { address, abi: fundstoreAbi, functionName: 'getQueue', args: [master] }
+      ]
+    })
+  )
+  const [supply, queued, masterUnits] = await fromChain(
+    `the units of ${master}`,
+    HUB,
+    client.multicall({
+      allowFailure: false,
+      contracts: [
+        { address: share, abi: shareAbi, functionName: 'totalSupply' },
+        { address: share, abi: shareAbi, functionName: 'balanceOf', args: [address] },
+        { address: share, abi: shareAbi, functionName: 'balanceOf', args: [master] }
+      ]
+    })
+  )
+  return { skin, queue, share, supply, queued, masterUnits }
+}
+
+export async function readBoundParent(deps: Pick<ITermsDeps, 'clients'>, chainId: ChainId, master: Address): Promise<Address | null> {
+  const client = clientOf(deps, chainId)
+  const code = await fromChain(`the code of ${master}`, chainId, client.getCode({ address: master }))
+  if (code === undefined || code === '0x') return null
+  const [module, parent] = await fromChain(
+    `the binding of ${master}`,
+    chainId,
+    client.readContract({ address: master, abi: fundaccountAbi, functionName: 'bound' })
+  )
+  return isAddressEqual(module, accountModuleAddress()) ? getAddress(parent) : null
+}
+
+export interface IEscrowCredit {
+  escrowed: bigint
+  credited: bigint
+  fulfilled: bigint
+  hubShutdown: boolean
+  chainShutdown: boolean
+}
+
+export const creditableOf = (credit: IEscrowCredit): bigint =>
+  credit.escrowed - (credit.credited > credit.fulfilled ? credit.credited : credit.fulfilled)
+
+export async function readEscrowCredit(
+  deps: Pick<ITermsDeps, 'clients'>,
+  parent: Address,
+  master: Address,
+  chainId: ChainId,
+  token: Address
+): Promise<IEscrowCredit> {
+  const store = deploymentAddress('EscrowStore', chainId)
+  const [[escrowed, fulfilled, chainShutdown], [credited, hubShutdown]] = await Promise.all([
+    fromChain(
+      `the ${token} escrow of ${master}`,
+      chainId,
+      clientOf(deps, chainId).multicall({
+        allowFailure: false,
+        contracts: [
+          { address: store, abi: escrowstoreAbi, functionName: 'escrowedMap', args: [parent, master, token] },
+          { address: store, abi: escrowstoreAbi, functionName: 'fulfilledMap', args: [parent, master, token] },
+          { address: store, abi: escrowstoreAbi, functionName: 'shutdown' }
+        ]
+      })
+    ),
+    fromChain(
+      `the credit of ${master} on chain ${chainId}`,
       HUB,
-      Promise.all(
-        puppets.map(
-          async puppet =>
-            [getAddress(puppet), await readContract(client, { address: bondStore, abi: bondstoreAbi, functionName: 'bondMap', args: [puppet, bondToken] })] as const
-        )
-      )
+      clientOf(deps, HUB).multicall({
+        allowFailure: false,
+        contracts: [
+          { address: deploymentAddress('FundStore', HUB), abi: fundstoreAbi, functionName: 'creditedMap', args: [master, BigInt(chainId), token] },
+          { address: deploymentAddress('EscrowStore', HUB), abi: escrowstoreAbi, functionName: 'shutdown' }
+        ]
+      })
     )
-  )
+  ])
+  return { escrowed, credited, fulfilled, hubShutdown, chainShutdown }
 }
 
-export async function readBondStanding(deps: ITermsDeps, puppets: readonly Address[]): Promise<Map<Address, { bond: bigint; matchable: bigint }>> {
-  const [bonds, open] = await Promise.all([readBonds(clientOf(deps, HUB), puppets), readOpenBacking(deps.chronicle, puppets)])
-  return new Map(
-    puppets.map(candidate => {
-      const puppet = getAddress(candidate)
-      const bond = bonds.get(puppet)
-      const byMaster = open.get(puppet)
-      if (bond === undefined || byMaster === undefined) throw new CompactError('BALANCE_UNREAD', `${puppet}'s bond standing was not read`, 'soft')
-      const backed = [...byMaster.values()].reduce((total, stake) => total + stake, 0n)
-      if (backed > bond) {
-        throw new CompactError('BOND_OVERDRAWN', `${puppet} backs ${backed} of open cycles against a bond of ${bond}; the chronicle and the bond store disagree`, 'server')
+export async function readPoolPosition(
+  deps: Pick<ITermsDeps, 'clients'>,
+  master: Address,
+  holder: Address
+): Promise<{ holding: IFundStore__Holding; position: IFundStore__Position; queue: IFundStore__Queue; closedAccrued: bigint }> {
+  const address = deploymentAddress('FundStore', HUB)
+  const client = clientOf(deps, HUB)
+  const [holding, position, queue] = await fromChain(
+    `the holding of ${holder} in the fund of ${master}`,
+    HUB,
+    client.multicall({
+      allowFailure: false,
+      contracts: [
+        { address, abi: fundstoreAbi, functionName: 'getHolding', args: [master, holder] },
+        { address, abi: fundstoreAbi, functionName: 'getPosition', args: [master, holder] },
+        { address, abi: fundstoreAbi, functionName: 'getQueue', args: [master] }
+      ]
+    })
+  )
+  const closedAccrued = await fromChain(
+    `closed accrual of ${master} epoch ${position.epoch}`,
+    HUB,
+    client.readContract({ address, abi: fundstoreAbi, functionName: 'closedAccruedMap', args: [master, position.epoch] })
+  )
+  return { holding, position, queue, closedAccrued }
+}
+
+type IPinnedBlocks = ReadonlyMap<ChainId, { number: bigint; timestamp: bigint }>
+
+export async function pinBlocks(deps: Pick<ITermsDeps, 'clients'>): Promise<IPinnedBlocks> {
+  const blocks = await Promise.all(CHAIN_ID_LIST.map(chainId => fromChain('latest block', chainId, clientOf(deps, chainId).getBlock())))
+  return new Map(CHAIN_ID_LIST.map((chainId, i) => [chainId, { number: blocks[i]!.number, timestamp: blocks[i]!.timestamp }] as const))
+}
+
+type ITransit = { row: ITransitRow } & (
+  | { kind: 'filled' }
+  | { kind: 'fillable'; fillStatus: bigint }
+  | { kind: 'expired'; fillStatus: bigint; refunded: bigint; deferred: bigint; owed: bigint }
+)
+
+const pinnedOf = (blocks: IPinnedBlocks, chainId: number | bigint): { number: bigint; timestamp: bigint } => {
+  const block = blocks.get(Number(chainId) as ChainId)
+  if (block === undefined) throw new CompactError('CHAIN_UNAVAILABLE', `no pinned block for chain ${chainId}`, 'server')
+  return block
+}
+
+export async function readTransits(deps: Pick<ITermsDeps, 'clients' | 'chronicle'>, master: Address, blocks: IPinnedBlocks): Promise<ITransit[]> {
+  const account = getAddress(master)
+  const [heads, folded, rows] = await Promise.all([
+    Promise.all(
+      [...blocks].map(([chainId, block]) =>
+        fromChain(
+          `the last call block of ${account}`,
+          chainId,
+          clientOf(deps, chainId).readContract({
+            address: deploymentAddress('AccountModule', chainId),
+            abi: accountmoduleAbi,
+            functionName: 'accountBlockMap',
+            args: [account],
+            blockNumber: block.number
+          })
+        ).then(head => [chainId, head] as const)
+      )
+    ),
+    fromChronicle(`bodies of ${account}`, deps.chronicle.select(accountTable, { where: { account } })),
+    fromChronicle(`bridge transits of ${account}`, deps.chronicle.select(transitTable, { where: { account } }))
+  ])
+  for (const [chainId, head] of heads) {
+    const row = folded.find(r => Number(r.chainId) === chainId)
+    if (row === undefined && head > 0n) {
+      const code = await fromChain(
+        `the code of ${account}`,
+        chainId,
+        clientOf(deps, chainId).getCode({ address: account, blockNumber: pinnedOf(blocks, chainId).number })
+      )
+      if (code === undefined || code === '0x') continue
+      const body = code.toLowerCase() === `0xef0100${deploymentAddress('FundAccount', chainId).slice(2)}`.toLowerCase()
+      if (body && (await readBoundParent(deps, chainId, account)) === null) continue
+    }
+    const lastBlock = row === undefined ? 0n : BigInt(row.lastBlock)
+    if (lastBlock < head) {
+      throw new CompactError(
+        'CHRONICLE_BEHIND',
+        `the chronicle folded ${account} on chain ${chainId} up to block ${lastBlock} while the AccountModule records a call at block ${head}; retry once it catches up`,
+        'soft'
+      )
+    }
+  }
+  const latest = new Map<bigint, ITransitRow>()
+  for (const row of rows) {
+    if (BigInt(row.block) > pinnedOf(blocks, row.chainId).number) continue
+    const held = latest.get(row.chainId)
+    if (held === undefined || row.block > held.block || (row.block === held.block && row.logIndex > held.logIndex)) latest.set(row.chainId, row)
+  }
+  return Promise.all(
+    [...latest.values()].map(async (row): Promise<ITransit> => {
+      const originChainId = Number(row.chainId) as ChainId
+      const destinationChainId = Number(row.destinationChainId) as ChainId
+      const destination = pinnedOf(blocks, row.destinationChainId)
+      const fillStatus = await fromChain(
+        `the Across fill of ${row.relayHash}`,
+        destinationChainId,
+        clientOf(deps, destinationChainId).readContract({
+          address: acrossSpokePoolOf(destinationChainId),
+          abi: SPOKE_POOL_ABI,
+          functionName: 'fillStatuses',
+          args: [row.relayHash],
+          blockNumber: destination.number
+        })
+      )
+      if (fillStatus === ACROSS_FILLED) return { row, kind: 'filled' }
+      if (destination.timestamp <= BigInt(row.fillDeadline)) return { row, kind: 'fillable', fillStatus }
+      const origin = clientOf(deps, originChainId)
+      const spokePool = acrossSpokePoolOf(originChainId)
+      const pinned = pinnedOf(blocks, row.chainId).number
+      let refunded = 0n
+      for (let from = BigInt(row.block); from <= pinned && refunded < row.inputAmount; from += REFUND_LOG_WINDOW) {
+        const to = from + REFUND_LOG_WINDOW - 1n < pinned ? from + REFUND_LOG_WINDOW - 1n : pinned
+        const leaves = await fromChain(
+          `Across refunds to ${account}`,
+          originChainId,
+          origin.getLogs({ address: spokePool, event: EXECUTED_RELAYER_REFUND_ROOT, args: { chainId: row.chainId }, fromBlock: from, toBlock: to, strict: true })
+        )
+        for (const leaf of leaves) {
+          if (!isAddressEqual(leaf.args.l2TokenAddress, row.inputToken)) continue
+          leaf.args.refundAddresses.forEach((refundAddress, i) => {
+            if (isAddressEqual(refundAddress, account)) refunded += leaf.args.refundAmounts[i]!
+          })
+        }
       }
-      return [puppet, { bond, matchable: bond - backed }] as const
+      const deferred = await fromChain(
+        `deferred Across refunds to ${account}`,
+        originChainId,
+        origin.readContract({ address: spokePool, abi: SPOKE_POOL_ABI, functionName: 'getRelayerRefund', args: [row.inputToken, account], blockNumber: pinned })
+      )
+      const owed = (refunded < row.inputAmount ? row.inputAmount - refunded : 0n) + deferred
+      return { row, kind: 'expired', fillStatus, refunded, deferred, owed }
     })
   )
 }
 
-export async function readCollateral(chronicle: IDigestClient, chainId: ChainId, master: Address): Promise<bigint> {
-  const rows = await fromChronicle(
-    `deposits of ${master} on chain ${chainId}`,
-    chronicle.select(flowTable, { where: { chainId: BigInt(chainId), account: master, settlement: false } })
-  )
-  let total = 0n
-  for (const r of rows) {
-    if (r.pending || r.value === undefined) throw new CompactError('FLOW_PENDING', `flow ${r.id} is not valued yet; the chronicle values it lazily`, 'soft')
-    total += r.value
-  }
-  return total
+interface IValuationRates {
+  toValue(chainId: ChainId, token: Address, amount: bigint): bigint
+  rates: readonly { chainId: ChainId; token: Address; rate: IRate }[]
 }
 
-const valuationFrom = (chainId: ChainId, rates: ReadonlyMap<Address, Pick<IRate, 'token0' | 'token1'>>): ISettleValuation => {
-  const rateOf = (token: Address) => {
-    const rate = rates.get(getAddress(token))
-    if (rate === undefined) throw new Error(`${token} on chain ${chainId} was not priced for this valuation`)
+export async function valuationRatesOf(getRate: IGetRate, tokens: readonly { chainId: ChainId; token: Address }[]): Promise<IValuationRates> {
+  const rates = await Promise.all(
+    tokens.map(async ({ chainId, token }) => {
+      const symbol = symbolOf(chainId, token)
+      const rate = symbol === VALUE_SYMBOL ? { token0: 1n, token1: 1n, time: 0 } : await getRate(symbol, VALUE_SYMBOL)
+      return { chainId, token: getAddress(token), rate }
+    })
+  )
+  return {
+    rates,
+    toValue: (chainId, token, amount) => {
+      const found = rates.find(r => r.chainId === chainId && r.token === getAddress(token))
+      if (found === undefined) throw new Error(`${token} on chain ${chainId} was not priced for this valuation`)
+      return (amount * found.rate.token0) / found.rate.token1
+    }
+  }
+}
+
+export async function composeValuation(deps: ITermsDeps, master: Address): Promise<IFund__Valuation> {
+  const registry = await deps.getTokenRegistry()
+  const used: { symbol0: string; symbol1: string; rate: IRate }[] = []
+  const getRate: IGetRate = async (asset0, asset1, freshness) => {
+    const rate = await deps.getRate(asset0, asset1, freshness)
+    used.push({ symbol0: asset0, symbol1: asset1, rate })
     return rate
   }
-  return {
-    toValue: (token, amount) => {
-      const rate = rateOf(token)
-      return (amount * rate.token0) / rate.token1
-    },
-    toAmount: (token, value) => {
-      const rate = rateOf(token)
-      return (value * rate.token1) / rate.token0
-    }
-  }
-}
-
-export async function valuationOf(getRate: IGetRate, chainId: ChainId, tokens: readonly Address[]): Promise<ISettleValuation> {
-  const rates = new Map(
-    await Promise.all(
-      tokens.map(async token => {
-        const symbol = symbolOf(chainId, token)
-        return [getAddress(token), symbol === VALUE_SYMBOL ? { token0: 1n, token1: 1n } : await getRate(symbol, VALUE_SYMBOL)] as const
+  const assetList: IFund__Asset[] = []
+  const positionList: IFund__Position[] = []
+  let value = 0n
+  const blocks = await pinBlocks(deps)
+  const transits = await readTransits(deps, master, blocks)
+  for (const chainId of CHAIN_ID_LIST) {
+    const client = clientOf(deps, chainId)
+    const tokens = registeredTokenAddresses(registry, chainId)
+    const block = pinnedOf(blocks, chainId)
+    const result = await fromChain(
+      `the fund of ${master}`,
+      chainId,
+      evaluateFundAt({
+        client,
+        chainId,
+        account: master,
+        holdingTokens: tokens,
+        blockNumber: block.number,
+        blockTimestamp: Number(block.timestamp),
+        kind: 'redeem',
+        signerGain: null,
+        getRate
       })
     )
-  )
-  return valuationFrom(chainId, rates)
-}
-
-export function sealedValuationOf(chainId: ChainId, mark: IMarkRow | undefined, token: Address): ISettleValuation {
-  if (mark === undefined) throw new CompactError('MARK_MISSING', 'the book has no mark to carry; open a cycle first', 'hard')
-  if (mark.pending || mark.closeRate0 === undefined || mark.closeRate1 === undefined) {
-    throw new CompactError('MARK_PENDING', `mark ${mark.id} is not evaluated yet; the chronicle values it lazily`, 'soft')
-  }
-  return valuationFrom(chainId, new Map([[getAddress(token), { token0: mark.closeRate0, token1: mark.closeRate1 }]]))
-}
-
-export interface IOperateTermsContext {
-  chainId: ChainId
-  master: Address
-  book: IBookRow | undefined
-  backers: readonly IBackerRow[]
-  mark: IMarkRow | undefined
-  cycle: bigint
-  mandates: ReadonlyMap<Address, IMandateRow>
-  matchable: ReadonlyMap<Address, bigint>
-  collateral: bigint
-  nowSec: number
-}
-
-export type IOperateTerms = Pick<ICoreGate__OperateIntent, 'cycle' | 'value' | 'collateral' | 'backed' | 'backingList'>
-
-export async function readOperateContext(deps: ITermsDeps, chainId: ChainId, master: Address, nowSec: number): Promise<IOperateTermsContext> {
-  const { book, backers, mark } = await readBookState(deps.chronicle, chainId, master)
-  const open = await openCycleOf(deps.chronicle, chainId, book)
-  if (open === null && book !== undefined) await assertCycleSettled(deps.chronicle, chainId, book, backers, mark)
-  const cycle = open === null ? (book === undefined ? 0n : book.cycle) + 1n : open.cycle
-  const mandates = await readMandates(deps.chronicle, master)
-  const [standing, collateral] = await Promise.all([readBondStanding(deps, [...mandates.keys()]), readCollateral(deps.chronicle, chainId, master)])
-  return {
-    chainId,
-    master,
-    book,
-    backers,
-    mark,
-    cycle,
-    mandates,
-    matchable: new Map([...standing].map(([puppet, bond]) => [puppet, bond.matchable] as const)),
-    collateral,
-    nowSec
-  }
-}
-
-export function operateTermsOf(ctx: IOperateTermsContext, tokenId: Hex, skin: bigint): IOperateTerms {
-  const bookCycle = ctx.book === undefined ? 0n : ctx.book.cycle
-  const opening = ctx.cycle > bookCycle
-  const backed = opening || ctx.book === undefined ? 0n : ctx.book.backed
-  const value = opening ? ctx.collateral : carriedValue(ctx.mark)
-  const committedAt = new Map(ctx.backers.map(b => [getAddress(b.puppet), b.committedAt]))
-  const candidates: ICohortCandidate[] = [...ctx.mandates].map(([puppet, row]) => {
-    const matchable = ctx.matchable.get(puppet)
-    if (matchable === undefined) throw new CompactError('BALANCE_UNREAD', `${puppet}'s matchable bond was not read`, 'soft')
-    const committed = committedAt.get(puppet)
-    return { puppet, mandate: mandateOf(row), matchable, committedAt: committed === undefined ? 0 : committed }
-  })
-  const rows = composeCohort({ master: ctx.master, tokenId, collateral: ctx.collateral, skin, backed, nowSec: ctx.nowSec, minStake: COHORT_MIN_STAKE, candidates })
-  return {
-    cycle: ctx.cycle,
-    value,
-    collateral: ctx.collateral,
-    backed,
-    backingList: rows.map(row => ({ puppet: row.puppet, matchable: row.matchable, stake: row.stake, mandate: row.mandate }))
-  }
-}
-
-export interface ISettleTermsContext {
-  spokeChainId: ChainId
-  book: IBookRow
-  backers: readonly IBackerRow[]
-  mark: IMarkRow | undefined
-  settled: ISettlementRow | undefined
-  closingValue: bigint
-  mandates: ReadonlyMap<Address, IMandateRow>
-  token: Address
-  tokenId: Hex
-  spokeValuation: ISettleValuation | null
-  hubValuation: ISettleValuation
-  bondToken: Address
-  masterHolding: bigint
-}
-
-export interface ISettleTerms {
-  cycle: bigint
-  value: bigint
-  gainList: ICoreGate__Outcome[]
-  lossList: IHubGate__Loss[]
-}
-
-export async function readSettleContext(deps: ITermsDeps, spokeChainId: ChainId, master: Address, requested: Address | null): Promise<ISettleTermsContext> {
-  const { book, backers, mark } = await readBookState(deps.chronicle, spokeChainId, master)
-  if (book === undefined || book.cycle === 0n) throw new CompactError('BAD_REQUEST', `${master} has no book on chain ${spokeChainId}`, 'hard')
-  const settled = await readSettlement(deps.chronicle, master, spokeChainId, book.cycle, 'settle')
-  const token = settled !== undefined && settled.token !== undefined ? getAddress(settled.token) : requested
-  if (token === null) {
-    throw new CompactError('UNSETTLED', `cycle ${book.cycle} of ${master} has no settlement on chain ${spokeChainId} yet; settle the gains first`, 'soft')
-  }
-  if (!isAddressEqual(token, book.token)) {
-    throw new CompactError('BAD_REQUEST', `gains settle in the book's token ${book.token}, not ${token}`, 'hard')
-  }
-  const client = clientOf(deps, spokeChainId)
-  const bondToken = bondTokenOf(HUB)
-  const [tokenRegistry, mandates, masterHolding, hubValuation] = await Promise.all([
-    deps.getTokenRegistry(),
-    readMandates(deps.chronicle, master),
-    fromChain(`balance of ${master} in ${token}`, spokeChainId, fetchTokenBalance(client, token, master)),
-    valuationOf(deps.getRate, HUB, [bondToken])
-  ])
-  return {
-    spokeChainId,
-    book,
-    backers,
-    mark,
-    settled,
-    closingValue: settled !== undefined && settled.value !== undefined ? settled.value : carriedValue(mark),
-    mandates,
-    token,
-    tokenId: tokenInfoFor(tokenRegistry, spokeChainId, token).tokenId,
-    spokeValuation: settled === undefined ? sealedValuationOf(spokeChainId, mark, token) : null,
-    hubValuation,
-    bondToken,
-    masterHolding
-  }
-}
-
-export function settleTermsOf(ctx: ISettleTermsContext): ISettleTerms {
-  const ledger = {
-    totalShares: ctx.book.totalShares,
-    totalPending: ctx.book.totalPending,
-    backing: ctx.book.backed,
-    masterShares: ctx.book.masterShares,
-    masterPending: ctx.book.masterPending
-  }
-  const owed = owedFor(ledger, carriedValue(ctx.mark), ctx.closingValue, ctx.backers)
-  const gainList: ICoreGate__Outcome[] = []
-  const lossList: IHubGate__Loss[] = []
-  for (const row of owed) {
-    if (row.owed === 0n) continue
-    const puppet = getAddress(row.puppet)
-    const known = ctx.mandates.get(puppet)
-    if (known === undefined) throw new CompactError('MANDATE_UNKNOWN', `${puppet} has no mandate naming ${ctx.book.master}`, 'hard')
-    if (row.owed < 0n) {
-      lossList.push({ puppet, amount: ctx.hubValuation.toAmount(ctx.bondToken, -row.owed) })
-      continue
+    if (!result.ok) throw new CompactError('POOL_UNVALUABLE', result.reasons.map(r => r.detail).join('; '), 'soft')
+    value += result.navMark
+    for (const leg of result.breakdown.perChain) {
+      if (leg.balance > 0n) assetList.push({ chainId: BigInt(chainId), token: bondTokenOf(chainId), amount: leg.balance })
     }
-    if (ctx.spokeValuation === null) continue
-    const mandate = mandateOf(known)
-    if (!listsToken(mandate, ctx.tokenId)) throw new CompactContractError('Mandate__TokenNotListed', [puppet, ctx.token])
-    const amount = ctx.spokeValuation.toAmount(ctx.token, row.owed)
-    if (amount > 0n) gainList.push({ puppet, amount, mandate })
+    for (const h of result.breakdown.holdings) {
+      assetList.push({ chainId: BigInt(chainId), token: getAddress(h.token), amount: h.balance })
+    }
+    const books = new Map<string, { platform: string; net: bigint }>()
+    for (const p of result.breakdown.positions) {
+      if (p.facets?.kind === 'unpriced') continue
+      const book = p.facets?.book
+      if (book === undefined) {
+        if (p.netBase < 0n) throw new CompactError('POOL_UNVALUABLE', `${p.platform} position ${p.positionKey} is worth ${p.netBase}`, 'soft')
+        positionList.push({ chainId: BigInt(chainId), venue: keccak256(toHex(p.platform)), id: p.positionKey, valueInUsd: p.netBase })
+        continue
+      }
+      const key = `${p.platform}:${master}:${String(book)}`
+      const sum = books.get(key)
+      books.set(key, { platform: p.platform, net: (sum?.net ?? 0n) + p.netBase })
+    }
+    for (const [key, { platform, net }] of books) {
+      if (net < 0n) throw new CompactError('POOL_UNVALUABLE', `${key} margin book is worth ${net}`, 'soft')
+      if (net < VENUE_BOOK_DUST) continue
+      positionList.push({ chainId: BigInt(chainId), venue: keccak256(toHex(platform)), id: keccak256(toHex(key)), valueInUsd: net })
+    }
   }
-  const byPuppet = <T extends { puppet: Address }>(rows: T[]): T[] => rows.sort((a, b) => (BigInt(a.puppet) < BigInt(b.puppet) ? -1 : 1))
-  return { cycle: ctx.book.cycle, value: ctx.closingValue, gainList: byPuppet(gainList), lossList: byPuppet(lossList) }
+  const priced = await valuationRatesOf(
+    getRate,
+    transits.flatMap(transit => {
+      const sent = { chainId: Number(transit.row.chainId) as ChainId, token: transit.row.inputToken }
+      if (transit.kind === 'fillable') return [sent, { chainId: Number(transit.row.destinationChainId) as ChainId, token: transit.row.outputToken }]
+      return transit.kind === 'expired' && transit.owed > 0n ? [sent] : []
+    })
+  )
+  for (const transit of transits) {
+    const originChainId = Number(transit.row.chainId) as ChainId
+    if (transit.kind === 'fillable') {
+      const delivered = priced.toValue(Number(transit.row.destinationChainId) as ChainId, transit.row.outputToken, transit.row.outputAmount)
+      const sent = priced.toValue(originChainId, transit.row.inputToken, transit.row.inputAmount)
+      const worth = delivered < sent ? delivered : sent
+      value += worth
+      positionList.push({ chainId: transit.row.destinationChainId, venue: ACROSS_VENUE, id: transit.row.relayHash, valueInUsd: worth })
+    } else if (transit.kind === 'expired' && transit.owed > 0n) {
+      const worth = priced.toValue(originChainId, transit.row.inputToken, transit.owed)
+      value += worth
+      positionList.push({ chainId: transit.row.chainId, venue: ACROSS_VENUE, id: transit.row.relayHash, valueInUsd: worth })
+    }
+  }
+  return {
+    value,
+    assetList,
+    positionList,
+  }
+}
+
+export interface IAllocationCandidate {
+  puppet: Address
+  delegated: boolean
+  withdrawRequestedAt: bigint
+  mandate: IAccountLib__Mandate
+  registered: Hex
+  available: bigint
+  basis: bigint
+  allocatedAt: bigint
+}
+
+interface IAllocationTermsContext extends IFundState {
+  master: Address
+  nowSec: bigint
+  value: bigint
+  blocked: string | null
+  feeReserve: bigint
+  feeCeiling: bigint
+  candidates: readonly IAllocationCandidate[]
+}
+
+export async function readAllocationCandidates(deps: ITermsDeps, master: Address): Promise<IAllocationCandidate[]> {
+  const rows = await readMandates(deps.chronicle, master)
+  const puppets = [...rows.keys()]
+  if (puppets.length === 0) return []
+  const client = clientOf(deps, HUB)
+  const bond = bondTokenOf(HUB)
+  const [codes, digests, holdings, balances, arms] = await fromChain(
+    `the mandated puppets of ${master}`,
+    HUB,
+    Promise.all([
+      Promise.all(puppets.map(puppet => client.getCode({ address: puppet }))),
+      client.multicall({
+        allowFailure: false,
+        contracts: puppets.map(puppet => ({
+          address: deploymentAddress('MandateStore', HUB),
+          abi: mandatestoreAbi,
+          functionName: 'mandateMap' as const,
+          args: [puppet, master] as const
+        }))
+      }),
+      client.multicall({
+        allowFailure: false,
+        contracts: puppets.map(puppet => ({
+          address: deploymentAddress('FundStore', HUB),
+          abi: fundstoreAbi,
+          functionName: 'getHolding' as const,
+          args: [master, puppet] as const
+        }))
+      }),
+      client.multicall({
+        allowFailure: false,
+        contracts: puppets.map(puppet => ({ address: bond, abi: erc20Abi, functionName: 'balanceOf' as const, args: [puppet] as const }))
+      }),
+      client.multicall({
+        allowFailure: true,
+        contracts: puppets.map(puppet => ({ address: puppet, abi: useraccountAbi, functionName: 'withdrawRequestedAt' as const }))
+      })
+    ])
+  )
+  return puppets.map((puppet, i) => {
+    const delegated = codes[i] !== undefined && codes[i] !== '0x'
+    const arm = arms[i]!
+    if (delegated && arm.status !== 'success') {
+      throw new CompactError('CHAIN_UNREACHABLE', `the withdrawal arm of ${puppet} could not be read; nothing can be signed against it`, 'server')
+    }
+    return {
+      puppet,
+      delegated,
+      withdrawRequestedAt: arm.status === 'success' ? arm.result : 0n,
+      mandate: mandateOf(rows.get(puppet)!),
+      registered: digests[i]!,
+      available: balances[i]!,
+      basis: holdings[i]!.basis,
+      allocatedAt: holdings[i]!.allocatedAt
+    }
+  })
+}
+
+export async function readAllocationBlock(deps: Pick<ITermsDeps, 'clients'>, master: Address): Promise<string | null> {
+  const reasons = await Promise.all(
+    VENUES.filter(venue => venue.blocksAllocation !== undefined).map(venue =>
+      fromChain(`${venue.name} standing on ${master}`, venue.chains[0]!, venue.blocksAllocation!({ account: getAddress(master), clients: deps.clients }))
+    )
+  )
+  return reasons.find(reason => reason !== null) ?? null
+}
+
+export function allocationTermsOf(ctx: IAllocationTermsContext, contribution: bigint): IFund__Allocation[] {
+  if (ctx.blocked !== null) return []
+  const { skin, supply, queued, value } = ctx
+  const contributed = contribution > ctx.feeCeiling ? unitsFor(contribution - ctx.feeCeiling, supply, value) : 0n
+  const masterUnits = ctx.masterUnits + contributed
+  const active = supply - queued + contributed
+  const roomAt = (floor: bigint): bigint | null => {
+    if (floor === 0n) return null
+    const bound = (masterUnits * PRECISION.basisPoints) / floor
+    return bound > active ? cashFor(bound - active, supply, value) : 0n
+  }
+  return composeAllocation({
+    master: ctx.master,
+    nowSec: ctx.nowSec,
+    minStake: COHORT_MIN_STAKE,
+    baseFloor: floorOf(skin, supply - queued, ctx.masterUnits),
+    roomAt,
+    candidates: ctx.candidates
+      .filter(c => c.delegated && c.withdrawRequestedAt === 0n && c.registered === mandateDigest(c.puppet, c.mandate))
+      .map(c => ({ puppet: c.puppet, mandate: c.mandate, available: c.available > ctx.feeReserve ? c.available - ctx.feeReserve : 0n, basis: c.basis, allocatedAt: c.allocatedAt }))
+  }).map(row => ({ puppet: row.puppet, stake: row.stake, mandate: row.mandate }))
 }

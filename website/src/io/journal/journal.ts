@@ -1,14 +1,18 @@
-import { HUB_CHAIN_ID, SPOKE_CHAIN_IDS } from '@puppet/contracts/const'
+import { HUB_CHAIN_ID, PROTOCOL, SPOKE_CHAIN_IDS } from '@puppet/contracts/const'
+import { fundSymbolOf, gridOf, predictUserAccount } from '@puppet/sdk/account'
 import type { ChainId } from '@puppet/sdk/const'
-import { accountTable } from '@puppet/sdk/schema'
-import { bondTokenOf } from '@puppet/sdk/state'
-import { type Address, getAddress, type Hex, isAddressEqual, size } from 'viem'
+import { BODY_GENESIS_NONCE, USER_GENESIS_NONCE } from '@puppet/sdk/intent'
+import { accountTable, fundTable } from '@puppet/sdk/schema'
+import { registeredTokenAddresses } from '@puppet/sdk/state'
+import { type Address, erc20Abi, getAddress, type Hex, isAddressEqual, size } from 'viem'
 import type { IAccountBalance, IRootState } from '../../wallet/root.js'
+import { publicClientMap } from '../../wallet/wallet.js'
+import { fundRecordsOf, type IFund } from '../../wallet/walletKeys.js'
+import context from '../context.js'
 import { client as chronicle } from '../datastore/reads.js'
 import { accountHead, walkAccount } from './archive.js'
 import type { IStoredAccountCall } from './callStore.js'
 import { readAccountCalls } from './callStore.js'
-import { foldOwnAccount, type IOwnState } from './localFold.js'
 
 const CHAINS = [HUB_CHAIN_ID, ...SPOKE_CHAIN_IDS] as ChainId[]
 
@@ -57,17 +61,29 @@ async function witnessedBy(root: Address, state: IJournalState, unreachable: Rea
   return { behind }
 }
 
+async function fundOf(root: Address, owner: Address, standing: IChronicleStanding): Promise<IFund | null> {
+  const [held] = fundRecordsOf(owner)
+  const known: IFund | null = held === undefined ? null : held
+  if ('unreachable' in standing) return known
+  const bodies = (await chronicle.select(accountTable, { where: { owner: root } })).sort((a, b) => a.createdAt - b.createdAt)
+  const body = bodies.find(row => known !== null && isAddressEqual(row.account, known.account)) ?? bodies[0]
+  if (body === undefined) return known
+  const master = getAddress(body.account)
+  const [row] = await chronicle.select(fundTable, { where: { master } })
+  if (row === undefined) return known !== null && isAddressEqual(known.account, master) ? known : null
+  return { account: master, symbol: fundSymbolOf(row), cells: gridOf(row) }
+}
+
 const cursorOf = (state: IJournalState, chainId: ChainId): bigint => {
   const list = state.entries.get(chainId)
   return list === undefined || list.length === 0 ? 0n : list[list.length - 1]!.blockNumber
 }
 
-const FRESH_INTENT_NONCE = 1n
-
-const nonceOf = (state: IJournalState, chainId: ChainId): bigint => {
+const nonceOf = (state: IJournalState, chainId: ChainId, root: Address, owner: Address): bigint => {
+  const born = isAddressEqual(predictUserAccount(owner), root) ? USER_GENESIS_NONCE : BODY_GENESIS_NONCE
   const list = state.entries.get(chainId)
-  if (list === undefined) return FRESH_INTENT_NONCE
-  return FRESH_INTENT_NONCE + BigInt(list.filter(e => size(e.signature) >= 130).length)
+  if (list === undefined) return born
+  return born + BigInt(list.filter(e => size(e.signature) >= 130).length)
 }
 
 async function loadState(root: Address): Promise<IJournalState> {
@@ -92,12 +108,13 @@ export const PROBE_MAX_AGE_MS = 5_000
 const SETTLE_CATCHUP_MS = 30_000
 const SETTLE_RETRY_MS = 1_500
 
-function openJournal(root: Address) {
+function openJournal(root: Address, owner: Address) {
   let loaded: Promise<IJournalState> | null = null
   let mutex: Promise<unknown> = Promise.resolve()
   let deployedSet: Set<ChainId> = new Set()
   let unreachableSet: Set<ChainId> = new Set()
   let chronicleStanding: IChronicleStanding = { unreachable: 'the journal has not synced yet' }
+  let fund: IFund | null = null
   let probeMaxAge = PROBE_MAX_AGE_MS
 
   const load = () => (loaded ??= loadState(root))
@@ -130,7 +147,7 @@ function openJournal(root: Address) {
           const head = heads.get(chainId) ?? 0n
           if (head <= cursorOf(state, chainId)) continue
           try {
-            const stored = await walkAccount(chainId, root, head)
+            const stored = await walkAccount(chainId, root, owner, head)
             if (stored.length === 0) {
               throw new Error(`walked calls for ${root} on ${chainId} came back empty while its log head is block ${head}`)
             }
@@ -147,6 +164,7 @@ function openJournal(root: Address) {
         deployedSet = deployed
         unreachableSet = unreachable
         chronicleStanding = await witnessedBy(root, state, unreachable)
+        fund = await fundOf(root, owner, chronicleStanding)
         return state
       } catch (err) {
         loaded = null
@@ -157,31 +175,32 @@ function openJournal(root: Address) {
     return run
   }
 
-  let folded: { cursors: string; own: Promise<IOwnState> } | null = null
-  const foldOwn = (state: IJournalState): Promise<IOwnState> => {
-    const cursors = CHAINS.map(c => `${c}:${cursorOf(state, c)}`).join('|')
-    if (folded?.cursors === cursors) return folded.own
-    const own = foldOwnAccount({ account: root, entries: state.entries })
-    folded = { cursors, own }
-    return own
-  }
-
-  const ledgerBalances = async (state: IJournalState): Promise<IAccountBalance[]> =>
-    (await foldOwn(state)).deposits
-      .filter(row => row.deposit > 0n)
-      .map(row => ({ chainId: Number(row.chainId) as ChainId, token: getAddress(row.token), balance: row.deposit }))
-
-  const bondedAmount = async (state: IJournalState): Promise<bigint> => {
-    const token = bondTokenOf(HUB_CHAIN_ID)
-    const row = (await foldOwn(state)).bonds.find(r => Number(r.chainId) === HUB_CHAIN_ID && isAddressEqual(r.token, token))
-    return row === undefined ? 0n : row.bond
+  const accountBalances = async (): Promise<IAccountBalance[]> => {
+    const registry = await context.getTokenRegistry()
+    const perChain = await Promise.all(
+      CHAINS.filter(chainId => !unreachableSet.has(chainId)).map(async chainId => {
+        const client = publicClientMap[chainId]
+        if (client === undefined) throw new Error(`no public client for chain ${chainId}`)
+        const tokens = registeredTokenAddresses(registry, chainId)
+        const balances = await Promise.all(
+          tokens.map(token =>
+            isAddressEqual(token, PROTOCOL.nativeToken)
+              ? client.getBalance({ address: root })
+              : client.readContract({ address: token, abi: erc20Abi, functionName: 'balanceOf', args: [root] })
+          )
+        )
+        return tokens.map((token, i) => ({ chainId, token: getAddress(token), balance: balances[i]! }))
+      })
+    )
+    return perChain.flat().filter(row => row.balance > 0n)
   }
 
   const foldOf = async (state: IJournalState) => ({
-    balances: await ledgerBalances(state),
+    balances: await accountBalances(),
     deployed: deployedSet,
     unreachable: unreachableSet,
     chronicle: chronicleStanding,
+    fund,
     heads: new Map<ChainId, bigint>(CHAINS.map(c => [c, cursorOf(state, c)]))
   })
 
@@ -198,7 +217,7 @@ function openJournal(root: Address) {
       return new Map([...state.entries].map(([chainId, list]) => [chainId, [...list]]))
     },
     async nonce(chainId: ChainId): Promise<bigint> {
-      return nonceOf(await load(), chainId)
+      return nonceOf(await load(), chainId, root, owner)
     },
     async chronicle(): Promise<IChronicleStanding> {
       const standing = await witnessedBy(root, await load(), unreachableSet)
@@ -219,21 +238,20 @@ function openJournal(root: Address) {
         await new Promise(r => setTimeout(r, SETTLE_RETRY_MS))
       }
     },
-    async own(): Promise<IOwnState> {
-      return foldOwn(await load())
-    },
     async root(user: Address): Promise<IRootState> {
-      const state = await advance()
+      if (!isAddressEqual(getAddress(user), owner)) {
+        throw new Error(`the journal of ${root} was opened for ${owner}, not ${user}`)
+      }
+      await advance()
       return {
         account: root,
         user,
         deployed: deployedSet,
         unreachable: unreachableSet,
         chronicle: chronicleStanding,
-        balances: await ledgerBalances(state),
-        bonded: await bondedAmount(state),
-        settled: null,
-        pending: []
+        balances: await accountBalances(),
+        fund,
+        settled: null
       }
     }
   }
@@ -243,10 +261,10 @@ export type ISettleFold = Awaited<ReturnType<ReturnType<typeof openJournal>['set
 
 const instances = new Map<Address, ReturnType<typeof openJournal>>()
 
-export function journal(root: Address) {
+export function journal(root: Address, owner: Address) {
   let j = instances.get(root)
   if (!j) {
-    j = openJournal(root)
+    j = openJournal(root, getAddress(owner))
     instances.set(root, j)
   }
   return j

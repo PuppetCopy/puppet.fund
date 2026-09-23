@@ -3,16 +3,6 @@ import { $column } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { $alertIcon, $alertNegativeContainer, $anchor, $icon, text } from '@/ui-components'
 
-export const $enableSessionDisclaimer = (): I$Node[] => [
-  $node(style({ fontSize: text.base, fontWeight: 'bold', color: palette.message }))($text('Enable a signing session')),
-  $node(style({ fontSize: text.sm, color: palette.message, lineHeight: '1.5' }))(
-    $text('Sign once to create a session key from your wallet. Trades then sign without a wallet popup.')
-  ),
-  $node(style({ fontSize: text.sm, color: palette.foreground, lineHeight: '1.5' }))(
-    $text('It acts only within the rules you sign, never moves funds out, and you can revoke it anytime.')
-  )
-]
-
 export const $betaAgreement = (): I$Node =>
   $alertNegativeContainer(style({ alignItems: 'flex-start', borderRadius: '12px' }))(
     $icon({

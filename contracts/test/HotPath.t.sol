@@ -1,152 +1,891 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.36;
 
+import {GateConfig} from "src/utils/GateConfig.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Test} from "forge-std/src/Test.sol";
 
-import {Account as PuppetAccount} from "src/core/Account.sol";
+import {
+    ALLOCATE_INTENT_TYPEHASH,
+    CREDIT_TYPEHASH,
+    HubGate,
+    MANDATE_INTENT_TYPEHASH,
+    PRICE_TYPEHASH,
+    REDEEM_INTENT_TYPEHASH,
+    SELL_INTENT_TYPEHASH,
+    VALUATION_TYPEHASH
+} from "src/HubGate.sol";
+import {
+    FULFIL_TYPEHASH,
+    OPERATE_INTENT_TYPEHASH,
+    SpokeGate
+} from "src/SpokeGate.sol";
 import {AccountModule} from "src/core/AccountModule.sol";
-import {BondStore} from "src/core/BondStore.sol";
 import {Deposit} from "src/core/Deposit.sol";
-import {DepositRoute} from "src/core/DepositRoute.sol";
-import {Dictate} from "src/core/Dictate.sol";
+import {EscrowStore} from "src/core/EscrowStore.sol";
 import {EvmChain} from "src/core/EvmChain.sol";
+import {Dictate} from "src/core/Dictate.sol";
+import {Fund} from "src/core/Fund.sol";
+import {FundAccount} from "src/core/FundAccount.sol";
+import {FundStore} from "src/core/FundStore.sol";
+import {MandateStore} from "src/core/MandateStore.sol";
 import {Register} from "src/core/Register.sol";
-import {CoreGate} from "src/CoreGate.sol";
-import {HubGate} from "src/HubGate.sol";
-import {AccountLib} from "src/utils/AccountLib.sol";
+import {Share} from "src/core/Share.sol";
 import {Error} from "src/utils/Error.sol";
-import {BaseGate} from "src/utils/BaseGate.sol";
-import {SwapLib} from "src/utils/SwapLib.sol";
+import {UserAccount} from "src/core/UserAccount.sol";
+import {AccountLib} from "src/utils/AccountLib.sol";
+import {LiquidityGate} from "src/utils/LiquidityGate.sol";
 import {IAccount} from "src/utils/interfaces/IAccount.sol";
-import {IChain} from "src/utils/interfaces/IChain.sol";
 import {IWNT} from "src/utils/interfaces/IWNT.sol";
 import {NATIVE_TOKEN} from "src/utils/Native.sol";
 
+import {SwapLib, SWAP_PARAMS_TYPEHASH} from "src/utils/SwapLib.sol";
+import {
+    DEPOSIT_ACROSS_INTENT_TYPEHASH,
+    ESCROW_INTENT_TYPEHASH,
+    FUND_SWAP_INTENT_TYPEHASH,
+    WITHDRAW_INTENT_TYPEHASH
+} from "src/utils/LiquidityGate.sol";
+
+import {LibClone} from "solady/utils/LibClone.sol";
+
 import {MockERC20} from "./mock/MockERC20.t.sol";
-import {MockBridge} from "./mock/MockBridge.t.sol";
 import {MockSwapProvider} from "./mock/MockSwapProvider.t.sol";
+import {MockTarget} from "./mock/MockTarget.t.sol";
 import {MockWNT} from "./mock/MockWNT.t.sol";
 
 contract HotPathTest is Test {
-    struct Party {
-        address user;
-        uint userKey;
-        address signer;
-        uint signerKey;
-        address acct;
-        uint acctKey;
-    }
-
-    uint constant SESSION_TTL = 7 days;
-    uint constant GAS = 200_000;
-    uint constant RESET_PERIOD = 7 days;
-    uint constant RATE = 10_000;
+    uint constant HUB_CHAIN = 10;
     uint constant FEE = 1e6;
-    bytes32 constant DEPOSIT_SWAP_TYPEHASH = keccak256(
-        "DepositSwap(IntentHeader header,SwapParams swap,uint256 destinationChainId)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)SwapParams(address inputToken,uint256 inputAmount,address outputToken,uint256 outputAmount,address provider,bytes providerCallData)"
-    );
+    uint constant USD = 1e24;
+    uint constant FOREIGN_CHAIN_ID = 42161;
+    uint constant WITHDRAW_DELAY = 600;
 
-    address owner = makeAddr("Owner");
-    address feeReceiver = makeAddr("FeeReceiver");
+    address owner = makeAddr("owner");
+    address feeReceiver = makeAddr("feeReceiver");
     address attestor;
     uint attestorKey;
 
     MockERC20 usdc;
-    MockWNT wnt;
     Dictate dictate;
     Register register;
-    BondStore bondStore;
     AccountModule accountModule;
     Deposit depositModule;
-    CoreGate coreGate;
-    HubGate hubGate;
+    MandateStore mandateStore;
+    FundStore fundStore;
+    EscrowStore escrowStore;
+    EscrowStore spokeEscrowStore;
+    Fund fundModule;
+    HubGate hub;
+    SpokeGate spoke;
+    MockERC20 outToken;
+    MockSwapProvider swapProvider;
 
-    AccountLib.Mandate mandateSpec;
-
-    Party master;
-    Party alice;
-    Party bob;
+    address master;
+    uint masterKey;
+    address body;
+    uint bodyKey;
+    address backer;
+    uint backerKey;
+    Share share;
 
     function setUp() public {
-        vm.chainId(1);
-        (attestor, attestorKey) = makeAddrAndKey("Attestor");
+        vm.chainId(HUB_CHAIN);
+        (attestor, attestorKey) = makeAddrAndKey("attestor");
+        (master, masterKey) = makeAddrAndKey("master");
+        (body, bodyKey) = makeAddrAndKey("body");
+        (backer, backerKey) = makeAddrAndKey("backer");
 
         vm.startPrank(owner);
         usdc = new MockERC20("USDC", "USDC", 6);
-        wnt = new MockWNT();
+        MockWNT _wnt = new MockWNT();
         dictate = new Dictate(owner);
         register = new Register(address(dictate));
-        bondStore = new BondStore(address(dictate));
-
-        IChain chain = new EvmChain();
+        fundStore = new FundStore(address(dictate));
         accountModule = new AccountModule(
-            address(dictate), chain, address(new PuppetAccount()), address(new DepositRoute()), RESET_PERIOD
+            address(dictate), new EvmChain(), address(new UserAccount()), address(new FundAccount()), WITHDRAW_DELAY
         );
+        depositModule = Deposit(
+            payable(
+                dictate.setGate(
+                    bytes32("Deposit"),
+                    address(new Deposit(address(dictate), accountModule, register, IWNT(address(_wnt))))
+                )
+            )
+        );
+        mandateStore = new MandateStore(address(dictate));
+        escrowStore = new EscrowStore(address(dictate));
+        spokeEscrowStore = new EscrowStore(address(dictate));
 
-        BaseGate.Config memory cfg = BaseGate.Config({
-            attestor: attestor,
-            feeReceiver: feeReceiver,
-            transferGasLimit: GAS,
-            maxIntentTtl: 10 minutes,
-            maxRelayFeeBps: 2000,
-            performanceFee: 1000,
-            maxCohortSize: 50
-        });
-        depositModule =
-            new Deposit(address(dictate), accountModule, register, IWNT(address(wnt)));
-        coreGate = new CoreGate(accountModule, register, depositModule, cfg);
-        hubGate = new HubGate(accountModule, register, depositModule, bondStore, address(usdc), cfg);
+        address _fundProxy = dictate.setGate(bytes32("Fund"), address(fundStore));
+        address _shareImpl = address(new Share(_fundProxy));
+        dictate.setGate(
+            bytes32("Fund"),
+            address(
+                new Fund(
+                    address(dictate),
+                    accountModule,
+                    mandateStore,
+                    fundStore,
+                    escrowStore,
+                    register,
+                    _shareImpl
+                )
+            )
+        );
+        fundModule = Fund(_fundProxy);
 
-        dictate.setAccess(accountModule, address(coreGate));
-        dictate.setAccess(accountModule, address(depositModule));
-        dictate.setAccess(depositModule, address(coreGate));
-        dictate.setAccess(depositModule, address(hubGate));
-        dictate.setAccess(accountModule, address(hubGate));
-        dictate.setAccess(bondStore, address(hubGate));
-        dictate.setAccess(accountModule, address(this));
+        address _gate = dictate.setGate(
+            bytes32("HubGate"),
+            address(
+                new HubGate(
+                    accountModule,
+                    register,
+                    depositModule,
+                    mandateStore,
+                    fundModule,
+                    escrowStore,
+                    GateConfig({
+                        attestor: attestor,
+                        feeReceiver: feeReceiver,
+                        transferGasLimit: 200_000,
+                        maxIntentTtl: 600,
+                        maxRelayFeeBps: 1000
+                    }),
+                    50,
+                    1000
+                )
+            )
+        );
+        hub = HubGate(_gate);
+
+        address _spokeGate = dictate.setGate(
+            bytes32("SpokeGate"),
+            address(
+                new SpokeGate(
+                    accountModule,
+                    register,
+                    depositModule,
+                    spokeEscrowStore,
+                    GateConfig({
+                        attestor: attestor,
+                        feeReceiver: feeReceiver,
+                        transferGasLimit: 200_000,
+                        maxIntentTtl: 600,
+                        maxRelayFeeBps: 1000
+                    })
+                )
+            )
+        );
+        spoke = SpokeGate(_spokeGate);
+
+        outToken = new MockERC20("OUT", "OUT", 18);
+        swapProvider = new MockSwapProvider();
         dictate.setAccess(register, owner);
-
-        register.setRegistered(NATIVE_TOKEN, type(uint).max, bytes32("NATIVE"));
-        register.setRegistered(address(usdc), type(uint).max, bytes32("USDC"));
-        register.setRegistered(address(wnt), type(uint).max, bytes32("WNT"));
+        register.setRegistered(address(usdc), bytes32("USDC"));
+        register.setRegistered(address(outToken), bytes32("OUT"));
+        register.setRegistered(NATIVE_TOKEN, bytes32("ETH"));
+        dictate.removeAccess(register, owner);
+        dictate.setAccess(accountModule, address(depositModule));
+        dictate.setAccess(accountModule, _gate);
+        dictate.setAccess(accountModule, _fundProxy);
+        dictate.setAccess(depositModule, _gate);
+        dictate.setAccess(mandateStore, _gate);
+        dictate.setAccess(fundStore, _fundProxy);
+        dictate.setAccess(fundStore, _gate);
+        dictate.setAccess(escrowStore, _gate);
+        dictate.setAccess(escrowStore, _fundProxy);
+        dictate.setAccess(fundModule, _gate);
+        dictate.setAccess(accountModule, _spokeGate);
+        dictate.setAccess(depositModule, _spokeGate);
+        dictate.setAccess(spokeEscrowStore, _spokeGate);
         vm.stopPrank();
 
-        master = _open("master", 3000e6);
-        bytes32[] memory _ids = new bytes32[](1);
-        _ids[0] = register.tokenIdMap(address(usdc));
-        mandateSpec = AccountLib.Mandate({
-            master: master.acct,
-            skin: 5000,
-            allocationRate: 5000,
-            cooldownPeriod: 0,
-            expiry: block.timestamp + 365 days,
-            tokenIdList: _ids
-        });
-        alice = _open("alice", 1200e6);
-        bob = _open("bob", 1200e6);
+        outToken.mint(address(swapProvider), 1_000_000e18);
+        vm.signAndAttachDelegation(accountModule.bodyImpl(), bodyKey);
+        vm.warp(1_700_000_000);
     }
 
-    function _claim(address _token, uint _amount) internal view returns (Deposit.ScheduledCredit memory) {
-        return Deposit.ScheduledCredit({
-            token: _token,
-            amount: _amount,
-            expiry: block.timestamp + 1 hours,
+    function _account(
+        address _user
+    ) internal returns (address) {
+        return accountModule.createUserAccount(_user);
+    }
+
+    function _fundWallet(
+        address _user,
+        uint _amount
+    ) internal {
+        usdc.mint(_user, _amount);
+        vm.startPrank(_user);
+        IERC20(address(usdc)).approve(address(depositModule), _amount);
+        hub.deposit(address(usdc), _amount);
+        vm.stopPrank();
+    }
+
+    function _nonceOf(
+        address _acct
+    ) internal view returns (uint) {
+        return UserAccount(payable(_acct)).nonce();
+    }
+
+    function _header(
+        address _acct,
+        address _user,
+        uint _nonce
+    ) internal view returns (AccountLib.IntentHeader memory) {
+        return AccountLib.IntentHeader({
+            account: _acct,
+            user: _user,
+            nonce: _nonce,
+            deadline: block.timestamp + 300,
+            feeToken: address(usdc),
             fee: FEE
         });
     }
 
-    function _claimDigest(address _account, Deposit.ScheduledCredit memory _c) internal view returns (bytes32) {
-        return _digest(
-            _account,
-            keccak256(
-                abi.encode(
-                    keccak256("ScheduledCredit(address token,uint256 amount,uint256 expiry,uint256 fee)"),
-                    _c.token,
-                    _c.amount,
-                    _c.expiry,
-                    _c.fee
+    function _fundHeader(
+        uint _nonce
+    ) internal view returns (AccountLib.IntentHeader memory header_) {
+        header_ = _header(body, master, _nonce);
+        header_.feeToken = address(0);
+        header_.fee = FEE * USD;
+    }
+
+    function _coSig(
+        uint _key,
+        bytes32 _digest
+    ) internal pure returns (bytes memory) {
+        (uint8 _v, bytes32 _r, bytes32 _s) = vm.sign(_key, _digest);
+        return abi.encodePacked(_r, _s, _v);
+    }
+
+    function _pair(
+        uint _key,
+        bytes32 _digest
+    ) internal view returns (bytes memory) {
+        return bytes.concat(_coSig(_key, _digest), _coSig(attestorKey, _digest));
+    }
+
+    function _typed(
+        address _acct,
+        bytes32 _structHash
+    ) internal view returns (bytes32) {
+        return AccountLib.intentDigest(_acct, _acct.code.length == 0 ? 0 : IAccount(_acct).nonce(), _structHash);
+    }
+
+    function _valuation(
+        uint _value
+    ) internal view returns (Fund.Valuation memory valuation_) {
+        valuation_.value = _value * USD;
+        valuation_.assetList = new Fund.Asset[](2);
+        valuation_.assetList[0] = Fund.Asset({chainId: 10, token: address(usdc), amount: 1_200e6});
+        valuation_.assetList[1] = Fund.Asset({chainId: 42161, token: address(usdc), amount: 800e6});
+        valuation_.positionList = new Fund.Position[](2);
+        valuation_.positionList[0] =
+            Fund.Position({chainId: 42161, venue: bytes32("GMX"), id: keccak256("position-a"), valueInUsd: 450e30});
+        valuation_.positionList[1] =
+            Fund.Position({chainId: 42161, venue: bytes32("GMX"), id: keccak256("position-b"), valueInUsd: 275e30});
+    }
+
+    function _valuationHash(
+        Fund.Valuation memory _v
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                VALUATION_TYPEHASH,
+                _v.value,
+                keccak256(abi.encode(_v.assetList)),
+                keccak256(abi.encode(_v.positionList))
+            )
+        );
+    }
+
+    function _allocateIntent(
+        uint _nonce,
+        uint _value,
+        Fund.Allocation[] memory _rows
+    ) internal view returns (Fund.AllocateIntent memory intent_, bytes memory coSig_) {
+        return _allocateIntent(_nonce, _value, Fund.Credit({chainId: 0, token: address(0), amount: 0}), _rows);
+    }
+
+    function _credit(
+        uint _chainId,
+        address _token,
+        uint _amount
+    ) internal pure returns (Fund.Credit memory) {
+        return Fund.Credit({chainId: _chainId, token: _token, amount: _amount});
+    }
+
+    function _allocateIntent(
+        uint _nonce,
+        uint _value,
+        Fund.Credit memory _credits,
+        Fund.Allocation[] memory _rows
+    ) internal view returns (Fund.AllocateIntent memory intent_, bytes memory coSig_) {
+        return _allocateIntent(
+            _nonce, _value, Fund.Price({token: address(usdc), amount: 1e6, value: 1e6 * USD}), _credits, _rows
+        );
+    }
+
+    function _allocateIntent(
+        uint _nonce,
+        uint _value,
+        Fund.Price memory _price,
+        Fund.Credit memory _credits,
+        Fund.Allocation[] memory _rows
+    ) internal view returns (Fund.AllocateIntent memory intent_, bytes memory coSig_) {
+        intent_ = Fund.AllocateIntent({
+            header: _fundHeader(_nonce),
+            share: share,
+            valuation: _valuation(_value),
+            price: _price,
+            credit: _credits,
+            allocationList: _rows
+        });
+        coSig_ = _pair(masterKey, _allocateDigest(intent_));
+    }
+
+    function _allocateDigest(
+        Fund.AllocateIntent memory _i
+    ) internal view returns (bytes32) {
+        return _typed(body, _allocateStructHash(_i));
+    }
+
+    function _allocateStructHash(
+        Fund.AllocateIntent memory _i
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                ALLOCATE_INTENT_TYPEHASH,
+                _hashHeader(_i.header),
+                _i.share,
+                _valuationHash(_i.valuation),
+                keccak256(abi.encode(PRICE_TYPEHASH, _i.price.token, _i.price.amount, _i.price.value)),
+                keccak256(abi.encode(CREDIT_TYPEHASH, _i.credit.chainId, _i.credit.token, _i.credit.amount)),
+                keccak256(abi.encode(_i.allocationList))
+            )
+        );
+    }
+
+    function test_hot_path_open_fund_back_it_sell_and_claim() public {
+        address _masterAccount = accountModule.predictUserAccount(master);
+        assertEq(_masterAccount.code.length, 0, "the wallet has no account before it funds one");
+        _fundWallet(master, 2000e6);
+        assertGt(_masterAccount.code.length, 0, "the first deposit creates the wallet's account");
+        assertEq(usdc.balanceOf(_masterAccount), 2000e6, "and lands in it");
+        _fundWallet(backer, 1000e6);
+
+        // the master escrows his own capital before the fund exists
+        bytes32 _symbol = bytes32("PUP");
+        bytes memory _pixels = new bytes(154);
+        for (uint _p; _p < _pixels.length; ++_p) {
+            _pixels[_p] = bytes1(uint8(_p < 33 ? 1 + (_p * 37) % 255 : 1 + _p % 10));
+        }
+        share = Share(
+            address(
+                uint160(
+                    uint(
+                        keccak256(
+                            abi.encodePacked(
+                                bytes1(0xff),
+                                address(hub),
+                                bytes32(uint(uint160(body))),
+                                keccak256(_cloneCode(fundModule.shareImpl(), abi.encodePacked(_symbol, _pixels, uint16(1000))))
+                            )
+                        )
+                    )
                 )
             )
+        );
+
+        _escrow(LiquidityGate(address(hub)), address(usdc), 500e6);
+        assertEq(escrowStore.escrowedMap(_masterAccount, body, address(usdc)), 500e6, "the escrow ledger holds the master capital");
+        assertEq(usdc.balanceOf(address(escrowStore)), 500e6, "and the store holds the tokens");
+
+        (Fund.AllocateIntent memory _i, bytes memory _sig) =
+            _allocateIntent(0, 0, _credit(block.chainid, address(usdc), 500e6), new Fund.Allocation[](0));
+        bytes32 _genesis =
+            AccountLib.genesisDigest(address(accountModule), body, _account(master));
+        hub.createFund(_symbol, _pixels, _coSig(bodyKey, _genesis), _coSig(masterKey, _genesis), _i, _sig);
+
+        vm.expectRevert(Error.Account__AlreadyCreated.selector);
+        hub.createFund(bytes32("PUP2"), _pixels, _coSig(bodyKey, _genesis), _coSig(masterKey, _genesis), _i, _sig);
+
+        assertEq(share.symbol(), "PUP", "the share carries the fund symbol");
+        assertEq(share.performanceFee(), 1000, "the share carries the fund fee");
+        assertGt(share.balanceOf(body), 0, "the opening round mints for the master");
+        assertEq(usdc.balanceOf(body), 500e6 - FEE, "escrow landed in the fund net of the fee");
+
+        // a backer mandates the fund and joins the next round
+        AccountLib.Mandate memory _m = AccountLib.Mandate({
+            master: body,
+            skin: 0,
+            allocationRate: 5000,
+            cooldownPeriod: 0,
+            expiry: block.timestamp + 365 days
+        });
+        AccountLib.Mandate[] memory _one = new AccountLib.Mandate[](1);
+        _one[0] = _m;
+        _mandate(backer, backerKey, _one);
+        Fund.Allocation[] memory _rows = new Fund.Allocation[](1);
+        _rows[0] = Fund.Allocation({puppet: _account(backer), mandate: _m, amount: 400e6});
+        (Fund.AllocateIntent memory _i2, bytes memory _sig2) =
+            _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _rows);
+        hub.allocate(_i2, _sig2);
+        uint _backerUnits = share.balanceOf(_account(backer));
+        assertGt(_backerUnits, 0, "the backer holds units after the round");
+        assertEq(usdc.balanceOf(body), 500e6 - FEE + 400e6 - FEE, "the stake landed in the fund net of the round fee");
+
+        // a second round with no cohort, and a two-row mandate, so per-row gas is measured at two list sizes
+        _escrow(LiquidityGate(address(hub)), address(usdc), 100e6);
+        (Fund.AllocateIntent memory _i3, bytes memory _sig3) = _allocateIntent(
+            _nonceOf(body), usdc.balanceOf(body), _credit(block.chainid, address(usdc), 100e6), new Fund.Allocation[](0)
+        );
+        hub.allocate(_i3, _sig3);
+        _cohortRound(_one, 3, 3);
+        _cohortRound(_one, 4, 3);
+
+        _mandate(backer, backerKey, _freshMandates(11, 2));
+        _mandate(backer, backerKey, _freshMandates(21, 4));
+
+        // the backer queues an exit, the master drains it, the backer collects
+        _sell(backer, backerKey, _backerUnits);
+        assertEq(share.balanceOf(address(fundStore)), _backerUnits, "sold units wait in the queue");
+        uint _before = usdc.balanceOf(_account(backer));
+        uint _ownerBefore = usdc.balanceOf(_account(master));
+        usdc.mint(body, 45e6);
+        _redeem(0, _backerUnits);
+        hub.claim(body, share, _account(backer));
+        assertGt(usdc.balanceOf(_account(backer)), _before, "the backer is paid out");
+        assertGt(usdc.balanceOf(_account(master)), _ownerBefore, "a profitable exit pays the owner its performance fee");
+        assertEq(share.balanceOf(address(fundStore)), 0, "the queue is empty again");
+        _proRataExits();
+
+        _spokeRound();
+        _walletFundsEscrowDirectly();
+        _withdrawWindow();
+        _gridRendersItsOwnColours();
+        _swapRound(LiquidityGate(address(hub)), "hub");
+        _swapRound(LiquidityGate(address(spoke)), "spoke");
+        _escrowStaysCommitted();
+    }
+
+    function _escrowStaysCommitted() internal {
+        usdc.mint(master, 30e6);
+        vm.startPrank(master);
+        IERC20(address(usdc)).approve(address(depositModule), 30e6);
+        hub.depositEscrow(body, address(usdc), 30e6);
+        vm.expectRevert(Error.Escrow__RefundClosed.selector);
+        hub.refund(body, address(usdc), 30e6);
+        vm.stopPrank();
+
+        vm.prank(backer);
+        vm.expectRevert();
+        hub.refund(body, address(usdc), 1e6);
+    }
+
+    function _proRataExits() internal {
+        (address _first, uint _firstKey) = makeAddrAndKey("cohort-0");
+        (address _second, uint _secondKey) = makeAddrAndKey("cohort-1");
+        uint _firstUnits = share.balanceOf(_account(_first)) / 2;
+        _sell(_first, _firstKey, _firstUnits);
+        _redeem(0, _firstUnits / 2);
+        _sell(_second, _secondKey, share.balanceOf(_account(_second)) / 2);
+        uint _firstBefore = usdc.balanceOf(_account(_first));
+        uint _secondBefore = usdc.balanceOf(_account(_second));
+        _redeem(0, share.balanceOf(address(fundStore)));
+        hub.claim(body, share, _account(_first));
+        hub.claim(body, share, _account(_second));
+        assertGt(usdc.balanceOf(_account(_first)), _firstBefore, "the earlier seller is paid across both drains");
+        assertGt(usdc.balanceOf(_account(_second)), _secondBefore, "the later seller is paid from the drain it joined");
+        assertEq(share.balanceOf(address(fundStore)), 0, "both exits drained");
+    }
+
+    function _walletFundsEscrowDirectly() internal {
+        vm.deal(master, 1 ether);
+        vm.prank(master);
+        hub.depositEscrow{value: 1 ether}(body, NATIVE_TOKEN, 1 ether);
+        assertEq(escrowStore.escrowedMap(_account(master), body, NATIVE_TOKEN), 1 ether, "the wallet escrows native straight into the store");
+
+        uint _bodyBefore = body.balance;
+        uint _feeBefore = feeReceiver.balance;
+        uint _unitsBefore = share.balanceOf(body);
+        Fund.Price memory _eth = Fund.Price({token: NATIVE_TOKEN, amount: 1 ether, value: 3000e6 * USD});
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(
+            _nonceOf(body), usdc.balanceOf(body), _eth, _credit(block.chainid, NATIVE_TOKEN, 1 ether), new Fund.Allocation[](0)
+        );
+        hub.allocate(_i, _sig);
+        uint _billed = (FEE * 1 ether + 3000e6 - 1) / 3000e6;
+        assertGt(share.balanceOf(body), _unitsBefore, "a round credits a token other than the bond at its signed value");
+        assertEq(feeReceiver.balance, _feeBefore + _billed, "the master slice is paid in the credited token");
+        assertEq(body.balance, _bodyBefore + 1 ether - _billed, "and the rest lands in the body");
+
+        (_i, _sig) = _allocateIntent(
+            _nonceOf(body), usdc.balanceOf(body), _eth, _credit(block.chainid, NATIVE_TOKEN, 1 ether), new Fund.Allocation[](0)
+        );
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidFulfil.selector, 1 ether, 2 ether));
+        hub.allocate(_i, _sig);
+
+        usdc.mint(backer, 1e6);
+        vm.startPrank(backer);
+        IERC20(address(usdc)).approve(address(depositModule), 1e6);
+        vm.expectRevert(abi.encodeWithSelector(Error.Account__HeaderMismatch.selector, body));
+        hub.depositEscrow(body, address(usdc), 1e6);
+        vm.stopPrank();
+    }
+
+    function _withdrawWindow() internal {
+        UserAccount _ua = UserAccount(payable(_account(backer)));
+        uint _walletBefore = usdc.balanceOf(backer);
+        vm.startPrank(backer);
+        vm.expectRevert(abi.encodeWithSelector(Error.Account__WithdrawNotOpen.selector, 0, WITHDRAW_DELAY));
+        _ua.withdraw(address(usdc), 1e6, 200_000);
+        _ua.requestWithdraw();
+        uint _requestedAt = vm.getBlockTimestamp();
+        vm.expectRevert(abi.encodeWithSelector(Error.Account__WithdrawNotOpen.selector, _requestedAt, WITHDRAW_DELAY));
+        _ua.withdraw(address(usdc), 1e6, 200_000);
+        vm.warp(_requestedAt + WITHDRAW_DELAY);
+        _ua.withdraw(address(usdc), 1e6, 200_000);
+        assertEq(usdc.balanceOf(backer), _walletBefore + 1e6, "a requested withdrawal pays the wallet once the module delay has passed");
+        vm.expectRevert(abi.encodeWithSelector(Error.Account__WithdrawNotOpen.selector, 0, WITHDRAW_DELAY));
+        _ua.withdraw(address(usdc), 1e6, 200_000);
+        vm.stopPrank();
+    }
+
+    function _gridRendersItsOwnColours() internal {
+        bytes memory _a = new bytes(154);
+        bytes memory _b = new bytes(154);
+        _a[0] = 0xE8;
+        _a[1] = 0x46;
+        _a[2] = 0x7C;
+        _b[0] = 0x00;
+        _b[1] = 0xFF;
+        _b[2] = 0x00;
+
+        address _impl = fundModule.shareImpl();
+        Share _shareA = Share(LibClone.cloneDeterministic(_impl, abi.encodePacked(bytes32("AAA"), _a), bytes32(uint(901))));
+        Share _shareB = Share(LibClone.cloneDeterministic(_impl, abi.encodePacked(bytes32("AAA"), _b), bytes32(uint(902))));
+
+        assertEq(_shareA.pixels(), _a, "the clone returns exactly the grid it was created with");
+        assertTrue(
+            keccak256(bytes(_shareA.tokenURI())) != keccak256(bytes(_shareB.tokenURI())),
+            "one differing cell must change the render, or the grid is not what tokenURI draws"
+        );
+
+        bytes memory _short = new bytes(153);
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(0, 0, new Fund.Allocation[](0));
+        vm.expectRevert(abi.encodeWithSelector(Error.Share__InvalidGrid.selector, 153));
+        hub.createFund(bytes32("BAD"), _short, "", "", _i, _sig);
+    }
+
+    function _swapRound(
+        LiquidityGate _gate,
+        string memory _tag
+    ) internal {
+        (address _user, uint _key) = makeAddrAndKey(string.concat("swapper-", _tag));
+        _fundWallet(_user, 4000e6);
+        address _acct = _account(_user);
+
+        _depositAcross(_gate, _user, _key, _acct, 1000e6);
+        assertGt(outToken.balanceOf(_acct), 0, "depositAcross delivered the output");
+
+        Deposit.SwapIntent memory _userSwap = Deposit.SwapIntent({
+            header: _header(_acct, _user, _nonceOf(_acct)),
+            swap: _swapParams(_acct, 1000e6),
+            destinationChainId: block.chainid
+        });
+        bytes memory _userSig = _swapSig(FUND_SWAP_INTENT_TYPEHASH, _key, _acct, _userSwap);
+        vm.expectRevert(abi.encodeWithSelector(Error.Account__NotDelegated.selector, _acct));
+        _gate.fundSwap(_userSwap, _userSig, AccountLib.Genesis({parent: address(0), key: "", approval: ""}));
+
+        usdc.mint(body, 1000e6);
+        uint _outBefore = outToken.balanceOf(body);
+        _fundSwapCall(_gate, master, masterKey, body, 1000e6);
+        assertGt(outToken.balanceOf(body), _outBefore, "fundSwap moved the fund body's own holdings");
+
+        uint _userBefore = outToken.balanceOf(_user);
+        _withdrawSwap(_gate, _user, _key, _acct, 1000e6);
+        assertGt(outToken.balanceOf(_user), _userBefore, "withdraw with a provider delivered the output");
+
+        uint _plainBefore = usdc.balanceOf(_user);
+        _withdrawPlain(_gate, _user, _key, _acct, 500e6);
+        assertEq(usdc.balanceOf(_user), _plainBefore + 500e6 - FEE, "withdraw without a provider paid the user");
+    }
+
+    function _swapParams(
+        address _recipient,
+        uint _amount
+    ) internal view returns (SwapLib.SwapParams memory) {
+        return SwapLib.SwapParams({
+            inputToken: address(usdc),
+            inputAmount: _amount,
+            outputToken: address(outToken),
+            outputAmount: 1e18,
+            provider: address(swapProvider),
+            providerCallData: abi.encodeCall(
+                MockSwapProvider.swap, (address(usdc), _amount - FEE, address(outToken), 1e18, _recipient)
+            )
+        });
+    }
+
+    function _hashSwap(
+        SwapLib.SwapParams memory _s
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                SWAP_PARAMS_TYPEHASH,
+                _s.inputToken,
+                _s.inputAmount,
+                _s.outputToken,
+                _s.outputAmount,
+                _s.provider,
+                keccak256(_s.providerCallData)
+            )
+        );
+    }
+
+    function _swapSig(
+        bytes32 _typehash,
+        uint _key,
+        address _acct,
+        Deposit.SwapIntent memory _i
+    ) internal view returns (bytes memory) {
+        return _pair(
+            _key,
+            _typed(
+                _acct,
+                keccak256(
+                    abi.encode(_typehash, _hashHeader(_i.header), _i.destinationChainId, _hashSwap(_i.swap))
+                )
+            )
+        );
+    }
+
+    function _depositAcross(
+        LiquidityGate _gate,
+        address _user,
+        uint _key,
+        address _acct,
+        uint _amount
+    ) internal {
+        Deposit.SwapIntent memory _i = Deposit.SwapIntent({
+            header: _header(_acct, _user, _nonceOf(_acct)),
+            swap: _swapParams(_acct, _amount),
+            destinationChainId: block.chainid
+        });
+        _gate.depositAcross(
+            _i,
+            _swapSig(DEPOSIT_ACROSS_INTENT_TYPEHASH, _key, _acct, _i));
+    }
+
+    function _fundSwapCall(
+        LiquidityGate _gate,
+        address _user,
+        uint _key,
+        address _acct,
+        uint _amount
+    ) internal {
+        Deposit.SwapIntent memory _i = Deposit.SwapIntent({
+            header: _header(_acct, _user, _nonceOf(_acct)),
+            swap: _swapParams(_acct, _amount),
+            destinationChainId: block.chainid
+        });
+        _gate.fundSwap(
+            _i,
+            _swapSig(FUND_SWAP_INTENT_TYPEHASH, _key, _acct, _i),
+            AccountLib.Genesis({parent: _account(_user), key: "", approval: ""})
+        );
+    }
+
+    function _withdrawSwap(
+        LiquidityGate _gate,
+        address _user,
+        uint _key,
+        address _acct,
+        uint _amount
+    ) internal {
+        Deposit.SwapIntent memory _i = Deposit.SwapIntent({
+            header: _header(_acct, _user, _nonceOf(_acct)),
+            swap: _swapParams(_user, _amount),
+            destinationChainId: block.chainid
+        });
+        _gate.withdraw(
+            _i,
+            _swapSig(WITHDRAW_INTENT_TYPEHASH, _key, _acct, _i));
+    }
+
+    function _withdrawPlain(
+        LiquidityGate _gate,
+        address _user,
+        uint _key,
+        address _acct,
+        uint _amount
+    ) internal {
+        Deposit.SwapIntent memory _i = Deposit.SwapIntent({
+            header: _header(_acct, _user, _nonceOf(_acct)),
+            swap: SwapLib.SwapParams({
+                inputToken: address(usdc),
+                inputAmount: _amount,
+                outputToken: address(usdc),
+                outputAmount: _amount - FEE,
+                provider: address(0),
+                providerCallData: ""
+            }),
+            destinationChainId: block.chainid
+        });
+        _gate.withdraw(
+            _i,
+            _swapSig(WITHDRAW_INTENT_TYPEHASH, _key, _acct, _i));
+    }
+
+    function _spokeRound() internal {
+        address _parent = _account(master);
+        usdc.mint(master, 200e6);
+        vm.startPrank(master);
+        IERC20(address(usdc)).approve(address(depositModule), 200e6);
+        spoke.depositEscrow(body, address(usdc), 200e6);
+        vm.stopPrank();
+        assertEq(spokeEscrowStore.escrowedMap(_parent, body, address(usdc)), 200e6, "the wallet escrows on the spoke in one call");
+
+        uint _bodyBefore = usdc.balanceOf(body);
+        uint _feeBefore = usdc.balanceOf(feeReceiver);
+        uint _unitsBefore = share.balanceOf(body);
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(
+            _nonceOf(body), _bodyBefore, _credit(FOREIGN_CHAIN_ID, address(usdc), 200e6), new Fund.Allocation[](0)
+        );
+        bytes32 _round = _allocateDigest(_i);
+        hub.allocate(_i, _sig);
+        assertGt(share.balanceOf(body), _unitsBefore, "the hub round credits escrow that sits on another chain");
+        assertEq(fundStore.creditedMap(body, FOREIGN_CHAIN_ID, address(usdc)), 200e6, "the hub remembers what it credited there");
+        assertEq(usdc.balanceOf(body), _bodyBefore, "nothing of the fund moves on the hub");
+        assertEq(usdc.balanceOf(feeReceiver), _feeBefore, "and the hub bills no fee the fund could not pay there");
+
+        bytes memory _over = _fulfilSignature(_parent, address(usdc), _round, 0, 201e6, FEE);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidFulfil.selector, 0, 201e6));
+        spoke.fulfil(_parent, body, address(usdc), _round, 0, 201e6, FEE, _over);
+
+        _fulfil(address(usdc), _round, 200e6, FEE);
+        assertEq(spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)), 200e6, "the fulfil total meets the credited total of the round it names");
+        assertEq(usdc.balanceOf(feeReceiver), _feeBefore + FEE, "the round fee is billed where the capital sits");
+        assertEq(usdc.balanceOf(body), _bodyBefore + 200e6 - FEE, "the escrow lands in the body net of that fee");
+
+        bytes memory _replay = _fulfilSignature(_parent, address(usdc), _round, 0, 200e6, FEE);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidFulfil.selector, 200e6, 200e6));
+        spoke.fulfil(_parent, body, address(usdc), _round, 0, 200e6, FEE, _replay);
+
+        _escrow(LiquidityGate(address(spoke)), address(usdc), 100e6);
+        assertEq(spokeEscrowStore.escrowedMap(_parent, body, address(usdc)), 300e6, "a relayed escrow adds account funds to the same ledger");
+
+        address _venue = makeAddr("venue");
+        IAccount.Call[] memory _callList = new IAccount.Call[](1);
+        _callList[0] = IAccount.Call({
+            target: address(usdc),
+            value: 0,
+            gasLimit: 200_000,
+            callData: abi.encodeCall(IERC20.transfer, (_venue, 50e6))
+        });
+        _operate(_callList);
+        assertEq(usdc.balanceOf(_venue), 50e6, "the body traded through operate");
+
+        address _venue2 = makeAddr("venue2");
+        IAccount.Call[] memory _pair2 = new IAccount.Call[](2);
+        _pair2[0] = IAccount.Call({
+            target: address(usdc),
+            value: 0,
+            gasLimit: 200_000,
+            callData: abi.encodeCall(IERC20.transfer, (_venue2, 10e6))
+        });
+        _pair2[1] = IAccount.Call({
+            target: address(new MockTarget()),
+            value: 0,
+            gasLimit: 200_000,
+            callData: abi.encodeCall(MockTarget.ping, ())
+        });
+        _operate(_pair2);
+        assertEq(usdc.balanceOf(_venue2), 10e6, "a multi-call operate runs every leg");
+    }
+
+    function _escrow(
+        LiquidityGate _gate,
+        address _token,
+        uint _amount
+    ) internal {
+        address _acct = _account(master);
+        LiquidityGate.EscrowIntent memory _i = LiquidityGate.EscrowIntent({
+            header: _header(_acct, master, _nonceOf(_acct)),
+            master: body,
+            token: _token,
+            amount: _amount
+        });
+        _gate.escrow(
+            _i,
+            _pair(
+                masterKey,
+                _typed(
+                    _acct,
+                    keccak256(abi.encode(ESCROW_INTENT_TYPEHASH, _hashHeader(_i.header), _i.master, _i.token, _i.amount))
+                )
+            )
+        );
+    }
+
+    function _fulfilSignature(
+        address _parent,
+        address _token,
+        bytes32 _round,
+        uint _from,
+        uint _total,
+        uint _fee
+    ) internal view returns (bytes memory) {
+        return _coSig(
+            attestorKey,
+            AccountLib.typedDigest(
+                block.chainid,
+                body,
+                keccak256(
+                    abi.encode(FULFIL_TYPEHASH, address(spokeEscrowStore), _parent, _token, _round, _from, _total, _fee)
+                )
+            )
+        );
+    }
+
+    function _fulfil(
+        address _token,
+        bytes32 _round,
+        uint _total,
+        uint _fee
+    ) internal {
+        address _parent = _account(master);
+        uint _from = spokeEscrowStore.fulfilledMap(_parent, body, _token);
+        spoke.fulfil(
+            _parent, body, _token, _round, _from, _total, _fee, _fulfilSignature(_parent, _token, _round, _from, _total, _fee)
+        );
+    }
+
+    function _operate(
+        IAccount.Call[] memory _callList
+    ) internal {
+        SpokeGate.OperateIntent memory _i = SpokeGate.OperateIntent({
+            header: _header(body, master, _nonceOf(body)), callList: _callList, tokenList: new address[](0)
+        });
+        spoke.operate(
+            _i,
+            _pair(
+                masterKey,
+                _typed(
+                    body,
+                    keccak256(
+                        abi.encode(
+                            OPERATE_INTENT_TYPEHASH,
+                            _hashHeader(_i.header),
+                            keccak256(abi.encode(_callList)),
+                            keccak256(abi.encodePacked(_i.tokenList))
+                        )
+                    )
+                )
+            ),
+            AccountLib.Genesis({parent: _account(master), key: "", approval: ""})
         );
     }
 
@@ -168,1177 +907,162 @@ contract HotPathTest is Test {
         );
     }
 
-    function _hashSwap(
-        SwapLib.SwapParams memory _s
-    ) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                keccak256(
-                    "SwapParams(address inputToken,uint256 inputAmount,address outputToken,uint256 outputAmount,address provider,bytes providerCallData)"
-                ),
-                _s.inputToken,
-                _s.inputAmount,
-                _s.outputToken,
-                _s.outputAmount,
-                _s.provider,
-                keccak256(_s.providerCallData)
-            )
-        );
-    }
-
-    function _mandateDigest(
+    function digestOf(
         address _puppet,
-        AccountLib.Mandate memory _m
-    ) internal pure returns (bytes32) {
-        bytes32 _struct = keccak256(
-            abi.encode(
-                keccak256(
-                    "Mandate(address master,uint256 skin,uint256 allocationRate,uint256 cooldownPeriod,uint256 expiry,bytes32[] tokenIdList)"
-                ),
-                _m.master,
-                _m.skin,
-                _m.allocationRate,
-                _m.cooldownPeriod,
-                _m.expiry,
-                keccak256(abi.encodePacked(_m.tokenIdList))
-            )
-        );
-        return keccak256(
-            abi.encodePacked(
-                hex"1901",
-                keccak256(
-                    abi.encode(
-                        keccak256("EIP712Domain(string name,string version,address verifyingContract)"),
-                        keccak256("Puppet"),
-                        keccak256("1"),
-                        _puppet
-                    )
-                ),
-                _struct
-            )
-        );
+        AccountLib.Mandate calldata _m
+    ) external pure returns (bytes32) {
+        return AccountLib.mandateDigest(_puppet, _m);
     }
 
-    function _sign(
+    function _cohortRound(
+        AccountLib.Mandate[] memory _one,
+        uint _count,
+        uint _oversizedFrom
+    ) internal {
+        Fund.Allocation[] memory _rows = new Fund.Allocation[](_count);
+        for (uint _j; _j < _count; ++_j) {
+            (address _user, uint _key) = makeAddrAndKey(string.concat("cohort-", vm.toString(_j)));
+            _fundWallet(_user, 1000e6);
+            _mandate(_user, _key, _one);
+            address _acct = _account(_user);
+            uint _k = _j;
+            while (_k > 0 && uint160(_rows[_k - 1].puppet) > uint160(_acct)) {
+                _rows[_k] = _rows[_k - 1];
+                --_k;
+            }
+            uint _stake = _j < _oversizedFrom ? 100e6 : 5_000e6;
+            _rows[_k] = Fund.Allocation({puppet: _acct, mandate: _one[0], amount: _stake});
+        }
+        uint[] memory _held = new uint[](_count);
+        for (uint _j; _j < _count; ++_j) {
+            _held[_j] = share.balanceOf(_rows[_j].puppet);
+        }
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _rows);
+        hub.allocate(_i, _sig);
+        for (uint _j; _j < _count; ++_j) {
+            if (_rows[_j].amount == 100e6) {
+                assertGt(share.balanceOf(_rows[_j].puppet), _held[_j], "a row inside its cap is minted");
+            } else {
+                assertEq(share.balanceOf(_rows[_j].puppet), _held[_j], "a row over its cap is skipped, the round survives");
+            }
+        }
+    }
+
+    function _freshMandates(
+        uint _from,
+        uint _count
+    ) internal view returns (AccountLib.Mandate[] memory list_) {
+        list_ = new AccountLib.Mandate[](_count);
+        for (uint _j; _j < _count; ++_j) {
+            list_[_j] = AccountLib.Mandate({
+                master: address(uint160(_from + _j)),
+                skin: 0,
+                allocationRate: 5000,
+                cooldownPeriod: 0,
+                expiry: block.timestamp + 365 days
+            });
+        }
+    }
+
+    function _mandate(
+        address _user,
         uint _key,
-        bytes32 _hash
-    ) internal pure returns (bytes memory) {
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(_key, _hash);
-        return abi.encodePacked(r, s, v);
-    }
-
-    function _pair(
-        Party memory _p,
-        bytes32 _digest
-    ) internal view returns (bytes memory) {
-        return abi.encodePacked(_sign(_p.signerKey, _digest), _sign(attestorKey, _digest));
-    }
-
-    function _stage(
-        string memory _label
-    ) internal returns (Party memory p) {
-        (p.user, p.userKey) = makeAddrAndKey(_label);
-        (p.signer, p.signerKey) = makeAddrAndKey(string.concat(_label, ".signer"));
-        (p.acct, p.acctKey) = makeAddrAndKey(string.concat(_label, ".acct"));
-    }
-
-    function _create(
-        Party memory p
+        AccountLib.Mandate[] memory _list
     ) internal {
-        vm.signAndAttachDelegation(accountModule.accountImpl(), p.acctKey);
-        bytes32 _d = AccountLib.genesisDigest(address(accountModule), p.acct, p.user, p.signer);
-        uint _expiry = block.timestamp + SESSION_TTL;
-        bytes32 _s = AccountLib.sessionDigest(address(accountModule), p.user, p.signer, _expiry);
-        accountModule.createAccount(p.acct, p.user, p.signer, _expiry, _sign(p.acctKey, _d), _sign(p.userKey, _s));
-    }
-
-    function _open(
-        string memory _label,
-        uint _fund
-    ) internal returns (Party memory p) {
-        p = _stage(_label);
-        _create(p);
-        usdc.mint(p.acct, _fund);
-    }
-
-    function _signedSwap(
-        AccountLib.IntentHeader memory _h,
-        SwapLib.SwapParams memory _swap,
-        uint _destinationChainId
-    ) internal view returns (Deposit.DepositSwap memory i_, bytes32 d_) {
-        _h.feeToken = _swap.inputToken;
-        i_ = Deposit.DepositSwap({header: _h, swap: _swap, destinationChainId: _destinationChainId});
-        d_ = _digest(
-            _h.account, keccak256(abi.encode(DEPOSIT_SWAP_TYPEHASH, _hashHeader(_h), _hashSwap(_swap), _destinationChainId))
-        );
-    }
-
-    function _hdr(
-        Party memory _p
-    ) internal view returns (AccountLib.IntentHeader memory) {
-        return AccountLib.IntentHeader({
-            account: _p.acct,
-            user: _p.user,
-            nonce: IAccount(_p.acct).nonce(),
-            deadline: block.timestamp + 5 minutes,
-            feeToken: address(usdc),
-            fee: FEE
-        });
-    }
-
-    function _mandateOf(
-        address
-    ) internal view returns (AccountLib.Mandate memory) {
-        return mandateSpec;
-    }
-
-    function _bond(
-        Party memory _p,
-        uint _amount
-    ) internal returns (AccountLib.Mandate memory m) {
-        m = _mandateOf(master.acct);
-        AccountLib.Mandate[] memory _list = new AccountLib.Mandate[](1);
-        _list[0] = m;
-        bytes[] memory _sigs = new bytes[](1);
-        _sigs[0] = _sign(_p.signerKey, _mandateDigest(_p.acct, m));
-
+        address _acct = _account(_user);
+        bytes[] memory _sigs = new bytes[](_list.length);
+        for (uint _j; _j < _list.length; ++_j) {
+            _sigs[_j] = _coSig(_key, this.digestOf(_acct, _list[_j]));
+        }
+        address[] memory _tokens = new address[](1);
+        _tokens[0] = address(usdc);
         HubGate.MandateIntent memory _i = HubGate.MandateIntent({
-            header: _hdr(_p), creditList: new address[](0), bond: _amount, mandateList: _list, signatureList: _sigs
+            header: _header(_acct, _user, _nonceOf(_acct)),
+            mandateList: _list,
+            signatureList: _sigs,
+            tokenList: _tokens,
+            arm: true
         });
-        bytes32 _d = _digest(
-            _p.acct,
-            keccak256(
-                abi.encode(
+        hub.mandate(
+            _i,
+            _pair(
+                _key,
+                _typed(
+                    _acct,
                     keccak256(
-                        "MandateIntent(IntentHeader header,bytes32 creditListHash,uint256 bond,bytes32 mandateListHash)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)"
-                    ),
-                    _hashHeader(_i.header),
-                    keccak256(abi.encode(_i.creditList)),
-                    _i.bond,
-                    keccak256(abi.encode(_i.mandateList))
-                )
-            )
-        );
-        hubGate.mandate(_i, _pair(_p, _d), _noGenesis());
-    }
-
-    function _noGenesis() internal pure returns (AccountLib.Genesis memory) {
-        return AccountLib.Genesis({signer: address(0), expiry: 0, key: "", user: ""});
-    }
-
-    function _genesisOf(
-        Party memory _p
-    ) internal returns (AccountLib.Genesis memory) {
-        vm.signAndAttachDelegation(accountModule.accountImpl(), _p.acctKey);
-        bytes32 _d = AccountLib.genesisDigest(address(accountModule), _p.acct, _p.user, _p.signer);
-        uint _expiry = block.timestamp + SESSION_TTL;
-        bytes32 _s = AccountLib.sessionDigest(address(accountModule), _p.user, _p.signer, _expiry);
-        return AccountLib.Genesis({signer: _p.signer, expiry: _expiry, key: _sign(_p.acctKey, _d), user: _sign(_p.userKey, _s)});
-    }
-
-    function _digest(
-        address _account,
-        bytes32 _structHash
-    ) internal view returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(
-                hex"1901",
-                keccak256(
-                    abi.encode(
-                        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                        keccak256("Puppet"),
-                        keccak256("1"),
-                        block.chainid,
-                        _account
+                        abi.encode(
+                            MANDATE_INTENT_TYPEHASH,
+                            _hashHeader(_i.header),
+                            keccak256(abi.encode(_list)),
+                            keccak256(abi.encodePacked(_tokens)),
+                            _i.arm
+                        )
                     )
-                ),
-                _structHash
+                )
             )
         );
     }
 
-    function _row(
-        Party memory _p,
-        AccountLib.Mandate memory _m,
-        uint _stake
-    ) internal view returns (AccountLib.Backing memory) {
-        return AccountLib.Backing({
-            puppet: _p.acct,
-            matchable: 1000e6,
-            stake: _stake,
-            mandate: _m
-        });
-    }
-
-    function _sorted(
-        Party memory _a,
-        Party memory _b
-    ) internal pure returns (Party memory, Party memory) {
-        return uint160(_a.acct) < uint160(_b.acct) ? (_a, _b) : (_b, _a);
-    }
-
-    function _deposit(
-        Party memory _p,
-        uint _amount
+    function _sell(
+        address _user,
+        uint _key,
+        uint _units
     ) internal {
-        usdc.mint(_p.user, _amount);
-        vm.startPrank(_p.user);
-        usdc.approve(address(depositModule), _amount);
-        coreGate.deposit(_p.acct, address(usdc), _amount);
-        vm.stopPrank();
-    }
-
-    function test_a_scheduled_credit_settles_when_funded_only_once_and_dies_at_expiry() public {
-        address _route = accountModule.predictDepositRoute(alice.user);
-
-        Deposit.ScheduledCredit memory _c = _claim(address(usdc), 300e6);
-        bytes memory _sig = _pair(alice, _claimDigest(alice.acct, _c));
-
-        vm.expectRevert(abi.encodeWithSelector(Error.Schedule__NotArrived.selector, address(usdc), 0, 300e6));
-        coreGate.credit(alice.acct, alice.user, _c, _sig, _noGenesis());
-
-        usdc.mint(_route, 300e6);
-        uint _before = usdc.balanceOf(alice.acct);
-        coreGate.credit(alice.acct, alice.user, _c, _sig, _noGenesis());
-        assertEq(usdc.balanceOf(alice.acct), _before + 300e6 - FEE, "the scheduled credit swept the route net of its fee");
-        assertEq(usdc.balanceOf(_route), 0, "the route is drained");
-
-        usdc.mint(_route, 300e6);
-        vm.expectRevert(abi.encodeWithSelector(Error.Account__DigestConsumed.selector, _claimDigest(alice.acct, _c)));
-        coreGate.credit(alice.acct, alice.user, _c, _sig, _noGenesis());
-        assertEq(usdc.balanceOf(_route), 300e6, "a replayed claim moves nothing and charges nothing");
-
-        vm.warp(_c.expiry + 1);
-        uint _now = block.timestamp;
-        vm.expectRevert(abi.encodeWithSelector(Error.Schedule__Expired.selector, _c.expiry, _now));
-        coreGate.credit(alice.acct, alice.user, _c, _sig, _noGenesis());
-    }
-
-    function test_a_direct_native_deposit_credits_the_account_in_full() public {
-        vm.deal(alice.user, 5e18);
-        uint _accountBefore = alice.acct.balance;
-        uint _feeBefore = feeReceiver.balance;
-
-        vm.prank(alice.user);
-        coreGate.deposit{value: 4e18}(alice.acct, NATIVE_TOKEN, 4e18);
-
-        assertEq(alice.acct.balance, _accountBefore + 4e18, "the account is credited the whole amount, no relay fee");
-        assertEq(feeReceiver.balance, _feeBefore, "no fee is taken from a direct deposit");
-        assertEq(alice.user.balance, 1e18, "the wallet paid exactly the amount");
-    }
-
-    function test_a_direct_deposit_needs_the_wallet_that_owns_the_account() public {
-        usdc.mint(bob.user, 100e6);
-        vm.startPrank(bob.user);
-        usdc.approve(address(depositModule), 100e6);
-        vm.expectRevert(Error.Account__UnauthorizedCaller.selector);
-        coreGate.deposit(alice.acct, address(usdc), 100e6);
-        vm.stopPrank();
-        assertEq(usdc.balanceOf(bob.user), 100e6, "nothing moved");
-    }
-
-    function test_a_direct_deposit_refuses_native_on_a_plain_token() public {
-        vm.deal(alice.user, 1);
-        vm.prank(alice.user);
-        vm.expectRevert(abi.encodeWithSelector(Error.Balance__ValueMismatch.selector, 1, 0));
-        coreGate.deposit{value: 1}(alice.acct, address(usdc), 1);
-    }
-
-    function test_a_direct_wrapped_deposit_fuses_attached_native_with_pulled_wrapped() public {
-        vm.deal(alice.user, 2e18);
-        uint _accountBefore = wnt.balanceOf(alice.acct);
-        vm.startPrank(alice.user);
-        wnt.deposit{value: 1e18}();
-        wnt.approve(address(depositModule), 1e18);
-        coreGate.deposit{value: 1e18}(alice.acct, address(wnt), 2e18);
-        vm.stopPrank();
-
-        assertEq(wnt.balanceOf(alice.acct), _accountBefore + 2e18, "both halves landed wrapped in the account");
-        assertEq(wnt.balanceOf(alice.user), 0, "the pulled half left the wallet");
-        assertEq(alice.user.balance, 0, "the attached half left the wallet");
-        assertEq(wnt.balanceOf(address(depositModule)), 0, "the module keeps nothing");
-    }
-
-    function test_a_direct_native_deposit_fuses_pulled_wrapped_with_attached_native() public {
-        vm.deal(alice.user, 3e18);
-        uint _accountBefore = alice.acct.balance;
-        vm.startPrank(alice.user);
-        wnt.deposit{value: 2e18}();
-        wnt.approve(address(depositModule), 2e18);
-        coreGate.deposit{value: 1e18}(alice.acct, NATIVE_TOKEN, 3e18);
-        vm.stopPrank();
-
-        assertEq(alice.acct.balance, _accountBefore + 3e18, "the pulled wrapped was unwrapped and joined the attached native");
-        assertEq(wnt.balanceOf(alice.user), 0, "the wrapped half left the wallet");
-        assertEq(alice.user.balance, 0, "the native half left the wallet");
-        assertEq(address(depositModule).balance, 0, "the module keeps nothing native");
-        assertEq(wnt.balanceOf(address(depositModule)), 0, "the module keeps nothing wrapped");
-    }
-
-    function test_a_hub_deposit_splits_the_amount_between_the_account_and_the_bond() public {
-        uint _accountBefore = usdc.balanceOf(alice.acct);
-        uint _storeBefore = usdc.balanceOf(address(bondStore));
-        usdc.mint(alice.user, 500e6);
-        vm.startPrank(alice.user);
-        usdc.approve(address(depositModule), 500e6);
-        hubGate.deposit(alice.acct, address(usdc), 500e6, 200e6);
-        vm.stopPrank();
-
-        assertEq(usdc.balanceOf(alice.acct), _accountBefore + 300e6, "the unbonded part is credited to the account");
-        assertEq(bondStore.bondMap(alice.acct, address(usdc)), 200e6, "the bonded part is booked to the account");
-        assertEq(usdc.balanceOf(address(bondStore)), _storeBefore + 200e6, "and held by the store");
-        assertEq(usdc.balanceOf(alice.user), 0, "the wallet paid the whole amount");
-    }
-
-    function test_a_hub_deposit_bonds_only_the_bond_token() public {
-        wnt.deposit{value: 1e18}();
-        wnt.transfer(alice.user, 1e18);
-        vm.startPrank(alice.user);
-        wnt.approve(address(depositModule), 1e18);
-        vm.expectRevert(abi.encodeWithSelector(Error.Bond__WrongToken.selector, address(wnt)));
-        hubGate.deposit(alice.acct, address(wnt), 1e18, 1e18);
-        vm.stopPrank();
-    }
-
-    function _bridgeIntent(
-        AccountLib.IntentHeader memory _h,
-        MockBridge _bridge,
-        uint _amount
-    ) internal view returns (Deposit.DepositSwap memory, bytes32) {
-        return _signedSwap(
-            _h,
-            SwapLib.SwapParams({
-                inputToken: address(usdc),
-                inputAmount: _amount,
-                outputToken: address(usdc),
-                outputAmount: _amount - FEE,
-                provider: address(_bridge),
-                providerCallData: abi.encodeCall(
-                    MockBridge.send, (address(usdc), _amount - FEE, 42_161, accountModule.predictDepositRoute(_h.user))
+        address _acct = _account(_user);
+        Fund.SellIntent memory _i =
+            Fund.SellIntent({header: _header(_acct, _user, _nonceOf(_acct)), share: share, master: body, units: _units});
+        hub.sell(
+            _i,
+            _pair(
+                _key,
+                _typed(
+                    _acct,
+                    keccak256(abi.encode(SELL_INTENT_TYPEHASH, _hashHeader(_i.header), _i.master, _i.share, _i.units))
                 )
-            }),
-            42_161
+            )
         );
     }
 
-    function test_flow_a_direct_deposit_pulls_the_wallet_into_the_account_with_no_fee() public {
-        address _route = accountModule.predictDepositRoute(alice.user);
-        uint _accountBefore = usdc.balanceOf(alice.acct);
-        uint _feeBefore = usdc.balanceOf(feeReceiver);
-        uint _nonceBefore = IAccount(alice.acct).nonce();
-
-        _deposit(alice, 500e6);
-
-        assertEq(usdc.balanceOf(alice.user), 0, "the wallet was emptied by the pull");
-        assertEq(usdc.balanceOf(_route), 0, "the route is not involved");
-        assertEq(usdc.balanceOf(alice.acct), _accountBefore + 500e6, "the account is credited in full");
-        assertEq(usdc.balanceOf(feeReceiver), _feeBefore, "no relay fee on a direct deposit");
-        assertEq(IAccount(alice.acct).nonce(), _nonceBefore, "no intent nonce is consumed");
-    }
-
-    function test_flow_a_credit_carrying_genesis_creates_the_account_and_sweeps_in_one_transaction() public {
-        Party memory _p = _stage("onboarding-genesis-credit");
-        address _route = accountModule.predictDepositRoute(_p.user);
-        uint _feeBefore = usdc.balanceOf(feeReceiver);
-
-        usdc.mint(_p.user, 500e6);
-        vm.startPrank(_p.user);
-        usdc.approve(address(depositModule), 500e6);
-        coreGate.depositRoute(address(usdc), 500e6);
-        vm.stopPrank();
-
-        assertEq(usdc.balanceOf(_route), 500e6, "the wallet funded its route through the gate");
-        assertEq(_p.acct.code.length, 0, "no account has been created yet");
-
-        AccountLib.Genesis memory _g = _genesisOf(_p);
-        assertEq(IAccount(_p.acct).nonce(), 0, "the delegation is attached but the body is still unwritten");
-
-        address[] memory _list = new address[](1);
-        _list[0] = address(usdc);
-        Deposit.ScheduledCredit memory _c = _claim(address(usdc), 500e6);
-        coreGate.credit(_p.acct, _p.user, _c, _pair(_p, _claimDigest(_p.acct, _c)), _g);
-
-        (, address _user, address _signer) = IAccount(_p.acct).args();
-        assertEq(_user, _p.user, "the genesis rode with the credit and created the account");
-        assertEq(_signer, _p.signer, "the body records the signer the genesis named");
-        assertEq(usdc.balanceOf(_route), 0, "the credit swept the route");
-        assertEq(usdc.balanceOf(_p.acct), 500e6 - FEE, "the account holds the swept deposit net of the relay fee");
-        assertEq(usdc.balanceOf(feeReceiver), _feeBefore + FEE, "the credit paid its relay fee");
-    }
-
-    function test_flow_a_mandate_carrying_genesis_creates_the_account_and_bonds_in_one_transaction() public {
-        Party memory _p = _stage("onboarding-genesis-mandate");
-        usdc.mint(accountModule.predictDepositRoute(_p.user), 500e6);
-
-        AccountLib.Genesis memory _g = _genesisOf(_p);
-        AccountLib.Mandate memory _m = _mandateOf(master.acct);
-        AccountLib.Mandate[] memory _mandates = new AccountLib.Mandate[](1);
-        _mandates[0] = _m;
-        bytes[] memory _sigs = new bytes[](1);
-        _sigs[0] = _sign(_p.signerKey, _mandateDigest(_p.acct, _m));
-        address[] memory _list = new address[](1);
-        _list[0] = address(usdc);
-
-        AccountLib.IntentHeader memory _h = _hdr(_p);
-        _h.nonce = 1;
-        HubGate.MandateIntent memory _i = HubGate.MandateIntent({
-            header: _h, creditList: _list, bond: 100e6, mandateList: _mandates, signatureList: _sigs
+    function _redeem(
+        uint _retire,
+        uint _drain
+    ) internal {
+        Fund.RedeemIntent memory _i = Fund.RedeemIntent({
+            header: _fundHeader(_nonceOf(body)),
+            share: share,
+            valuation: _valuation(usdc.balanceOf(body)),
+            retire: _retire,
+            drain: _drain,
+            price: Fund.Price({token: address(usdc), amount: 1e6, value: 1e6 * USD})
         });
-        bytes32 _d = _digest(
-            _p.acct,
-            keccak256(
-                abi.encode(
+        hub.redeem(
+            _i,
+            _pair(
+                masterKey,
+                _typed(
+                    body,
                     keccak256(
-                        "MandateIntent(IntentHeader header,bytes32 creditListHash,uint256 bond,bytes32 mandateListHash)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)"
-                    ),
-                    _hashHeader(_i.header),
-                    keccak256(abi.encode(_i.creditList)),
-                    _i.bond,
-                    keccak256(abi.encode(_i.mandateList))
-                )
-            )
-        );
-        hubGate.mandate(_i, _pair(_p, _d), _g);
-
-        address _user = accountModule.userOf(_p.acct);
-        assertEq(_user, _p.user, "the genesis rode with the mandate and created the account");
-        assertEq(bondStore.bondMap(_p.acct, address(usdc)), 100e6, "the bond landed from the swept route funds");
-    }
-
-    function test_flow_a_draw_carrying_genesis_creates_the_master_and_seizes_in_one_transaction() public {
-        Party memory _m = _stage("onboarding-genesis-draw");
-        AccountLib.Mandate memory _spec = mandateSpec;
-        _spec.master = _m.acct;
-
-        AccountLib.Mandate[] memory _mandates = new AccountLib.Mandate[](1);
-        _mandates[0] = _spec;
-        bytes[] memory _sigs = new bytes[](1);
-        _sigs[0] = _sign(alice.signerKey, _mandateDigest(alice.acct, _spec));
-        HubGate.MandateIntent memory _bondIntent = HubGate.MandateIntent({
-            header: _hdr(alice), creditList: new address[](0), bond: 1000e6, mandateList: _mandates, signatureList: _sigs
-        });
-        bytes32 _bondDigest = _digest(
-            alice.acct,
-            keccak256(
-                abi.encode(
-                    keccak256(
-                        "MandateIntent(IntentHeader header,bytes32 creditListHash,uint256 bond,bytes32 mandateListHash)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)"
-                    ),
-                    _hashHeader(_bondIntent.header),
-                    keccak256(abi.encode(_bondIntent.creditList)),
-                    _bondIntent.bond,
-                    keccak256(abi.encode(_bondIntent.mandateList))
-                )
-            )
-        );
-        hubGate.mandate(_bondIntent, _pair(alice, _bondDigest), _noGenesis());
-
-        usdc.mint(_m.acct, FEE);
-        AccountLib.Genesis memory _g = _genesisOf(_m);
-
-        HubGate.Loss[] memory _losses = new HubGate.Loss[](1);
-        _losses[0] = HubGate.Loss({puppet: alice.acct, amount: 400e6});
-        AccountLib.IntentHeader memory _h = _hdr(_m);
-        _h.nonce = 1;
-        HubGate.DrawIntent memory _i =
-            HubGate.DrawIntent({header: _h, spokeChainId: block.chainid, cycle: 1, lossList: _losses});
-        hubGate.draw(_i, _pair(_m, _drawDigest(_i)), _g);
-
-        address _user = accountModule.userOf(_m.acct);
-        assertEq(_user, _m.user, "the genesis rode with the draw and created the master");
-        assertEq(bondStore.bondMap(alice.acct, address(usdc)), 600e6, "the draw seized the loss from the bond");
-    }
-
-    function test_session_consent_binds_the_signer_not_the_account_address() public {
-        Party memory _p = _stage("session-consent");
-        Party memory _other = _stage("session-other");
-
-        vm.signAndAttachDelegation(accountModule.accountImpl(), _p.acctKey);
-        bytes32 _genesis = AccountLib.genesisDigest(address(accountModule), _p.acct, _p.user, _p.signer);
-        uint _expiry = block.timestamp + SESSION_TTL;
-        bytes32 _session = AccountLib.sessionDigest(address(accountModule), _p.user, _p.signer, _expiry);
-
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        accountModule.createAccount(_p.acct, _p.user, _other.signer, _expiry, _sign(_p.acctKey, _genesis), _sign(_p.userKey, _session));
-
-        accountModule.createAccount(_p.acct, _p.user, _p.signer, _expiry, _sign(_p.acctKey, _genesis), _sign(_p.userKey, _session));
-        (, address _user, address _signer) = IAccount(_p.acct).args();
-        assertEq(_user, _p.user, "the session bound the account to its wallet");
-        assertEq(_signer, _p.signer, "and to the signer the wallet named");
-    }
-
-    function test_session_expires_and_refuses_an_unbounded_lifetime() public {
-        Party memory _p = _stage("session-expiry");
-        vm.signAndAttachDelegation(accountModule.accountImpl(), _p.acctKey);
-        bytes32 _genesis = AccountLib.genesisDigest(address(accountModule), _p.acct, _p.user, _p.signer);
-
-        uint _forever = block.timestamp + 400 days;
-        bytes32 _far = AccountLib.sessionDigest(address(accountModule), _p.user, _p.signer, _forever);
-        vm.expectRevert(abi.encodeWithSelector(Error.Account__SessionTooLong.selector, _forever, 30 days));
-        accountModule.createAccount(_p.acct, _p.user, _p.signer, _forever, _sign(_p.acctKey, _genesis), _sign(_p.userKey, _far));
-
-        uint _expiry = block.timestamp + SESSION_TTL;
-        bytes32 _session = AccountLib.sessionDigest(address(accountModule), _p.user, _p.signer, _expiry);
-        vm.warp(_expiry + 1);
-        vm.expectRevert(abi.encodeWithSelector(Error.Account__SessionExpired.selector, _expiry, block.timestamp));
-        accountModule.createAccount(_p.acct, _p.user, _p.signer, _expiry, _sign(_p.acctKey, _genesis), _sign(_p.userKey, _session));
-    }
-
-    function test_genesis_never_commits_without_the_signer_it_names() public {
-        Party memory _p = _stage("atomic-genesis");
-        Party memory _impostor = _stage("atomic-impostor");
-        usdc.mint(accountModule.predictDepositRoute(_p.user), 500e6);
-
-        AccountLib.Genesis memory _g = _genesisOf(_p);
-        address[] memory _list = new address[](1);
-        _list[0] = address(usdc);
-        AccountLib.IntentHeader memory _h = _hdr(_p);
-        _h.nonce = 1;
-        Deposit.ScheduledCredit memory _c = _claim(address(usdc), 1);
-        bytes32 _d = _claimDigest(_p.acct, _c);
-
-        bytes memory _wrong = abi.encodePacked(_sign(_impostor.signerKey, _d), _sign(attestorKey, _d));
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        coreGate.credit(_p.acct, _p.user, _c, _wrong, _g);
-
-        assertEq(accountModule.predictDepositRoute(_p.user).code.length, 0, "the route was never cloned");
-        (, address _user, address _signer) = IAccount(_p.acct).args();
-        assertEq(_user, address(0), "no body was written");
-        assertEq(_signer, address(0), "and no signer was recorded");
-        assertEq(IAccount(_p.acct).nonce(), 0, "the account nonce never advanced");
-    }
-
-    function test_session_digest_matches_the_client() public pure {
-        assertEq(
-            AccountLib.sessionDigest(
-                0xf07BC8c3632524472FdFfA42CFe50881231cd4F1,
-                0x1111111111111111111111111111111111111111,
-                0x2222222222222222222222222222222222222222,
-                1800000000
-            ),
-            0xabe66bcf42f85fe547f4718093989a8bb16dd425ee3897a37d36e095a968df9b,
-            "the prompt the client renders must hash to the digest createAccount verifies"
-        );
-    }
-
-    function test_a_credit_that_sweeps_nothing_reverts_instead_of_charging_the_fee() public {
-        uint _before = usdc.balanceOf(alice.acct);
-        assertEq(usdc.balanceOf(accountModule.predictDepositRoute(alice.user)), 0, "the route is empty");
-        uint _nonceBefore = IAccount(alice.acct).nonce();
-        Deposit.ScheduledCredit memory _c = _claim(address(usdc), 1);
-        bytes32 _d = _claimDigest(alice.acct, _c);
-        vm.expectRevert(abi.encodeWithSelector(Error.Schedule__NotArrived.selector, address(usdc), 0, 1));
-        coreGate.credit(alice.acct, alice.user, _c, _pair(alice, _d), _noGenesis());
-        assertEq(usdc.balanceOf(alice.acct), _before, "no relay fee was taken");
-        assertEq(IAccount(alice.acct).nonce(), _nonceBefore, "and no nonce was consumed");
-    }
-
-    function test_a_credit_fee_is_bounded_by_what_actually_arrives() public {
-        usdc.mint(accountModule.predictDepositRoute(alice.user), 4e6);
-        Deposit.ScheduledCredit memory _c = _claim(address(usdc), 1);
-        bytes memory _sig = _pair(alice, _claimDigest(alice.acct, _c));
-        vm.expectRevert(abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, FEE, 4e6, 2000));
-        coreGate.credit(alice.acct, alice.user, _c, _sig, _noGenesis());
-    }
-
-    function test_flow_crosschain_deposit_bridges_from_the_route_and_credits_nothing_locally() public {
-        MockBridge _bridge = new MockBridge();
-        address _route = accountModule.predictDepositRoute(alice.user);
-        usdc.mint(_route, 500e6);
-        uint _accountBefore = usdc.balanceOf(alice.acct);
-        uint _feeBefore = usdc.balanceOf(feeReceiver);
-
-        (Deposit.DepositSwap memory _i, bytes32 _d) = _bridgeIntent(_hdr(alice), _bridge, 500e6);
-        coreGate.depositAcross(_i, _pair(alice, _d), _noGenesis());
-
-        assertEq(_bridge.bridged(), 500e6 - FEE, "the bridge took the input net of the relay fee");
-        assertEq(_bridge.destinationChainId(), 42_161, "the bridge was told the signed destination");
-        assertEq(_bridge.recipient(), _route, "the destination recipient is the route, the same address on every chain");
-        assertEq(usdc.balanceOf(_route), 0, "the route spent the whole input");
-        assertEq(
-            usdc.balanceOf(alice.acct), _accountBefore, "nothing is credited locally; the credit happens on arrival"
-        );
-        assertEq(usdc.balanceOf(feeReceiver), _feeBefore + FEE, "the relay fee was paid on the source chain");
-        assertEq(usdc.allowance(_route, address(_bridge)), 0, "the route revoked the bridge allowance");
-    }
-
-    function test_flow_onboarding_crosschain_is_a_plain_transfer_then_a_swap_carrying_genesis() public {
-        Party memory _p = _stage("onboarding-crosschain");
-        address _route = accountModule.predictDepositRoute(_p.user);
-        MockBridge _bridge = new MockBridge();
-
-        usdc.mint(_p.user, 500e6);
-        vm.prank(_p.user);
-        usdc.transfer(_route, 500e6);
-        assertEq(_p.acct.code.length, 0, "the route was funded before the account existed");
-
-        AccountLib.Genesis memory _g = _genesisOf(_p);
-        AccountLib.IntentHeader memory _h = _hdr(_p);
-        _h.nonce = 1;
-        (Deposit.DepositSwap memory _i, bytes32 _d) = _bridgeIntent(_h, _bridge, 500e6);
-        coreGate.depositAcross(_i, _pair(_p, _d), _g);
-
-        address _user = accountModule.userOf(_p.acct);
-        assertEq(_user, _p.user, "the genesis rode with the swap and created the account");
-        assertEq(_bridge.bridged(), 500e6 - FEE, "the prefunded route paid the bridge");
-        assertEq(_bridge.recipient(), _route, "the bridge delivers to the route on the destination");
-        assertEq(usdc.balanceOf(_route), 0, "the route spent everything it was funded with");
-        assertEq(usdc.balanceOf(_p.acct), 0, "the wallet never routed through the account on this chain");
-    }
-
-    function test_flow_a_local_swap_parks_on_the_route_then_a_credit_moves_it() public {
-        MockERC20 _out = _providerDeposit(500e6, 480e6, 480e6);
-        address _route = accountModule.predictDepositRoute(alice.user);
-        assertEq(_out.balanceOf(_route), 480e6, "the swap output parks on the route");
-        assertEq(_out.balanceOf(alice.acct), 0, "a swap never credits the account by itself");
-
-        _creditToken(alice, address(_out));
-
-        assertEq(_out.balanceOf(_route), 0, "the credit swept the parked output");
-        assertEq(_out.balanceOf(alice.acct), 480e6 - FEE, "the account now holds the swapped token net of the credit fee");
-    }
-
-    function test_flow_crosschain_swap_is_credited_on_arrival_by_its_claim_once() public {
-        MockBridge _bridge = new MockBridge();
-        address _route = accountModule.predictDepositRoute(alice.user);
-        usdc.mint(_route, 500e6);
-        uint _accountBefore = usdc.balanceOf(alice.acct);
-        uint _feeBefore = usdc.balanceOf(feeReceiver);
-
-        (Deposit.DepositSwap memory _i, bytes32 _d) = _bridgeIntent(_hdr(alice), _bridge, 500e6);
-        coreGate.depositAcross(_i, _pair(alice, _d), _noGenesis());
-        assertEq(usdc.balanceOf(_route), 0, "the source route was spent into the bridge");
-
-        vm.chainId(42_161);
-        Deposit.ScheduledCredit memory _c = _claim(address(usdc), 500e6 - FEE);
-        bytes32 _cd = _claimDigest(alice.acct, _c);
-        bytes memory _sig = _pair(alice, _cd);
-        vm.expectRevert(abi.encodeWithSelector(Error.Schedule__NotArrived.selector, address(usdc), 0, 500e6 - FEE));
-        coreGate.credit(alice.acct, alice.user, _c, _sig, _noGenesis());
-
-        usdc.mint(_route, 500e6 - FEE);
-        Deposit.ScheduledCredit memory _greedy =
-            Deposit.ScheduledCredit({token: _c.token, amount: _c.amount, expiry: _c.expiry, fee: 2 * FEE});
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        coreGate.credit(alice.acct, alice.user, _greedy, _sig, _noGenesis());
-
-        coreGate.credit(alice.acct, alice.user, _c, _sig, _noGenesis());
-        assertEq(usdc.balanceOf(alice.acct), _accountBefore + 500e6 - 2 * FEE, "the fill is credited net of the agreed fee");
-        assertEq(usdc.balanceOf(feeReceiver), _feeBefore + 2 * FEE, "each half paid only its agreed fee");
-        assertEq(usdc.balanceOf(_route), 0, "the destination route is swept");
-
-        usdc.mint(_route, 500e6);
-        vm.expectRevert(abi.encodeWithSelector(Error.Account__DigestConsumed.selector, _cd));
-        coreGate.credit(alice.acct, alice.user, _c, _sig, _noGenesis());
-    }
-
-    function test_a_claim_is_bound_to_the_chain_it_was_signed_for() public {
-        usdc.mint(accountModule.predictDepositRoute(alice.user), 300e6);
-        Deposit.ScheduledCredit memory _c = _claim(address(usdc), 1);
-        bytes memory _sig = _pair(alice, _claimDigest(alice.acct, _c));
-
-        vm.chainId(2);
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        coreGate.credit(alice.acct, alice.user, _c, _sig, _noGenesis());
-    }
-
-    function test_a_credit_claims_a_fused_arrival_in_the_form_the_claim_names() public {
-        address _route = accountModule.predictDepositRoute(alice.user);
-        uint _fee = 1e16;
-
-        vm.deal(_route, 4e18);
-        uint _wrappedBefore = wnt.balanceOf(alice.acct);
-        Deposit.ScheduledCredit memory _wrapped = Deposit.ScheduledCredit({
-            token: address(wnt), amount: 1, expiry: block.timestamp + 1 hours, fee: _fee
-        });
-        coreGate.credit(alice.acct, alice.user, _wrapped, _pair(alice, _claimDigest(alice.acct, _wrapped)), _noGenesis());
-        assertEq(wnt.balanceOf(alice.acct), _wrappedBefore + 4e18 - _fee, "native that landed on the route was wrapped into the claimed form");
-        assertEq(_route.balance, 0, "the route holds no native");
-
-        wnt.deposit{value: 3e18}();
-        wnt.transfer(_route, 3e18);
-        uint _nativeBefore = alice.acct.balance;
-        Deposit.ScheduledCredit memory _native = Deposit.ScheduledCredit({
-            token: NATIVE_TOKEN, amount: 1, expiry: block.timestamp + 1 hours, fee: _fee
-        });
-        coreGate.credit(alice.acct, alice.user, _native, _pair(alice, _claimDigest(alice.acct, _native)), _noGenesis());
-        assertEq(alice.acct.balance, _nativeBefore + 3e18 - _fee, "wrapped that landed on the route was unwrapped into the claimed form");
-        assertEq(wnt.balanceOf(_route), 0, "the route holds no wrapped");
-    }
-
-    function test_a_swap_spends_route_funds_only_and_never_reaches_into_the_wallet() public {
-        MockBridge _bridge = new MockBridge();
-        usdc.mint(alice.user, 500e6);
-        vm.prank(alice.user);
-        usdc.approve(address(depositModule), 500e6);
-
-        (Deposit.DepositSwap memory _i, bytes32 _d) = _bridgeIntent(_hdr(alice), _bridge, 500e6);
-        vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 0, 500e6));
-        coreGate.depositAcross(_i, _pair(alice, _d), _noGenesis());
-
-        assertEq(usdc.balanceOf(alice.user), 500e6, "an allowance to the module buys a swap nothing");
-    }
-
-    function test_a_crosschain_swap_funds_from_the_route_in_the_form_it_holds() public {
-        MockBridge _bridge = new MockBridge();
-        address _route = accountModule.predictDepositRoute(alice.user);
-        vm.deal(_route, 4e18);
-
-        AccountLib.IntentHeader memory _h = _hdr(alice);
-        _h.fee = 1e16;
-        (Deposit.DepositSwap memory _i, bytes32 _d) = _signedSwap(
-            _h,
-            SwapLib.SwapParams({
-                inputToken: address(wnt),
-                inputAmount: 4e18,
-                outputToken: address(wnt),
-                outputAmount: 4e18 - 1e16,
-                provider: address(_bridge),
-                providerCallData: abi.encodeCall(MockBridge.send, (address(wnt), 4e18 - 1e16, 42_161, _route))
-            }),
-            42_161
-        );
-        coreGate.depositAcross(_i, _pair(alice, _d), _noGenesis());
-
-        assertEq(_bridge.bridged(), 4e18 - 1e16, "the route's native was wrapped on the way into the bridge");
-        assertEq(_route.balance, 0, "the native holding was fully consumed");
-        assertEq(wnt.balanceOf(_route), 0, "and nothing wrapped was left behind");
-        assertEq(wnt.balanceOf(feeReceiver), 1e16, "the relay fee was paid in the wrapped form");
-    }
-
-    function test_a_native_swap_spends_the_route_wrapped_first_then_native() public {
-        MockERC20 _out = new MockERC20("USDT", "USDT", 6);
-        MockSwapProvider _provider = new MockSwapProvider();
-        vm.prank(owner);
-        register.setRegistered(address(_out), type(uint).max, bytes32("USDT"));
-        address _route = accountModule.predictDepositRoute(alice.user);
-        wnt.deposit{value: 3e18}();
-        wnt.transfer(_route, 3e18);
-        vm.deal(_route, 3e18);
-        _out.mint(address(_provider), 480e6);
-
-        (Deposit.DepositSwap memory _i, bytes32 _d) = _signedSwap(
-            _hdr(alice),
-            SwapLib.SwapParams({
-                inputToken: NATIVE_TOKEN,
-                inputAmount: 4e18,
-                outputToken: address(_out),
-                outputAmount: 480e6,
-                provider: address(_provider),
-                providerCallData: abi.encodeCall(MockSwapProvider.swapNative, (address(_out), 480e6, _route))
-            }),
-            block.chainid
-        );
-        coreGate.depositAcross(_i, _pair(alice, _d), _noGenesis());
-
-        assertEq(wnt.balanceOf(_route), 0, "the wrapped holding was spent first");
-        assertEq(_route.balance, 2e18, "native covered only the remainder");
-        assertEq(_out.balanceOf(_route), 480e6, "the swap output parks on the route");
-        assertEq(feeReceiver.balance, FEE, "the relay fee was paid in native");
-    }
-
-    function test_forced_withdrawal_reaches_funds_stranded_at_the_route() public {
-        address _route = accountModule.predictDepositRoute(alice.user);
-        usdc.mint(_route, 700e6);
-
-        vm.warp(block.timestamp + RESET_PERIOD + 1);
-        vm.prank(alice.user);
-        accountModule.forcedWithdrawal(alice.acct, address(usdc), 100e6, alice.user);
-
-        assertEq(usdc.balanceOf(_route), 0, "the route was emptied by the escape");
-        assertEq(usdc.balanceOf(alice.user), 800e6, "route funds and account funds both reached the user");
-        assertEq(usdc.balanceOf(alice.acct), 1200e6 - 100e6, "the account paid only what was asked");
-    }
-
-    function _providerDeposit(
-        uint _in,
-        uint _declared,
-        uint _delivered
-    ) internal returns (MockERC20 out_) {
-        out_ = new MockERC20("USDT", "USDT", 6);
-        MockSwapProvider _provider = new MockSwapProvider();
-        vm.prank(owner);
-        register.setRegistered(address(out_), type(uint).max, bytes32("USDT"));
-
-        address _route = accountModule.predictDepositRoute(alice.user);
-        usdc.mint(_route, _in);
-        out_.mint(address(_provider), _delivered);
-
-        (Deposit.DepositSwap memory _i, bytes32 _d) = _signedSwap(
-            _hdr(alice),
-            SwapLib.SwapParams({
-                inputToken: address(usdc),
-                inputAmount: _in,
-                outputToken: address(out_),
-                outputAmount: _declared,
-                provider: address(_provider),
-                providerCallData: abi.encodeCall(
-                    MockSwapProvider.swap, (address(usdc), _in - FEE, address(out_), _delivered, _route)
-                )
-            }),
-            block.chainid
-        );
-        coreGate.depositAcross(_i, _pair(alice, _d), _noGenesis());
-    }
-
-    function test_a_swap_parks_its_output_on_the_route_for_the_user_to_direct() public {
-        address _route = accountModule.predictDepositRoute(alice.user);
-        MockERC20 _out = _providerDeposit(500e6, 480e6, 480e6);
-
-        assertEq(_out.balanceOf(alice.acct), 0, "a swap does not credit the account by itself");
-        assertEq(_out.balanceOf(_route), 480e6, "the swap output parks on the route");
-        assertEq(usdc.balanceOf(_route), 0, "the route spent the whole input");
-        assertEq(usdc.balanceOf(feeReceiver), FEE, "the relay fee was paid from the route");
-    }
-
-    function test_an_under_delivering_provider_is_caught_even_when_route_surplus_covers_it() public {
-        MockERC20 _out = new MockERC20("USDT", "USDT", 6);
-        MockSwapProvider _provider = new MockSwapProvider();
-        vm.prank(owner);
-        register.setRegistered(address(_out), type(uint).max, bytes32("USDT"));
-
-        address _route = accountModule.predictDepositRoute(alice.user);
-        usdc.mint(_route, 500e6);
-        _out.mint(address(_provider), 400e6);
-        _out.mint(_route, 100e6);
-
-        (Deposit.DepositSwap memory _i, bytes32 _d) = _signedSwap(
-            _hdr(alice),
-            SwapLib.SwapParams({
-                inputToken: address(usdc),
-                inputAmount: 500e6,
-                outputToken: address(_out),
-                outputAmount: 480e6,
-                provider: address(_provider),
-                providerCallData: abi.encodeCall(
-                    MockSwapProvider.swap, (address(usdc), 500e6 - FEE, address(_out), 400e6, _route)
-                )
-            }),
-            block.chainid
-        );
-        vm.expectRevert(abi.encodeWithSelector(Error.Balance__DepositNotReceived.selector, address(_out), 400e6, 480e6));
-        coreGate.depositAcross(_i, _pair(alice, _d), _noGenesis());
-    }
-
-    function _creditToken(
-        Party memory _p,
-        address _token
-    ) internal {
-        Deposit.ScheduledCredit memory _c = _claim(_token, 1);
-        coreGate.credit(_p.acct, _p.user, _c, _pair(_p, _claimDigest(_p.acct, _c)), _noGenesis());
-    }
-
-    function _credit(
-        Party memory _p,
-        uint _amount
-    ) internal {
-        usdc.mint(accountModule.predictDepositRoute(_p.user), _amount);
-        _creditToken(_p, address(usdc));
-    }
-
-    function _withdrawAll(
-        Party memory _p
-    ) internal {
-        uint _held = usdc.balanceOf(_p.acct);
-        if (_held <= FEE) return;
-        CoreGate.WithdrawIntent memory _i = CoreGate.WithdrawIntent({
-            header: _hdr(_p),
-            swap: SwapLib.SwapParams({
-                inputToken: address(usdc),
-                inputAmount: _held,
-                outputToken: address(usdc),
-                outputAmount: _held - FEE,
-                provider: address(0),
-                providerCallData: ""
-            }),
-            destinationChainId: block.chainid
-        });
-        bytes32 _d = _digest(
-            _p.acct,
-            keccak256(
-                abi.encode(
-                    keccak256(
-                        "WithdrawIntent(IntentHeader header,SwapParams swap,uint256 destinationChainId)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)SwapParams(address inputToken,uint256 inputAmount,address outputToken,uint256 outputAmount,address provider,bytes providerCallData)"
-                    ),
-                    _hashHeader(_i.header),
-                    _hashSwap(_i.swap),
-                    _i.destinationChainId
-                )
-            )
-        );
-        coreGate.withdraw(_i, _pair(_p, _d));
-    }
-
-    function _operate(
-        uint _cycle,
-        uint _stake
-    ) internal {
-        (Party memory _lo, Party memory _hi) = _sorted(alice, bob);
-        AccountLib.Mandate memory _m = mandateSpec;
-        AccountLib.Backing[] memory _rows = new AccountLib.Backing[](2);
-        _rows[0] = _row(_lo, _m, _stake);
-        _rows[1] = _row(_hi, _m, _stake);
-
-        CoreGate.OperateIntent memory _i = CoreGate.OperateIntent({
-            header: _hdr(master),
-            creditList: new address[](0),
-            cycle: _cycle,
-            token: address(usdc),
-            value: 0,
-            collateral: 1000e6,
-            skin: 5000,
-            backed: 0,
-            backingList: _rows,
-            callList: new IAccount.Call[](0)
-        });
-        bytes32 _d = _digest(
-            master.acct,
-            keccak256(
-                abi.encode(
-                    keccak256(
-                        "OperateIntent(IntentHeader header,bytes32 creditListHash,uint256 cycle,address token,uint256 value,uint256 collateral,uint256 skin,uint256 backed,bytes32 backingListHash,bytes32 callListHash)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)"
-                    ),
-                    _hashHeader(_i.header),
-                    keccak256(abi.encode(_i.creditList)),
-                    _i.cycle,
-                    _i.token,
-                    _i.value,
-                    _i.collateral,
-                    _i.skin,
-                    _i.backed,
-                    keccak256(abi.encode(_i.backingList)),
-                    keccak256(abi.encode(_i.callList))
-                )
-            )
-        );
-        coreGate.operate(_i, _pair(master, _d));
-    }
-
-    function _settle(
-        uint _cycle,
-        uint _gain
-    ) internal {
-        (Party memory _lo, Party memory _hi) = _sorted(alice, bob);
-        AccountLib.Mandate memory _m = mandateSpec;
-        CoreGate.Outcome[] memory _gains = new CoreGate.Outcome[](2);
-        _gains[0] = CoreGate.Outcome({
-            puppet: _lo.acct, amount: _gain, mandate: _m});
-        _gains[1] = CoreGate.Outcome({
-            puppet: _hi.acct, amount: _gain, mandate: _m});
-
-        CoreGate.SettleIntent memory _i = CoreGate.SettleIntent({
-            header: _hdr(master), cycle: _cycle, token: address(usdc), value: 0, gainList: _gains
-        });
-        bytes32 _d = _digest(
-            master.acct,
-            keccak256(
-                abi.encode(
-                    keccak256(
-                        "SettleIntent(IntentHeader header,uint256 cycle,address token,uint256 value,bytes32 gainListHash)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)"
-                    ),
-                    _hashHeader(_i.header),
-                    _i.cycle,
-                    _i.token,
-                    _i.value,
-                    keccak256(abi.encode(_i.gainList))
-                )
-            )
-        );
-        coreGate.settle(_i, _pair(master, _d));
-    }
-
-    function _draw(
-        uint _cycle,
-        uint _loss
-    ) internal {
-        HubGate.DrawIntent memory _i = _drawIntent(_cycle, _loss);
-        hubGate.draw(_i, _pair(master, _drawDigest(_i)), _noGenesis());
-    }
-
-    function _drawIntent(
-        uint _cycle,
-        uint _loss
-    ) internal view returns (HubGate.DrawIntent memory) {
-        (Party memory _lo, Party memory _hi) = _sorted(alice, bob);
-        HubGate.Loss[] memory _losses = new HubGate.Loss[](2);
-        _losses[0] = HubGate.Loss({puppet: _lo.acct, amount: _loss});
-        _losses[1] = HubGate.Loss({puppet: _hi.acct, amount: _loss});
-        return HubGate.DrawIntent({header: _hdr(master), spokeChainId: block.chainid, cycle: _cycle, lossList: _losses});
-    }
-
-    function _drawDigest(
-        HubGate.DrawIntent memory _i
-    ) internal view returns (bytes32) {
-        return _digest(
-            _i.header.account,
-            keccak256(
-                abi.encode(
-                    keccak256(
-                        "DrawIntent(IntentHeader header,uint256 spokeChainId,uint256 cycle,bytes32 lossListHash)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)"
-                    ),
-                    _hashHeader(_i.header),
-                    _i.spokeChainId,
-                    _i.cycle,
-                    keccak256(abi.encode(_i.lossList))
+                        abi.encode(
+                            REDEEM_INTENT_TYPEHASH,
+                            _hashHeader(_i.header),
+                            _i.share,
+                            _valuationHash(_i.valuation),
+                            keccak256(abi.encode(PRICE_TYPEHASH, _i.price.token, _i.price.amount, _i.price.value)),
+                            _i.retire,
+                            _i.drain
+                        )
+                    )
                 )
             )
         );
     }
 
-    function _unbond(
-        Party memory _p,
-        uint _amount
-    ) internal {
-        HubGate.UnbondIntent memory _i = HubGate.UnbondIntent({header: _hdr(_p), amount: _amount});
-        bytes32 _d = _digest(
-            _p.acct,
-            keccak256(
-                abi.encode(
-                    keccak256(
-                        "UnbondIntent(IntentHeader header,uint256 amount)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)"
-                    ),
-                    _hashHeader(_i.header),
-                    _i.amount
-                )
-            )
-        );
-        hubGate.unbond(_i, _pair(_p, _d));
-    }
-
-    function test_draw_is_clamped_to_the_bond_and_never_more() public {
-        _bond(alice, 1000e6);
-        _bond(bob, 1000e6);
-        _operate(1, 250e6);
-
-        _draw(1, 1400e6);
-
-        assertEq(bondStore.bondMap(alice.acct, address(usdc)), 0, "a loss beyond the bond seizes the bond, not more");
-        assertEq(bondStore.bondMap(bob.acct, address(usdc)), 0, "same for bob");
-        assertEq(usdc.balanceOf(address(bondStore)), 0, "custody matches the drained ledger");
-    }
-
-    function test_a_route_is_keyed_to_the_user_and_only_their_account_can_spend_it() public {
-        address _aliceRoute = accountModule.predictDepositRoute(alice.user);
-        assertEq(_aliceRoute, accountModule.predictDepositRoute(alice.user), "the route is a pure function of the user");
-        assertTrue(_aliceRoute != accountModule.predictDepositRoute(bob.user), "each user gets their own route");
-
-        usdc.mint(_aliceRoute, 100e6);
-        IAccount.Call[] memory _steal = new IAccount.Call[](1);
-        _steal[0] = IAccount.Call({
-            target: address(usdc),
-            value: 0,
-            gasLimit: GAS,
-            callData: abi.encodeWithSignature("transfer(address,uint256)", bob.acct, 100e6)
-        });
-
-        vm.prank(bob.acct);
-        vm.expectRevert(Error.Account__UnauthorizedCaller.selector);
-        DepositRoute(payable(_aliceRoute)).execute(_steal);
-
-        vm.prank(alice.acct);
-        DepositRoute(payable(_aliceRoute)).execute(_steal);
-        assertEq(usdc.balanceOf(_aliceRoute), 0, "alice's own account can spend her route");
-    }
-
-    function test_a_prefunded_route_has_no_code_until_the_account_is_created() public {
-        (address _fresh,) = makeAddrAndKey("funds-before-onboarding");
-        address _route = accountModule.predictDepositRoute(_fresh);
-
-        usdc.mint(_fresh, 250e6);
-        vm.prank(_fresh);
-        usdc.transfer(_route, 250e6);
-
-        assertEq(usdc.balanceOf(_route), 250e6, "the route holds value");
-        assertEq(_route.code.length, 0, "and has no code until createAccount clones it");
-
-        assertGt(accountModule.predictDepositRoute(alice.user).code.length, 0, "an onboarded user's route is deployed");
-    }
-
-    function test_a_cycle_can_only_be_drawn_once() public {
-        _bond(alice, 1000e6);
-        _bond(bob, 1000e6);
-        _operate(1, 250e6);
-
-        _draw(1, 100e6);
-        assertEq(bondStore.bondMap(alice.acct, address(usdc)), 900e6, "the first draw seizes the loss");
-
-        HubGate.DrawIntent memory _i = _drawIntent(1, 100e6);
-        bytes memory _sig = _pair(master, _drawDigest(_i));
-        vm.expectRevert(
-            abi.encodeWithSelector(Error.Bond__CycleAlreadyDrawn.selector, master.acct, block.chainid, uint(1))
-        );
-        hubGate.draw(_i, _sig, _noGenesis());
-
-        assertEq(bondStore.bondMap(alice.acct, address(usdc)), 900e6, "a replayed draw seizes nothing more");
-        assertEq(bondStore.bondMap(bob.acct, address(usdc)), 900e6, "same for bob");
-    }
-
-    function test_rebroadcasting_a_mandate_cannot_repudiate_an_incurred_loss() public {
-        _bond(alice, 1000e6);
-        _bond(bob, 1000e6);
-        _operate(1, 250e6);
-
-        bytes32[] memory _ids = new bytes32[](1);
-        _ids[0] = register.tokenIdMap(address(usdc));
-        mandateSpec = AccountLib.Mandate({
-            master: master.acct,
-            skin: 0,
-            allocationRate: 0,
-            cooldownPeriod: 0,
-            expiry: block.timestamp + 365 days,
-            tokenIdList: _ids
-        });
-        _bond(alice, 0);
-        _bond(bob, 0);
-
-        _draw(1, 400e6);
-
-        assertEq(bondStore.bondMap(alice.acct, address(usdc)), 600e6, "a zeroed mandate does not shrink the loss");
-        assertEq(bondStore.bondMap(bob.acct, address(usdc)), 600e6, "same for bob");
-    }
-
-    function test_full_lifecycle_every_participant_exits() public {
-        uint _minted = 3000e6 + 1200e6 + 1200e6;
-
-        _deposit(alice, 200e6);
-        _minted += 200e6;
-        _credit(alice, 100e6);
-        _minted += 100e6;
-
-        _bond(alice, 1000e6);
-        _bond(bob, 1000e6);
-        assertEq(bondStore.bondMap(alice.acct, address(usdc)), 1000e6, "alice bonded");
-        assertEq(bondStore.bondMap(bob.acct, address(usdc)), 1000e6, "bob bonded");
-        assertEq(usdc.balanceOf(address(bondStore)), 2000e6, "bond custody");
-
-        _operate(1, 250e6);
-        _settle(1, 100e6);
-
-        _operate(2, 250e6);
-        _draw(2, 50e6);
-        assertEq(bondStore.bondMap(alice.acct, address(usdc)), 950e6, "alice bond drawn");
-        assertEq(bondStore.bondMap(bob.acct, address(usdc)), 950e6, "bob bond drawn");
-
-        _unbond(alice, 950e6);
-        _unbond(bob, 950e6);
-        assertEq(usdc.balanceOf(address(bondStore)), 0, "bond store fully drained");
-
-        _withdrawAll(master);
-        _withdrawAll(alice);
-        _withdrawAll(bob);
-
-        assertEq(usdc.balanceOf(master.acct), 0, "master account drained");
-        assertEq(usdc.balanceOf(alice.acct), 0, "alice account drained");
-        assertEq(usdc.balanceOf(bob.acct), 0, "bob account drained");
-        assertGt(usdc.balanceOf(master.user), 0, "master exited to wallet");
-        assertGt(usdc.balanceOf(alice.user), 0, "alice exited to wallet");
-        assertGt(usdc.balanceOf(bob.user), 0, "bob exited to wallet");
-
-        assertEq(
-            usdc.balanceOf(master.user) + usdc.balanceOf(alice.user) + usdc.balanceOf(bob.user)
-                + usdc.balanceOf(feeReceiver),
-            _minted,
-            "value conserved: every minted unit is in a wallet or the fee receiver"
+    function _cloneCode(
+        address _impl,
+        bytes memory _args
+    ) internal pure returns (bytes memory) {
+        return abi.encodePacked(
+            hex"61", uint16(_args.length + 0x2d), hex"3d81600a3d39f3363d3d373d3d3d363d73", _impl, hex"5af43d82803e903d91602b57fd5bf3", _args
         );
     }
 }

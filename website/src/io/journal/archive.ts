@@ -99,7 +99,7 @@ async function walkPointers(chainId: ChainId, account: Address, head: bigint, fl
   return out.sort((a, b) => (a.blockNumber !== b.blockNumber ? (a.blockNumber < b.blockNumber ? -1 : 1) : a.logIndex - b.logIndex))
 }
 
-export async function walkAccount(chainId: ChainId, account: Address, head: bigint): Promise<IStoredAccountCall[]> {
+export async function walkAccount(chainId: ChainId, account: Address, user: Address, head: bigint): Promise<IStoredAccountCall[]> {
   const cached = await readAccountCalls(chainId, account)
   const afterBlock = cached.length > 0 ? cached[cached.length - 1]!.blockNumber : 0n
   if (head <= afterBlock) return cached
@@ -115,23 +115,17 @@ export async function walkAccount(chainId: ChainId, account: Address, head: bigi
     prevBlock = f.blockNumber
   }
 
-  const genesis = cached[0] ?? fetched[0]!
-  const born = decodeAccountCall(genesis)
-  if (born.selector !== ACCOUNT_CALL_MAP.AccountModule.createAccount.selector) {
-    throw new Error(`the first entry of ${account} on ${chainId} is not its genesis; the account history must start at creation`)
-  }
-  const bornProof = await verifyAccountCall(
-    { account, nonce: genesis.blockNumber, digest: genesis.digest, signature: genesis.signature },
-    { signer: born.signer, attestor: attestorAddress }
-  )
-  if (bornProof?.kind !== 'key') {
-    throw new Error(
-      `the genesis of ${account} on ${chainId} is not signed by the account's own key; the signer it names cannot be trusted to authorise the entries that follow`
-    )
-  }
-  for (const s of fetched) {
+  let epoch = 0n
+  for (const s of [...cached, ...fetched]) {
+    const record = decodeAccountCall(s)
+    if (record.selector === ACCOUNT_CALL_MAP.UserAccount.revokeSessions.selector) {
+      epoch = record.epoch
+      continue
+    }
     if (s.digest === zeroHash) continue
-    await verifyAccountCall({ account, nonce: s.blockNumber, digest: s.digest, signature: s.signature }, { signer: born.signer, attestor: attestorAddress })
+    if (fetched.includes(s)) {
+      await verifyAccountCall({ account, nonce: s.blockNumber, digest: s.digest, signature: s.signature }, { user, attestor: attestorAddress, epoch })
+    }
   }
 
   await writeAccountCalls(chainId, account, fetched).catch((err: unknown) =>

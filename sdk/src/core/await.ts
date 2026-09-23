@@ -1,6 +1,6 @@
-export class AwaitTimeoutError extends Error {}
+class AwaitTimeoutError extends Error {}
 
-export interface IAwaitOptions {
+interface IAwaitOptions {
   timeoutMs: number
   pollMs?: number
   maxPollMs?: number

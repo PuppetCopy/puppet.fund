@@ -1,6 +1,8 @@
-import { generatePairingKeypair, type IPairedSession, type ISealedPayload, openPairingPayload } from '@puppet/sdk/account'
+import { generatePairingKeypair, type IPairedGrant, type IPairedSession, type ISealedPayload, openPairingPayload, sessionEnvelope } from '@puppet/sdk/account'
 import { createCompact, type ICompact } from '@puppet/sdk/compact'
+import { createClient, type IDigestClient } from '@puppet/sdk/datastore'
 import { type IGetRate, oracleRate } from '@puppet/sdk/evaluate'
+import * as schema from '@puppet/sdk/schema'
 import { type ITokenRegistryMap, tokenRegistryFromRows } from '@puppet/sdk/state'
 import type { Address, Hex } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
@@ -53,22 +55,28 @@ export async function pairOverBrowser(pairUrl: string | URL = 'https://puppet.fu
 export interface IConnectorConfig {
   session?: IPairedSession
   pairUrl?: string | URL
+  chronicleUrl: string
   dryRun?: boolean
 }
 
 export interface IConnector {
+  matchmakerUrl: string
   compact: ICompact
+  chronicle: IDigestClient
   tokenRegistry: ITokenRegistryMap
   getRate: IGetRate
   user: Address
   account: Address
   dryRun: boolean
   signer: Address
-  signIntent: (digest: Hex) => Promise<Hex>
+  approve: (chainId: number, digest: Hex) => Promise<Hex>
   close: () => void
 }
 
-export async function createConnector(config: IConnectorConfig = {}): Promise<IConnector> {
+export async function createConnector(config: IConnectorConfig): Promise<IConnector> {
+  if (!/^https?:\/\//.test(config.chronicleUrl)) {
+    throw new Error(`chronicleUrl "${config.chronicleUrl}" is not an absolute http(s) URL`)
+  }
   const session = config.session ?? (await pairOverBrowser(config.pairUrl))
   for (const [name, value] of [
     ['matchmakerUrl', session.matchmakerUrl],
@@ -78,28 +86,43 @@ export async function createConnector(config: IConnectorConfig = {}): Promise<IC
       throw new Error(`session ${name} "${value}" is not an absolute http(s) URL: re-pair against a current puppet.fund build`)
     }
   }
-  if (!session.signer) {
+  if (!session.signerKey) {
     throw new Error('paired session carries no signer key: re-pair against a current puppet.fund build')
+  }
+  if (!session.grants || session.grants.length === 0) {
+    throw new Error('paired session carries no session grant: sign a session in the browser, then re-pair')
   }
   if (!session.tokenRegistry) {
     throw new Error('paired session lacks the token registry: re-pair against a current puppet.fund build')
   }
-  if (!session.body) {
-    throw new Error('paired session names no trading account: re-pair against a current puppet.fund build with a trading account selected')
+  if (!session.account) {
+    throw new Error('paired session names no fund account: re-pair against a current puppet.fund build with a fund open')
   }
   Object.defineProperty(session, 'share', { enumerable: false })
-  Object.defineProperty(session, 'signer', { enumerable: false })
-  const signerAccount = privateKeyToAccount(session.signer)
+  Object.defineProperty(session, 'signerKey', { enumerable: false })
+  const signerAccount = privateKeyToAccount(session.signerKey)
+  const grantOf = (chainId: number): IPairedGrant => {
+    const granted = session.grants.find(row => row.chainId === chainId)
+    if (granted === undefined) {
+      throw new Error(`the paired session carries no grant for chain ${chainId}; sign a session there in the browser and re-pair`)
+    }
+    return granted
+  }
   const compact = createCompact({ matchmakerUrl: session.matchmakerUrl })
   return {
+    matchmakerUrl: session.matchmakerUrl,
     compact,
+    chronicle: createClient({ storageUrl: config.chronicleUrl, schema }),
     tokenRegistry: tokenRegistryFromRows(session.tokenRegistry),
     getRate: oracleRate(session.oracleUrl),
     user: session.user,
-    account: session.body.account,
+    account: session.account,
     dryRun: config.dryRun ?? false,
     signer: signerAccount.address,
-    signIntent: (digest: Hex): Promise<Hex> => signerAccount.sign({ hash: digest }),
+    approve: async (chainId: number, digest: Hex): Promise<Hex> => {
+      const granted = grantOf(chainId)
+      return sessionEnvelope(granted.signer, granted.issuedAt, granted.expiry, granted.grant, await signerAccount.sign({ hash: digest }))
+    },
     close: (): void => {
       compact.close()
     }

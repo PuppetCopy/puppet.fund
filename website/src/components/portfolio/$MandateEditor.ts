@@ -1,30 +1,27 @@
 import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
 import { getTokenDescription, getUnixTimestamp, readableDate, readablePercentage } from '@puppet/sdk/core'
-import type { ChainId } from '@puppet/sdk/const'
 import type { IMandateRow } from '@puppet/sdk/schema'
-import { bondTokenOf, type ITokenRegistryMap } from '@puppet/sdk/state'
+import { bondTokenOf } from '@puppet/sdk/state'
 import { combine, filter, type IStream, just, map, merge, op, sampleMap, start, switchMap } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, type I$Slottable, style, styleBehavior } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { type Address, type Hex, hexToString } from 'viem'
+import { $defaultAnchor, $Link } from 'aelea/ui-router'
+import type { Address } from 'viem'
 import {
   $ButtonPrimary,
   $ButtonSecondary,
   $Dropdown,
-  $DropMultiSelect,
   $defaultDropdownContainer,
-  $defaultDropMultiSelectAnchor,
   $defaultMiniButtonPrimary,
   $defaultMiniButtonSecondary,
   $FieldLabeled,
   $infoTooltip,
-  $labelDisplay,
   text
 } from '@/ui-components'
+import { routeSchema } from '../../app/routeSchema.js'
 import { chainName } from '../../common/$chain.js'
-import { $tokenProfile } from '../../common/$common.js'
 import type { IMandateDraft } from './draft.js'
 import { $editorPercentSlider } from './editorUtils.js'
 
@@ -83,7 +80,7 @@ const $explainer = (lead: string, $body: I$Node): I$Node =>
     $body
   )
 
-const $caption = (label: string): I$Node => $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.4' }))($text(label))
+const $caption = (label: string | IStream<string>): I$Node => $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.4' }))($text(label))
 
 const $rowLabel = (label: string): I$Node =>
   $node(style({ fontSize: text.xs, color: palette.foreground, width: '112px', flexShrink: 0 }))($text(label))
@@ -112,13 +109,13 @@ const $timelineRow = (label: string, dots: readonly { at: number; on: boolean }[
   )
 
 export interface I$MandateEditor {
-  registry: ITokenRegistryMap
   master: Address
   existing: IMandateRow | undefined
   draft: IStream<IMandateDraft | null>
+  needsDeposit: boolean
 }
 
-export const $MandateEditor = ({ registry, master, existing, draft }: I$MandateEditor) =>
+export const $MandateEditor = ({ master, existing, draft, needsDeposit }: I$MandateEditor) =>
   component(
     (
       [changeAllocation, changeAllocationTether]: IBehavior<number>,
@@ -127,25 +124,11 @@ export const $MandateEditor = ({ registry, master, existing, draft }: I$MandateE
       [typeCooldown, typeCooldownTether]: IBehavior<string>,
       [selectExpiry, selectExpiryTether]: IBehavior<bigint>,
       [typeExpiry, typeExpiryTether]: IBehavior<string>,
-      [selectTokens, selectTokensTether]: IBehavior<Hex[]>,
       [clickAdd, clickAddTether]: IBehavior<PointerEvent>,
       [clickLeave, clickLeaveTether]: IBehavior<PointerEvent>
     ) => {
       const nowSec = getUnixTimestamp()
       const active = existing !== undefined && existing.expiry > BigInt(nowSec) ? existing : undefined
-      const assets = new Map<Hex, { chainId: ChainId; token: Address }>()
-      for (const [chainId, chainMap] of registry) {
-        for (const info of chainMap.values()) {
-          if (!assets.has(info.tokenId) || chainId === HUB_CHAIN_ID) assets.set(info.tokenId, { chainId, token: info.token })
-        }
-      }
-      const $asset = (id: Hex, size: number): I$Node => {
-        const asset = assets.get(id)
-        return asset === undefined ? $node($text(hexToString(id).replace(/\0+$/, ''))) : $tokenProfile(asset.chainId, asset.token, size)
-      }
-      const coversEveryToken = (list: readonly Hex[]): boolean => [...assets.keys()].every(id => list.includes(id))
-      const seedTokens: Hex[] = active === undefined || coversEveryToken(active.tokenIdList) ? [] : [...active.tokenIdList]
-
       const allocation: IStream<number> = state(active ? Number(active.allocationRate) / RATE : 0.25, changeAllocation)
       const skin: IStream<number> = state(Number(active?.skin ?? DEFAULT_SKIN) / RATE, changeSkin)
       const initialCooldown = active?.cooldownPeriod ?? DEFAULT_COOLDOWN
@@ -165,56 +148,53 @@ export const $MandateEditor = ({ registry, master, existing, draft }: I$MandateE
         map(text => (parseExpiry(text) === null ? 'Type a duration like 30d, 12w or 1y' : null), typeExpiry),
         map(() => null, selectExpiry)
       )
-      const selected: IStream<Hex[]> = state(seedTokens, selectTokens)
-      const terms = combine({ allocation, skin, cooldown, expiryIn, selected })
+      const terms = combine({ allocation, skin, cooldown, expiryIn })
 
-      const toDraft = (p: { allocation: number; skin: number; cooldown: bigint; expiryIn: bigint; selected: readonly Hex[] } | null): IMandateDraft => ({
+      const toDraft = (p: { allocation: number; skin: number; cooldown: bigint; expiryIn: bigint } | null): IMandateDraft => ({
         kind: 'mandate',
         id: `mandate:${master}`,
-        bond: 0n,
         mandate: {
           master,
           skin: p === null ? 0n : BigInt(Math.round(p.skin * RATE)),
           allocationRate: p === null ? 0n : BigInt(Math.round(p.allocation * RATE)),
           cooldownPeriod: p === null ? 0n : p.cooldown,
-          expiry: p === null ? 0n : BigInt(getUnixTimestamp()) + p.expiryIn,
-          tokenIdList: p === null ? [] : [...(p.selected.length === 0 ? assets.keys() : p.selected)].sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1))
+          expiry: p === null ? 0n : BigInt(getUnixTimestamp()) + p.expiryIn
         }
       })
 
       const $shareExplainer = $explainer(
-        'Each time this master opens a cycle by trading, at most this share of your matchable bond backs it.',
+        'Each allocation round of this master takes at most this share of your deposit.',
         switchMap(
           rate =>
             $column(spacing.small)(
-              $meterRow('Matchable bond', 1, exampleAmount(EXAMPLE_MATCHABLE)),
-              $meterRow(`Per match at ${ratePercent(rate)}`, rate, exampleAmount(EXAMPLE_MATCHABLE * rate)),
-              $caption('Matchable is your bond not already backing an open cycle, shared by every master you back.')
+              $meterRow('Your deposit', 1, exampleAmount(EXAMPLE_MATCHABLE)),
+              $meterRow(`Per round at ${ratePercent(rate)}`, rate, exampleAmount(EXAMPLE_MATCHABLE * rate)),
+              $caption(`Your deposit is the ${bondSymbol} in your account on the hub, shared by every master you back. A withdrawal you requested is not counted, and part is kept for exit fees.`)
             ),
           allocation
         )
       )
 
       const $skinExplainer = $explainer(
-        'Your backing never exceeds this share of what the master puts up, so the master always has its own value next to yours.',
+        'The master must keep at least this share of the pool, so its own money always sits next to yours.',
         switchMap(p => {
-          const skinCap = EXAMPLE_COLLATERAL * p.skin
+          const room = p.skin === 0 ? Number.POSITIVE_INFINITY : EXAMPLE_COLLATERAL / p.skin - EXAMPLE_COLLATERAL
           const shareCap = EXAMPLE_MATCHABLE * p.allocation
-          const backed = Math.min(skinCap, shareCap)
+          const backed = Math.min(room, shareCap)
           return $column(spacing.small)(
-            $meterRow('Master puts up', EXAMPLE_COLLATERAL / EXAMPLE_MATCHABLE, exampleAmount(EXAMPLE_COLLATERAL)),
-            $meterRow(`Skin cap at ${ratePercent(p.skin)}`, skinCap / EXAMPLE_MATCHABLE, exampleAmount(skinCap)),
+            $meterRow('Master owns', EXAMPLE_COLLATERAL / EXAMPLE_MATCHABLE, exampleAmount(EXAMPLE_COLLATERAL)),
+            $meterRow(`Room at ${ratePercent(p.skin)}`, room / EXAMPLE_MATCHABLE, Number.isFinite(room) ? exampleAmount(room) : 'No limit'),
             $meterRow(`Share cap at ${ratePercent(p.allocation)}`, shareCap / EXAMPLE_MATCHABLE, exampleAmount(shareCap)),
             $meterRow('You back', backed / EXAMPLE_MATCHABLE, exampleAmount(backed)),
             $caption(
-              `${skinCap <= shareCap ? 'Your skin cap binds here.' : 'Your share cap binds here.'} The master also limits total backing to its own skin; when backers ask for more, every stake scales down pro-rata.`
+              `${room <= shareCap ? 'The room binds here.' : 'Your share cap binds here.'} The room is shared by every backer in the round; when they ask for more, every stake scales down pro-rata.`
             )
           )
         }, combine({ skin, allocation }))
       )
 
       const $cooldownExplainer = $explainer(
-        "After the attestor matches you into one of this master's cycles, it skips you until the cooldown has passed.",
+        "After you join one of this master's allocation rounds, you sit out its rounds until the cooldown has passed.",
         switchMap((period: bigint) => {
           const hours = Number(period) / 3600
           let lastMatched: number | null = null
@@ -224,12 +204,12 @@ export const $MandateEditor = ({ registry, master, existing, draft }: I$MandateE
             return { at: hour / EXAMPLE_WINDOW_HOURS, on }
           })
           return $column(spacing.small)(
-            $timelineRow('Master opens', dots.map(dot => ({ at: dot.at, on: true }))),
-            $timelineRow('You are matched', dots),
+            $timelineRow('Master funds', dots.map(dot => ({ at: dot.at, on: true }))),
+            $timelineRow('You join', dots),
             $caption(
               period === 0n
-                ? 'No cooldown: you can be matched into every cycle this master opens.'
-                : `With ${readableDuration(period)} between matches, the grey cycles open without you. The example spans 8 days.`
+                ? 'No cooldown: you can join every round this master funds.'
+                : `With ${readableDuration(period)} between rounds you join, the grey rounds go ahead without you. The example spans 8 days.`
             )
           )
         }, filter((period): period is bigint => period !== null, cooldown))
@@ -243,39 +223,34 @@ export const $MandateEditor = ({ registry, master, existing, draft }: I$MandateE
 
       return [
         $column(spacing.default, style({ width: '394px', maxWidth: '100%' }))(
+          ...(needsDeposit
+            ? [
+                $row(spacing.small, style({ alignItems: 'center', fontSize: text.xs, color: palette.indeterminate, lineHeight: '1.4' }))(
+                  $node(style({ flex: 1 }))(
+                    $text(
+                      `Backing pays its relay fee and each round's stake from your ${getTokenDescription(HUB_CHAIN_ID, bondTokenOf(HUB_CHAIN_ID)).symbol} deposit on ${chainName(HUB_CHAIN_ID)}. Add a deposit before you submit.`
+                    )
+                  ),
+                  $Link({
+                    route: routeSchema.portfolio,
+                    $anchor: $defaultAnchor(style({ fontSize: text.xs, textDecoration: 'underline', whiteSpace: 'nowrap' })),
+                    $content: $text('Deposit')
+                  })({})
+                )
+              ]
+            : []),
           $column(spacing.small)(
-            $term('Share of your matchable bond per match', $shareExplainer, map(ratePercent, allocation)),
-            $editorPercentSlider({ value: allocation, disabled: just(false), error: just(false), ariaLabel: 'allocation rate' })({
+            $term('Share of your deposit per round', $shareExplainer, map(ratePercent, allocation)),
+            $editorPercentSlider({ value: allocation, disabled: just(false), error: map(a => a >= 1, allocation), ariaLabel: 'allocation rate' })({
               change: changeAllocationTether()
-            })
+            }),
+            $caption(map(a => (a >= 1 ? 'Keep part of your deposit on the route for exit fees.' : ''), allocation))
           ),
           $column(spacing.small)(
             $term('Skin you require', $skinExplainer, map(ratePercent, skin)),
             $editorPercentSlider({ value: skin, disabled: just(false), error: just(false), ariaLabel: 'skin ratio' })({
               change: changeSkinTether()
             })
-          ),
-          $column(spacing.small)(
-            $row(spacing.small, style({ width: '100%' }))(
-              $labelDisplay(style({ width: '128px' }))(
-                $row(spacing.tiny, style({ alignItems: 'center', whiteSpace: 'nowrap' }))(
-                  $text('Tokens'),
-                  $infoTooltip('The tokens this master may trade you into. A cycle can only match you when the master operates in one of them; Any token covers every token listed today.', palette.foreground)
-                )
-              ),
-              $DropMultiSelect<Hex>({
-                $container: $defaultDropdownContainer(style({ display: 'flex', flex: 1, minWidth: '0' })),
-                $anchorContainer: $defaultDropMultiSelectAnchor(
-                  style({ minHeight: '48px', padding: '0 22px 0 10px', backgroundColor: palette.background, borderBottom: `2px solid ${palette.message}` })
-                ),
-                value: selected,
-                optionList: [...assets.keys()],
-                $noneSelected: $node(style({ color: colorShade(palette.foreground, 80) }))($text('Any token')),
-                $$selectedOption: map(id => $asset(id, 20)),
-                $$option: map(id => $asset(id, 24))
-              })({ select: selectTokensTether() })
-            ),
-            $node(style({ minHeight: '1rem', width: '100%' }))()
           ),
           $Dropdown<bigint>({
             $container: $defaultDropdownContainer(style({ display: 'flex', width: '100%' })),
@@ -313,7 +288,7 @@ export const $MandateEditor = ({ registry, master, existing, draft }: I$MandateE
           })({ select: selectExpiryTether() }),
           $node(style({ fontSize: text.xs, color: palette.foreground }))(
             $text(
-              `One broadcast on ${chainName(HUB_CHAIN_ID)} carries the whole mandate: it is chainless and binds wherever this master operates. Re-broadcasting replaces it; leaving is the same broadcast with an expiry of zero.`
+              `One broadcast on ${chainName(HUB_CHAIN_ID)} carries the whole mandate. Re-broadcasting replaces it; leaving is the same broadcast with an expiry of zero.`
             )
           ),
           $row(spacing.small, style({ justifyContent: 'flex-end', alignItems: 'center' }))(
@@ -322,7 +297,7 @@ export const $MandateEditor = ({ registry, master, existing, draft }: I$MandateE
               : []),
             $ButtonPrimary({
               $container: $defaultMiniButtonPrimary,
-              disabled: map(p => p.cooldown === null || p.expiryIn === null, combine({ cooldown, expiryIn })),
+              disabled: map(p => p.cooldown === null || p.expiryIn === null || p.allocation >= 1, combine({ cooldown, expiryIn, allocation })),
               $content: $text(map(d => (d ? 'Update in cart' : active ? 'Change' : 'Back this trader'), start(null, draft)))
             })({ click: clickAddTether() })
           )
@@ -331,7 +306,7 @@ export const $MandateEditor = ({ registry, master, existing, draft }: I$MandateE
           changeMandateDraft: merge(
             op(
               sampleMap(p => p, terms, clickAdd),
-              filter((p): p is { allocation: number; skin: number; cooldown: bigint; expiryIn: bigint; selected: Hex[] } => p.cooldown !== null && p.expiryIn !== null),
+              filter((p): p is { allocation: number; skin: number; cooldown: bigint; expiryIn: bigint } => p.cooldown !== null && p.expiryIn !== null && p.allocation < 1),
               map(toDraft)
             ),
             map(() => toDraft(null), clickLeave)

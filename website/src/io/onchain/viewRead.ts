@@ -11,7 +11,7 @@ import {
   getAddress,
   type Hex
 } from 'viem'
-import { EVICT_VIEW_OWNER, viewBucket, viewUrl, writeCacheJson } from '../../app/swCache.js'
+import { EVICT_VIEW_OWNER, viewUrl } from '../../app/swCache.js'
 import { publicClientMap } from '../../wallet/wallet.js'
 
 const swActive = (): boolean =>
@@ -82,32 +82,4 @@ export async function viewCall<
   const body = JSON.parse(raw) as { result?: Hex; error?: string }
   if (body.error !== undefined || body.result === undefined) throw new Error(body.error ?? 'view read failed')
   return decodeFunctionResult({ abi, functionName, data: body.result }) as IViewReturn<abi, fn, args>
-}
-
-export async function primeViewCache<
-  const abi extends Abi,
-  fn extends IViewFn<abi>,
-  const args extends IViewArgs<abi, fn>
->(req: IViewCall<abi, fn, args>, result: Hex): Promise<void> {
-  if (!swActive()) return
-  const owner = readOwner(req.global)
-  const data = encodeFunctionData({
-    abi: req.abi as Abi,
-    functionName: req.functionName as string,
-    args: req.args as readonly unknown[] | undefined
-  })
-  const key = new URL(viewUrl({ net: CHAIN_NETWORK_MAP[req.chainId], to: req.address, data, owner }), location.origin).href
-  await writeCacheJson(viewBucket(owner), key, { result })
-}
-
-export async function viewCode(chainId: ChainId, address: Address, maxAge?: number): Promise<Hex | undefined> {
-  const direct = (): Promise<Hex | undefined> => publicClientMap[chainId].getCode({ address })
-  if (!swActive()) return direct()
-  const url = viewUrl({ net: CHAIN_NETWORK_MAP[chainId], to: address, code: true, owner: readOwner(), maxAge })
-  const res = await fetch(url)
-  const raw = res.ok ? await res.text() : ''
-  if (raw === '') return direct()
-  const body = JSON.parse(raw) as { result?: Hex; error?: string }
-  if (body.error !== undefined || body.result === undefined) throw new Error(body.error ?? 'view code read failed')
-  return body.result
 }

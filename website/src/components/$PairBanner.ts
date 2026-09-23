@@ -45,13 +45,15 @@ export const $PairBanner = ({ walletPair }: I$PairBanner) =>
               $WalletConnect()({})
             )
           }
-          if (root === null) return $column(spacing.small)($hint('Create your trading account first; the agent pairs to it.'))
-          const keys = p.wallet === null ? null : (p.bodyKeys?.keysOf(p.wallet.address) ?? null)
-          if (keys === null) return $column(spacing.small)($hint('No key share cached here yet; sign a session to re-derive it from your wallet.'))
+          if (root === null) return $column(spacing.small)($hint('Your account state could not be read, so the agent cannot pair yet.'))
+          if (root.fund === null) return $column(spacing.small)($hint('Open a fund first; the agent pairs to the fund it trades for.'))
+          const pairing = p.keys === null ? null : p.keys.pairingOf(wallet.address, root.fund.account)
+          if (pairing === null) return $column(spacing.small)($hint('This browser holds no key share for that fund; reopen it here first.'))
+          const fund = root.fund
           return $column(spacing.small)(
             $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text('Pair your agent')),
             $hint(
-              'Hand this account key share to the local agent waiting to pair. It is encrypted to your agent, sent only to 127.0.0.1, and never written to disk.'
+              'Hand this fund key share to the local agent waiting to pair. It is encrypted to your agent, sent only to 127.0.0.1, and never written to disk.'
             ),
             $defaultButtonPrimary(
                   style({ alignSelf: 'flex-start' }),
@@ -62,10 +64,11 @@ export const $PairBanner = ({ walletPair }: I$PairBanner) =>
                         .getTokenRegistry()
                         .then(registry => {
                           const payload: IPairedSession = {
-                            share: keys.share,
-                            signer: keys.signer,
+                            share: pairing.share,
+                            signerKey: pairing.signerKey,
+                            grants: pairing.grants,
                             user: wallet.address,
-                            body: { account: root.account },
+                            account: fund.account,
                             matchmakerUrl: new URL(matchmakerUrl, location.origin).href,
                             oracleUrl: new URL('/api/oracle', location.origin).href,
                             relayer: relayerAddress,

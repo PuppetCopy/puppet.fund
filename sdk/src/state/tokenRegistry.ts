@@ -1,4 +1,4 @@
-import { CHAIN_META, CHAIN_TOKEN_MAP, HUB_CHAIN_ID, PROTOCOL, TOKEN_META } from '@puppet/contracts/const'
+import { CHAIN_META, CHAIN_TOKEN_MAP, PROTOCOL, TOKEN_META } from '@puppet/contracts/const'
 import { type Address, getAddress, type Hex, isAddressEqual, } from 'viem'
 import { CompactContractError } from '../compact/error.js'
 import type { ChainId } from '../const/index.js'
@@ -46,7 +46,7 @@ export function candidateTokens(): Map<ChainId, Address[]> {
   return byChain
 }
 
-export type ITokenMeta = (typeof TOKEN_META)[keyof typeof TOKEN_META] & { address: Address; tokenKey: string }
+type ITokenMeta = (typeof TOKEN_META)[keyof typeof TOKEN_META] & { address: Address; tokenKey: string }
 
 export type ITokenMetaKey = `${ChainId}:${Address}`
 
@@ -96,10 +96,6 @@ export function bondTokenOf(chainId: ChainId): Address {
   return chainTokenOfKey(chainId, PROTOCOL.bondToken)
 }
 
-export function isProtocolBase(token: Address): boolean {
-  return (PROTOCOL.BASE_TOKEN as readonly string[]).includes(tokenKeyOf(HUB_CHAIN_ID, token))
-}
-
 export function nativeSymbolOf(chainId: ChainId): string {
   return CHAIN_META[chainId].nativeSymbol
 }
@@ -128,19 +124,4 @@ export function registeredTokenAddresses(registry: ITokenRegistryMap, chainId: C
   const chainMap = registry.get(chainId)
   if (!chainMap) throw new Error(`token registry has no chain ${chainId}`)
   return [...chainMap.values()].map(info => getAddress(info.token))
-}
-
-export function listedTokenAddresses(registry: ITokenRegistryMap, chainId: ChainId, baseTokenIdList: readonly Hex[]): Address[] {
-  const chainMap = registry.get(chainId)
-  if (!chainMap) throw new Error(`token registry has no chain ${chainId}`)
-  return [...chainMap.values()].filter(info => baseTokenIdList.includes(info.tokenId)).map(info => getAddress(info.token))
-}
-
-export function custodyTokenAddresses(chainId: ChainId): Address[] {
-  return Object.values(CHAIN_TOKEN_MAP[chainId] as Record<string, string>).map(t => getAddress(t))
-}
-
-export function chainBaseToken(fromChainId: ChainId, baseToken: Address, toChainId: ChainId): Address {
-  const key = tokenKeyOf(fromChainId, baseToken)
-  return symbolOfKey(key) === nativeSymbolOf(toChainId) ? PROTOCOL.nativeToken : chainTokenOfKey(toChainId, key)
 }

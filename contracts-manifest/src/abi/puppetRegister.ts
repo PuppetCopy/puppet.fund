@@ -25,25 +25,6 @@ export default [
   },
   {
     "type": "function",
-    "name": "capMap",
-    "inputs": [
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "cap",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "setAccess",
     "inputs": [
       {
@@ -68,11 +49,6 @@ export default [
         "name": "_token",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "_cap",
-        "type": "uint256",
-        "internalType": "uint256"
       },
       {
         "name": "_tokenId",
@@ -111,12 +87,6 @@ export default [
         "type": "address",
         "indexed": true,
         "internalType": "address"
-      },
-      {
-        "name": "cap",
-        "type": "uint256",
-        "indexed": false,
-        "internalType": "uint256"
       },
       {
         "name": "tokenId",

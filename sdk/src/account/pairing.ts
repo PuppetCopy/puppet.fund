@@ -11,22 +11,28 @@ export interface ISealedPayload {
   ct: string
 }
 
-export interface IPairedBody {
-  account: Address
+export interface IPairedGrant {
+  chainId: number
+  signer: Address
+  grant: Hex
+  issuedAt: bigint
+  expiry: bigint
+  epoch: bigint
 }
 
 export interface IPairedSession {
   share: IShare
-  signer: Hex
+  signerKey: Hex
+  grants: IPairedGrant[]
   user: Address
-  body: IPairedBody
+  account: Address
   matchmakerUrl: string
   oracleUrl: string
   relayer: Address
   tokenRegistry?: ITokenRegistry[]
 }
 
-export interface IPairingKeypair {
+interface IPairingKeypair {
   publicKey: string
   privateKey: CryptoKey
 }

@@ -14,8 +14,7 @@ contract MockWNT is ERC20 {
         uint amount
     ) external {
         _burn(msg.sender, amount);
-        (bool ok,) = msg.sender.call{value: amount}("");
-        require(ok, "withdraw fail");
+        payable(msg.sender).transfer(amount);
     }
 
     receive() external payable {

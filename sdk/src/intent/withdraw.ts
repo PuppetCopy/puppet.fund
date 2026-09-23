@@ -1,15 +1,16 @@
-import type { IAccountLib__IntentHeader, ICoreGate__WithdrawIntent, ISwapLib__SwapParams } from '@puppet/contracts/types'
+import type { IAccountLib__IntentHeader, IDeposit__SwapIntent, ISwapLib__SwapParams } from '@puppet/contracts/types'
 import { type Address, type Hex, isAddressEqual, type TypedDataDefinition } from 'viem'
-import { CompactContractError, } from '../compact/error.js'
+import { predictUserAccount } from '../account/createAccount.js'
+import { CompactContractError } from '../compact/error.js'
 import { ADDRESS_ZERO, type ChainId } from '../const/index.js'
 import type { ITokenRegistryMap } from '../state/tokenRegistry.js'
-import type { IAcrossTiming } from './acrossDeposit.js'
+import type { IAcrossTiming } from './route/acrossDeposit.js'
 import * as IntentLib from './intentLib.js'
-import { intentTypedData } from './shared.js'
-import { type IWithdrawRoute, resolveSwapRoute, routeProvider } from './swap.js'
+import { type IGenesisContext, intentTypedData, verifyHeaderOrGenesis } from './shared.js'
+import { type IWithdrawRoute, resolveSwapRoute, routeProvider } from './route/swap.js'
 
 
-export interface IWithdrawLegs {
+interface IWithdrawLegs {
   inputToken: Address
   outputToken: Address
   inputAmount: bigint
@@ -23,16 +24,15 @@ export interface IWithdrawInput extends IWithdrawLegs {
   header: IAccountLib__IntentHeader
 }
 
-export interface IWithdrawAttestContext {
+interface IWithdrawAttestContext extends IGenesisContext {
   chainId: ChainId
   tokenRegistry: ITokenRegistryMap
-  sourceBalance: bigint
+  balance: bigint
   timing: IAcrossTiming
 }
 
-export function withdrawSwapParams(
+function withdrawSwapParams(
   chainId: ChainId,
-  account: Address,
   user: Address,
   legs: IWithdrawLegs,
   relayFee: bigint,
@@ -42,7 +42,7 @@ export function withdrawSwapParams(
   let providerCallData: Hex = '0x'
   if (legs.route.kind !== 'transfer') {
     IntentLib.verifyRelayFeeRatio(relayFee, legs.inputAmount)
-    providerCallData = resolveSwapRoute(account, user, {
+    providerCallData = resolveSwapRoute(predictUserAccount(user), user, {
       ...legs,
       timing,
       chainId,
@@ -61,15 +61,15 @@ export function withdrawSwapParams(
   }
 }
 
-export function verifyWithdrawLegs(
+function verifyWithdrawLegs(
   ctx: IWithdrawAttestContext,
   swap: ISwapLib__SwapParams,
   destinationChainId: bigint,
   relayFee: bigint
 ): void {
   if (swap.inputAmount === 0n) throw new CompactContractError('Balance__NothingToWithdraw', [])
-  if (ctx.sourceBalance < swap.inputAmount) {
-    throw new CompactContractError('Balance__InsufficientBalance', [ctx.sourceBalance, swap.inputAmount])
+  if (ctx.balance < swap.inputAmount) {
+    throw new CompactContractError('Balance__InsufficientBalance', [ctx.balance, swap.inputAmount])
   }
 
   if (isAddressEqual(swap.provider, ADDRESS_ZERO)) {
@@ -89,17 +89,17 @@ export function verifyWithdrawLegs(
   IntentLib.verifyRegisteredTokenCap(ctx.tokenRegistry, ctx.chainId, swap.inputToken, swap.inputAmount)
 }
 
-export function attestWithdrawIntent(
+export async function attestWithdrawIntent(
   ctx: IWithdrawAttestContext,
   input: IWithdrawInput
-): { intent: ICoreGate__WithdrawIntent; typedData: TypedDataDefinition } {
+): Promise<{ intent: IDeposit__SwapIntent; typedData: TypedDataDefinition }> {
+  await verifyHeaderOrGenesis(ctx, input.header, 'withdraw')
   if (!isAddressEqual(input.header.feeToken, input.inputToken)) {
     throw new CompactContractError('Intent__FeeTokenMismatch', [input.header.feeToken, input.inputToken])
   }
-  const account = input.header.account
-  const intent: ICoreGate__WithdrawIntent = {
+  const intent: IDeposit__SwapIntent = {
     header: input.header,
-    swap: withdrawSwapParams(ctx.chainId, account, input.header.user, input, input.header.fee, ctx.timing),
+    swap: withdrawSwapParams(ctx.chainId, input.header.user, input, input.header.fee, ctx.timing),
     destinationChainId: input.destinationChainId
   }
   verifyWithdrawLegs(ctx, intent.swap, intent.destinationChainId, input.header.fee)

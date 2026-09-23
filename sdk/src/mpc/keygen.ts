@@ -1,7 +1,7 @@
 import { type Hex, hexToBytes, toHex } from 'viem'
 import { decodePoint, decodeScalar, encodePoint, encodeScalar, equalBytes, G, hashBytes, type ISchnorrProof, schnorrProve, schnorrVerify } from './core.js'
 
-export type IRole = 'alice' | 'bob'
+type IRole = 'alice' | 'bob'
 
 export interface IShare {
   sid: Hex
@@ -19,7 +19,7 @@ export interface IKeygenReveal {
   proof: ISchnorrProof
 }
 
-export interface IKeygenAliceState {
+interface IKeygenAliceState {
   sid: Hex
   sk: bigint
   reveal: IKeygenReveal

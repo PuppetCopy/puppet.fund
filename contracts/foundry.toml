@@ -26,7 +26,7 @@
   optimizer = true
   optimizer_runs = 200
   gas_reports = [
-    "CoreGate",
+    "SpokeGate",
     "HubGate"
   ]
 
@@ -43,7 +43,7 @@
 [profile.prod]
   out = "forge-artifacts-prod"
   cache_path = "forge-cache-prod"
-  optimizer_runs = 100_000
+  optimizer_runs = 1_000
 
 # Under via_ir the whole compilation unit decides a contract's bytecode, so
 # script/ and test/ are pinned to their own harness profile: without it foundry
@@ -88,10 +88,7 @@
     "**/interface/**/*.sol",
     "**/shared/**/*.sol",
     "src/utils/auth/**/*.sol",
-    "src/utils/CoreContract.sol",
     "src/utils/TransferUtils.sol",
-    "src/utils/Precision.sol",
-    "src/utils/NonceLib.sol",
     "src/utils/IntentLib.sol"
   ]
 
@@ -116,17 +113,9 @@
   ]
 
 [rpc_endpoints]
-  # mainnet = { url = "${RPC_URL}/ethereum/${RPC_KEY}", chain_id = 1 }
   arbitrum = { url = "${RPC_URL}/arbitrum/${RPC_KEY}", chain_id = 42161 }
-  # base = { url = "${RPC_URL}/base/${RPC_KEY}", chain_id = 8453 }
-  # polygon = { url = "${RPC_URL}/polygon/${RPC_KEY}", chain_id = 137 }
-  # megaeth = { url = "${RPC_URL}/megaeth/${RPC_KEY}", chain_id = 4326 }
-  monad = { url = "${RPC_URL}/monad-mainnet/${RPC_KEY}", chain_id = 143 }
+  optimism = { url = "${RPC_URL}/optimism/${RPC_KEY}", chain_id = 10 }
 
 [etherscan]
-  mainnet = { key = "${ETHERSCAN_API_KEY}" }
   arbitrum = { key = "${ETHERSCAN_API_KEY}" }
-  base = { key = "${ETHERSCAN_API_KEY}" }
-  polygon = { key = "${ETHERSCAN_API_KEY}" }
-  # No `monad` entry: forge cannot resolve chain 143 in its built-in table and errors out at startup. Monad verifies
-  # through const.toml [VERIFIER.monad] instead (--verifier custom against the Etherscan V2 URL, chain id in the query).
+  optimism = { key = "${ETHERSCAN_API_KEY}" }

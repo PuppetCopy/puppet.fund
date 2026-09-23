@@ -96,7 +96,7 @@ const transcriptOf = (sid: Uint8Array, B: IPoint, m2: IPresignMessage2, m3: IPre
     hexListBytes(correlation[1].tauHat)
   )
 
-export interface IPresignAlice1 {
+interface IPresignAlice1 {
   share: IShare
   key: IOtSenderKey
 }
@@ -129,7 +129,7 @@ export function presignBob1(share: IShare, m1: IPresignMessage1): { state: IPres
   return { state: { share, B, kB, ot: state, m2 }, msg: m2 }
 }
 
-export interface IPresignAlice2 extends IPresignAlice1 {
+interface IPresignAlice2 extends IPresignAlice1 {
   m2: IPresignMessage2
   m3: IPresignMessage3
   pads: IOtSenderPads

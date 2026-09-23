@@ -1,24 +1,41 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import { bondTokenOf } from '@puppet/sdk/state'
-import type { Address } from 'viem'
-import { getAddress } from 'viem'
-import { fetchBonds, fetchDeposits, fetchOwnedAccount } from '../io/datastore/reads.js'
+import { escrowstoreAbi } from '@puppet/contracts/abi'
+import { HUB_CHAIN_ID, SPOKE_CHAIN_IDS } from '@puppet/contracts/const'
+import { predictUserAccount } from '@puppet/sdk/account'
+import { type ChainId, deploymentAddress } from '@puppet/sdk/const'
+import { fetchTokenBalance, registeredTokenAddresses } from '@puppet/sdk/state'
+import { type Address, getAddress } from 'viem'
+import context from '../io/context.js'
+import { publicClientMap } from './wallet.js'
 
 export interface IFundedCoordinate {
   chainId: number
   token: Address
 }
 
-export async function fundedFromChronicle(user: Address): Promise<IFundedCoordinate> {
-  const account = await fetchOwnedAccount(user)
-  if (account === null) {
-    throw new Error(`${user} has no account the chronicle knows of; fund your deposit route from the Deposit panel, which names what you funded`)
+export async function fundedFromStake(user: Address, fundList: readonly Address[]): Promise<IFundedCoordinate> {
+  const registry = await context.getTokenRegistry()
+  const parent = predictUserAccount(user)
+  const chainList = [HUB_CHAIN_ID, ...SPOKE_CHAIN_IDS] as ChainId[]
+  for (const chainId of chainList) {
+    const client = publicClientMap[chainId]
+    if (client === undefined) continue
+    const store = deploymentAddress('EscrowStore', chainId)
+    const tokens = registeredTokenAddresses(registry, chainId)
+    const coords = fundList.flatMap(fund => tokens.map(token => ({ fund, token })))
+    const held = await Promise.all(
+      coords.map(async ({ fund, token }) => {
+        const [escrowed, fulfilled] = await client.multicall({
+          allowFailure: false,
+          contracts: [
+            { address: store, abi: escrowstoreAbi, functionName: 'escrowedMap', args: [parent, fund, token] },
+            { address: store, abi: escrowstoreAbi, functionName: 'fulfilledMap', args: [parent, fund, token] }
+          ]
+        })
+        return escrowed - fulfilled + (await fetchTokenBalance(client, token, fund))
+      })
+    )
+    const at = held.findIndex(amount => amount > 0n)
+    if (at >= 0) return { chainId, token: getAddress(coords[at]!.token) }
   }
-  const richest = (await fetchDeposits([account])).filter(row => row.deposit > 0n).sort((a, b) => (a.deposit > b.deposit ? -1 : a.deposit < b.deposit ? 1 : 0))[0]
-  if (richest !== undefined) return { chainId: Number(richest.chainId), token: getAddress(richest.token) }
-  const bonded = (await fetchBonds([account])).some(row => Number(row.chainId) === HUB_CHAIN_ID && row.bond > 0n)
-  if (!bonded) {
-    throw new Error(`${account} holds no credited deposit or bond the chronicle knows of; fund your deposit route from the Deposit panel first`)
-  }
-  return { chainId: HUB_CHAIN_ID, token: bondTokenOf(HUB_CHAIN_ID) }
+  throw new Error(`${user} has nothing at stake yet: no fund of this wallet holds escrow or a balance; escrow first`)
 }

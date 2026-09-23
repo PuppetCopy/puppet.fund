@@ -2,7 +2,7 @@ import { type Address, type Hex, isAddress } from 'viem'
 import type { IBodyGenesis } from '../account/createAccount.js'
 import type { ChainId } from '../const/chains.js'
 import type { IDerivedInputByKind, ISelfInputByKind } from '../intent/index.js'
-import { type IDerivedAction, type ISealedAction, isDerivedAction } from '../intent/shared.js'
+import { type IDerivedAction, type IIntentByKind, type ISealedAction, isDerivedAction } from '../intent/shared.js'
 import { CompactError, OPTIMISTIC_RELAY_CLOSED } from './error.js'
 import { decode, encode } from './frame.js'
 
@@ -14,6 +14,7 @@ export type IRelayRequest<K extends ISealedAction = ISealedAction> = K extends I
       kind: K
       chainId: ChainId
       input: ISelfInputByKind[K]
+      intent?: IIntentByKind[K]
       signature: Hex
       genesis?: IBodyGenesis
     }
@@ -33,12 +34,11 @@ export type IDispatchRequest = IRelayRequest | IAttestRequest
 
 export interface IDispatchedFrame {
   account: Address
-  nonce: bigint
   txHash: Hex
   relayFee: bigint
 }
 
-export interface ICompactOpts {
+interface ICompactOpts {
   matchmakerUrl: string
   defaultTimeoutMs?: number
 }
@@ -54,14 +54,13 @@ function assertDispatchedFrame(f: unknown): asserts f is IDispatchedFrame {
   }
   const x = f as Record<string, unknown>
   const invalid: string[] = []
-  if (typeof x.nonce !== 'bigint') invalid.push('nonce')
   if (typeof x.relayFee !== 'bigint') invalid.push('relayFee')
   if (typeof x.txHash !== 'string') invalid.push('txHash')
   if (typeof x.account !== 'string' || !isAddress(x.account)) invalid.push('account')
   if (invalid.length > 0) {
     throw new CompactError(
       'BAD_ACK',
-      `relay ack malformed (missing/invalid: ${invalid.join(', ')}); the intent was likely dispatched; verify on-chain by nonce rather than retrying`,
+      `relay ack malformed (missing/invalid: ${invalid.join(', ')}); the intent was likely dispatched; verify on-chain before retrying`,
       'server'
     )
   }
@@ -106,7 +105,7 @@ export function createCompact(opts: ICompactOpts): ICompact {
         if (timedOut) throw unacknowledged()
         throw new CompactError(
           'RELAY_UNREACHABLE',
-          `${request.kind} never reached the relay at ${matchmakerUrl} (${err instanceof Error ? err.message : String(err)}). Nothing was dispatched; check your connection and retry.`,
+          `${request.kind} lost its connection to the relay at ${matchmakerUrl} (${err instanceof Error ? err.message : String(err)}), so whether it dispatched is unknown; reopen to refresh your history before retrying.`,
           'server'
         )
       }

@@ -30,14 +30,13 @@ registerRoute(
 )
 
 async function dispatchView(view: IViewRequest): Promise<{ result?: string; error?: string }> {
-  const method = view.isCode ? 'eth_getCode' : 'eth_call'
   const block = view.block ?? 'latest'
-  const params = view.isCode ? [view.to, block] : [{ to: view.to, data: view.data }, block]
+  const params = [{ to: view.to, data: view.data }, block]
   try {
     const res = await fetch(`/api/rpc?network=${view.net}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_call', params })
     })
     const json = (await res.json()) as { result?: string; error?: { message?: string } }
     return json.error ? { error: json.error.message ?? 'rpc error' } : { result: json.result }

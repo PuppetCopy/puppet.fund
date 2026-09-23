@@ -1,10 +1,10 @@
 import { GMX } from '@puppet/contracts/const'
-import { ARBITRUM_MARKET_LIST } from '@puppet/contracts/gmx'
 import type { IIAccount__Call } from '@puppet/contracts/types'
 import { type Address, decodeFunctionData, encodeFunctionData, type Hex, isAddressEqual, zeroHash } from 'viem'
 import { GMX_ROUTER, GMX_ROUTER_ABI } from './contracts.js'
+import { ARBITRUM_MARKET_LIST } from './marketList.js'
 
-export function decodeRouter(callData: Hex) {
+function decodeRouter(callData: Hex) {
   try {
     return decodeFunctionData({ abi: GMX_ROUTER_ABI, data: callData })
   } catch {

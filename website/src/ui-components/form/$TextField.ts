@@ -118,7 +118,7 @@ export const $FieldLabeled = ({
     const $below: I$Node =
       hint === undefined && validation === undefined
         ? empty
-        : $node(style({ minHeight: '1rem', width: '100%' }))(
+        : $node(style({ fontSize: text.xs, lineHeight: '1.5', height: '1.5em', width: '100%', overflow: 'hidden' }))(
             switchMap(v => (v ? $clampLine(palette.negative, v) : $hintDisplay), validationStream)
           )
 
@@ -141,7 +141,7 @@ export const $FieldLabeled = ({
         label === null
           ? $field
           : $row(spacing.small, style({ width: '100%' }))(
-              $labelDisplay(style({ width: labelWidth ? `${labelWidth}px` : '' }))(
+              $labelDisplay(style(labelWidth ? { width: `${labelWidth}px`, minWidth: `${labelWidth}px` } : {}))(
                 typeof label === 'string' ? $text(label) : label
               ),
               $field

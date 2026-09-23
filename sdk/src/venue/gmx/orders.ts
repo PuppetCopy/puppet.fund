@@ -1,8 +1,8 @@
 import { GMX, PROTOCOL } from '@puppet/contracts/const'
-import { ARBITRUM_MARKET_LIST } from '@puppet/contracts/gmx'
 import type { IIAccount__Call } from '@puppet/contracts/types'
 import { type Address, encodeFunctionData, erc20Abi, type Hex, isAddressEqual, zeroAddress } from 'viem'
 import { GMX_DECREASE_SWAP_TYPE, GMX_DECREASE_TYPES, GMX_INCREASE_TYPES, GMX_ORDER_VAULT, GMX_ROUTER, GMX_ROUTER_ABI, GMX_TOKEN_SPENDER, GMX_WNT } from './contracts.js'
+import { ARBITRUM_MARKET_LIST } from './marketList.js'
 
 export interface IGmxOrder {
   orderType: number
@@ -19,18 +19,18 @@ export interface IGmxOrder {
   autoCancel?: boolean
 }
 
-export interface IGmxBuildContext {
+interface IGmxBuildContext {
   master: Address
   baseToken: Address
   executionFee: bigint
 }
 
-export interface IGmxOutflow {
+interface IGmxOutflow {
   token: Address
   amountOut: bigint
 }
 
-export interface IGmxBuildResult {
+interface IGmxBuildResult {
   callList: IIAccount__Call[]
   outflows: IGmxOutflow[]
 }

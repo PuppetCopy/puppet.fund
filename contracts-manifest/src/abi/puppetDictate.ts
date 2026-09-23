@@ -12,17 +12,17 @@ export default [
   },
   {
     "type": "function",
-    "name": "gateMap",
+    "name": "gateOf",
     "inputs": [
       {
-        "name": "name",
+        "name": "_name",
         "type": "bytes32",
         "internalType": "bytes32"
       }
     ],
     "outputs": [
       {
-        "name": "proxy",
+        "name": "",
         "type": "address",
         "internalType": "address"
       }

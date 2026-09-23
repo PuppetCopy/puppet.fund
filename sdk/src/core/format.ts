@@ -10,7 +10,7 @@ export function readableAddress(hash: string) {
   return `${hash.slice(0, 6)}-${hash.slice(-4)}`
 }
 
-export const getExplorerUrl = (chain: Chain = HUB_CHAIN) => {
+const getExplorerUrl = (chain: Chain = HUB_CHAIN) => {
   return chain.blockExplorers?.default.url || chain.blockExplorers?.etherscan?.url
 }
 

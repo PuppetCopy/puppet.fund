@@ -1,10 +1,10 @@
 import { ACCOUNT_CALL_MAP, decodeAccountCall } from '@puppet/sdk/account'
 import type { ChainId } from '@puppet/sdk/const'
-import { bookIdOf, isBackingRecord, isGainRecord, isLossRecord, markIdOf, receiptRecords } from '@puppet/sdk/fold'
-import type { IMarkRow } from '@puppet/sdk/schema'
+import { isAllocationRecord, isClaimFeeRecord, isClaimRecord, isSellFeeRecord, isSellRecord, receiptRecords } from '@puppet/sdk/fold'
 import { describeOperate, type IOperateStep } from '@puppet/sdk/venue'
 import { type Address, getAddress, type Hex } from 'viem'
 import type { IStoredAccountCall } from './callStore.js'
+import type { IJournalEntries } from './localFold.js'
 
 export type IAccountAction = {
   chainId: ChainId
@@ -15,47 +15,34 @@ export type IAccountAction = {
   txHash: Hex
   fee: { token: Address; amount: bigint } | null
 } & (
-  | { kind: 'genesis'; signer: Address }
-  | { kind: 'deposit'; token: Address; amount: bigint; bond: bigint }
+  | { kind: 'genesis'; parent: Address | null }
+  | { kind: 'deposit'; token: Address; amount: bigint }
+  | { kind: 'selfWithdraw'; token: Address; amount: bigint }
+  | { kind: 'withdrawRequest'; requestedAt: bigint }
+  | { kind: 'revoke'; epoch: bigint }
   | { kind: 'swap'; token: Address; amount: bigint; outputToken: Address; outputAmount: bigint; destinationChainId: bigint }
   | { kind: 'withdraw'; token: Address; amount: bigint; outputToken: Address; outputAmount: bigint }
-  | { kind: 'credit'; creditList: { token: Address; amount: bigint }[] }
-  | {
-      kind: 'operate'
-      cycle: bigint
-      token: Address
-      value: bigint
-      collateral: bigint
-      skin: bigint
-      backed: bigint
-      backers: number
-      steps: IOperateStep[]
-      mark: IMarkRow | null
-    }
-  | { kind: 'backing'; master: Address; cycle: bigint; stake: bigint }
-  | { kind: 'settle'; cycle: bigint; token: Address; value: bigint; backers: number }
-  | { kind: 'gain'; master: Address; cycle: bigint; token: Address; owed: bigint; net: bigint }
-  | { kind: 'draw'; spokeChainId: bigint; cycle: bigint; backers: number }
-  | { kind: 'loss'; master: Address; spokeChainId: bigint; cycle: bigint; owed: bigint; drawn: bigint }
-  | { kind: 'mandate'; bond: bigint; masters: { master: Address; expiry: bigint }[] }
-  | { kind: 'unbond'; amount: bigint }
-  | { kind: 'forcedWithdrawal'; token: Address; amount: bigint; to: Address }
+  | { kind: 'operate'; steps: IOperateStep[] }
+  | { kind: 'fundSwap'; token: Address; amount: bigint; outputToken: Address; outputAmount: bigint; destinationChainId: bigint }
+  | { kind: 'createFund'; share: Address; symbol: Hex; pixels: Hex }
+  | { kind: 'escrow'; master: Address; token: Address; amount: bigint }
+  | { kind: 'fulfil'; token: Address; amount: bigint; fulfilledTotal: bigint }
+  | { kind: 'refund'; master: Address; token: Address; amount: bigint }
+  | { kind: 'allocate'; credit: { chainId: ChainId; token: Address; amount: bigint } | null; credited: bigint; minted: bigint; value: bigint; backers: number; masterSlice: bigint; billed: bigint }
+  | { kind: 'allocation'; master: Address; stake: bigint; units: bigint }
+  | { kind: 'sell'; master: Address; units: bigint; basis: bigint; payout: bigint; payoutFee: bigint }
+  | { kind: 'sellFee'; puppet: Address; payoutFee: bigint }
+  | { kind: 'redeem'; retire: bigint; drained: bigint; value: bigint; cash: bigint; payout: bigint }
+  | { kind: 'claim'; master: Address; payout: bigint; payoutFee: bigint }
+  | { kind: 'claimFee'; holder: Address; payoutFee: bigint }
+  | { kind: 'mandate'; masters: { master: Address; expiry: bigint }[] }
 )
-
-export interface IAccountJournal {
-  account: Address
-  entries: ReadonlyMap<ChainId, readonly IStoredAccountCall[]>
-}
 
 const at = (entry: IStoredAccountCall): string => `${entry.blockNumber}#${entry.logIndex}`
 
-const isMasterOperate = (entry: IStoredAccountCall): boolean => {
+export function accountAction(chainId: ChainId, account: Address, entry: IStoredAccountCall): IAccountAction {
+  const steps = describeOperate(chainId, entry.callList, true, entry.resultList)
   const d = decodeAccountCall(entry)
-  return d.selector === ACCOUNT_CALL_MAP.CoreGate.operateMaster.selector && !isBackingRecord(d)
-}
-
-export function accountAction(chainId: ChainId, account: Address, entry: IStoredAccountCall, marks: ReadonlyMap<string, IMarkRow>): IAccountAction {
-  const steps = describeOperate(chainId, entry.callList, entry.resultList)
   const feeStep = steps.find(s => s.kind === 'fee')
   const base = {
     chainId,
@@ -64,18 +51,37 @@ export function accountAction(chainId: ChainId, account: Address, entry: IStored
     logIndex: entry.logIndex,
     time: entry.blockTimestamp,
     txHash: entry.transactionHash,
-    fee: feeStep?.kind === 'fee' ? { token: feeStep.token, amount: feeStep.amount } : null
+    fee: 'feeToken' in d ? { token: getAddress(d.feeToken), amount: d.fee } : feeStep?.kind === 'fee' ? { token: feeStep.token, amount: feeStep.amount } : null
   }
-  const d = decodeAccountCall(entry)
+  if (isAllocationRecord(d)) return { ...base, kind: 'allocation', master: getAddress(d.master), stake: d.stake, units: d.units }
+  if (isSellRecord(d)) {
+    return { ...base, kind: 'sell', master: getAddress(d.master), units: d.units, basis: d.basis, payout: d.payout, payoutFee: d.payoutFee }
+  }
+  if (isSellFeeRecord(d)) return { ...base, kind: 'sellFee', puppet: getAddress(d.puppet), payoutFee: d.payoutFee }
+  if (isClaimRecord(d)) return { ...base, kind: 'claim', master: getAddress(d.master), payout: d.payout, payoutFee: d.fee }
+  if (isClaimFeeRecord(d)) return { ...base, kind: 'claimFee', holder: getAddress(d.holder), payoutFee: d.fee }
   switch (d.selector) {
     case ACCOUNT_CALL_MAP.AccountModule.createAccount.selector:
-      return { ...base, kind: 'genesis', signer: getAddress(d.signer) }
-    case ACCOUNT_CALL_MAP.AccountModule.forcedWithdrawal.selector:
-      return { ...base, kind: 'forcedWithdrawal', token: getAddress(d.token), amount: d.amount, to: getAddress(d.to) }
-    case ACCOUNT_CALL_MAP.CoreGate.deposit.selector:
-      return { ...base, kind: 'deposit', token: getAddress(d.token), amount: d.amount, bond: 0n }
-    case ACCOUNT_CALL_MAP.HubGate.deposit.selector:
-      return { ...base, kind: 'deposit', token: getAddress(d.token), amount: d.amount, bond: d.bond }
+      return { ...base, kind: 'genesis', parent: getAddress(d.parent) }
+    case ACCOUNT_CALL_MAP.AccountModule.createUserAccount.selector:
+      return { ...base, kind: 'genesis', parent: null }
+    case ACCOUNT_CALL_MAP.Deposit.deposit.selector:
+      return { ...base, kind: 'deposit', token: getAddress(d.token), amount: d.amount }
+    case ACCOUNT_CALL_MAP.UserAccount.withdraw.selector:
+      return { ...base, kind: 'selfWithdraw', token: getAddress(d.token), amount: d.amount }
+    case ACCOUNT_CALL_MAP.UserAccount.revokeSessions.selector:
+      return { ...base, kind: 'revoke', epoch: d.epoch }
+    case ACCOUNT_CALL_MAP.HubGate.createFund.selector:
+      return { ...base, kind: 'createFund', share: getAddress(d.clone), symbol: d.symbol, pixels: d.pixels }
+    case ACCOUNT_CALL_MAP.UserAccount.requestWithdraw.selector:
+      return { ...base, kind: 'withdrawRequest', requestedAt: d.requestedAt }
+    case ACCOUNT_CALL_MAP.Deposit.depositEscrow.selector:
+    case ACCOUNT_CALL_MAP.LiquidityGate.escrow.selector:
+      return { ...base, kind: 'escrow', master: getAddress(d.master), token: getAddress(d.token), amount: d.amount }
+    case ACCOUNT_CALL_MAP.LiquidityGate.refund.selector:
+      return { ...base, kind: 'refund', master: getAddress(d.master), token: getAddress(d.token), amount: d.amount }
+    case ACCOUNT_CALL_MAP.SpokeGate.fulfil.selector:
+      return { ...base, kind: 'fulfil', token: getAddress(d.token), amount: d.amount, fulfilledTotal: d.fulfilledTotal }
     case ACCOUNT_CALL_MAP.Deposit.depositAcross.selector:
       return {
         ...base,
@@ -83,80 +89,54 @@ export function accountAction(chainId: ChainId, account: Address, entry: IStored
         token: getAddress(d.input),
         amount: d.inputAmount,
         outputToken: getAddress(d.outputToken),
-        outputAmount: d.outputFloor,
+        outputAmount: d.outputAmount,
         destinationChainId: d.destinationChainId
       }
-    case ACCOUNT_CALL_MAP.CoreGate.withdraw.selector:
+    case ACCOUNT_CALL_MAP.Deposit.withdraw.selector:
       return { ...base, kind: 'withdraw', token: getAddress(d.inputToken), amount: d.inputAmount, outputToken: getAddress(d.outputToken), outputAmount: d.outputAmount }
-    case ACCOUNT_CALL_MAP.Deposit.settleCredit.selector:
-      return { ...base, kind: 'credit', creditList: [{ token: getAddress(d.token), amount: d.arrived }] }
-    case ACCOUNT_CALL_MAP.CoreGate.operateMaster.selector: {
-      if (isBackingRecord(d)) {
-        return { ...base, kind: 'backing', master: getAddress(d.master), cycle: d.cycle, stake: d.stake }
-      }
-      const mark = marks.get(markIdOf(bookIdOf(chainId, account), Number(entry.blockNumber), entry.logIndex))
+    case ACCOUNT_CALL_MAP.SpokeGate.operate.selector:
+      return { ...base, kind: 'operate', steps }
+    case ACCOUNT_CALL_MAP.Deposit.fundSwap.selector:
       return {
         ...base,
-        kind: 'operate',
-        cycle: d.cycle,
-        token: getAddress(d.token),
-        value: d.value,
-        collateral: d.collateral,
-        skin: d.skin,
-        backed: d.backed,
-        backers: receiptRecords(entry).filter(r => isBackingRecord(r.record)).length,
-        steps,
-        mark: mark === undefined ? null : mark
+        kind: 'fundSwap',
+        token: getAddress(d.input),
+        amount: d.inputAmount,
+        outputToken: getAddress(d.outputToken),
+        outputAmount: d.outputAmount,
+        destinationChainId: d.destinationChainId
       }
-    }
-    case ACCOUNT_CALL_MAP.CoreGate.settleMaster.selector: {
-      if (isGainRecord(d)) {
-        return { ...base, kind: 'gain', master: getAddress(d.master), cycle: d.cycle, token: getAddress(d.token), owed: d.amount, net: d.amount2 }
-      }
+    case ACCOUNT_CALL_MAP.Fund.allocateMaster.selector:
       return {
         ...base,
-        kind: 'settle',
-        cycle: d.cycle,
-        token: getAddress(d.token),
-        value: d.value,
-        backers: new Set(receiptRecords(entry).filter(r => isGainRecord(r.record)).map(r => r.account)).size
+        kind: 'allocate',
+        credit: d.credit.amount === 0n ? null : { chainId: Number(d.credit.chainId) as ChainId, token: getAddress(d.credit.token), amount: d.credit.amount },
+        credited: d.credit.value,
+        minted: d.minted,
+        value: d.valuation.value,
+        backers: receiptRecords(entry).filter(r => isAllocationRecord(r.record)).length,
+        masterSlice: d.masterSlice,
+        billed: d.billed
       }
-    }
-    case ACCOUNT_CALL_MAP.HubGate.drawMaster.selector: {
-      if (isLossRecord(d)) {
-        return { ...base, kind: 'loss', master: getAddress(d.master), spokeChainId: d.spokeChainId, cycle: d.cycle, owed: d.amount, drawn: d.loss }
-      }
+    case ACCOUNT_CALL_MAP.Fund.redeem.selector:
       return {
         ...base,
-        kind: 'draw',
-        spokeChainId: d.spokeChainId,
-        cycle: d.cycle,
-        backers: new Set(receiptRecords(entry).filter(r => isLossRecord(r.record)).map(r => r.account)).size
+        kind: 'redeem',
+        retire: d.retire,
+        drained: d.drained,
+        value: d.valuation.value,
+        cash: d.cash,
+        payout: d.payout
       }
-    }
     case ACCOUNT_CALL_MAP.HubGate.mandate.selector:
-      return { ...base, kind: 'mandate', bond: d.bond, masters: d.mandateList.map(m => ({ master: getAddress(m.master), expiry: m.expiry })) }
-    case ACCOUNT_CALL_MAP.HubGate.unbond.selector:
-      return { ...base, kind: 'unbond', amount: d.amount }
+      return { ...base, kind: 'mandate', masters: d.mandateList.map(m => ({ master: getAddress(m.master), expiry: m.expiry })) }
     default:
       throw new Error(`entry ${at(entry)} on chain ${chainId} carries selector ${(d as { selector: Hex }).selector}, which the history does not know`)
   }
 }
 
-export async function accountHistory(
-  journals: readonly IAccountJournal[],
-  readMarks: (ids: readonly string[]) => Promise<IMarkRow[]>
-): Promise<IAccountAction[]> {
-  const markIds: string[] = []
-  for (const j of journals) {
-    for (const [chainId, list] of j.entries) {
-      for (const entry of list) {
-        if (isMasterOperate(entry)) markIds.push(markIdOf(bookIdOf(chainId, j.account), Number(entry.blockNumber), entry.logIndex))
-      }
-    }
-  }
-  const marks = new Map((await readMarks(markIds)).map(m => [m.id, m]))
+export function accountHistory(journals: readonly IJournalEntries[]): IAccountAction[] {
   const out: IAccountAction[] = []
-  for (const j of journals) for (const [chainId, list] of j.entries) for (const entry of list) out.push(accountAction(chainId, j.account, entry, marks))
+  for (const j of journals) for (const [chainId, list] of j.entries) for (const entry of list) out.push(accountAction(chainId, j.account, entry))
   return out.sort((a, b) => b.time - a.time || (b.block > a.block ? 1 : b.block < a.block ? -1 : b.logIndex - a.logIndex))
 }

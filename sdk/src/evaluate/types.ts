@@ -1,7 +1,7 @@
 import type { Address, Hex, PublicClient } from 'viem'
 import type { ChainId } from '../const/index.js'
 
-export type INavKind = 'operate' | 'settle' | 'view'
+export type INavKind = 'allocate' | 'redeem' | 'view'
 
 export interface INavChainBalance {
   chainId: ChainId
@@ -30,39 +30,11 @@ export interface IRate {
 
 export type IGetRate = (asset0: string, asset1: string, freshness?: number) => Promise<IRate>
 
-export interface IGmxPositionRow {
-  positionKey: Hex
-  market: Address
-  collateralToken: Address
-  isLong: boolean
-  sizeInUsd: bigint
-  sizeInTokens: bigint
-  collateralUsd: bigint
-  collateralAmount: bigint
-  storedPnlUsd: bigint
-  increasedAtTime: number
-}
-export type IGmxPositionProvider = (account: Address) => Promise<IGmxPositionRow[]>
 
-export interface IGmxOrderRow {
-  orderKey: Hex
-  market: Address
-  collateralToken: Address
-  isLong: boolean
-  orderType: number
-  sizeDeltaUsd: bigint
-  collateralDeltaAmount: bigint
-  triggerPrice: bigint
-  isFrozen: boolean
+export interface INavReserved {
+  holding: INavHolding
+  spender: Address
 }
-export type IGmxOrderProvider = (account: Address) => Promise<IGmxOrderRow[]>
-
-export interface IGmxClaimableRow {
-  market: Address
-  token: Address
-  amount: bigint
-}
-export type IGmxClaimableProvider = (account: Address) => Promise<IGmxClaimableRow[]>
 
 export type IVenueFacets = Record<string, string | number | bigint | boolean | undefined>
 
@@ -91,26 +63,6 @@ export interface IPlatformValuation {
   unavailableReason?: string
 }
 
-export interface IPlatformEvalParams {
-  chainId: ChainId
-  account: Address
-  baseToken: Address
-  blockNumber: bigint
-  blockTimestamp: number
-  nowSec: number
-  publicClient?: PublicClient
-  getRate: IGetRate
-  positions: IGmxPositionRow[]
-  orders: IGmxOrderRow[]
-  claimables: IGmxClaimableRow[]
-}
-
-export interface IPlatformEvaluator {
-  platform: string
-  chainId: ChainId
-  evaluate(params: IPlatformEvalParams): Promise<IPlatformValuation>
-}
-
 export interface INavBreakdown {
   unitedCashBase: bigint
   positionMarkBase: bigint
@@ -129,22 +81,27 @@ export interface INavGateReason {
 
 export type INavGate = { ok: true } | { ok: false; reasons: INavGateReason[] }
 
-export type INavGateCode =
+type INavGateCode =
   | 'CHAIN_UNREACHABLE'
   | 'STALE_ORACLE'
   | 'NAV_MISMATCH'
   | 'PENDING_ORDER'
   | 'PLATFORM_UNAVAILABLE'
-  | 'OPEN_POSITIONS'
   | 'VENUE_TOKEN_UNSUPPORTED'
   | 'VENUE_PRICE_STALE'
   | 'VENUE_PRICE_UNUSABLE'
   | 'VENUE_EXCESS_SLIPPAGE'
   | 'VENUE_BAD_INPUT'
 
+export interface ISignerGain {
+  above: bigint
+  below: bigint
+}
+
 export interface IEvaluationConfig {
   maxPriceAgeSec: number
   driftToleranceBps: bigint
+  markWindowSec: bigint
   swapMaxSlippageBps: bigint
   bridgeMaxSlippageBps: bigint
 }
@@ -152,25 +109,29 @@ export interface IEvaluationConfig {
 export const DEFAULT_EVALUATION_CONFIG: IEvaluationConfig = {
   maxPriceAgeSec: 120,
   driftToleranceBps: 50n,
+  markWindowSec: 60n,
   swapMaxSlippageBps: 500n,
   bridgeMaxSlippageBps: 500n
 }
 
+const VALUATION_CLOCK_SKEW_SEC = 15n
+
+export const valuationDeadline = (nowSec: bigint, config: IEvaluationConfig): bigint => nowSec + config.markWindowSec - VALUATION_CLOCK_SKEW_SEC
+
 export interface IEvaluateAccountParams {
   master: Address
+  chainId: ChainId
   baseKey: string
   blockNumber: bigint
   blockTimestamp: number
   kind: INavKind
-  platforms?: IPlatformEvaluator[]
   publicClient?: PublicClient
   getRate: IGetRate
-  positions: IGmxPositionRow[]
-  orders: IGmxOrderRow[]
-  claimables: IGmxClaimableRow[]
+  reserved: INavReserved[]
   nowSec?: number
   config?: Partial<IEvaluationConfig>
   clientNav?: bigint
+  signerGain: ISignerGain | null
   cashLeg: INavChainBalance[]
   holdings: INavHolding[]
 }

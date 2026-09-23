@@ -1,6 +1,6 @@
 import { CHAIN_NETWORK_MAP, HUB_CHAIN_ID } from '@puppet/contracts/const'
 import { type ChainId, VIEM_CHAINS } from '@puppet/sdk/const'
-import { rpcTransport } from '@puppet/sdk/state'
+import { buildPublicClients, rpcTransport } from '@puppet/sdk/state'
 import {
   type Config,
   type Connector,
@@ -39,15 +39,13 @@ const userTransport = (chainId: number): Transport =>
     { retryCount: 0, methods: { exclude: ['eth_getLogs'] } }
   )
 
+const appRpcUrl = (chainId: ChainId): string => new URL(`/api/rpc?network=${CHAIN_NETWORK_MAP[chainId]}`, location.origin).href
+
 export const publicTransports = Object.fromEntries(
-  VIEM_CHAINS.map(chain => [
-    chain.id,
-    fallback([
-      userTransport(chain.id),
-      rpcTransport(new URL(`/api/rpc?network=${CHAIN_NETWORK_MAP[chain.id]}`, location.origin).href)
-    ])
-  ])
+  VIEM_CHAINS.map(chain => [chain.id, fallback([userTransport(chain.id), rpcTransport(appRpcUrl(chain.id))])])
 ) as Record<ChainId, Transport>
+
+export const appClientMap: Record<ChainId, PublicClient> = buildPublicClients(appRpcUrl)
 
 export const wagmi: Config = createConfig({
   chains: VIEM_CHAINS,

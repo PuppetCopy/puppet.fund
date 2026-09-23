@@ -7,7 +7,6 @@
     "build": "forge build",
     "build:prod": "FOUNDRY_PROFILE=prod forge build",
     "test": "forge test -vvv",
-    "test:fork": "forge test -vvvv --fork-url=arbitrum",
     "deploy": "FOUNDRY_PROFILE=prod forge script script/deploy/Deploy.s.sol --skip test --sig \"deploy()\" --slow --rpc-url",
     "coverage": "forge coverage --report lcov",
     "sizes": "FOUNDRY_PROFILE=prod forge build --sizes",

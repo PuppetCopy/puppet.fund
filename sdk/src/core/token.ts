@@ -5,7 +5,7 @@ import type { ChainId } from '../const/index.js'
 import { tokenMetaOf } from '../state/tokenRegistry.js'
 import type { ITokenDescription } from './types.js'
 
-export const NATIVE_TOKEN = PROTOCOL.nativeToken
+const NATIVE_TOKEN = PROTOCOL.nativeToken
 
 export function isNativeToken(token: Address): boolean {
   return isAddressEqual(token, NATIVE_TOKEN)

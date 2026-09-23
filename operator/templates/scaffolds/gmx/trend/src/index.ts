@@ -25,9 +25,15 @@ const TICK_MS = 60_000
 // still land until its deadline, so a re-fire inside that window risks a doubled position.
 const COOLDOWN_MS = 5 * 60_000
 
-const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, dryRun: DRY })
-if (!Bun.env.ARBITRUM_RPC_URL) throw new Error('set ARBITRUM_RPC_URL in .env (cp .env.example .env)')
-const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL, token: ETH, skin: 10_000n })
+if (!Bun.env.CHRONICLE_URL || !Bun.env.ARBITRUM_RPC_URL || !Bun.env.OPTIMISM_RPC_URL) {
+  throw new Error('set CHRONICLE_URL, ARBITRUM_RPC_URL and OPTIMISM_RPC_URL in .env (cp .env.example .env)')
+}
+const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, chronicleUrl: Bun.env.CHRONICLE_URL, dryRun: DRY })
+const gmx = await gmxOperator(connector, {
+  rpcUrl: Bun.env.ARBITRUM_RPC_URL,
+  hubRpcUrl: Bun.env.OPTIMISM_RPC_URL,
+  token: ETH,
+})
 const market = gmx.getMarket(ETH)
 let lastTradeAt = 0
 

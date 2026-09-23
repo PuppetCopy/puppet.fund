@@ -1,87 +1,89 @@
-import { owedFor } from '@puppet/sdk/backing'
-import { bookIdOf } from '@puppet/sdk/fold'
-import type { IBackingRow, IBookRow, IMarkRow } from '@puppet/sdk/schema'
-import { getAddress, isAddressEqual } from 'viem'
+import { PROTOCOL } from '@puppet/contracts/const'
+import type { ChainId } from '@puppet/sdk/const'
+import { cashFor, settlePosition } from '@puppet/sdk/pool'
+import { closedAccruedTable, fundTable, type IClosedAccruedRow, type IFundRow, type IQueueRow, queueTable } from '@puppet/sdk/schema'
+import { type Address, getAddress, isAddressEqual } from 'viem'
 import type { IOwnState } from '../journal/localFold.js'
-import { fetchBackings, fetchBook, fetchMark, fetchMarksById } from './reads.js'
-import type { ITradeView } from './trading.js'
+import { client } from './reads.js'
 
-export async function ownMarks(own: IOwnState, ids: readonly string[]): Promise<IMarkRow[]> {
-  const local = new Map(own.marks.filter(m => ids.includes(m.id)).map(m => [m.id, m]))
-  const unsealed = ids.filter(id => {
-    const row = local.get(id)
-    return row === undefined || row.pending
+export type IHoldingStanding =
+  | { kind: 'behind' }
+  | { kind: 'current'; fundRow: IFundRow; value: bigint; queued: bigint; queuedValue: bigint; payout: bigint; payoutFee: bigint }
+
+export interface IHoldingView {
+  master: Address
+  units: bigint
+  basis: bigint
+  standing: IHoldingStanding
+}
+
+export function escrowSurplus(own: IOwnState, master: Address): { chainId: ChainId; token: Address; amount: bigint }[] {
+  return own.escrows.flatMap(row => {
+    if (!isAddressEqual(row.parent, own.account) || !isAddressEqual(row.master, master)) return []
+    const credit = own.credits.find(c => isAddressEqual(c.master, row.master) && c.creditChainId === row.chainId && isAddressEqual(c.token, row.token))
+    const taken = credit !== undefined && credit.credited > row.fulfilled ? credit.credited : row.fulfilled
+    return row.escrowed > taken ? [{ chainId: Number(row.chainId) as ChainId, token: row.token, amount: row.escrowed - taken }] : []
   })
-  for (const row of await fetchMarksById(unsealed)) local.set(row.id, row)
-  return [...local.values()]
 }
 
-const markOf = async (own: IOwnState, id: string): Promise<IMarkRow | undefined> => {
-  if (id === '') return undefined
-  const local = own.marks.find(m => m.id === id)
-  if (local !== undefined && !local.pending) return local
-  const valued = await fetchMark(id)
-  return valued === undefined ? local : valued
-}
-
-export async function ownTradeViews(own: IOwnState): Promise<ITradeView[]> {
-  return Promise.all(
-    own.books.map(async book => {
-      const mark = await markOf(own, book.lastMark)
-      const settledCycle = own.settlements
-        .filter(s => s.spokeChainId === book.chainId && isAddressEqual(s.master, book.master) && s.kind === 'settle')
-        .reduce((max, s) => (s.cycle > max ? s.cycle : max), 0n)
+export async function ownHoldingViews(own: IOwnState, holder: Address): Promise<IHoldingView[]> {
+  const self = getAddress(holder)
+  const masters = [...new Set([...own.holdings, ...own.positions].filter(r => isAddressEqual(r.holder, self)).map(r => getAddress(r.master)))]
+  const others = masters.filter(master => !isAddressEqual(master, self))
+  const shared: [IFundRow[], IQueueRow[], IClosedAccruedRow[]] =
+    others.length === 0
+      ? [[], [], []]
+      : await Promise.all([
+          client.select(fundTable, { where: { master: { in: others } } }),
+          client.select(queueTable, { where: { master: { in: others } } }),
+          client.select(closedAccruedTable, { where: { master: { in: others } } })
+        ])
+  const fundRows = [...own.fundRows, ...shared[0]]
+  const queues = [...own.queues, ...shared[1]]
+  const closed = [...own.closedAccrued, ...shared[2]]
+  return masters.map((master): IHoldingView => {
+    const holding = own.holdings.find(h => isAddressEqual(h.master, master) && isAddressEqual(h.holder, self))
+    const position = own.positions.find(p => isAddressEqual(p.master, master) && isAddressEqual(p.holder, self))
+    const fundRow = fundRows.find(p => isAddressEqual(p.master, master))
+    const queue = queues.find(q => isAddressEqual(q.master, master))
+    const units = holding === undefined ? 0n : holding.units
+    const basis = holding === undefined ? 0n : holding.basis
+    const behind = { master, units, basis, standing: { kind: 'behind' } } as const
+    if (fundRow === undefined || units > fundRow.totalUnits) return behind
+    if (position === undefined) {
+      const queued = isAddressEqual(master, self) && queue !== undefined && queue.weight > 0n ? (queue.masterWeight * queue.units) / queue.weight : 0n
       return {
-        book,
-        backers: own.backers.filter(b => b.chainId === book.chainId && isAddressEqual(b.master, book.master)),
-        mark,
-        settledCycle
+        master,
+        units,
+        basis,
+        standing: {
+          kind: 'current',
+          fundRow,
+          value: cashFor(units, fundRow.totalUnits, fundRow.value),
+          queued,
+          queuedValue: cashFor(queued, fundRow.totalUnits, fundRow.value),
+          payout: 0n,
+          payoutFee: 0n
+        }
       }
-    })
-  )
-}
-
-export function openBacking(own: IOwnState): bigint {
-  const closed = new Set(own.settleRows.map(r => `${getAddress(r.master)}-${r.spokeChainId}-${r.cycle}`))
-  return own.backings
-    .filter(r => !closed.has(`${getAddress(r.master)}-${r.chainId}-${r.cycle}`))
-    .reduce((total, r) => total + r.stake, 0n)
-}
-
-export interface IBackingView {
-  row: IBackingRow
-  book: IBookRow
-  mark: IMarkRow | undefined
-  claim: bigint | null
-  pnl: bigint | null
-}
-
-export async function ownBackingViews(own: IOwnState): Promise<IBackingView[]> {
-  return Promise.all(
-    own.backings
-      .filter(r => r.stake > 0n)
-      .map(async row => {
-        const chainId = Number(row.chainId)
-        const mine = isAddressEqual(own.account, row.master)
-        const book = mine ? own.books.find(b => b.id === bookIdOf(chainId, row.master)) : await fetchBook(chainId, row.master)
-        if (book === undefined) throw new Error(`your backing of ${row.master} on chain ${chainId} has no book row`)
-        const mark = mine ? await markOf(own, book.lastMark) : book.lastMark === '' ? undefined : await fetchMark(book.lastMark)
-        if (row.cycle !== book.cycle || mark === undefined || mark.pending || mark.closeValue === undefined) {
-          return { row, book, mark, claim: null, pnl: null }
-        }
-        const backers = mine
-          ? own.backers.filter(b => b.chainId === row.chainId && isAddressEqual(b.master, row.master))
-          : (await fetchBackings({ master: row.master })).filter(b => b.chainId === row.chainId)
-        const ledger = {
-          totalShares: book.totalShares,
-          totalPending: book.totalPending,
-          backing: book.backed,
-          masterShares: book.masterShares,
-          masterPending: book.masterPending
-        }
-        const owed = owedFor(ledger, mark.closeValue, mark.closeValue, backers).find(o => isAddressEqual(o.puppet, row.puppet))
-        const pnl = owed === undefined ? null : owed.owed
-        return { row, book, mark, claim: pnl === null ? null : row.stake + pnl, pnl }
-      })
-  )
+    }
+    if (queue === undefined || position.epoch > queue.epoch || (position.epoch === queue.epoch && position.cursor > queue.accrued)) return behind
+    const closedAccrued = position.epoch < queue.epoch ? closed.find(c => isAddressEqual(c.master, master) && c.epoch === position.epoch) : undefined
+    if (position.epoch < queue.epoch && closedAccrued === undefined) return behind
+    const settled = settlePosition(queue, position, queue.units, closedAccrued?.accrued, fundRow === undefined ? PROTOCOL.performanceFee : fundRow.performanceFee)
+    return {
+      master,
+      units,
+      basis,
+      standing: {
+        kind: 'current',
+        fundRow,
+        value: cashFor(units, fundRow.totalUnits, fundRow.value),
+        queued: settled.position.units,
+        queuedValue: cashFor(settled.position.units, fundRow.totalUnits, fundRow.value),
+        payout: settled.payout,
+        payoutFee: settled.fee
+      }
+    }
+  })
 }

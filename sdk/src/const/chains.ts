@@ -1,7 +1,7 @@
 import { CHAIN_IDS, HUB_CHAIN_ID } from '@puppet/contracts/const'
 import type { Chain } from 'viem'
 import * as viemChains from 'viem/chains'
-import { groupListMap } from '../core/utils.js'
+import { groupList } from '../core/utils.js'
 
 const VIEM_CHAIN_BY_ID = new Map<number, Chain>(
   (Object.values(viemChains) as unknown[])
@@ -21,7 +21,7 @@ export type ChainId = (typeof CHAIN_IDS)[number]
 export const VIEM_CHAINS = CHAIN_IDS.map(resolveChain) as unknown as readonly [ChainOf<ChainId>, ...ChainOf<ChainId>[]]
 
 export const CHAIN_ID_LIST: readonly ChainId[] = CHAIN_IDS
-export const CHAIN_MAP = groupListMap(VIEM_CHAINS, 'id', c => c) as Record<ChainId, Chain>
+export const CHAIN_MAP = groupList(VIEM_CHAINS, 'id') as Record<ChainId, Chain>
 
 export function resolveDispatchChainId(chainId: number): ChainId {
   const known = CHAIN_ID_LIST.find(id => id === chainId)

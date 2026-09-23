@@ -47,9 +47,15 @@ const PARAMS = {
 // still land it until the intent's deadline. Acting during limbo is how positions double.
 const INTENT_DEADLINE_MS = 5 * 60_000
 
-const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, dryRun: DRY })
-if (!Bun.env.ARBITRUM_RPC_URL) throw new Error('set ARBITRUM_RPC_URL in .env (cp .env.example .env)')
-const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL, token: ETH, skin: 10_000n })
+if (!Bun.env.CHRONICLE_URL || !Bun.env.ARBITRUM_RPC_URL || !Bun.env.OPTIMISM_RPC_URL) {
+  throw new Error('set CHRONICLE_URL, ARBITRUM_RPC_URL and OPTIMISM_RPC_URL in .env (cp .env.example .env)')
+}
+const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, chronicleUrl: Bun.env.CHRONICLE_URL, dryRun: DRY })
+const gmx = await gmxOperator(connector, {
+  rpcUrl: Bun.env.ARBITRUM_RPC_URL,
+  hubRpcUrl: Bun.env.OPTIMISM_RPC_URL,
+  token: ETH,
+})
 const market = gmx.getMarket(ETH)
 const marketInfo = gmx.markets.find(m => isAddressEqual(m.marketToken as Address, market))
 if (!marketInfo) throw new Error(`market ${market} not in the GMX market list`)

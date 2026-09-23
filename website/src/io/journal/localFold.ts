@@ -1,24 +1,26 @@
 import type { ChainId } from '@puppet/sdk/const'
 import { foldAccountEntry, type IAccountEntry, type IMemoryStore, memoryStore } from '@puppet/sdk/fold'
 import {
-  backerTable,
-  backingTable,
-  bondTable,
-  bookTable,
-  depositTable,
-  type IBackerRow,
-  type IBackingRow,
-  type IBondRow,
-  type IBookRow,
-  type IDepositRow,
+  closedAccruedTable,
+  creditTable,
+  escrowTable,
+  fundTable,
+  holdingTable,
+  type IClosedAccruedRow,
+  type ICreditRow,
+  type IEscrowRow,
+  type IFundRow,
+  type IHoldingRow,
   type IMandateRow,
-  type IMarkRow,
-  type ISettlementRow,
-  type ISettleRowRow,
+  type IMasterMetricRow,
+  type IPositionRow,
+  type IQueueRow,
+  type IValuationRow,
   mandateTable,
-  markTable,
-  settlementTable,
-  settleRowTable
+  masterMetricTable,
+  positionTable,
+  queueTable,
+  valuationTable
 } from '@puppet/sdk/schema'
 import type { Address } from 'viem'
 import type { IStoredAccountCall } from './callStore.js'
@@ -30,50 +32,54 @@ export interface IJournalEntries {
 
 export interface IOwnState {
   account: Address
-  deposits: IDepositRow[]
-  bonds: IBondRow[]
-  backings: IBackingRow[]
   mandates: IMandateRow[]
-  books: IBookRow[]
-  backers: IBackerRow[]
-  marks: IMarkRow[]
-  settlements: ISettlementRow[]
-  settleRows: ISettleRowRow[]
+  holdings: IHoldingRow[]
+  positions: IPositionRow[]
+  fundRows: IFundRow[]
+  queues: IQueueRow[]
+  closedAccrued: IClosedAccruedRow[]
+  valuations: IValuationRow[]
+  metrics: IMasterMetricRow[]
+  escrows: IEscrowRow[]
+  credits: ICreditRow[]
 }
 
-export async function foldOwnAccount(journal: IJournalEntries): Promise<IOwnState> {
+export async function foldOwnAccount(own: IJournalEntries, bodyList: readonly IJournalEntries[]): Promise<IOwnState> {
   const store: IMemoryStore = memoryStore()
-  const ordered = [...journal.entries]
-    .flatMap(([chainId, list]) =>
-      list.map(
-        (call): IAccountEntry => ({
-          chainId,
-          account: journal.account,
-          source: call.source,
-          digest: call.digest,
-          executionData: call.executionData,
-          callList: call.callList,
-          resultList: call.resultList,
-          logs: call.logs,
-          value: call.value,
-          block: { number: Number(call.blockNumber), timestamp: call.blockTimestamp },
-          logIndex: call.logIndex,
-          transactionHash: call.transactionHash
-        })
+  const ordered = [own, ...bodyList]
+    .flatMap(journal =>
+      [...journal.entries].flatMap(([chainId, list]) =>
+        list.map(
+          (call): IAccountEntry => ({
+            chainId,
+            account: journal.account,
+            source: call.source,
+            digest: call.digest,
+            executionData: call.executionData,
+            callList: call.callList,
+            resultList: call.resultList,
+            logs: call.logs,
+            value: call.value,
+            block: { number: Number(call.blockNumber), timestamp: call.blockTimestamp },
+            logIndex: call.logIndex,
+            transactionHash: call.transactionHash
+          })
+        )
       )
     )
     .sort((a, b) => a.chainId - b.chainId || a.block.number - b.block.number || a.logIndex - b.logIndex)
   for (const entry of ordered) await foldAccountEntry(store, entry)
   return {
-    account: journal.account,
-    deposits: store.rowsOf(depositTable),
-    bonds: store.rowsOf(bondTable),
-    backings: store.rowsOf(backingTable),
+    account: own.account,
     mandates: store.rowsOf(mandateTable),
-    books: store.rowsOf(bookTable),
-    backers: store.rowsOf(backerTable),
-    marks: store.rowsOf(markTable),
-    settlements: store.rowsOf(settlementTable),
-    settleRows: store.rowsOf(settleRowTable)
+    holdings: store.rowsOf(holdingTable),
+    positions: store.rowsOf(positionTable),
+    fundRows: store.rowsOf(fundTable),
+    queues: store.rowsOf(queueTable),
+    closedAccrued: store.rowsOf(closedAccruedTable),
+    valuations: store.rowsOf(valuationTable),
+    metrics: store.rowsOf(masterMetricTable),
+    escrows: store.rowsOf(escrowTable),
+    credits: store.rowsOf(creditTable)
   }
 }

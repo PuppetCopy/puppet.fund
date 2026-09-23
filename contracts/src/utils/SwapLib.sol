@@ -8,7 +8,6 @@ import {CallLib} from "./CallLib.sol";
 import {NATIVE_TOKEN} from "./Native.sol";
 import {Error} from "./Error.sol";
 import {IntentLib} from "./IntentLib.sol";
-import {Register} from "../core/Register.sol";
 
 bytes32 constant SWAP_PARAMS_TYPEHASH = keccak256(
     "SwapParams(address inputToken,uint256 inputAmount,address outputToken,uint256 outputAmount,address provider,bytes providerCallData)"
@@ -41,16 +40,14 @@ library SwapLib {
     }
 
     function verify(
-        Register _register,
         SwapParams calldata _swap,
         uint _relayFee,
         uint _maxRelayFeeBps
-    ) internal view {
+    ) internal pure {
         if (_swap.inputAmount == 0) revert Error.Balance__NothingToSwap();
         if (_swap.outputAmount == 0) revert Error.Balance__ZeroSwapOutput();
         if (_swap.provider == address(0)) revert Error.Intent__InvalidProvider();
         IntentLib.verifyRelayFeeRatio(_relayFee, _swap.inputAmount, _maxRelayFeeBps);
-        IntentLib.verifyRegisteredTokenAndCap(_register, _swap.inputToken, _swap.inputAmount);
     }
 
     function calls(

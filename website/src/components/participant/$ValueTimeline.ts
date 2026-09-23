@@ -1,13 +1,25 @@
-import { type IntervalTime, PLATFORM_STAT_INTERVAL } from '@puppet/sdk/const'
+import type { IntervalTime } from '@puppet/sdk/const'
 import { getMappedValue, parseReadableNumber, readableDate, readableUnitAmount } from '@puppet/sdk/core'
-import { combine, empty, filterNull, type IStream, just, map, op, skipRepeatsWith, start, switchLatest, switchPromises } from 'aelea/stream'
+import { combine, constant, empty, filterNull, type IStream, just, map, op, skipRepeatsWith, start, switchLatest, switchPromises } from 'aelea/stream'
 import { type IBehavior, multicast, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, motion, style } from 'aelea/ui'
-import { $column, $defaultNumberTickerSlot, $NumberTicker, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
+import { $column, $defaultNumberTickerSlot, $NumberTicker, $Popover, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import type { BaselineData, MouseEventParams } from 'lightweight-charts'
-import { $Baseline, $DropSelect, $errorCard, $infoLabel, $infoTooltip, $spinner, type ISeriesTime, text } from '@/ui-components'
-import { activityOptionShortLabelMap } from '../$LastActivity.js'
+import {
+  $Baseline,
+  $ButtonSecondary,
+  $defaultMiniButtonSecondary,
+  $errorCard,
+  $infoLabel,
+  $infoTooltip,
+  $popoverCaret,
+  $spinner,
+  type ISeriesTime,
+  text
+} from '@/ui-components'
+import { $LastAtivity, activityOptionShortLabelMap } from '../$LastActivity.js'
+import { $PerformanceMetricToggle, $performanceMetricIcon, type IPerformanceMetric } from '../$PerformanceMetric.js'
 
 export interface ITimelinePoint {
   time: number
@@ -18,9 +30,10 @@ export interface I$ValueTimeline {
   hideBalances: IStream<boolean>
   timelineQuery: IStream<Promise<ITimelinePoint[]>>
   unit: string
-  label: string
-  tooltip: string
+  label: string | IStream<string>
+  tooltip: string | IStream<string>
   activityTimeframe: IStream<IntervalTime>
+  performanceMetric?: IStream<IPerformanceMetric>
   chartHeight?: string
   $lead?: I$Node
   $empty?: I$Node
@@ -36,6 +49,7 @@ export const $ValueTimeline = ({
   label,
   tooltip,
   activityTimeframe,
+  performanceMetric,
   chartHeight = '200px',
   scaleFloor,
   $lead = $node(style({ flex: 1 }))(),
@@ -44,7 +58,9 @@ export const $ValueTimeline = ({
   component(
     (
       [crosshairMove, crosshairMoveTether]: IBehavior<MouseEventParams>,
-      [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<IntervalTime>
+      [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<IntervalTime>,
+      [changePerformanceMetric, changePerformanceMetricTether]: IBehavior<IPerformanceMetric>,
+      [clickFilters, clickFiltersTether]: IBehavior<PointerEvent>
     ) => {
       const seriesLastValue: IStream<number | null> = op(
         map(q => q.then(tl => (tl.length ? tl[tl.length - 1]!.value : null)), timelineQuery),
@@ -93,7 +109,7 @@ export const $ValueTimeline = ({
           map(
             date =>
               date === null
-                ? $row(style({ alignItems: 'center', fontSize: text.xs }))($infoLabel($text(label)), $infoTooltip(tooltip, palette.foreground))
+                ? $row(style({ alignItems: 'center', fontSize: text.xs }))($infoLabel($text(label)), $infoTooltip(typeof tooltip === 'string' ? tooltip : $node($text(tooltip)), palette.foreground))
                 : $infoLabel(style({ fontSize: text.xs }))($text(date)),
             hoverDate
           )
@@ -117,12 +133,31 @@ export const $ValueTimeline = ({
           )(
             $lead,
             $row(style({ flex: 1, justifyContent: 'center' }))(
-              $DropSelect({
-                value: activityTimeframe,
-                optionList: [...PLATFORM_STAT_INTERVAL],
-                $valueLabel: map((tf: IntervalTime) => $node(style({ fontWeight: '600', fontSize: text.sm }))($text(getMappedValue(activityOptionShortLabelMap, tf)))),
-                $$option: map((tf: IntervalTime) => $node(style({ padding: '8px 14px', fontSize: text.sm }))($text(getMappedValue(activityOptionShortLabelMap, tf))))
-              })({ select: changeActivityTimeframeTether() })
+              $Popover({
+                $open: constant(
+                  $column(spacing.default, style({ minWidth: '240px' }))(
+                    $column(spacing.small)(
+                      $node(style({ color: palette.foreground, fontSize: text.sm }))($text('Timeframe')),
+                      $LastAtivity({ activityTimeframe })({ changeActivityTimeframe: changeActivityTimeframeTether() })
+                    ),
+                    performanceMetric === undefined
+                      ? empty
+                      : $column(spacing.small)(
+                          $node(style({ color: palette.foreground, fontSize: text.sm }))($text('Metric')),
+                          $PerformanceMetricToggle({ performanceMetric })({ changePerformanceMetric: changePerformanceMetricTether() })
+                        )
+                  ),
+                  clickFilters
+                ),
+                $target: $ButtonSecondary({
+                  $container: $defaultMiniButtonSecondary(style({ height: '32px', padding: '0 12px', fontSize: text.sm, fontWeight: '600' })),
+                  $content: $row(spacing.small, style({ alignItems: 'center', whiteSpace: 'nowrap' }))(
+                    performanceMetric === undefined ? empty : switchLatest(map(metric => $performanceMetricIcon(metric, '14px'), performanceMetric)),
+                    $node($text(map(tf => getMappedValue(activityOptionShortLabelMap, tf), activityTimeframe))),
+                    $popoverCaret()
+                  )
+                })({ click: clickFiltersTether() })
+              })({})
             ),
             $header
           ),
@@ -155,7 +190,7 @@ export const $ValueTimeline = ({
             )
           )
         ),
-        { changeActivityTimeframe }
+        { changeActivityTimeframe, changePerformanceMetric }
       ]
     }
   )

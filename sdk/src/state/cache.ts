@@ -1,4 +1,4 @@
-export const MIN_TTL_MS = 20
+const MIN_TTL_MS = 20
 
 const assertTtl = (ms: number): void => {
   if (ms < MIN_TTL_MS) throw new Error(`ttl/maxAge ${ms}ms is below the ${MIN_TTL_MS}ms floor`)

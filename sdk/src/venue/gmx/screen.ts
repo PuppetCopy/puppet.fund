@@ -1,18 +1,26 @@
 import { GMX, PROTOCOL } from '@puppet/contracts/const'
-import { ARBITRUM_MARKET_LIST } from '@puppet/contracts/gmx'
 import type { IIAccount__Call } from '@puppet/contracts/types'
-import { type Address, decodeAbiParameters, getAddress, type Hex, isAddressEqual, size, zeroAddress } from 'viem'
+import { type Address, decodeAbiParameters, getAddress, type Hex, isAddress, isAddressEqual, size, zeroAddress } from 'viem'
 import type { ChainId } from '../../const/index.js'
-import { resolveIndexToken } from '../../evaluate/platform/gmx.js'
+import { readableAddress } from '../../core/format.js'
+import { readableTokenAmountLabel, readableUsd } from '../../core/readable.js'
+import { contractLabelOf } from '../../state/label.js'
 import { decodeErc20, isRegisteredToken } from '../erc20.js'
-import type { IGuardReason, IOperateStep, IScreenContext, IVenue } from '../types.js'
+import type { IGuardReason, IOperateStep, IScreenContext, IVenue, IVenueStep } from '../types.js'
+import { gmxSubaccountBlock } from './allocation.js'
+import { GMX_V2_CONTRACT_MAP } from './contractMap.js'
 import {
   GMX_ADMITTED_ORDER_TYPES,
+  GMX_CHAIN_TOKENS,
   GMX_DECREASE_TYPES,
   GMX_INCREASE_TYPES,
   GMX_MAX_SWAP_PATH_LENGTH,
+  GMX_ONE_CLICK_MESSAGE,
   GMX_ORDER_VAULT,
+  GMX_RELAY_DOMAIN,
   GMX_ROUTER,
+  GMX_SUBACCOUNT_RELAY_ROUTER,
+  GMX_SUBACCOUNT_REMOVAL_TYPE,
   GMX_SWAP_TYPES,
   GMX_TOKEN_SPENDER,
   GMX_UI_FEE_RECEIVER,
@@ -20,7 +28,12 @@ import {
   GMX_WNT
 } from './contracts.js'
 import { gmxOutflows, traceSwapPathOutput, unwrapRouterCalls } from './decode.js'
+import { GMX_ORDER_TYPE, resolveIndexToken, valueGmxAccount } from './evaluate.js'
+import { getGmxTokenDescription, getMarketDescription } from './market.js'
+import { ARBITRUM_MARKET_LIST } from './marketList.js'
+import { gmxOrderOutcome } from './outcome.js'
 
+const PLATFORM = 'gmx'
 const MULTICALL_SELECTOR = '0xac9650d8'
 const BYTES_LIST_HEAD = '0x0000000000000000000000000000000000000000000000000000000000000020'
 
@@ -156,19 +169,43 @@ function screenRouterCall(ctx: IScreenContext, call: IIAccount__Call): IGuardRea
   return reasons
 }
 
-function screenApproval(call: IIAccount__Call): IGuardReason[] {
-  const reasons: IGuardReason[] = []
-  if (call.value !== 0n) {
-    reasons.push({ code: 'NATIVE_VALUE_FORBIDDEN', detail: `approve call to ${call.target} forwards native value ${call.value}` })
-  }
+function routerApproval(call: IIAccount__Call): boolean {
   const dec = decodeErc20(call.callData)
-  if (dec?.functionName !== 'approve') return reasons
-  const [spender] = dec.args as readonly [Address, bigint]
-  if (!isAddressEqual(spender, GMX_TOKEN_SPENDER)) {
-    reasons.push({ code: 'APPROVE_BAD_SPENDER', detail: `approve spender ${spender} must be the GMX Router ${GMX_TOKEN_SPENDER}` })
-  }
-  return reasons
+  return dec?.functionName === 'approve' && isAddressEqual((dec.args as readonly [Address, bigint])[0], GMX_TOKEN_SPENDER)
 }
+
+function screenApproval(call: IIAccount__Call): IGuardReason[] {
+  return call.value === 0n ? [] : [{ code: 'NATIVE_VALUE_FORBIDDEN', detail: `approve call to ${call.target} forwards native value ${call.value}` }]
+}
+
+const ORDER_STYLE: Record<number, string> = {
+  [GMX_ORDER_TYPE.LimitIncrease]: 'limit',
+  [GMX_ORDER_TYPE.StopIncrease]: 'stop',
+  [GMX_ORDER_TYPE.LimitDecrease]: 'take profit',
+  [GMX_ORDER_TYPE.StopLossDecrease]: 'stop loss'
+}
+
+const NATIVE_DESCRIPTION = { symbol: 'ETH', decimals: 18 }
+
+const tokenOf = (token: Address): { symbol: string; decimals: number } => {
+  try {
+    const desc = getGmxTokenDescription(token)
+    return { symbol: desc.symbol, decimals: desc.decimals }
+  } catch {
+    return { symbol: readableAddress(token), decimals: 18 }
+  }
+}
+
+const indexOf = (market: Address): { symbol: string; decimals: number } => {
+  try {
+    const desc = getGmxTokenDescription(getMarketDescription(market).indexToken)
+    return { symbol: desc.baseSymbol ?? desc.symbol, decimals: desc.decimals }
+  } catch {
+    return { symbol: readableAddress(market), decimals: 18 }
+  }
+}
+
+const venueStep = (step: Omit<IVenueStep, 'kind' | 'venueId'>): IVenueStep => ({ kind: 'venue', venueId: PLATFORM, ...step })
 
 function describeRouterCall(call: IIAccount__Call, returned: Hex | undefined, sent: Map<Address, bigint>): IOperateStep[] {
   const innerResults: readonly Hex[] =
@@ -195,46 +232,92 @@ function describeRouterCall(call: IIAccount__Call, returned: Hex | undefined, se
       const funded = (sent.get(collateralToken) ?? 0n) - (isAddressEqual(collateralToken, GMX_WNT) ? p.numbers.executionFee : 0n)
       sent.clear()
       const key = innerResults[j]
-      steps.push({
-        kind: 'gmx-order',
-        key: key !== undefined && size(key) === 32 ? key : null,
-        orderType: Number(p.orderType),
-        market: getAddress(p.addresses.market),
-        isLong: p.isLong,
-        sizeDeltaUsd: p.numbers.sizeDeltaUsd,
-        collateralToken,
-        collateralDelta: increase ? funded : p.numbers.initialCollateralDeltaAmount,
-        positionCollateralToken: swapPath.length > 0 ? traceSwapPathOutput(collateralToken, swapPath) : collateralToken,
-        triggerPrice: p.numbers.triggerPrice,
-        acceptablePrice: p.numbers.acceptablePrice,
-        executionFee: p.numbers.executionFee,
-        swapPath,
-        decreasePositionSwapType: Number(p.decreasePositionSwapType)
-      })
+      const collateralDelta = increase ? funded : p.numbers.initialCollateralDeltaAmount
+      const delivered = swapPath.length > 0 ? traceSwapPathOutput(collateralToken, swapPath) : collateralToken
+      const index = indexOf(getAddress(p.addresses.market))
+      const style = ORDER_STYLE[Number(p.orderType)]
+      const side = p.isLong ? 'long' : 'short'
+      steps.push(
+        venueStep({
+          key: key !== undefined && size(key) === 32 ? key : null,
+          call: 'createOrder',
+          label: `${style === undefined ? (increase ? 'Increase' : 'Decrease') : style[0]!.toUpperCase() + style.slice(1)} ${side} ${index.symbol}`,
+          fields: [
+            { label: 'market', value: index.symbol },
+            { label: 'side', value: p.isLong ? 'long' : 'short' },
+            { label: 'size', value: `$${readableUsd(p.numbers.sizeDeltaUsd)}` },
+            { label: 'collateral', value: readableTokenAmountLabel(tokenOf(collateralToken), collateralDelta) },
+            ...(delivered === undefined || isAddressEqual(delivered, collateralToken) ? [] : [{ label: 'swapped to', value: indexOf(delivered).symbol }]),
+            ...(p.numbers.triggerPrice === 0n ? [] : [{ label: 'trigger', value: `$${readableUsd(p.numbers.triggerPrice * 10n ** BigInt(index.decimals))}` }]),
+            ...(p.numbers.acceptablePrice === 0n ? [] : [{ label: 'acceptable', value: `$${readableUsd(p.numbers.acceptablePrice * 10n ** BigInt(index.decimals))}` }]),
+            { label: 'execution fee', value: readableTokenAmountLabel(NATIVE_DESCRIPTION, p.numbers.executionFee) }
+          ],
+          flows: [
+            ...(collateralDelta > 0n ? [{ token: collateralToken, delta: increase ? -collateralDelta : collateralDelta }] : []),
+            { token: PROTOCOL.nativeToken as Address, delta: -p.numbers.executionFee }
+          ]
+        })
+      )
     } else if (dec.functionName === 'cancelOrder') {
-      steps.push({ kind: 'gmx-cancel', key: dec.args[0] as Hex })
+      const key = dec.args[0] as Hex
+      steps.push(
+        venueStep({
+          key,
+          call: 'cancelOrder',
+          label: 'Cancel order',
+          fields: [{ label: 'order', value: key }],
+          flows: []
+        })
+      )
     } else if (dec.functionName === 'updateOrder') {
-      const [key, sizeDeltaUsd, acceptablePrice, triggerPrice] = dec.args as readonly [Hex, bigint, bigint, bigint]
-      steps.push({ kind: 'gmx-update', key, sizeDeltaUsd, acceptablePrice, triggerPrice })
+      const [key, sizeDeltaUsd] = dec.args as readonly [Hex, bigint, bigint, bigint]
+      steps.push(
+        venueStep({
+          key,
+          call: 'updateOrder',
+          label: 'Update order',
+          fields: [
+            { label: 'order', value: key },
+            { label: 'size', value: `$${readableUsd(sizeDeltaUsd)}` }
+          ],
+          flows: []
+        })
+      )
     } else if (dec.functionName === 'claimFundingFees' || dec.functionName === 'claimCollateral') {
-      const [markets, tokens] = dec.args as readonly [readonly Address[], readonly Address[]]
-      steps.push({
-        kind: 'gmx-claim',
-        claim: dec.functionName === 'claimFundingFees' ? 'funding' : 'collateral',
-        markets: markets.map(m => getAddress(m)),
-        tokens: tokens.map(t => getAddress(t))
-      })
+      const [markets] = dec.args as readonly [readonly Address[], readonly Address[]]
+      const funding = dec.functionName === 'claimFundingFees'
+      steps.push(
+        venueStep({
+          key: null,
+          call: dec.functionName,
+          label: funding ? 'Claim funding fees' : 'Claim collateral',
+          fields: [{ label: 'markets', value: String(markets.length) }],
+          flows: []
+        })
+      )
     }
   })
   return steps
 }
 
 export const gmxVenue: IVenue = {
-  venueId: 'gmx',
+  venueId: PLATFORM,
+  name: 'GMX',
+  chains: [GMX_V2_CHAIN_ID],
+  value: valueGmxAccount,
+  outcome: gmxOrderOutcome,
+  blocksAllocation: gmxSubaccountBlock,
+  contracts: Object.entries(GMX_V2_CONTRACT_MAP as Record<string, { address: Address }>).map(([key, entry]) => ({
+    chainId: GMX_V2_CHAIN_ID,
+    address: entry.address,
+    name: contractLabelOf(GMX_V2_CHAIN_ID, entry.address).name,
+    detail: contractLabelOf(GMX_V2_CHAIN_ID, entry.address).detail,
+    pullsTokens: isAddressEqual(entry.address, GMX_TOKEN_SPENDER) || key === 'GmxRouter'
+  })),
   claims(ctx, call) {
     if (ctx.chainId !== GMX_V2_CHAIN_ID) return false
     if (isAddressEqual(call.target, GMX_ROUTER)) return true
-    return isRegisteredToken(ctx, call.target) && decodeErc20(call.callData)?.functionName === 'approve'
+    return isRegisteredToken(ctx, call.target) && routerApproval(call)
   },
   screen(ctx, call) {
     return isAddressEqual(call.target, GMX_ROUTER) ? screenRouterCall(ctx, call) : screenApproval(call)
@@ -250,7 +333,48 @@ export const gmxVenue: IVenue = {
     })
     return out
   },
-  typedData() {
+  typedData(account, typedData) {
+    const domain = typedData.domain
+    const verifying = domain?.verifyingContract
+    if (domain?.name === GMX_RELAY_DOMAIN.name) {
+      const isRemoval =
+        domain.version === GMX_RELAY_DOMAIN.version &&
+        Number(domain.chainId) === GMX_V2_CHAIN_ID &&
+        verifying !== undefined &&
+        isAddress(verifying) &&
+        isAddressEqual(verifying, GMX_SUBACCOUNT_RELAY_ROUTER) &&
+        typedData.primaryType === GMX_SUBACCOUNT_REMOVAL_TYPE
+      if (isRemoval) return []
+      return [
+        {
+          code: 'DAPP_ACTION_NOT_ADMITTED',
+          detail: `GMX Express is not supported. Its signature commits relayParams as a single hash, so the relay fee, the external calls and the token permits it authorises cannot be read or bounded here, and one-click orders run outside the account entirely. Trade in Classic mode; the only GMX relay signature this account makes is ${GMX_SUBACCOUNT_REMOVAL_TYPE} on ${GMX_SUBACCOUNT_RELAY_ROUTER}, which revokes an existing subaccount.`
+        }
+      ]
+    }
+    if (typedData.primaryType === 'Permit' && verifying !== undefined && isAddress(verifying) && GMX_CHAIN_TOKENS.some(t => isAddressEqual(t, verifying))) {
+      const { owner, spender } = typedData.message
+      if (Number(domain?.chainId) !== GMX_V2_CHAIN_ID) {
+        return [{ code: 'DAPP_DOMAIN_NOT_ADMITTED', detail: `a permit on ${verifying} must be bound to chain ${GMX_V2_CHAIN_ID}, not ${String(domain?.chainId ?? '(none)')}` }]
+      }
+      if (typeof owner !== 'string' || !isAddress(owner) || !isAddressEqual(owner, account)) {
+        return [{ code: 'DAPP_ACTION_NOT_ADMITTED', detail: `a permit must name the account ${account} as owner, not ${String(owner)}` }]
+      }
+      if (typeof spender !== 'string' || !isAddress(spender) || !isAddressEqual(spender, GMX_TOKEN_SPENDER)) {
+        return [{ code: 'DAPP_EXIT_DESTINATION', detail: `a permit may only let the GMX Router ${GMX_TOKEN_SPENDER} pull ${verifying}; ${String(spender)} could move the account's balance elsewhere` }]
+      }
+      return []
+    }
     return null
+  },
+  message(_account, text) {
+    return text === GMX_ONE_CLICK_MESSAGE
+      ? [
+          {
+            code: 'DAPP_ACTION_NOT_ADMITTED',
+            detail: 'one-click trading is not admitted: its session key would sign orders GMX relays outside the account, so no cycle opens and nothing is screened; trade in Classic mode'
+          }
+        ]
+      : null
   }
 }

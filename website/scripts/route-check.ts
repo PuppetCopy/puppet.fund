@@ -26,7 +26,7 @@ const ACROSS_INTEGRATOR_ID = required('ACROSS_INTEGRATOR_ID')
 const LIFI_API_KEY = Bun.env.LIFI_API_KEY
 
 const ACCOUNT: Address = '0x78305f62c2a0e16D82fD09928f7B4DDe21922368'
-const HUB: ChainId = 143
+const HUB: ChainId = 10
 const ARB: ChainId = 42161
 
 const proxy = Bun.serve({
@@ -68,7 +68,7 @@ const proxy = Bun.serve({
 })
 
 const base = `http://localhost:${proxy.port}`
-const ENDPOINTS = { lifi: base, across: base }
+const ENDPOINTS = { lifi: base, kyber: base, across: base }
 
 const clientFor = (chainId: ChainId) =>
   createPublicClient({ transport: http(`${RPC_URL}/${CHAIN_NETWORK_MAP[chainId]}/${RPC_KEY_WEBSITE}`) })
@@ -108,11 +108,11 @@ const WETH_IN = 89593282301017988n
 const USDC_IN = 25000000n
 
 const JOURNEYS: IJourney[] = [
-  { name: 'deposit ARB WETH -> MON WETH', originChainId: ARB, destinationChainId: HUB, inputKey: 'WETH', outputKey: 'WETH', inputAmount: WETH_IN, maxLegs: 2, expect: 'viable' },
-  { name: 'deposit ARB WETH -> MON USDC', originChainId: ARB, destinationChainId: HUB, inputKey: 'WETH', outputKey: 'USDC', inputAmount: WETH_IN, maxLegs: 2, expect: 'viable' },
-  { name: 'deposit ARB USDC -> MON USDC', originChainId: ARB, destinationChainId: HUB, inputKey: 'USDC', outputKey: 'USDC', inputAmount: USDC_IN, maxLegs: 2, expect: 'viable' },
+  { name: 'deposit ARB WETH -> OP WETH', originChainId: ARB, destinationChainId: HUB, inputKey: 'WETH', outputKey: 'WETH', inputAmount: WETH_IN, maxLegs: 2, expect: 'viable' },
+  { name: 'deposit ARB WETH -> OP USDC', originChainId: ARB, destinationChainId: HUB, inputKey: 'WETH', outputKey: 'USDC', inputAmount: WETH_IN, maxLegs: 2, expect: 'viable' },
+  { name: 'deposit ARB USDC -> OP USDC', originChainId: ARB, destinationChainId: HUB, inputKey: 'USDC', outputKey: 'USDC', inputAmount: USDC_IN, maxLegs: 2, expect: 'viable' },
   {
-    name: 'fund ARB USDC -> MON WETH',
+    name: 'fund ARB USDC -> OP WETH',
     originChainId: ARB,
     destinationChainId: HUB,
     inputKey: 'USDC',
@@ -122,10 +122,9 @@ const JOURNEYS: IJourney[] = [
     expect: 'gap',
     gap: 'the Fund editor runs maxLegs 1 so there is no composed fallback, and the single-leg route is the unscreened SpokePool arrival-swap shape; this is what a user funding a WETH fund with USDC hits'
   },
-  { name: 'deposit ARB WETH -> MON WMON', originChainId: ARB, destinationChainId: HUB, inputKey: 'WETH', outputKey: 'WMON', inputAmount: WETH_IN, maxLegs: 2, expect: 'viable' },
-  { name: 'withdraw MON WETH -> ARB WETH', originChainId: HUB, destinationChainId: ARB, inputKey: 'WETH', outputKey: 'WETH', inputAmount: WETH_IN, maxLegs: 1, expect: 'viable' },
+  { name: 'withdraw OP WETH -> ARB WETH', originChainId: HUB, destinationChainId: ARB, inputKey: 'WETH', outputKey: 'WETH', inputAmount: WETH_IN, maxLegs: 1, expect: 'viable' },
   {
-    name: 'withdraw MON USDC -> ARB WETH',
+    name: 'withdraw OP USDC -> ARB WETH',
     originChainId: HUB,
     destinationChainId: ARB,
     inputKey: 'USDC',
@@ -135,9 +134,9 @@ const JOURNEYS: IJourney[] = [
     expect: 'gap',
     gap: 'input is already the bridge asset, so Across returns a plain SpokePool deposit (0xad5425c6) with an arrival-side swap instead of a periphery swapAndBridge; we only screen the swapAndBridge shape'
   },
-  { name: 'withdraw MON USDC -> ARB USDC', originChainId: HUB, destinationChainId: ARB, inputKey: 'USDC', outputKey: 'USDC', inputAmount: USDC_IN, maxLegs: 1, expect: 'viable' },
-  { name: 'fundSwap ARB WETH -> MON WETH', originChainId: ARB, destinationChainId: HUB, inputKey: 'WETH', outputKey: 'WETH', inputAmount: WETH_IN, maxLegs: 3, expect: 'viable' },
-  { name: 'fundSwap ARB WETH -> MON USDC', originChainId: ARB, destinationChainId: HUB, inputKey: 'WETH', outputKey: 'USDC', inputAmount: WETH_IN, maxLegs: 3, expect: 'viable' }
+  { name: 'withdraw OP USDC -> ARB USDC', originChainId: HUB, destinationChainId: ARB, inputKey: 'USDC', outputKey: 'USDC', inputAmount: USDC_IN, maxLegs: 1, expect: 'viable' },
+  { name: 'fundSwap ARB WETH -> OP WETH', originChainId: ARB, destinationChainId: HUB, inputKey: 'WETH', outputKey: 'WETH', inputAmount: WETH_IN, maxLegs: 3, expect: 'viable' },
+  { name: 'fundSwap ARB WETH -> OP USDC', originChainId: ARB, destinationChainId: HUB, inputKey: 'WETH', outputKey: 'USDC', inputAmount: WETH_IN, maxLegs: 3, expect: 'viable' }
 ]
 
 const MAX_LOSS_BPS = DEFAULT_EVALUATION_CONFIG.swapMaxSlippageBps

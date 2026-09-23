@@ -11,13 +11,13 @@ import {
 } from './types.js'
 import { assertNavSignable } from './verify.js'
 
-export interface IVenueValueLeg {
+interface IVenueValueLeg {
   chainId: ChainId
   token: Address
   amount: bigint
 }
 
-export interface IEvaluateSwapParams {
+interface IEvaluateSwapParams {
   input: IVenueValueLeg
   output: IVenueValueLeg
   nowSec: number
@@ -25,7 +25,7 @@ export interface IEvaluateSwapParams {
   getRate: IGetRate
 }
 
-export interface IEvaluateCrossChainSwapParams {
+interface IEvaluateCrossChainSwapParams {
   inputAmount: bigint
   outputAmount: bigint
   config?: Partial<IEvaluationConfig>

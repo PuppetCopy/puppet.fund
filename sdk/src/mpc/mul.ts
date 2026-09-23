@@ -4,9 +4,9 @@ import { type Hex, hexToBytes } from 'viem'
 import { decodeScalar, encodeScalar, Fn, hashBytes, hashScalar, u32 } from './core.js'
 import type { IOtReceiverState, IOtSenderPads } from './ot.js'
 
-export const KAPPA = 256
-export const STAT = 128
-export const ENCODED_BITS = KAPPA + 2 * STAT
+const KAPPA = 256
+const STAT = 128
+const ENCODED_BITS = KAPPA + 2 * STAT
 export const MUL_LENGTH = KAPPA + ENCODED_BITS
 
 const gadget: bigint[] = [
@@ -44,7 +44,7 @@ export interface ICorrelation {
   tauHat: Hex[]
 }
 
-export interface IMulSenderShares {
+interface IMulSenderShares {
   tA: bigint[]
   tAHat: bigint[]
 }
@@ -67,7 +67,7 @@ export function cotSender(pads: IOtSenderPads, offset: number, alpha: bigint, al
   return { shares: { tA, tAHat }, correlation: { tau, tauHat } }
 }
 
-export interface IMulReceiverShares {
+interface IMulReceiverShares {
   tB: bigint[]
   tBHat: bigint[]
 }

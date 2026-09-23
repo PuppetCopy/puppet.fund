@@ -1,20 +1,25 @@
 import type { ChainId } from '@puppet/sdk/const'
-import { getTokenDescription, readableAddress, readableHash, readableTokenAmountLabel, readableUsd } from '@puppet/sdk/core'
-import { getGmxTokenDescription, getMarketDescription } from '@puppet/sdk/gmx'
-import { GMX_INCREASE_TYPES, GMX_ORDER_TYPE, type IOperateStep } from '@puppet/sdk/venue'
-import type { Address, Hex } from 'viem'
+import { getTokenDescription, readableAddress, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { contractLabelOf } from '@puppet/sdk/state'
+import { type IOperateStep, VENUES } from '@puppet/sdk/venue'
+import { type Address, type Hex, isAddressEqual } from 'viem'
 
 export interface ITokenFlow {
   token: { symbol: string; decimals: number }
   delta: bigint
 }
 
+export interface IStepField {
+  label: string
+  value: string
+}
+
 export interface IVenueAction {
+  venueId: string
   venue: string
   label: string
   call: string
-  title: string
-  details: string[]
+  fields: IStepField[]
   orderKey: Hex | null
 }
 
@@ -25,106 +30,91 @@ export interface IOperationSummary {
 
 export const readableFlow = (f: ITokenFlow): string => `${f.delta > 0n ? '+' : ''}${readableTokenAmountLabel(f.token, f.delta)}`
 
-const ORDER_STYLE: Record<number, string> = {
-  [GMX_ORDER_TYPE.LimitIncrease]: 'limit',
-  [GMX_ORDER_TYPE.StopIncrease]: 'stop',
-  [GMX_ORDER_TYPE.LimitDecrease]: 'take profit',
-  [GMX_ORDER_TYPE.StopLossDecrease]: 'stop loss'
-}
+const UNBOUNDED_ALLOWANCE = 2n ** 128n - 1n
 
-const indexOf = (market: Address): { symbol: string; decimals: number } => {
-  try {
-    const desc = getGmxTokenDescription(getMarketDescription(market).indexToken)
-    return { symbol: desc.baseSymbol ?? desc.symbol, decimals: desc.decimals }
-  } catch {
-    return { symbol: readableAddress(market), decimals: 18 }
-  }
-}
+const NATIVE: Address = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
 
-const gmxToken = (token: Address): { symbol: string; decimals: number } => {
-  try {
-    return getGmxTokenDescription(token)
-  } catch {
-    return { symbol: readableAddress(token), decimals: 18 }
-  }
-}
+const venueName = (venueId: string): string => VENUES.find(v => v.venueId === venueId)?.name ?? venueId
+
+const labelled = (chainId: ChainId, address: Address): string => `${contractLabelOf(chainId, address).name} ${readableAddress(address)}`
 
 export function operationSummary(chainId: ChainId, steps: readonly IOperateStep[]): IOperationSummary {
   const actions: IVenueAction[] = []
   const flows: ITokenFlow[] = []
-  for (const s of steps) {
+  const paired = new Set<number>()
+  steps.forEach((step, i) => {
+    if (step.kind !== 'approve' || step.amount === 0n || paired.has(i)) return
+    const reset = steps.findIndex(
+      (later, j) =>
+        j > i &&
+        later.kind === 'approve' &&
+        later.amount === 0n &&
+        !paired.has(j) &&
+        isAddressEqual(later.token, step.token) &&
+        isAddressEqual(later.spender, step.spender)
+    )
+    if (reset === -1) return
+    paired.add(i)
+    paired.add(reset)
+  })
+  for (const [i, s] of steps.entries()) {
     switch (s.kind) {
-      case 'gmx-order': {
-        const index = indexOf(s.market)
-        const increase = GMX_INCREASE_TYPES.has(s.orderType)
-        const style = ORDER_STYLE[s.orderType]
-        const side = s.isLong ? 'long' : 'short'
+      case 'venue':
         actions.push({
-          venue: 'GMX',
-          label: `${style === undefined ? (increase ? 'Increase' : 'Decrease') : style[0].toUpperCase() + style.slice(1)} ${side} ${index.symbol}`,
-          call: 'createOrder',
-          title: `${s.isLong ? 'Long' : 'Short'} ${index.symbol} ${increase ? '+' : '−'}$${readableUsd(s.sizeDeltaUsd)}`,
-          details: [
-            ...(style === undefined ? [] : [`${style} @ $${readableUsd(s.triggerPrice * 10n ** BigInt(index.decimals))}`]),
-            ...(s.positionCollateralToken !== undefined && s.positionCollateralToken !== s.collateralToken
-              ? [`swapped to ${gmxToken(s.positionCollateralToken).symbol}`]
-              : [])
-          ],
+          venueId: s.venueId,
+          venue: venueName(s.venueId),
+          label: s.label,
+          call: s.call,
+          fields: [...s.fields],
           orderKey: s.key
         })
-        if (s.collateralDelta > 0n) {
-          flows.push({ token: gmxToken(s.collateralToken), delta: increase ? -s.collateralDelta : s.collateralDelta })
-        }
-        flows.push({ token: getTokenDescription(chainId, '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'), delta: -s.executionFee })
-        break
-      }
-      case 'gmx-cancel':
-        actions.push({ venue: 'GMX', label: 'Cancel order', call: 'cancelOrder', title: `Cancel order ${readableHash(s.key)}`, details: [], orderKey: s.key })
-        break
-      case 'gmx-update':
-        actions.push({
-          venue: 'GMX',
-          label: 'Update order',
-          call: 'updateOrder',
-          title: `Update order ${readableHash(s.key)}`,
-          details: [`size $${readableUsd(s.sizeDeltaUsd)}`],
-          orderKey: s.key
-        })
-        break
-      case 'gmx-claim':
-        actions.push({
-          venue: 'GMX',
-          label: s.claim === 'funding' ? 'Claim funding fees' : 'Claim collateral',
-          call: s.claim === 'funding' ? 'claimFundingFees' : 'claimCollateral',
-          title: s.claim === 'funding' ? 'Claim funding fees' : 'Claim collateral',
-          details: [`${s.markets.length} market${s.markets.length === 1 ? '' : 's'}`],
-          orderKey: null
-        })
-        break
-      case 'venue-deposit':
-        actions.push({ venue: 'Hyperliquid', label: 'Deposit', call: 'transfer', title: 'Deposit to Hyperliquid', details: [], orderKey: null })
-        flows.push({ token: getTokenDescription(chainId, s.token), delta: -s.amount })
+        for (const flow of s.flows) flows.push({ token: getTokenDescription(chainId, flow.token), delta: flow.delta })
         break
       case 'release':
         actions.push({
+          venueId: '',
           venue: readableAddress(s.to),
           label: 'Release',
           call: s.token === null ? 'send' : 'transfer',
-          title: `Release to ${readableAddress(s.to)}`,
-          details: [],
+          fields: [
+            { label: 'to', value: labelled(chainId, s.to) },
+            { label: 'amount', value: readableTokenAmountLabel(getTokenDescription(chainId, s.token ?? NATIVE), s.amount) }
+          ],
           orderKey: null
         })
-        flows.push({ token: getTokenDescription(chainId, s.token ?? '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'), delta: -s.amount })
+        flows.push({ token: getTokenDescription(chainId, s.token ?? NATIVE), delta: -s.amount })
         break
+      case 'approve': {
+        if (paired.has(i)) break
+        const desc = getTokenDescription(chainId, s.token)
+        const amount = s.amount > UNBOUNDED_ALLOWANCE ? `unlimited ${desc.symbol}` : readableTokenAmountLabel(desc, s.amount)
+        actions.push({
+          venueId: '',
+          venue: VENUES.find(v => v.contracts.some(c => c.pullsTokens === true && isAddressEqual(c.address, s.spender)))?.name ?? readableAddress(s.spender),
+          label: s.amount === 0n ? `Revoke ${desc.symbol} approval` : `Approve ${amount}`,
+          call: 'approve',
+          fields: [
+            { label: 'token', value: `${desc.symbol} ${readableAddress(s.token)}` },
+            { label: 'spender', value: labelled(chainId, s.spender) },
+            { label: 'amount', value: s.amount === 0n ? 'none, the approval is cleared' : amount }
+          ],
+          orderKey: null
+        })
+        break
+      }
       case 'fee':
         break
       case 'call':
         actions.push({
+          venueId: '',
           venue: readableAddress(s.target),
           label: 'Call',
           call: s.selector,
-          title: `Call ${readableAddress(s.target)} ${s.selector}`,
-          details: [],
+          fields: [
+            { label: 'contract', value: labelled(chainId, s.target) },
+            { label: 'selector', value: s.selector },
+            ...(s.value === 0n ? [] : [{ label: 'value', value: readableTokenAmountLabel(getTokenDescription(chainId, NATIVE), s.value) }])
+          ],
           orderKey: null
         })
         break

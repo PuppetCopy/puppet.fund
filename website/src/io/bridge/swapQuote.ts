@@ -3,7 +3,7 @@ import { type IRouteCandidate, quoteSwapRoutes } from '@puppet/sdk/intent'
 import type { Address } from 'viem'
 import context from '../context.js'
 
-const ENDPOINTS = { lifi: '', across: '' }
+const ENDPOINTS = { lifi: '', kyber: '', across: '' }
 
 export interface ISwapRequest {
   originChainId: ChainId
@@ -11,24 +11,22 @@ export interface ISwapRequest {
   inputToken: Address
   outputToken: Address
   inputAmount: bigint
-  account: Address
+  depositor: Address
   recipient: Address
 }
-
-const boundsOf = (p: ISwapRequest) => ({
-  chainId: p.originChainId,
-  destinationChainId: BigInt(p.destinationChainId),
-  inputToken: p.inputToken,
-  outputToken: p.outputToken,
-  inputAmount: p.inputAmount
-})
 
 export const swapRouteCandidates = (p: ISwapRequest, maxLegs: number, signal?: AbortSignal): IRouteCandidate[] =>
   quoteSwapRoutes(
     ENDPOINTS,
-    p.account,
+    p.depositor,
     p.recipient,
-    boundsOf(p),
+    {
+      chainId: p.originChainId,
+      destinationChainId: BigInt(p.destinationChainId),
+      inputToken: p.inputToken,
+      outputToken: p.outputToken,
+      inputAmount: p.inputAmount
+    },
     () => context.getAcrossTiming(p.originChainId),
     maxLegs,
     signal

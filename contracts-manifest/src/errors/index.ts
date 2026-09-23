@@ -1,45 +1,24 @@
 export const puppetErrorAbi = [
   {
     type: "error",
-    name: "Schedule__Expired",
-    inputs: [
-      {
-        name: "expiry",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "timestamp",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Schedule__NotArrived",
-    inputs: [
-      {
-        name: "token",
-        internalType: "address",
-        type: "address"
-      },
-      {
-        name: "held",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "amount",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
     name: "Account__UnauthorizedCaller",
     inputs: []
+  },
+  {
+    type: "error",
+    name: "Account__WithdrawNotOpen",
+    inputs: [
+      {
+        name: "requestedAt",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "delay",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
   },
   {
     type: "error",
@@ -60,43 +39,6 @@ export const puppetErrorAbi = [
   {
     type: "error",
     name: "Account__InvalidUser",
-    inputs: []
-  },
-  {
-    type: "error",
-    name: "Account__SessionExpired",
-    inputs: [
-      {
-        name: "expiry",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "nowTs",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Account__SessionTooLong",
-    inputs: [
-      {
-        name: "expiry",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "maxTtl",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Account__InvalidResetPeriod",
     inputs: []
   },
   {
@@ -132,8 +74,19 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Account__ReentrantCall",
+    name: "Account__Executing",
     inputs: []
+  },
+  {
+    type: "error",
+    name: "Account__CallReturnedFalse",
+    inputs: [
+      {
+        name: "target",
+        internalType: "address",
+        type: "address"
+      }
+    ]
   },
   {
     type: "error",
@@ -154,28 +107,6 @@ export const puppetErrorAbi = [
         name: "account",
         internalType: "address",
         type: "address"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Account__AttestorAlive",
-    inputs: [
-      {
-        name: "quietSince",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Account__DigestConsumed",
-    inputs: [
-      {
-        name: "digest",
-        internalType: "bytes32",
-        type: "bytes32"
       }
     ]
   },
@@ -353,21 +284,10 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Gate__InvalidAllocationRate",
+    name: "Intent__DuplicateToken",
     inputs: [
       {
-        name: "rate",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Gate__MasterAsPuppet",
-    inputs: [
-      {
-        name: "master",
+        name: "token",
         internalType: "address",
         type: "address"
       }
@@ -471,51 +391,8 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Intent__AmountExceedsCap",
-    inputs: [
-      {
-        name: "amount",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "cap",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
     name: "Intent__InvalidProvider",
     inputs: []
-  },
-  {
-    type: "error",
-    name: "Mandate__Mismatch",
-    inputs: [
-      {
-        name: "puppet",
-        internalType: "address",
-        type: "address"
-      },
-      {
-        name: "digest",
-        internalType: "bytes32",
-        type: "bytes32"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Mandate__Expired",
-    inputs: [
-      {
-        name: "expiry",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
   },
   {
     type: "error",
@@ -551,7 +428,29 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Mandate__TokenNotListed",
+    name: "Mandate__InvalidAllocationRate",
+    inputs: [
+      {
+        name: "rate",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Mandate__InvalidSkin",
+    inputs: [
+      {
+        name: "skin",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Mandate__Cooldown",
     inputs: [
       {
         name: "puppet",
@@ -559,7 +458,28 @@ export const puppetErrorAbi = [
         type: "address"
       },
       {
-        name: "token",
+        name: "allocatedAt",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "cooldownPeriod",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Fund__CreditTokenMismatch",
+    inputs: [
+      {
+        name: "credit",
+        internalType: "address",
+        type: "address"
+      },
+      {
+        name: "round",
         internalType: "address",
         type: "address"
       }
@@ -567,13 +487,8 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Bond__InsufficientBalance",
+    name: "Fund__InsufficientUnits",
     inputs: [
-      {
-        name: "account",
-        internalType: "address",
-        type: "address"
-      },
       {
         name: "held",
         internalType: "uint256",
@@ -588,18 +503,39 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Bond__WrongToken",
+    name: "Fund__DrainExceedsQueue",
     inputs: [
       {
-        name: "token",
-        internalType: "address",
-        type: "address"
+        name: "drain",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "queued",
+        internalType: "uint256",
+        type: "uint256"
       }
     ]
   },
   {
     type: "error",
-    name: "Bond__CycleAlreadyDrawn",
+    name: "Fund__DrainLeavesDust",
+    inputs: [
+      {
+        name: "queued",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "floor",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Fund__ShareMismatch",
     inputs: [
       {
         name: "master",
@@ -607,12 +543,23 @@ export const puppetErrorAbi = [
         type: "address"
       },
       {
-        name: "spokeChainId",
+        name: "share",
+        internalType: "address",
+        type: "address"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Escrow__InvalidFulfil",
+    inputs: [
+      {
+        name: "fulfilled",
         internalType: "uint256",
         type: "uint256"
       },
       {
-        name: "cycle",
+        name: "submitted",
         internalType: "uint256",
         type: "uint256"
       }
@@ -620,7 +567,76 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Credit__ListNotSorted",
+    name: "Escrow__RefundClosed",
+    inputs: []
+  },
+  {
+    type: "error",
+    name: "Fund__FeeUnfunded",
+    inputs: [
+      {
+        name: "amount",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "fee",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Fund__ZeroDrain",
+    inputs: []
+  },
+  {
+    type: "error",
+    name: "Fund__NothingToClaim",
+    inputs: [
+      {
+        name: "holder",
+        internalType: "address",
+        type: "address"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Fund__SkinBelowFloor",
+    inputs: [
+      {
+        name: "masterUnits",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "exposedUnits",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "skin",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Fund__NativeRowsUnsupported",
+    inputs: [
+      {
+        name: "rows",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Fund__AllocationListNotSorted",
     inputs: [
       {
         name: "prev",
@@ -636,17 +652,44 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Settle__RowsNotSorted",
+    name: "Share__NotIssuer",
+    inputs: []
+  },
+  {
+    type: "error",
+    name: "Share__InvalidSymbol",
     inputs: [
       {
-        name: "prev",
-        internalType: "address",
-        type: "address"
+        name: "symbol",
+        internalType: "bytes32",
+        type: "bytes32"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Share__InvalidGrid",
+    inputs: [
+      {
+        name: "length",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Share__InvalidPixel",
+    inputs: [
+      {
+        name: "cell",
+        internalType: "uint256",
+        type: "uint256"
       },
       {
-        name: "curr",
-        internalType: "address",
-        type: "address"
+        name: "color",
+        internalType: "uint256",
+        type: "uint256"
       }
     ]
   },
@@ -678,11 +721,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Balance__NothingToSweep",
-    inputs: []
-  },
-  {
-    type: "error",
     name: "Balance__NothingToSwap",
     inputs: []
   },
@@ -690,6 +728,27 @@ export const puppetErrorAbi = [
     type: "error",
     name: "Balance__InsufficientBalance",
     inputs: [
+      {
+        name: "balance",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "required",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Balance__InsufficientFund",
+    inputs: [
+      {
+        name: "token",
+        internalType: "address",
+        type: "address"
+      },
       {
         name: "balance",
         internalType: "uint256",
@@ -761,71 +820,7 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Operate__BackingListTooLong",
-    inputs: [
-      {
-        name: "length",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "cap",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Operate__BackingListNotSorted",
-    inputs: [
-      {
-        name: "prev",
-        internalType: "address",
-        type: "address"
-      },
-      {
-        name: "curr",
-        internalType: "address",
-        type: "address"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Operate__BackingExceedsCap",
-    inputs: [
-      {
-        name: "puppet",
-        internalType: "address",
-        type: "address"
-      },
-      {
-        name: "stake",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "cap",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Operate__SkinExceeded",
-    inputs: [
-      {
-        name: "backed",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "collateral",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
+    name: "Balance__InvalidSwap",
+    inputs: []
   }
 ] as const

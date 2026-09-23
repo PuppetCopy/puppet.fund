@@ -31,6 +31,10 @@ export function screenDappMessage(account: Address, message: Hex): IDappScreenRe
   } catch {
     return [{ code: 'DAPP_MESSAGE_NOT_ADMITTED', detail: 'a personal_sign message must be UTF-8 text' }]
   }
+  for (const venue of VENUES) {
+    const reasons = venue.message(account, text)
+    if (reasons !== null) return reasons
+  }
   const siwe = SIWE_HEADER.exec(text)
   if (siwe === null) {
     return [{ code: 'DAPP_MESSAGE_NOT_ADMITTED', detail: 'only Sign-In with Ethereum messages are signed for dApps; nothing else can be authorized with a bare message' }]

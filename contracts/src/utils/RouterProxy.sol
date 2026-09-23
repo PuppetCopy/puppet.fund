@@ -16,11 +16,10 @@ contract RouterProxy is Proxy {
     }
 
     function upgrade(
-        address _impl,
-        bytes memory _data
+        address _impl
     ) external {
         if (msg.sender != authority) revert Error.Access__CallerNotAuthority();
-        ERC1967Utils.upgradeToAndCall(_impl, _data);
+        ERC1967Utils.upgradeToAndCall(_impl, "");
     }
 
     function _implementation() internal view override returns (address) {

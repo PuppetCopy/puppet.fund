@@ -2,6 +2,7 @@ import type { IAccountLib__Mandate, IIAccount__Call } from '@puppet/contracts/ty
 import type { ChainId } from '@puppet/sdk/const'
 import type { ISwapRoute, IWithdrawInput } from '@puppet/sdk/intent'
 import type { Address } from 'viem'
+import type { ISettledTx } from '../../wallet/root.js'
 
 export type IUnsealed<T> = T extends unknown ? Omit<T, 'header'> : never
 
@@ -10,16 +11,18 @@ export type StepKind =
   | 'fund'
   | 'key'
   | 'session'
-  | 'deposit'
   | 'swap'
-  | 'credit'
   | 'withdraw'
   | 'mandate'
-  | 'unbond'
   | 'operate'
-  | 'settle'
+  | 'allocate'
+  | 'sell'
+  | 'redeem'
+  | 'fundSwap'
+  | 'escrow'
+  | 'fulfil'
 
-export type IReportWalletTx = (kind: StepKind, hash: `0x${string}` | null, chainId: ChainId) => void
+export type IReportWalletTx = (kind: StepKind, landed: ISettledTx | null) => void
 
 export interface IDraftAmount {
   amount: bigint
@@ -40,6 +43,7 @@ export interface IDepositLeg {
   inputToken: Address
   outputToken: Address
   inputAmount: bigint
+  routeInput: bigint
   outputAmount: bigint
   destinationChainId: bigint
   route: ISwapRoute | null
@@ -50,16 +54,21 @@ export interface IDepositFunding {
   deposit: IDepositLeg
   nativeValue: bigint
   expectedOutput: bigint
-  hub: null
-  arrival: 'credit' | 'bond'
 }
 
-export const arrivalFloor = (funding: IDepositFunding): bigint => funding.deposit.outputAmount
+export const depositArrivalToken = (funding: IDepositFunding): Address => funding.deposit.outputToken
 
-export const depositCreditToken = (funding: IDepositFunding): Address => funding.deposit.outputToken
+export interface IArrival {
+  chainId: ChainId
+  token: Address
+  amount: bigint
+}
 
 export interface IDepositDraft extends IDraftBase, IDepositFunding {
   kind: 'deposit'
+  source: 'wallet' | 'account'
+  toEscrow: boolean
+  identity?: IFundIdentityDraft
 }
 
 export interface IWithdrawDraft extends IDraftBase {
@@ -75,35 +84,57 @@ export type IEditorDraft = IDepositDraft | IWithdrawDraft
 
 export interface IMandateDraft extends IDraftBase {
   kind: 'mandate'
-  bond: bigint
-  mandate: IAccountLib__Mandate | null
-}
-
-export interface IUnbondDraft extends IDraftBase {
-  kind: 'unbond'
-  amount: bigint
-}
-
-export interface ICreditDraft extends IDraftBase {
-  kind: 'credit'
-  chainId: ChainId
-  creditList: Address[]
+  mandate: IAccountLib__Mandate
 }
 
 export interface IOperateDraft extends IDraftBase {
   kind: 'operate'
   chainId: ChainId
-  token: Address
-  skin: bigint
   feeToken: Address
   callList: IIAccount__Call[]
 }
 
-export interface ISettleDraft extends IDraftBase {
-  kind: 'settle'
-  spokeChainId: ChainId
-  token: Address
+export interface IFundIdentityDraft {
+  symbol: string
+  cells: readonly string[]
 }
 
-export type ITradeDraft = ICreditDraft | IOperateDraft | ISettleDraft
-export type IDraft = IEditorDraft | IMandateDraft | IUnbondDraft | ITradeDraft
+export interface IAllocateDraft extends IDraftBase {
+  kind: 'allocate'
+  escrowChainId: ChainId
+  escrowToken: Address
+  contribution: bigint
+  backers: bigint
+  identity: IFundIdentityDraft | null
+}
+
+export interface ISellDraft extends IDraftBase {
+  kind: 'sell'
+  master: Address
+  share: Address
+  units: bigint
+  value: bigint
+}
+
+export interface IRedeemDraft extends IDraftBase {
+  kind: 'redeem'
+  retire: bigint
+  drain: bigint
+  value: bigint
+}
+
+export interface IFundSwapDraft extends IDraftBase {
+  kind: 'fundSwap'
+  chainId: ChainId
+  destinationChainId: ChainId
+  inputToken: Address
+  outputToken: Address
+  inputAmount: bigint
+  outputAmount: bigint
+  expectedOutput: bigint
+  route: ISwapRoute
+  fillDeadline: number
+}
+
+export type ITradeDraft = IOperateDraft | IAllocateDraft | ISellDraft | IRedeemDraft | IFundSwapDraft
+export type IDraft = IEditorDraft | IMandateDraft | ITradeDraft

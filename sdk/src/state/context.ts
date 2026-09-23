@@ -1,7 +1,7 @@
 import type { Address, } from 'viem'
 import { getBlockNumber as fetchBlockNumber, getGasPrice as fetchGasPrice } from 'viem/actions'
 import { accountNonce } from '../account/accountLog.js'
-import { type IAcrossTiming, readAcrossBuffers } from '../intent/acrossDeposit.js'
+import { type IAcrossTiming, readAcrossBuffers } from '../intent/route/acrossDeposit.js'
 
 export type { IAcrossTiming }
 

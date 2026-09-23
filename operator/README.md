@@ -5,13 +5,13 @@ cron script. The kit handles signing, fee quoting, the matchmaker relay, and ven
 shapes; you write the strategy.
 
 You trade as a **master**: one account per wallet, the same address on every chain. It holds
-what you deposit on the site, executes every action, and pays and collects at settlement.
-Backers, called **puppets**, bond funds into a pool on the hub and sign **mandates** naming you,
-each carrying the rules their bond may be matched under: how much skin they want behind them,
-what share of their pool you may take, a cooldown, an expiry, and which tokens they will back.
-The protocol co-signs every action against those mandates. What you set per operate is `skin`,
-the share of your own collateral you let backers match against, and `token`, the base token the
-cycle trades and pays out in.
+what you deposit on the site and executes every action. Backers, called **puppets**, deposit on
+the hub and sign **mandates** naming you, each carrying the rules their stake may be matched under:
+how much skin they want behind them, what share of their deposit you may take, a cooldown, an
+expiry, and which tokens they will back. Each `operate` that spends your funds is matched against
+those mandates and distributed on the hub into your fund: backers stake into it for
+units, and the protocol co-signs every action against their mandates. What you set per operate is
+`skin`, the share of the fund's active units you keep so backers can match against it.
 
 ```bash
 bun add @puppet.fund/operator
@@ -28,15 +28,15 @@ bunx @puppet.fund/templates my-operator gmx
 The package is split by operator, so you choose yours:
 
 - **`@puppet.fund/operator/gmx`**: the ready-made GMX V2 venue
-  (`gmxOperator(connector, { rpcUrl, token, skin })`), which establishes its
+  (`gmxOperator(connector, { rpcUrl, hubRpcUrl, token, skin })`), which establishes its
   chain-bound operator internally and exposes it as `gmx.operator`. What the scaffolder sets up,
   and what most users want. Also here: `GMX_V2_CHAIN_ID` and the GMX helpers.
-- **`@puppet.fund/operator`**: the generic, venue-agnostic layers. `createConnector()` (async)
+- **`@puppet.fund/operator`**: the generic, venue-agnostic layers. `createConnector({ chronicleUrl })` (async)
   acquires the session (browser pairing, or a `session` you built headlessly) and establishes
   the chain-agnostic connection: your identity (wallet address + the trading account you paired),
-  the matchmaker compact, the token registry, the oracle rate source, and `close()`.
-  `createOperator(connector, config)` then binds it to one chain: the RPC client, balance reads, and
-  the generic `credit` / `convert` / `operate` / `settle` dispatch. Compose that with your own
+  the matchmaker compact, the chronicle client, the token registry, the oracle rate source, and
+  `close()`. `createOperator(connector, config)` then binds it to one chain: the RPC clients, balance
+  reads, and the generic `credit` / `convert` / `operate` / `redeem` dispatch. Compose that with your own
   venue call shapes to build an extended operator: a different venue, collateral, or surface. The
   GMX venue is built on exactly this. Also here: `runOperator`, `pairOverBrowser`, and the compact
   errors (`CompactError`, `CompactContractError`). Type against `IConnector`, `IOperator`, and
@@ -44,38 +44,43 @@ The package is split by operator, so you choose yours:
 
 ## Usage
 
-`createConnector()` (async) acquires the **session**, the sealed identity seed (your wallet
-address, the matchmaker and oracle endpoints, the session grant, the token registry): with no
-config it pairs over the browser (set `pairUrl` for a local site); for unattended runs pass a
-`session` (an `IPairedSession` literal you build yourself). It validates the sealed endpoints,
-derives your puppet account, and establishes the **connector** (signing, the matchmaker compact,
-the oracle rate source, lifecycle). Hand the connector to the venue:
-`gmxOperator(connector, { rpcUrl, token, skin })` (async) internally establishes a
+`createConnector({ chronicleUrl })` (async) acquires the **session**, the sealed identity seed
+(your wallet address, the matchmaker and oracle endpoints, the session grant, the token registry):
+without a `session` it pairs over the browser (set `pairUrl` for a local site); for unattended runs
+pass a `session` (an `IPairedSession` literal you build yourself). `chronicleUrl` is required: it is
+the protocol index the operator reads mandates, fund holdings, and pending operates from to compose
+each operate's backing rows. It validates the endpoints, derives your puppet account, and
+establishes the **connector** (signing, the matchmaker compact, the chronicle client, the oracle
+rate source, lifecycle). Hand the connector to the venue:
+`gmxOperator(connector, { rpcUrl, hubRpcUrl, token, skin })` (async) internally establishes a
 chain-bound operator on `GMX_V2_CHAIN_ID` (the RPC client, the trading body, balance reads,
 dispatch), exposes it as `gmx.operator`, and adds the GMX execution + reads, so you call
 identity/lifecycle actions on `connector`, chain actions on `gmx.operator`, GMX actions on
 `gmx`. For a venue of your own, `createOperator(connector, config)` names any chain
 and establishes the same chain-bound **operator**; one connector can establish operators on
 several chains, sharing the same identity, relay, and registry.
-`rpcUrl` is required: the relay fee you sign is priced on the gas price your node reports and on
-the fee token's rate from the protocol oracle the session names, and the relay re-derives the
-same fee and drops an intent whose fee disagrees without answering. Every attested value is in
-the hub USDC unit, and relay fees are paid in the chain's USDC by the account that acts (the
-trading body for `operate`, your puppet account for `credit`, your hub puppet account for
-`settle`), so keep a little USDC where you act. `convert` is the exception: its fee comes out of
-the token it converts.
+`rpcUrl` and `hubRpcUrl` are required: the relay fee you sign is priced on the gas price your
+nodes report and on the fee token's rate from the protocol oracle the session names, and the relay
+re-derives the same fee and drops an intent whose fee disagrees without answering. An `operate`
+fee also prepays its hub distribution (priced on the hub gas price, per backing row), and every
+operate reads the fund on the hub and values your account on every chain. Every attested value is
+in the hub USDC unit; the `operate` relay fee is paid in the chain's USDC by the trading body, so
+keep a little USDC there; `redeem` pays the hub USDC relay fee from your hub deposit or from the
+cash it drains. `credit` and `convert` pay out of the token they sweep, convert, or
+swap.
 
 ```ts
 import { createConnector, runOperator } from '@puppet.fund/operator'
 import { gmxOperator } from '@puppet.fund/operator/gmx'
 
-// Pairing carries everything: identity, matchmaker + oracle endpoints, session grant, registry.
-const connector = await createConnector() // pairUrl for a local site, else https://puppet.fund
+// Pairing carries identity, matchmaker + oracle endpoints, session grant, registry.
+const connector = await createConnector({ chronicleUrl: 'https://puppet.fund/api/chronicle' })
 
 const rpcUrl = Bun.env.ARBITRUM_RPC_URL
-if (!rpcUrl) throw new Error('set ARBITRUM_RPC_URL')
+const hubRpcUrl = Bun.env.OPTIMISM_RPC_URL
+if (!rpcUrl || !hubRpcUrl) throw new Error('set ARBITRUM_RPC_URL and OPTIMISM_RPC_URL')
 const WETH = '0x82aF49447D8a07e3bd95BD0d56f35241523fBab1'
-const gmx = await gmxOperator(connector, { rpcUrl, token: WETH, skin: 10_000n })
+const gmx = await gmxOperator(connector, { rpcUrl, hubRpcUrl, token: WETH, skin: 10_000n })
 
 // Headless (no browser): build the session yourself as an IPairedSession literal, then
 // createConnector({ session }).
@@ -99,7 +104,7 @@ Three addresses matter, all deterministic:
   behalf.
 - **`connector.account`** (also `gmx.operator.account`): the trading account you paired, the same
   address on every chain. It holds what you deposit on the site, is the GMX account positions live
-  under, executes every `operate` and pays the relay fees, and receives what settlement pays out.
+  under, executes every `operate` and pays the relay fees; its fund lives on the hub.
   One wallet has exactly one account; the performance fee is a protocol constant and it is yours.
 
 ## Surface
@@ -109,41 +114,54 @@ Three addresses matter, all deterministic:
   `matchmakerUrl`, `oracleUrl`, the session grant, and the token registry. `createConnector` calls
   it for you when no `session` is supplied; reach for it directly only in a custom flow. For
   unattended runs build the same seed yourself as an `IPairedSession` literal.
-- `createConnector(config?)` (async, package root): acquires the session (`config.session` when
+- `createConnector(config)` (async, package root): acquires the session (`config.session` when
   supplied, else browser pairing at `config.pairUrl`) and establishes the connection: it
-  validates that the sealed endpoints are absolute http(s) URLs, sets up the matchmaker compact
-  and the oracle rate source, and predicts the puppet account. Returns the chain-agnostic
-  **connector** (`IConnector`): `user`, `account`, the `compact` relay client, `tokenRegistry`,
+  validates that the sealed endpoints and `config.chronicleUrl` are absolute http(s) URLs, sets up
+  the matchmaker compact, the chronicle client, and the oracle rate source, and predicts the puppet
+  account. Returns the chain-agnostic **connector** (`IConnector`): `user`, `account`, the
+  `compact` relay client, the `chronicle` client, `tokenRegistry`,
   `getRate`, `dryRun`, `sign(typedData)` (EIP-712 intent signing; the session key itself never
   leaves the connector), and `close()`. One connector per process: it is what you hand to
   `runOperator(connector, body)`. `config.dryRun: true` means never dispatch: every operator
   established on the connector builds and screens each intent exactly as it would for a
   dispatch, logs what would be sent, and skips the dispatch: the way to watch a strategy decide
   without risking funds.
-- `createOperator(connector, config)` (async): takes a config naming the `chainId` and the `rpcUrl`
-  that reaches it (`hubRpcUrl` is optional and only the hub draw inside `settle` needs it, when a cycle closes with losses; `routeEndpoint` is optional
-  and only `convert` needs it) and builds the RPC client. Returns the chain-bound **operator**
+- `createOperator(connector, config)` (async): takes a config naming the `chainId`, the `rpcUrl`
+  that reaches it, the `hubRpcUrl` that reaches the hub, and the `skin` every operate signs
+  (`routeEndpoint` is optional and only `convert` needs it) and builds the RPC clients. Returns the chain-bound **operator**
   (`IOperator`) you call directly: `account` (the trading account), `readBalance(token)` (its live
   balance of any token), `credit(token)` (sweep a token that a bridge delivered to the account's
   deposit route into the account), `convert(inputToken, outputToken, inputAmount)`
-  (convert a token your puppet account holds on this chain into another via an allowlisted DEX:
-  the operator quotes the route through `config.routeEndpoint`, the origin that proxies the
-  aggregator, for the amount left after the relay fee and signs the quoted output as the floor;
-  the matchmaker re-prices in-domain and the contract bounds the output. Conversions are
-  chain-local; cross-chain moves are a site flow), `operate(callList, open)` (the generic
-  signed-call dispatch from the master account; `open: true` opens the next cycle with
-  this operate, `false` trades inside the open one; the protocol attestor co-signs only calls
-  inside the venue perimeter it can screen, so arbitrary targets are rejected), `settle()` (close
-  the open cycle: the attestor values the account, gains pay each backer on the traded chain in
-  the cycle's token less your performance fee, and losses draw from their bond on the hub), plus
-  `publicClient`. Multiple operators on different chains can share one connector. The operator
-  needs no indexer: nonces, balances, and settlement are read from your own RPC, and the cohort
-  terms come from the matchmaker. The relay itself is stateless HTTP: the compact POSTs each intent to the matchmaker,
-  fire-and-ACK. `credit`, `convert`, `operate`, and `settle` (and everything built on them) return
+  (convert a token on your deposit route on this chain into another via an allowlisted DEX, then
+  credit the output into the account: the operator quotes the route through
+  `config.routeEndpoint`, the origin that proxies the aggregator, for the amount left after the
+  relay fee and signs the quoted output as the floor; the matchmaker re-prices in-domain and the
+  contract bounds the output. Conversions are chain-local),
+  `operate(callList)` (the generic signed-call dispatch from the master account: it declares the
+  call list's outflows, composes the backing rows from the mandates naming you, and prices the
+  hub distribution into its fee; the protocol attestor co-signs only calls inside the venue
+  perimeter it can screen, so arbitrary targets are rejected, and refuses a new operate while your
+  previous one is not yet distributed on the hub),
+  `convert(inputToken, outputToken, inputAmount, destinationChainId)` (swap or bridge fund
+  balances, the account's balance above its deposit, from this chain to any supported chain, this
+  one included; the output lands on your own account there, `outputToken` names the token on the
+  destination chain, and a same-chain swap needs a different output token. The operator quotes
+  the route through `config.routeEndpoint` for the amount left after the relay fee, which is paid
+  in the input token, including the hub evaluation that follows it. After a fund swap the attestor
+  schedules that evaluation once the funds have landed, and `operate`, `redeem` and further fund swaps
+  wait with `DISTRIBUTE_PENDING` until it records),
+  `redeem(retire, drain)` (on the hub: fetches a valuation quote from the attestor, queues
+  `retire` of your own fund units, and drains up to `drain` units of the sell queue from the
+  fund's hub cash, paying puppets who sold; the drain is capped by the fund's bond token on the
+  hub, so `convert` the fund's spoke proceeds there first), plus `publicClient`. Multiple operators on
+  different chains can share one connector. Nonces and balances are read from your own RPC, and
+  the backing rows are composed from the chronicle and your RPCs exactly as the attestor composes
+  them. The relay itself is stateless HTTP: the compact POSTs each intent to the matchmaker,
+  fire-and-ACK. `credit`, `convert`, `operate`, and `redeem` (and everything built on them) return
   `Promise<IDispatchedFrame | null>`: a real dispatch settles on-chain before resolving, and
   `null` means dry-run, nothing was dispatched.
 - `gmxOperator(connector, opts)` (async, `@puppet.fund/operator/gmx`): the GMX venue over a
-  connector. `opts` is the operator config without `chainId`; its `token` is what every order
+  connector. `opts` is the operator config without `chainId`, plus `token`: what every order
   posts as collateral and what `getMarket` resolves markets against (WETH keeps collateral and
   keeper fee in one token): it internally calls
   `createOperator(connector, { ...opts, chainId: GMX_V2_CHAIN_ID })` and exposes the chain-bound
@@ -165,8 +183,8 @@ Three addresses matter, all deterministic:
   passes straight through to the internal operator. Call chain actions on `gmx.operator`,
   identity/lifecycle on `connector`.
 - Lifecycle + building blocks (`runOperator`, `pairOverBrowser`, the compact types and errors)
-  live at the package root; see **Entrypoints** above. A GMX operator is `createConnector()` →
-  `gmxOperator(connector, { rpcUrl, token, skin })`, run under
+  live at the package root; see **Entrypoints** above. A GMX operator is
+  `createConnector({ chronicleUrl })` → `gmxOperator(connector, { rpcUrl, hubRpcUrl, token, skin })`, run under
   `runOperator(connector, body)`.
 
 ## Pairing
@@ -196,7 +214,7 @@ and abandon the account. Only ever pair on the real https://puppet.fund.
 Today this kit ships one venue: GMX V2 on Arbitrum. Any registered collateral works (WETH
 keeps collateral and keeper fee in one token; any other token funds the keeper fee
 from a little native ETH in the trading body). `createOrder` stays a single primitive for
-every order type; `operate(callList, open)` is the generic dispatch underneath it, but every
+every order type; `operate(callList)` is the generic dispatch underneath it, but every
 call is screened by the protocol attestor, which today co-signs only the GMX order perimeter
 (create, cancel, update, and their token legs). Claims and foreign targets are rejected until
 the screen widens. `operate` is also where you set custom per-call gas (each `callList` entry

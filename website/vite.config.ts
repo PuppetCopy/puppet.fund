@@ -19,9 +19,6 @@ function themeVar(themeName: string, role: string): string {
   return value
 }
 
-// Mirrors ops/website.Caddyfile so a CSP or header regression surfaces in dev, not in the container.
-// script-src additionally allows inline here ONLY because vite-plugin-pwa injects an inline dev-SW
-// registrar that the built index.html does not have; Caddy stays strict for the shipped bundle.
 const SECURITY_HEADERS = {
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
@@ -35,9 +32,9 @@ const SITE_CONFIG = {
   __WEBSITE__: WEBSITE,
   __TWITTER_ID__: '@PuppetCopy',
   __APP_NAME__: 'Puppet',
-  __APP_DESC_SHORT__: 'Puppet, a trading wallet operated by humans and agents',
+  __APP_DESC_SHORT__: 'Puppet, a shared wallet operated by humans and agents',
   __APP_DESC_LONG__:
-    'Back top traders and share their gains, or trade as you do today with backing from others, on any EVM chain. Keep your keys; every match runs under rules you sign.',
+    'Top traders seamlessly earn more. Puppets (investors) add capital and share the gains, within rules they set once and any EVM chain enforces.',
   __APP_DESC_INSTALL__:
     'Installs Puppet as its own app: a standalone window with no browser chrome, a home screen icon, and faster loads, so charts and order entry get the full screen and stay put while you trade. It is the same Puppet either way, with the same keys and the same account. Cancel to keep using it in this browser tab.',
   __OG_IMAGE__: `${WEBSITE}/api/og{{$p := .OriginalReq.URL.Path}}{{$master := regexFind \`^/traders/0x[0-9a-fA-F]{40}$\` $p}}{{if $master}}/masters/{{regexFind \`0x[0-9a-fA-F]{40}\` $master}}?{{$s := .OriginalReq.URL.Query.Get \`s\`}}{{if $s}}s={{urlquery $s}}{{else}}d={{now | date \`2006-01-02-15\`}}{{end}}{{else if eq $p \`/traders\`}}/masters?d={{now | date \`2006-01-02-15\`}}{{end}}`,
@@ -105,6 +102,7 @@ export default defineConfig(() => {
     server: {
       port: Number(Bun.env.PORT) || 3000,
       headers: SECURITY_HEADERS,
+      hmr: false,
       proxy: {
         '/api/rpc': {
           target: Bun.env.RPC_URL,
@@ -131,6 +129,12 @@ export default defineConfig(() => {
             }
             return `${stripped}${stripped.includes('?') ? '&' : '?'}integratorId=${integratorId}`
           }
+        },
+        '/api/swap/kyber': {
+          target: 'https://aggregator-api.kyberswap.com',
+          changeOrigin: true,
+          secure: true,
+          rewrite: path => path.replace(/^\/api\/swap\/kyber/, '')
         },
         '/api/swap/lifi': {
           target: 'https://li.quest',

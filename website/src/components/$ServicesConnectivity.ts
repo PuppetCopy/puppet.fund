@@ -17,6 +17,7 @@ import { $node, $text, component, type I$Node, type I$Slottable, style, styleBeh
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { $Tooltip, text } from '@/ui-components'
+import { chainName } from '../common/$chain.js'
 import context from '../io/context.js'
 import { matchmakerUrl } from '../io/matchmaker/index.js'
 
@@ -59,11 +60,14 @@ const livenessView = (liveness: IChainLiveness): ILivenessView => {
 const PROBE_TIMEOUT_MS = 5000
 const probeChronicle = (): Promise<ILivenessView> =>
   Promise.race([
-    fetch('/api/chronicle/status').then((res): ILivenessView =>
-      res.ok
-        ? { detail: 'Reachable · books and marks are current', service: 'ok' }
-        : { detail: `Unavailable (${res.status}) · data may be out of date`, service: 'down' }
-    ),
+    fetch('/api/chronicle/status').then(async (res): Promise<ILivenessView> => {
+      if (!res.ok) return { detail: `Unavailable (${res.status}) · data may be out of date`, service: 'down' }
+      const report = (await res.json()) as { chains: { chainId: number; halted: string | null }[] }
+      const frozen = report.chains.filter(chain => chain.halted !== null)
+      return frozen.length === 0
+        ? { detail: 'Reachable · funds and valuations are current', service: 'ok' }
+        : { detail: `Halted on ${frozen.map(chain => chainName(chain.chainId)).join(', ')} · funds and valuations there are frozen until it is repaired`, service: 'down' }
+    }),
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timeout')), PROBE_TIMEOUT_MS))
   ]).catch((): ILivenessView => ({ detail: 'Unavailable · data may be out of date', service: 'down' }))
 

@@ -33,6 +33,7 @@ export const getRate: IGetRate = async (asset0, asset1, freshness = 10000) => {
       const res = await fetch(`/api/oracle/rate?token0=${asset0}&token1=${asset1}&freshness=${freshness}`)
       if (!res.ok) {
         const reason = res.headers.get('content-type')?.startsWith('text/plain') ? await res.text() : ''
+        console.error(`[rate] ${asset0}/${asset1} refused (${res.status}) at freshness ${freshness}ms${reason ? `: ${reason}` : ''}`)
         throw new Error(`no rate for ${asset0}/${asset1} (${res.status})${reason ? `: ${reason}` : ''}`)
       }
       const data = (await res.json()) as { token0?: string | number; token1?: string | number; time?: number } | null

@@ -9,22 +9,24 @@ declare module 'abitype' {
 
 type IErrorAbi = typeof puppetErrorAbi
 
-export type ICompactContractErrorName = ExtractAbiErrorNames<IErrorAbi>
+type ICompactContractErrorName = ExtractAbiErrorNames<IErrorAbi>
 
-export type ICompactContractErrorArgs<N extends ICompactContractErrorName> = AbiParametersToPrimitiveTypes<
+type ICompactContractErrorArgs<N extends ICompactContractErrorName> = AbiParametersToPrimitiveTypes<
   ExtractAbiError<IErrorAbi, N>['inputs']
 >
 
-export type IStrikeSeverity = 'server' | 'soft' | 'hard'
+type IStrikeSeverity = 'server' | 'soft' | 'hard'
 
 export const OPTIMISTIC_RELAY_CLOSED = 'OPTIMISTIC_RELAY_CLOSED'
 
 export class CompactError extends Error {
   readonly code: string
+  readonly detail: string
   readonly severity: IStrikeSeverity
-  constructor(code: string, message: string, severity: IStrikeSeverity = 'soft') {
-    super(`[${code}] ${message}`)
+  constructor(code: string, detail: string, severity: IStrikeSeverity = 'soft') {
+    super(`[${code}] ${detail}`)
     this.code = code
+    this.detail = detail
     this.severity = severity
     this.name = 'CompactError'
   }

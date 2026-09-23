@@ -17,7 +17,6 @@ import {
   $node,
   $text,
   attr,
-  attrBehavior,
   component,
   effectRun,
   type INode,
@@ -79,7 +78,6 @@ export const $MainMenu = ({ walletPair, walletValue }: I$MainMenu) =>
       [escapeExtra, escapeExtraTether]: IBehavior<INode, KeyboardEvent>
     ) => {
       let extraTriggerEl: HTMLElement | null = null
-      const extraOpen = merge(constant(true, clickPopoverClaim), constant(false, extraDismiss))
       const onEscape = (getTrigger: () => HTMLElement | null) =>
         o(
           nodeEvent('keydown'),
@@ -106,11 +104,15 @@ export const $MainMenu = ({ walletPair, walletValue }: I$MainMenu) =>
         borderColor: colorShade(palette.foreground, 50),
         filter: 'brightness(1.4)'
       })
+      const iconCircularOpen = stylePseudo('[aria-expanded="true"]', {
+        borderColor: colorShade(palette.foreground, 50),
+        filter: 'brightness(1.4)'
+      })
       const iconCircularActive = stylePseudo(':active', { filter: 'brightness(1.15)' })
 
-      const $iconAnchor = $anchor(layoutSheet.displayFlex, iconCircularStyle, iconCircularHover, iconCircularActive)
+      const $iconAnchor = $anchor(layoutSheet.displayFlex, iconCircularStyle, iconCircularHover, iconCircularOpen, iconCircularActive)
 
-      const $iconCircular = $node(layoutSheet.displayFlex, iconCircularStyle, iconCircularHover, iconCircularActive)
+      const $iconCircular = $node(layoutSheet.displayFlex, iconCircularStyle, iconCircularHover, iconCircularOpen, iconCircularActive)
 
       const $socialLinkList = [
         $iconAnchor(attr({ href: DOCS_URL, 'aria-label': 'Documentation' }))(
@@ -150,7 +152,6 @@ export const $MainMenu = ({ walletPair, walletValue }: I$MainMenu) =>
             clickPopoverClaimTether(nodeEvent('click')),
             escapeExtraTether(onEscape(() => extraTriggerEl)),
             attr({ role: 'button', tabindex: '0', 'aria-haspopup': 'menu', 'aria-label': 'More menu' }),
-            attrBehavior(map(open => ({ 'aria-expanded': open ? 'true' : 'false' }), extraOpen)),
             keyActivate(),
             effectRun((el: unknown) => {
               extraTriggerEl = el as HTMLElement

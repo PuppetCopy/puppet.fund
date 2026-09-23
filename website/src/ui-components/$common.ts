@@ -1,10 +1,7 @@
-import { HUB_CHAIN } from '@puppet/sdk/const'
-import { getExplorerUrl, readableAddress } from '@puppet/sdk/core'
 import { type IOps, type IStream, isStream, map, nowWith, o } from 'aelea/stream'
 import { $element, $node, $svg, $text, attr, effectProp, type I$Node, type I$Text, type IMutator, type INode, style, styleBehavior, stylePseudo } from 'aelea/ui'
 import { spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
-import type { Chain } from 'viem/chains'
 import { $caretDown } from './$icons.js'
 
 export const $elipsisTextWrapper = $node(
@@ -138,10 +135,5 @@ export const listboxKeyNav = (close?: () => void, getAnchor?: () => HTMLElement 
       options[next]?.focus()
     })
   )
-
-export function $addressRef(addr: string, chain: Chain = HUB_CHAIN) {
-  const href = `${getExplorerUrl(chain)}/address/${addr}`
-  return $anchor(attr({ href }))($text(readableAddress(addr)))
-}
 
 export const POPOVER_WIDTH = '340px'

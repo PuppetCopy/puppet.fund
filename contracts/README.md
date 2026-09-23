@@ -1,6 +1,6 @@
 # Puppet Contracts
 
-Smart contracts for Puppet on Arbitrum.
+Smart contracts for Puppet: an Optimism hub with Arbitrum as its first spoke.
 
 ## Description
 

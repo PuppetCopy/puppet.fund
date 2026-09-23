@@ -1,43 +1,54 @@
-import { CHAIN_IDS, PROTOCOL } from '@puppet/contracts/const'
+import { CHAIN_IDS, HUB_CHAIN_ID } from '@puppet/contracts/const'
 import type { ChainId } from '@puppet/sdk/const'
-import { readableAddress, readablePercentage } from '@puppet/sdk/core'
-import type { IBookRow } from '@puppet/sdk/schema'
-import type { ITokenRegistryMap } from '@puppet/sdk/state'
-import { awaitPromises, combine, constant, empty, filter, filterNull, type IStream, map, nowWith, op, sampleMap, skipRepeatsWith, start, switchLatest } from 'aelea/stream'
-import { type IBehavior, multicast, state } from 'aelea/stream-extended'
+import { getTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { VALUE_KEY } from '@puppet/sdk/evaluate'
+import { minFundedAmount } from '@puppet/sdk/mpc'
+import type { IFundRow } from '@puppet/sdk/schema'
+import { chainTokenOfKey, type ITokenRegistryMap } from '@puppet/sdk/state'
+import { combine, constant, empty, type IStream, just, map, merge, nowWith, op, sampleMap, switchLatest, switchMap } from 'aelea/stream'
+import { type IBehavior, state } from 'aelea/stream-extended'
 import { $node, $text, attr, component, effectProp, type I$Node, type INode, nodeEvent, style, styleBehavior, stylePseudo } from 'aelea/ui'
-import { $column, $intermediatePromise, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
+import { $column, $intermediatePromise, $Popover, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { $defaultAnchor, $Link } from 'aelea/ui-router'
-import { type Address, isAddressEqual } from 'viem'
+import { type Hex, isAddressEqual } from 'viem'
 import {
+  $amountDisplay,
   $anchor,
   $ButtonPrimary,
   $ButtonToggle,
   $defaultMiniButtonPrimary,
   $icon,
   $infoTooltip,
+  $popoverCaret,
   $puppeteer,
   $smartContract,
   text
 } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
+import { $tokenProfile } from '../common/$common.js'
 import { chainFor } from '../common/$contract.js'
 import { $puppetLogo } from '../common/$icons.js'
-import { $roboAvatar } from '../common/$roboAvatar.js'
 import { $card, $card2, $defaultMockWindow, $mockWindow } from '../common/elements/$common.js'
-import { accountDisplayName } from '../components/$AccountProfile.js'
 import { $WalletConnect } from '../components/$WalletConnect.js'
 import { $WalletLink } from '../components/$WalletLink.js'
-import { $TokenBalanceEditor } from '../components/portfolio/$TokenBalanceEditor.js'
-import { depositCreditToken, type IDepositDraft, type IEditorDraft } from '../components/portfolio/draft.js'
+import { $AllocationSimulation } from '../components/portfolio/$AllocationSimulation.js'
+import { $DepositEditor } from '../components/portfolio/$DepositEditor.js'
+import { $EscrowedRow } from '../components/portfolio/$EscrowedRow.js'
+import { $FundIdentityEditor, type IFundIdentity } from '../components/portfolio/$FundIdentityEditor.js'
+import { depositArrivalToken, type IAllocateDraft, type IArrival, type IDepositDraft, type ITradeDraft } from '../components/portfolio/draft.js'
+import { $editorPopoverContentContainer } from '../components/portfolio/editorUtils.js'
 import { DOCS_URL, GITHUB_REPO_URL, OPERATOR_GUIDE_URL } from '../const/links.js'
 import context from '../io/context.js'
+import { escrowSurplus } from '../io/datastore/own.js'
 import type { IOwnState } from '../io/journal/localFold.js'
+import { formatUsd, priceFor } from '../io/price.js'
 import { canInstallApp, promptInstallApp } from '../utils/pwaInstall.js'
-import type { IConnectedWallet, IRootState, IWalletPair } from '../wallet/index.js'
+import type { IConnectedWallet, IFund, IRootState, IWalletKeys, IWalletPair } from '../wallet/index.js'
 import { balanceAt } from '../wallet/root.js'
 import { $body, $bulletList, $callout, $linkButton, $stageHeader, $terminal } from './$onboarding.js'
+
+const fundValueToken = getTokenDescription(HUB_CHAIN_ID, chainTokenOfKey(HUB_CHAIN_ID, VALUE_KEY))
 
 type IMasterMode = 'human' | 'agent'
 type ITemplate = 'base' | 'guarded' | 'trend' | 'copy-trader' | 'llm-basic'
@@ -50,7 +61,7 @@ const TEMPLATE_LABEL: Record<ITemplate, string> = {
   'llm-basic': 'LLM'
 }
 const TEMPLATE_DESC: Record<ITemplate, string> = {
-  base: 'A connected operator with an empty strategy body to fill in yourself (src/index.ts).',
+  base: 'A connected agent with an empty strategy body to fill in yourself (src/index.ts).',
   guarded: 'The reference risk-managed bot: swap one pure decide() and keep the guards (on-chain stop, drawdown halt, cost budget). Starts in dry-run.',
   trend: 'Deterministic EMA(12/26) + RSI trend-follower on ETH, one position at a time, with a cooldown.',
   'copy-trader': 'Mirrors a chosen GMX trader’s ETH position, sized to your trading account, with risk caps and a liquidation guard (set TRADER_ACCOUNT).',
@@ -61,40 +72,33 @@ interface ISectionParams {
   wallet: IConnectedWallet | null
   root: IRootState | null
   registry: ITokenRegistryMap
-  books: IBookRow[]
+  fundRow: IFundRow | undefined
+  surplus: ReturnType<typeof escrowSurplus>
+  fund: IFund | null
+  keys: IWalletKeys | null
 }
 
 export interface I$HelloPage {
   hideBalances: IStream<boolean>
   walletPair: IStream<IWalletPair>
-  walletRoot: IStream<IRootState | null>
   ownStateQuery: IStream<Promise<IOwnState | null>>
   draftDepositList: IStream<IDepositDraft[]>
 }
 
-export const $HelloPage = ({ hideBalances, walletPair, walletRoot, ownStateQuery, draftDepositList }: I$HelloPage) =>
+export const $HelloPage = ({ hideBalances, walletPair, ownStateQuery, draftDepositList }: I$HelloPage) =>
   component(
     (
-      [changeDepositDraft, changeDepositDraftTether]: IBehavior<IEditorDraft>,
-      [clickCreate, clickCreateTether]: IBehavior<PointerEvent>,
+      [changeIdentity, changeIdentityTether]: IBehavior<IFundIdentity>,
       [selectMode, selectModeTether]: IBehavior<INode, IMasterMode>,
-      [selectTemplate, selectTemplateTether]: IBehavior<ITemplate>
+      [selectTemplate, selectTemplateTether]: IBehavior<ITemplate>,
+      [popAllocate, popAllocateTether]: IBehavior<PointerEvent>,
+      [fundRound, fundRoundTether]: IBehavior<IDepositDraft>,
+      [arrival, arrivalTether]: IBehavior<IArrival>,
+      [roundBackers, roundBackersTether]: IBehavior<bigint | null>,
+      [fundEscrowed, fundEscrowedTether]: IBehavior<IAllocateDraft>
     ) => {
       const modeState: IStream<IMasterMode> = state('human' as IMasterMode, selectMode)
-      const keyless: IStream<boolean> = map(p => p.bodyKeys === null, walletPair)
-      const deriving = op(
-        sampleMap((pair, _click: PointerEvent) => pair, walletPair, clickCreate),
-        map(pair => (pair.wallet === null || pair.bodyKeys === null ? null : { wallet: pair.wallet, keys: pair.bodyKeys })),
-        filterNull,
-        map(f => f.keys.derive(f.wallet)),
-        state()
-      )
-      const created: IStream<Address> = op(
-        deriving,
-        map(async signer => (await signer).account),
-        awaitPromises,
-        multicast
-      )
+      const identity: IStream<IFundIdentity | null> = state(null, changeIdentity)
 
       const query: IStream<Promise<ISectionParams>> = op(
         combine({ pair: walletPair, own: ownStateQuery }),
@@ -104,7 +108,13 @@ export const $HelloPage = ({ hideBalances, walletPair, walletRoot, ownStateQuery
             wallet: q.pair.wallet,
             root,
             registry,
-            books: root === null || own === null ? [] : own.books.filter(b => isAddressEqual(b.master, root.account))
+            fundRow:
+              root === null || root.fund === null || own === null
+                ? undefined
+                : own.fundRows.find(row => isAddressEqual(row.master, root.fund!.account)),
+            surplus: root === null || root.fund === null || own === null ? [] : escrowSurplus(own, root.fund.account),
+            fund: root === null ? null : root.fund,
+            keys: q.pair.keys
           }
         }),
         state()
@@ -135,106 +145,140 @@ export const $HelloPage = ({ hideBalances, walletPair, walletRoot, ownStateQuery
           )
         )
 
-      const $create: I$Node = $column(spacing.big)(
-        $row(spacing.small, style({ alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }))(
-          $row(spacing.tiny, style({ alignItems: 'center', fontSize: text.xs, color: palette.foreground }))(
-            $text(map(k => (k ? 'Key service unavailable in this build' : 'A fresh key shared between you and Puppet'), keyless)),
-            $infoTooltip(
-              'Your trading account is the address of a key you and Puppet hold together; neither side can move funds alone. One wallet holds exactly one account, at the same address on every chain and every venue; your first deposit binds it where it lands.',
-              palette.foreground)
-          ),
-          $ButtonPrimary({
-            $container: $defaultMiniButtonPrimary,
-            $content: $text('Create trading account'),
-            disabled: map(p => p.keyless || (p.deriving ?? false), combine({ keyless, deriving: start(null, deriving) }))
-          })({ click: clickCreateTether() })
-        )
+      const openingRound: IStream<IDepositDraft> = sampleMap(
+        (held, draft: IDepositDraft) => (held === null ? draft : { ...draft, identity: held }),
+        identity,
+        fundRound
       )
 
-      const $accountCard = (root: IRootState, p: ISectionParams, wallet: IConnectedWallet): I$Node => {
-        const account = root.account
-        const puppetAccount: IStream<IRootState> = start(
-          root,
-          filter((live): live is IRootState => live !== null && isAddressEqual(live.account, account), walletRoot)
-        )
-        const registeredOn = (chainId: ChainId): Address[] =>
-          [...(p.registry.get(chainId)?.keys() ?? [])].filter(t => !isAddressEqual(t, PROTOCOL.nativeToken))
-        const draftFor = (list: IDepositDraft[], chainId: ChainId, token: Address): IDepositDraft | null =>
-          list.find(
-            d =>
-              (Number(d.deposit.destinationChainId) === chainId && isAddressEqual(depositCreditToken(d), token)) ||
-              (d.deposit.chainId === chainId && isAddressEqual(d.deposit.inputToken, token))
-          ) ?? null
-        const heldList: IStream<{ chainId: ChainId; token: Address }[]> = op(
-          combine({ account: puppetAccount, drafts: draftDepositList }),
-          map(q =>
-            ([...CHAIN_IDS] as ChainId[]).flatMap(chainId =>
-              registeredOn(chainId)
-                .filter(token => balanceAt(q.account.balances, chainId, token) > 0n || draftFor(q.drafts, chainId, token) !== null)
-                .map(token => ({ chainId, token }))
+      const openingRoundTrade: IStream<ITradeDraft> = map(
+        (round): ITradeDraft => ({
+          kind: 'allocate',
+          id: 'allocate',
+          escrowChainId: Number(round.deposit.destinationChainId) as ChainId,
+          escrowToken: round.deposit.outputToken,
+          contribution: round.expectedOutput,
+          backers: 0n,
+          identity: round.identity ?? null
+        }),
+        openingRound
+      )
+
+      const savedRound: IStream<IDepositDraft | null> = state(null, openingRound)
+
+      const $allocateSection = (root: IRootState, p: ISectionParams, wallet: IConnectedWallet): I$Node =>
+        $column(spacing.default, style({ width: '100%', maxWidth: '460px' }))(
+          $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text('Fund your first round')),
+          $row(spacing.small, style({ alignItems: 'center' }))(
+            $node(style({ fontSize: text.xs, color: palette.foreground, lineHeight: '1.5' }))(
+              $text('Move any registered token into your fund. The hub mints units for you and the backers who join.')
+            ),
+            $infoTooltip(
+              `Your deposit can start as any registered token on any supported chain. It is escrowed for your fund as the token and on the chain you pick; the round on ${chainFor(HUB_CHAIN_ID).name} credits it at the value you sign and mints your units.`
             )
           ),
-          skipRepeatsWith((a, b) => a.map(x => `${x.chainId}:${x.token}`).join() === b.map(x => `${x.chainId}:${x.token}`).join())
-        )
-        const $balanceRows = switchLatest(
-          map(
-            list =>
-              list.length === 0
-                ? empty
-                : $column(spacing.default, style({ width: '100%' }))(
-                    ...list.map(x =>
-                      $TokenBalanceEditor({
-                        hideBalances,
-                        accountState: puppetAccount,
-                        chainId: x.chainId,
-                        token: x.token,
-                        tokenRegistry: p.registry,
-                        walletAccount: wallet,
-                        draft: map(drafts => draftFor(drafts, x.chainId, x.token), draftDepositList)
-                      })({ changeDraft: changeDepositDraftTether() })
-                    )
-                  ),
-            heldList
-          )
-        )
-        const $existing =
-          p.books.length === 0
+          p.surplus.length === 0
             ? empty
-            : $column(spacing.small, style({ width: '100%' }))(
-                $node(style({ color: palette.foreground, fontSize: text.xs }))($text('Your books')),
-                ...p.books.map(b =>
-                  $row(spacing.default, style({ fontSize: text.sm, alignItems: 'center' }))(
-                    $node(style({ color: palette.foreground }))($text(`${chainFor(Number(b.chainId) as ChainId).name} · cycle ${b.cycle}`))
+            : $column(spacing.tiny, style({ width: '100%' }))(
+                $row(spacing.small, style({ alignItems: 'center' }))(
+                  $node(style({ fontSize: text.xs, color: palette.indeterminate }))($text('In escrow for your fund, not in a round yet')),
+                  $infoTooltip(
+                    'Escrow has one way out: the round that credits it into your fund. Fund a round to credit what is already there; nothing more leaves your wallet.'
                   )
                 ),
-                $Link({
-                  route: routeSchema.portfolio,
-                  $content: $text('Manage in your portfolio'),
-                  $anchor: $defaultAnchor(style({ fontSize: text.sm, textDecoration: 'underline' }))
-                })({})
-              )
-        return $card2(
-          style({ borderRadius: '30px', padding: '20px 24px', width: '100%', maxWidth: '520px', alignSelf: 'center', border: `1px solid ${colorShade(palette.foreground, 25)}` })
-        )(
-          $column(spacing.default, style({ width: '100%' }))(
-            $row(spacing.default, style({ alignItems: 'center' }))(
-              $node(style({ width: '48px', height: '48px', borderRadius: '50%', overflow: 'hidden', flexShrink: '0' }))($roboAvatar(account, 48)),
-              $column(style({ minWidth: '0', gap: '2px', flex: '1' }))(
-                $node(style({ fontWeight: '600', fontSize: text.lg }))($text(accountDisplayName(account))),
-                $row(spacing.tiny, style({ alignItems: 'center', fontFamily: 'monospace', fontSize: text.xs, color: palette.foreground }))(
-                  $text(readableAddress(account)),
-                  $infoTooltip(
-                    `Your trading account takes ${readablePercentage(PROTOCOL.performanceFee)} of every backer gain at settlement. The same address on every chain; a deposit creates it where it lands.`,
-                    palette.foreground)
-                )
+                ...p.surplus.map(row => $EscrowedRow({ hideBalances, ...row })({ fundRound: fundEscrowedTether() }))
               ),
-              $infoTooltip('Deposits land in this account on the chain you pick. A cross-chain arrival is swept in automatically once the bridge fills.', palette.foreground)
-            ),
-            $existing,
-            $balanceRows
-          )
+          $Popover({
+            $contentContainer: $editorPopoverContentContainer,
+            $target: $ButtonPrimary({
+              $container: $defaultMiniButtonPrimary(style({ alignSelf: 'flex-start' })),
+              $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Allocate'), $popoverCaret())
+            })({ click: popAllocateTether() }),
+            $open: map(() => {
+              if (root.unreachable.has(HUB_CHAIN_ID as ChainId)) {
+                return $node(style({ fontSize: text.xs, color: palette.negative, lineHeight: '1.5' }))(
+                  $text(`${chainFor(HUB_CHAIN_ID).name} could not be probed for your account; retry once it answers.`)
+                )
+              }
+              const fund = p.fundRow === undefined ? null : p.fund
+              return $DepositEditor({
+                label: 'Allocate',
+                ...(fund === null
+                  ? {}
+                  : {
+                      $note: $AllocationSimulation({
+                        master: fund.account,
+                        hideBalances,
+                        arrival
+                      })({ backers: roundBackersTether() }),
+                      gate: map(backers => backers !== null, roundBackers)
+                    }),
+                hideBalances,
+                tokenRegistry: p.registry,
+                walletAccount: wallet,
+                destination: {
+                  choose: ([...CHAIN_IDS] as ChainId[]).flatMap(chainId =>
+                    [...(p.registry.get(chainId)?.keys() ?? [])].map(token => ({ chainId, token: token as Hex }))
+                  ),
+                  scope: 'allocate'
+                },
+                ...(fund === null ? { stakeFloor: minFundedAmount } : {}),
+                existingDraft: map(list => list.find(d => d.id === 'deposit') ?? null, draftDepositList)
+              })({ changeDraft: fundRoundTether(), arrival: arrivalTether() })
+            }, popAllocate),
+            dismiss: fundRound
+          })({}),
+          switchMap(d => {
+            if (d === null) {
+              return $row(spacing.default, style({ alignItems: 'center' }))(
+                $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
+                  $node(
+                    style({
+                      width: '32px',
+                      height: '32px',
+                      borderRadius: '50%',
+                      background: palette.horizon,
+                      color: palette.foreground,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: text.base,
+                      fontWeight: '600',
+                      flexShrink: '0'
+                    })
+                  )($text('?')),
+                  $node(style({ fontWeight: '600', fontSize: text.base, color: palette.foreground }))($text('---'))
+                ),
+                $node(style({ flex: 1 }))(),
+                $amountDisplay({ hideBalances, usd: just(formatUsd(0n, 0n)), amount: '0.0', align: 'flex-end' })
+              )
+            }
+            const chainId = Number(d.deposit.destinationChainId) as ChainId
+            const token = depositArrivalToken(d)
+            const description = getTokenDescription(chainId, token)
+            const before = balanceAt(root.balances, chainId, token)
+            const price = priceFor(chainId, token)
+            const $staged = $row(spacing.default, style({ alignItems: 'center' }))(
+              $tokenProfile(chainId, token, 32, chainId !== HUB_CHAIN_ID),
+              $node(style({ flex: 1 }))(),
+              $amountDisplay({
+                hideBalances,
+                usd: map(v => formatUsd(before, v), price),
+                amount: readableTokenAmountLabel(description, before),
+                change: map(
+                  v => ({
+                    usd: formatUsd(before + d.expectedOutput, v),
+                    amount: readableTokenAmountLabel(description, before + d.expectedOutput)
+                  }),
+                  price
+                ),
+                color: just(palette.positive),
+                align: 'flex-end'
+              })
+            )
+            return $staged
+          }, savedRound)
         )
-      }
 
       const $createStep: I$Node = $intermediatePromise({
         $display: map(async (q: Promise<ISectionParams>) => {
@@ -252,8 +296,25 @@ export const $HelloPage = ({ hideBalances, walletPair, walletRoot, ownStateQuery
             )
           }
           const wallet = p.wallet
-          if (p.root === null) return $column(spacing.big)($stubIdentity('One signature creates it'), $create)
-          return $accountCard(p.root, p, wallet)
+          if (p.root === null) return $column(spacing.big)($stubIdentity('Reading your account'))
+          const root = p.root
+          return $column(spacing.big, style({ alignItems: 'center' }))(
+            $FundIdentityEditor(p.fund)({ changeIdentity: changeIdentityTether() }),
+            p.fundRow === undefined
+              ? empty
+              : $column(spacing.small, style({ width: '100%', maxWidth: '460px' }))(
+                  $node(style({ color: palette.foreground, fontSize: text.xs }))($text('Your fund')),
+                  $node(style({ color: palette.foreground, fontSize: text.sm }))(
+                    $text(`${readableTokenAmountLabel(fundValueToken, p.fundRow.value)} at the last valuation`)
+                  ),
+                  $Link({
+                    route: routeSchema.portfolio,
+                    $content: $text('Manage in your portfolio'),
+                    $anchor: $defaultAnchor(style({ fontSize: text.sm, textDecoration: 'underline' }))
+                  })({})
+                ),
+            $allocateSection(root, p, wallet)
+          )
         }, query)
       })
 
@@ -298,7 +359,7 @@ export const $HelloPage = ({ hideBalances, walletPair, walletRoot, ownStateQuery
           $puppeteer,
           'Trade by hand',
           'You place the trades',
-          'Place trades on GMX by linking your trading account over WalletConnect. Every settled cycle builds your public record.',
+          'Place trades on GMX by linking your trading account over WalletConnect. Every valuation of your fund builds your public record.',
           palette.positive
         ),
         $choiceCard(
@@ -306,7 +367,7 @@ export const $HelloPage = ({ hideBalances, walletPair, walletRoot, ownStateQuery
           $smartContract,
           'Run an agent',
           'A bot places the trades',
-          'Scaffold a bot that opens and maintains positions within the rules you signed. You deposit and settle here.',
+          'Scaffold a bot that opens and maintains positions within the rules you signed. You deposit and redeem here.',
           palette.primary
         )
       )
@@ -330,7 +391,7 @@ export const $HelloPage = ({ hideBalances, walletPair, walletRoot, ownStateQuery
       )
 
       const $card1 = $card(spacing.big, style({ width: '100%', padding: isDesktopScreen ? '62px' : '16px' }))(
-        $stageHeader(1, 'Create your trading account'),
+        $stageHeader(1, 'Create your fund'),
         $createStep,
         $separator(),
         $stageHeader(2, 'Choose your style'),
@@ -339,7 +400,10 @@ export const $HelloPage = ({ hideBalances, walletPair, walletRoot, ownStateQuery
       )
       return [
         $column(spacing.big, style({ width: '100%' }))($card1),
-        { changeDraft: changeDepositDraft, deriveAccount: created }
+        {
+          changeDraft: openingRound,
+          changeTradeDraft: merge(openingRoundTrade, fundEscrowed)
+        }
       ]
     }
   )
@@ -415,7 +479,7 @@ const $tradeStep = (walletPair: IStream<IWalletPair>): I$Node =>
     $tradeRow(
       $tradeExplain(
         'Link GMX',
-        'On app.gmx.io choose WalletConnect, copy its connection link, then open this panel to paste it. Every order is attested inside your open cycle.'
+        'On app.gmx.io choose WalletConnect, copy its connection link, then open this panel to paste it. Every order is attested before it signs.'
       ),
       $WalletLink({ walletPair, size: 56 })({})
     )
@@ -423,11 +487,11 @@ const $tradeStep = (walletPair: IStream<IWalletPair>): I$Node =>
 
 const $humanNextStep = (): I$Node =>
   $column(spacing.default)(
-    $body('A credited trading account and a record that grows with every settled cycle. From here, performance is the work.'),
+    $body('A funded trading account and a record that grows with every valuation. From here, performance is the work.'),
     $bulletList([
-      ['Watch your first cycle settle', 'Every action lands on-chain the moment it executes; closing at flat settles your backers on the hub.'],
-      ['Build a track record', 'Each settled cycle adds to a public history tied to this account. The chain is the proof.'],
-      ['Attract outside capital', 'Once your record stands out, backers sign mandates naming your account, and you trade their bond alongside your own.']
+      ['Fund your first round', 'Allocate moves your deposit into your fund; the hub values the fund and mints units for you and the backers who join.'],
+      ['Build a track record', 'Each valuation adds to a public history tied to this account. The chain is the proof.'],
+      ['Attract outside capital', 'Once your record stands out, backers sign mandates naming your account, and their deposits join the rounds you fund alongside your own.']
     ]),
     $row(spacing.default, style({ paddingTop: '8px' }))($linkButton('Traders', '/traders', true), $linkButton('Protocol docs', DOCS_URL, false))
   )
@@ -444,7 +508,7 @@ const $step = (n: number, label: string | I$Node, $extra?: I$Node): I$Node =>
 const $spinUpStep = (templateState: IStream<ITemplate>, $picker: I$Node): I$Node =>
   $column(spacing.big)(
     $body(
-      'The agent trades whatever you credited into the trading account above; any registered token works. GMX execution fees are paid in native, so credit a little ETH alongside.'
+      'The agent trades what your fund holds, so fund a round into it first; any registered token works. GMX execution fees are paid in native, so keep a little ETH in the fund alongside.'
     ),
     $column(
       spacing.default,
@@ -513,7 +577,7 @@ const $spinUpStep = (templateState: IStream<ITemplate>, $picker: I$Node): I$Node
       $step(
         5,
         $node(style({ display: 'inline' }))(
-          $text('Done. The agent opens and maintains positions; you credit and settle '),
+          $text('Done. The agent opens and maintains positions; you allocate and redeem '),
           $Link({ route: routeSchema.portfolio, $content: $text('here'), $anchor: $defaultAnchor(style({ textDecoration: 'underline' })) })({}),
           $text('.')
         )
@@ -528,9 +592,9 @@ const $agentNextStep = (): I$Node =>
   $column(spacing.default)(
     $body('A live account, an agent trading within the rules you signed, and every action checked by the protocol before it executes. From here, performance is the work.'),
     $bulletList([
-      ['Watch your first cycle settle', 'Every action lands on-chain the moment your strategy executes; closing at flat settles your backers on the hub.'],
-      ['Build a track record', 'Each settled cycle adds to a public history tied to this account. The chain is the proof.'],
-      ['Attract outside capital', 'Once your record stands out, backers sign mandates naming your account, and your strategy trades their bond alongside your own.']
+      ['Watch your first trade land', 'Every action lands on-chain the moment your strategy executes; the hub values your fund and mints your backers their units.'],
+      ['Build a track record', 'Each valuation adds to a public history tied to this account. The chain is the proof.'],
+      ['Attract outside capital', 'Once your record stands out, backers sign mandates naming your account, and their stakes back your strategy alongside your own.']
     ]),
     $row(spacing.default, style({ paddingTop: '8px' }))(
       $linkButton('Traders', '/traders', true),

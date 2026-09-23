@@ -3,41 +3,33 @@ import DEPLOYMENTS from '@puppet/contracts/deployments'
 import { type ChainId, IntervalTime } from '@puppet/sdk/const'
 import { uiStorage } from '@/ui-storage'
 import type { IStreamStoreKey } from '../app/storage/storage.js'
+import type { IPerformanceMetric } from '../components/$PerformanceMetric.js'
 
 const DB_NAME = `root:${DEPLOYMENTS[`Dictate:${HUB_CHAIN_ID}`].address}`
 
 export const localStoreSchema = uiStorage.createStoreDefinition(DB_NAME, 3, {
   global: {
-    chain: HUB_CHAIN_ID,
-    wallet: null as null | string,
     activityTimeframe: IntervalTime.WEEK,
-    firstVisitSeen: false,
+    performanceMetric: 'pnl' as IPerformanceMetric,
     hideBalances: false
-  },
-  ruleEditor: {
-    advancedRouteEditorEnabled: false
   }
 })
-
-export function originChainKey(wallet: string): IStreamStoreKey<number | null> {
-  return {
-    dbName: DB_NAME,
-    storeName: 'global',
-    key: `originChain:${wallet.toLowerCase()}`,
-    initialValue: null
-  }
-}
 
 export interface IDepositSource {
   chainId: ChainId
   address: `0x${string}`
 }
 
-export function depositDestinationKey(wallet: string): IStreamStoreKey<IDepositSource | null> {
+export interface IDepositPath {
+  source: IDepositSource
+  dest: IDepositSource
+}
+
+export function depositDestinationKey(wallet: string, scope: string): IStreamStoreKey<IDepositPath | null> {
   return {
     dbName: DB_NAME,
     storeName: 'global',
-    key: `depositDestination:${wallet.toLowerCase()}`,
+    key: `depositDestination:${scope}:${wallet.toLowerCase()}`,
     initialValue: null
   }
 }

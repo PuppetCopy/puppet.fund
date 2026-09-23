@@ -1,10 +1,10 @@
 
 import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import type { ChainId } from '@puppet/sdk/const'
-import { getMappedValueFallback, isNativeToken, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { isNativeToken, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
 import { symbolOf, wrappedNativeAddressOf } from '@puppet/sdk/state'
-import { combine, constant, filter, type IStream, just, map, merge, op, switchMap } from 'aelea/stream'
+import { combine, constant, filter, type IStream, just, map, merge, op, start, switchLatest, switchMap } from 'aelea/stream'
 import { type IBehavior, multicast, state } from 'aelea/stream-extended'
 import {
   $node,
@@ -28,14 +28,12 @@ import {
   $labeledDivider,
   $loadingValue,
   $spinner,
-  $tokenIconMap,
-  $unknown,
   $wallet,
   fadeInX,
   text
 } from '@/ui-components'
 import { $chainIcon, $tokenWithChainBadge, chainName } from '../../common/$chain.js'
-import { $tokenProfile } from '../../common/$common.js'
+import { $tokenIcon, $tokenProfile, $tokenProfileStub } from '../../common/$common.js'
 import { formatUsd } from '../../io/price.js'
 import {
   $breadcrumbSearchHeader,
@@ -61,15 +59,6 @@ export interface ITokenInputOption {
   selected?: boolean
 }
 
-export const $tokenIconBySymbol = (sym: string, size = '28px'): I$Node =>
-  $icon({
-    $content: getMappedValueFallback($tokenIconMap, sym, $unknown),
-    size,
-    fill: palette.message,
-    svgOps: style({ borderRadius: '50%' }),
-    viewBox: '0 0 32 32'
-  })
-
 export interface ITokenRowDisplay {
   symbol: string
   title?: string
@@ -83,15 +72,15 @@ export interface ITokenRowDisplay {
 
 export const $tokenBalanceRow = (r: ITokenRowDisplay): I$Node => {
   const size = 40
-  const $tokenIcon = $tokenIconBySymbol(r.symbol, `${size}px`)
+  const $symbolIcon = $tokenIcon(r.symbol, `${size}px`)
   return $row(
     spacing.default,
     style({ alignItems: 'center', justifyContent: 'space-between', flex: 1, minWidth: '0' })
   )(
     $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
       r.chainId === undefined
-        ? $tokenIcon
-        : $tokenWithChainBadge($tokenIcon, r.chainId, size, Math.round(size * 0.45)),
+        ? $symbolIcon
+        : $tokenWithChainBadge($symbolIcon, r.chainId, size, Math.round(size * 0.45)),
       $column(style({ gap: '1px', minWidth: '0' }))(
         $node(
           style({
@@ -326,9 +315,9 @@ export const $TokenSelectFlow = (config: I$TokenSelectFlow) =>
         return switchMap(m => {
           const chains = m.step === 'chains'
           const $header = $breadcrumbSearchHeader(
-            chains ? [{ label: m.symbol, $lead: $tokenIconBySymbol(m.symbol, '16px'), op: goBackTether(nodeEvent('click')) }] : [],
+            chains ? [{ label: m.symbol, $lead: $tokenIcon(m.symbol, '16px'), op: goBackTether(nodeEvent('click')) }] : [],
             $listSearchInput(
-              chains ? 'Select chain' : 'Search tokens',
+              chains ? 'Select chain' : 'Select deposit token',
               searchInputTether(nodeEvent('input'), map(searchInputValue)),
               !chains
             ),
@@ -423,7 +412,12 @@ export const $TokenSelectFlow = (config: I$TokenSelectFlow) =>
               )
             )
           ),
-        $anchorContent: switchMap(s => $tokenProfile(s.chainId, s.address), config.selection),
+        $anchorContent: op(
+          config.selection,
+          map(s => $tokenProfile(s.chainId, s.address)),
+          start($tokenProfileStub()),
+          switchLatest
+        ),
         $listContent,
         close: merge(closeList, select)
       })({ selecting: selectingTether() })

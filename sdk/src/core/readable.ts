@@ -1,5 +1,4 @@
 import { PRECISION } from '@puppet/contracts/const'
-import { curry2 } from 'aelea/stream'
 import { USD_DECIMALS } from '../const/common.js'
 import { formatFixed } from './parse.js'
 import type { ITokenDescription } from './types.js'
@@ -8,7 +7,7 @@ const readableAccountingNumber: Intl.NumberFormatOptions = { maximumFractionDigi
 const readableLargeNumber: Intl.NumberFormatOptions = { maximumFractionDigits: 0 }
 const readableTinyNumber: Intl.NumberFormatOptions = { maximumSignificantDigits: 2, minimumSignificantDigits: 2 }
 
-export const readableNumber = curry2((formatOptions: Intl.NumberFormatOptions, ammount: number | bigint) => {
+const readableNumber = (formatOptions: Intl.NumberFormatOptions) => (ammount: number | bigint) => {
   const absAmount = Math.abs(Number(ammount))
   if (absAmount > 0 && absAmount < 1e-8) {
     return Intl.NumberFormat('en-US', { ...readableAccountingNumber, ...formatOptions }).format(0)
@@ -17,18 +16,15 @@ export const readableNumber = curry2((formatOptions: Intl.NumberFormatOptions, a
     absAmount >= 100 ? readableLargeNumber : absAmount >= 0.01 ? readableAccountingNumber : readableTinyNumber
 
   return Intl.NumberFormat('en-US', { ...digitOptions, ...formatOptions }).format(ammount)
-})
+}
 
 export const readableUnitAmount = readableNumber({})
-const readableUSD = readableNumber({})
 export const readablePercentage = (amount: bigint) => `${readableUnitAmount(formatFixed(2, amount))}%`
-export const readableFactorPercentage = (amount: bigint) =>
-  `${readableUnitAmount(formatFixed(USD_DECIMALS, amount) * 100)}%`
 export const readableLeverage = (a: bigint, b: bigint) =>
   `${b ? readableUnitAmount(formatFixed(4, (a * PRECISION.basisPoints) / b)) : 0n}x`
 const USD_DUST = 10n ** 28n
 export const dustToZeroUsd = (amount: bigint): bigint => (amount < USD_DUST && amount > -USD_DUST ? 0n : amount)
-export const readableUsd = (ammount: bigint) => readableUSD(formatFixed(USD_DECIMALS, ammount))
+export const readableUsd = (ammount: bigint) => readableUnitAmount(formatFixed(USD_DECIMALS, ammount))
 export const readablePnl = (ammount: bigint, decimals = USD_DECIMALS) =>
   readableNumber({ signDisplay: 'exceptZero' })(formatFixed(decimals, ammount))
 export const readableTokenAmount = (token: ITokenDescription | number, amount: bigint) => {

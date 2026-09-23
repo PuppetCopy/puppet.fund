@@ -1,7 +1,9 @@
-import { formatThrownError } from '@puppet/sdk/compact'
+import { PROTOCOL } from '@puppet/contracts/const'
+import { getTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { contractLabelOf } from '@puppet/sdk/state'
+import { describeOperate } from '@puppet/sdk/venue'
 import {
   combine,
-  constant,
   empty,
   filter,
   type IStream,
@@ -30,14 +32,17 @@ import {
 } from 'aelea/ui'
 import { $column, $defaultInputContainer, $Popover, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $ButtonPrimary, $ButtonSecondary, $defaultButtonPrimary, $defaultMiniButtonPrimary, $defaultMiniButtonSecondary, $FieldLabeled, $icon, $infoTooltip, $labeledDivider, $popoverCaret, POPOVER_WIDTH, text } from '@/ui-components'
-import type { Address } from 'viem'
+import { $ButtonPrimary, $ButtonSecondary, $defaultMiniButtonPrimary, $defaultMiniButtonSecondary, $FieldLabeled, $icon, $infoTooltip, $labeledDivider, POPOVER_WIDTH, text } from '@/ui-components'
+import { $contractIdentity } from '../common/$contract.js'
 import { $walletConnectLogo } from '../common/$icons.js'
+import { $venueFields, $venueHeadline } from '../common/$operationView.js'
+import { operationSummary, readableFlow } from '../common/operation.js'
 import type { IConnectedWallet, IWalletPair } from '../wallet/index.js'
 import {
   blockedRequest,
   disconnectDapp,
   enableSignAlerts,
+  type IPendingCall,
   type IPendingSign,
   type IWalletLinkLogEntry,
   type IWalletLinkSession,
@@ -45,13 +50,11 @@ import {
   pendingSign,
   resolveSignApproval,
   signAlertPermission,
-  signWalletLinkSession,
   startWalletConnect,
   walletLinkLog,
   walletLinkSessions
 } from '../wallet/walletLink.js'
 import { isWcLink } from '../wallet/wcUri.js'
-import { $enableSessionDisclaimer } from './$enableSession.js'
 
 export interface I$WalletLink {
   walletPair: IStream<IWalletPair>
@@ -109,10 +112,10 @@ const $linkTunnel = (walletState: IStream<IConnectedWallet | null>) =>
             placeholder: 'Paste wc: link',
             value: uri,
             $input: $defaultInputContainer(
-              attrBehavior(map(s => ({ disabled: s?.kind === 'pending' ? '' : null }), connectStatus)),
-              styleBehavior(map(s => (s?.kind === 'pending' ? { opacity: '0.6' } : null), connectStatus))
+              attrBehavior(map(status => ({ disabled: status?.kind === 'pending' ? '' : null }), connectStatus)),
+              styleBehavior(map(status => (status?.kind === 'pending' ? { opacity: '0.6' } : null), connectStatus))
             ),
-            hint: map(s => (s?.kind === 'pending' ? 'Connecting…' : ''), connectStatus),
+            hint: map(status => (status?.kind === 'pending' ? 'Connecting…' : ''), connectStatus),
             validation: inputError
           })({ change: changeUriTether() })
         }, skipRepeatsWith<IConnectedWallet | null>(
@@ -131,8 +134,6 @@ export const $WalletLink = ({ walletPair, size = 32 }: I$WalletLink) =>
       [disconnect, disconnectTether]: IBehavior<PointerEvent, string>,
       [signDecision, signDecisionTether]: IBehavior<PointerEvent, { id: number; approved: boolean }>,
       [enableAlerts, enableAlertsTether]: IBehavior<PointerEvent>,
-      [signSession, signSessionTether]: IBehavior<PointerEvent>,
-      [popSession, popSessionTether]: IBehavior<PointerEvent>
     ) => {
       const connectedWallet: IStream<IConnectedWallet | null> = map(p => p.wallet, walletPair)
       const rootState = promiseState(map(p => p.root, walletPair))
@@ -148,7 +149,7 @@ export const $WalletLink = ({ walletPair, size = 32 }: I$WalletLink) =>
               ? ('loading' as const)
               : root.status === PromiseStatus.ERROR
                 ? ('unavailable' as const)
-                : root.value === null
+                : root.value === null || root.value.fund === null
                   ? ('unsigned' as const)
                   : ('signed' as const)
         })),
@@ -158,50 +159,8 @@ export const $WalletLink = ({ walletPair, size = 32 }: I$WalletLink) =>
         state()
       )
 
-      const signAttempt: IStream<Promise<Address>> = op(
-        signSession,
-        map(() => signWalletLinkSession()),
-        state()
-      )
-
-      const signOutcome: IStream<string | null> = op(
-        signAttempt,
-        promiseState,
-        map(s =>
-          s.status === PromiseStatus.PENDING
-            ? 'Waiting for your wallet signature…'
-            : s.status === PromiseStatus.ERROR
-              ? formatThrownError(s.error)
-              : null
-        )
-      )
-
-      const $sessionGate: I$Node = $column(spacing.small)(
-        $node(style({ fontSize: text.sm, color: palette.foreground, lineHeight: '1.5' }))(
-          $text('Sign a session to derive your account key. dApps connect to it, and the same wallet re-derives it on any device.')
-        ),
-        $row(spacing.default, style({ alignItems: 'center' }))(
-          $Popover({
-            $container: $node(style({ display: 'flex' })),
-            $open: constant(
-              $column(spacing.default, style({ maxWidth: '320px' }))(
-                ...$enableSessionDisclaimer(),
-                $ButtonPrimary({
-                  $container: $defaultButtonPrimary(style({ alignSelf: 'flex-end', minHeight: '40px' })),
-                  $content: $text('Enable session'),
-                  disabled: signAttempt
-                })({ click: signSessionTether() })
-              ),
-              popSession
-            ),
-            $target: $ButtonSecondary({
-              $container: $defaultMiniButtonSecondary,
-              $content: $row(spacing.small, style({ alignItems: 'center' }))($text('Sign session'), $popoverCaret()),
-              disabled: signAttempt
-            })({ click: popSessionTether() })
-          })({}),
-          $node(style({ fontSize: text.xs, color: palette.foreground }))($text(map(o => o ?? '', signOutcome)))
-        )
+      const $fundGate: I$Node = $node(style({ fontSize: text.sm, color: palette.foreground, lineHeight: '1.5' }))(
+        $text('A linked dApp trades through a fund, not through your wallet. Open a fund, then link the dApp here.')
       )
 
       const statusColor: IStream<string> = map(i => (i.linked ? palette.positive : palette.foreground), linkInfo)
@@ -212,7 +171,7 @@ export const $WalletLink = ({ walletPair, size = 32 }: I$WalletLink) =>
         if (i.session === 'unavailable')
           return { label: 'Account unavailable', color: palette.negative, tip: 'Your account state could not be read; dApps cannot connect until it loads.' }
         if (i.session === 'unsigned')
-          return { label: 'Session unsigned', color: palette.indeterminate, tip: 'Sign once with your wallet to derive your account key; the same wallet re-derives it on any device. dApps connect to that account.' }
+          return { label: 'No fund open', color: palette.indeterminate, tip: 'A dApp trades through a fund. Open one and it appears here for linking.' }
         if (i.unanswered)
           return {
             label: 'Not responding',
@@ -363,6 +322,51 @@ export const $WalletLink = ({ walletPair, size = 32 }: I$WalletLink) =>
           $signHint(session)
         )
 
+      const $callSimulation = (call: IPendingCall): I$Node => {
+        const summary = operationSummary(call.chainId, describeOperate(call.chainId, [{ target: call.target, value: call.value, gasLimit: 0n, callData: call.callData }], false))
+        return $column(
+          spacing.small,
+          style({ padding: '8px 10px', borderRadius: '8px', backgroundColor: colorShade(palette.horizon, 15) })
+        )(
+          ...summary.actions.flatMap(action => [
+            $venueHeadline(action),
+            ...(action.fields.length === 0 ? [] : [$node(style({ padding: '2px 0 2px 24px' }))($venueFields(action.fields))])
+          ]),
+          ...(summary.flows.length === 0
+            ? []
+            : [
+                $row(spacing.small, style({ flexWrap: 'wrap' }))(
+                  ...summary.flows.map(flow =>
+                    $node(style({ fontSize: text.xs, color: flow.delta > 0n ? palette.positive : flow.delta < 0n ? palette.negative : palette.foreground }))(
+                      $text(readableFlow(flow))
+                    )
+                  )
+                )
+              ])
+        )
+      }
+
+      const $callTarget = (call: IPendingCall): I$Node => {
+        const label = contractLabelOf(call.chainId, call.target)
+        return $column(
+          spacing.tiny,
+          style({ padding: '8px 10px', borderRadius: '8px', backgroundColor: colorShade(palette.horizon, 15) })
+        )(
+          $row(spacing.small, style({ alignItems: 'baseline', flexWrap: 'wrap' }))(
+            $node(style({ fontSize: text.xs, color: palette.foreground }))($text('to')),
+            $contractIdentity({ address: call.target, chainId: call.chainId, name: label.name })
+          ),
+          $node(style({ fontSize: text.xs, color: palette.foreground }))($text(label.detail)),
+          ...(call.value === 0n
+            ? []
+            : [
+                $node(style({ fontSize: text.xs, color: palette.message }))(
+                  $text(`sends ${readableTokenAmountLabel(getTokenDescription(call.chainId, PROTOCOL.nativeToken), call.value)}`)
+                )
+              ])
+        )
+      }
+
       const $signPrompt = (p: IPendingSign): I$Node =>
         $column(
           spacing.small,
@@ -382,19 +386,31 @@ export const $WalletLink = ({ walletPair, size = 32 }: I$WalletLink) =>
                   : `${p.name} wants a signature from your account. Only approve it if you recognise this action.`
             )
           ),
-          $node(
-            style({
-              fontSize: text.xs,
-              color: palette.foreground,
-              fontFamily: 'monospace',
-              wordBreak: 'break-word',
-              maxHeight: '120px',
-              overflowY: 'auto',
-              padding: '6px 8px',
-              borderRadius: '6px',
-              backgroundColor: colorShade(palette.horizon, 15)
-            })
-          )($text(p.payload)),
+          ...(p.call === null ? [] : [$callSimulation(p.call), $callTarget(p.call)]),
+          ...(p.restore
+            ? [
+                $node(style({ fontSize: text.xs, color: palette.indeterminate, lineHeight: '1.4' }))(
+                  $text('This device holds no key for your account yet. Approving first asks your wallet for the 2 signatures that restore it, then runs the request.')
+                )
+              ]
+            : []),
+          ...(p.call !== null
+            ? []
+            : [
+                $node(
+                  style({
+                    fontSize: text.xs,
+                    color: palette.foreground,
+                    fontFamily: 'monospace',
+                    wordBreak: 'break-word',
+                    maxHeight: '120px',
+                    overflowY: 'auto',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    backgroundColor: colorShade(palette.horizon, 15)
+                  })
+                )($text(p.payload))
+              ]),
           $row(spacing.small, style({ justifyContent: 'flex-end', alignItems: 'center' }))(
             $ButtonSecondary({
               $container: $defaultMiniButtonSecondary,
@@ -451,7 +467,7 @@ export const $WalletLink = ({ walletPair, size = 32 }: I$WalletLink) =>
                               )
                             ]
                           : i.session !== 'signed'
-                            ? [...(i.session === 'unsigned' ? [$sessionGate] : []), $header(i)]
+                            ? [...(i.session === 'unsigned' ? [$fundGate] : []), $header(i)]
                             : [
                                 $linkTunnel(connectedWallet)({}),
                                 switchLatest(

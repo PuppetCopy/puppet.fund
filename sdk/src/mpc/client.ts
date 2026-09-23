@@ -7,22 +7,22 @@ import { type IKeygenReveal, type IShare, keygenAlice1, keygenAlice2 } from './k
 import { type IPresignMessage2, type IPresignMessage4, presignAlice1, presignAlice2, presignAlice3 } from './presign.js'
 import { signAlice } from './sign.js'
 
-export interface IFundedClaim {
+export interface IBindingClaim {
   chainId: number
-  token: Address
   user: Address
-  signer: Address
-  expiry: bigint
-  session: Hex
-  request: Hex
+  binding: Hex
 }
 
-export interface IMpcClient {
-  keygen(sid: Hex, sk: bigint, funded: IFundedClaim): Promise<IShare>
+export interface IFundedClaim extends IBindingClaim {
+  token: Address
+}
+
+interface IMpcClient {
+  keygen(sid: Hex, sk: bigint, claim: IBindingClaim): Promise<IShare>
   sign(share: IShare, request: IBodySignRequest, funded: IFundedClaim): Promise<Hex>
 }
 
-export const randomSid = (): Hex => keccak256(toHex(randomBytes(32)))
+const randomSid = (): Hex => keccak256(toHex(randomBytes(32)))
 
 export function createMpcClient(mpcUrl: string): IMpcClient {
   async function post<T>(path: string, body: unknown): Promise<T> {
@@ -32,9 +32,9 @@ export function createMpcClient(mpcUrl: string): IMpcClient {
     return decode(text) as T
   }
   return {
-    async keygen(sid, sk, funded) {
+    async keygen(sid, sk, claim) {
       const a1 = keygenAlice1(sid, sk)
-      const reveal = await post<IKeygenReveal>('/mpc/keygen/1', { sid, funded, msg: a1.msg })
+      const reveal = await post<IKeygenReveal>('/mpc/keygen/1', { sid, claim, msg: a1.msg })
       const a2 = keygenAlice2(a1.state, reveal)
       const { account } = await post<{ account: Address }>('/mpc/keygen/2', { sid, msg: a2.msg })
       if (account.toLowerCase() !== publicKeyToAddress(a2.share.pk).toLowerCase()) {

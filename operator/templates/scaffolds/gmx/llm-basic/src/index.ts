@@ -27,9 +27,15 @@ if (!Bun.env.ANTHROPIC_API_KEY) {
   throw new Error('set ANTHROPIC_API_KEY in .env (cp .env.example .env) — get a key at https://console.anthropic.com')
 }
 const anthropic = new Anthropic() // reads ANTHROPIC_API_KEY
-const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, dryRun: DRY })
-if (!Bun.env.ARBITRUM_RPC_URL) throw new Error('set ARBITRUM_RPC_URL in .env (cp .env.example .env)')
-const gmx = await gmxOperator(connector, { rpcUrl: Bun.env.ARBITRUM_RPC_URL, token: ETH, skin: 10_000n })
+if (!Bun.env.CHRONICLE_URL || !Bun.env.ARBITRUM_RPC_URL || !Bun.env.OPTIMISM_RPC_URL) {
+  throw new Error('set CHRONICLE_URL, ARBITRUM_RPC_URL and OPTIMISM_RPC_URL in .env (cp .env.example .env)')
+}
+const connector = await createConnector({ pairUrl: Bun.env.PAIR_URL, chronicleUrl: Bun.env.CHRONICLE_URL, dryRun: DRY })
+const gmx = await gmxOperator(connector, {
+  rpcUrl: Bun.env.ARBITRUM_RPC_URL,
+  hubRpcUrl: Bun.env.OPTIMISM_RPC_URL,
+  token: ETH,
+})
 const market = gmx.getMarket(ETH)
 let lastTradeAt = 0
 

@@ -37,7 +37,6 @@ export {
   $defaultOptionContainer,
   type I$Dropdown
 } from './form/$Dropdown.js'
-export * from './form/$DropMultiselect.js'
 export * from './form/$DropSelect.js'
 export * from './form/$TextField.js'
 export * from './form/$TokenAmountInput.js'

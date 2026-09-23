@@ -1,7 +1,7 @@
 import { empty, type IStream, map, nowWith } from 'aelea/stream'
-import { $element, effectProp, type I$Slottable, type INodeCompose, type IStyleCSS, style, styleBehavior } from 'aelea/ui'
+import { effectProp, type I$Slottable, type INodeCompose, type IStyleCSS, style, styleBehavior } from 'aelea/ui'
 import { palette } from 'aelea/ui-components-theme'
-import { $Link as $aeleaLink, $defaultAnchor, type I$Link as I$AeleaLink, type ParamsOf, pushUrl, type RouteNode, type RouteSpec } from 'aelea/ui-router'
+import { $Link as $aeleaLink, $defaultAnchor, type I$Link as I$AeleaLink, pushUrl } from 'aelea/ui-router'
 
 export interface I$Link extends Omit<I$AeleaLink, '$anchor' | '$content'> {
   $content: I$Slottable
@@ -18,15 +18,6 @@ const disabledStyle = (disabled: IStream<boolean>) =>
 
 export const $Link = ({ disabled = empty, $content, $anchor = $defaultLinkAnchor, ...rest }: I$Link) =>
   $aeleaLink({ ...rest, $content, $anchor: $anchor(disabledStyle(disabled)) })
-
-export interface I$NavLink<T extends RouteSpec> {
-  route: RouteNode<T>
-  params?: ParamsOf<T>
-  $content: I$Slottable
-  $anchor?: INodeCompose<HTMLAnchorElement>
-}
-
-const $plainAnchor = $element('a')(style({ color: 'inherit', textDecoration: 'none', cursor: 'pointer', minWidth: 0 }))
 
 export const softNavClick = (url: string, after?: () => void) =>
   effectProp(

@@ -1,181 +1,179 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.36;
 
-import {ECDSA} from "solady/utils/ECDSA.sol";
+import {IAccount} from "../utils/interfaces/IAccount.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
 
-import {IAccount} from "../utils/interfaces/IAccount.sol";
-import {Account} from "./Account.sol";
-import {DepositRoute} from "./DepositRoute.sol";
+import {FundAccount} from "./FundAccount.sol";
+import {UserAccount} from "./UserAccount.sol";
 import {Access} from "../utils/auth/Access.sol";
 import {Error} from "../utils/Error.sol";
-import {AccountLib} from "../utils/AccountLib.sol";
-import {IntentLib} from "../utils/IntentLib.sol";
 import {IChain} from "../utils/interfaces/IChain.sol";
+import {BalanceLib} from "../utils/BalanceLib.sol";
 
 contract AccountModule is Access {
     event AccountCall(
         address indexed account,
         address indexed source,
-        bytes32 digest,
         uint modulePrevBlock,
         uint accountPrevBlock,
         uint blockTimestamp,
+        bytes32 digest,
         bytes signature,
         bytes executionData,
         IAccount.Call[] callList,
-        bytes[] resultList
+        bytes[] resultList,
+        BalanceLib.Balance[] balanceList
     );
 
     IChain public immutable chain;
-    address public immutable accountImpl;
-    bytes32 public immutable designatorHash;
-    address public immutable routeImpl;
-    uint public immutable resetPeriod;
+    address public immutable userImpl;
+    address public immutable bodyImpl;
+    bytes32 public immutable bodyHash;
+    uint public immutable withdrawDelay;
 
-    uint public lastAttestedAt;
+    struct Tip {
+        uint64 blockNumber;
+        bytes24 digest;
+    }
+
     uint public lastCallBlock;
-    mapping(address account => address user) internal userMap;
-    mapping(address account => uint) public accountBlockMap;
-    mapping(bytes32 digest => bool consumed) internal consumedMap;
+    mapping(address account => Tip) public accountTipMap;
 
     constructor(
         address _authority,
         IChain _chain,
-        address _accountImpl,
-        address _routeImpl,
-        uint _resetPeriod
+        address _userImpl,
+        address _bodyImpl,
+        uint _withdrawDelay
     ) Access(_authority) {
         if (address(_chain) == address(0)) revert Error.Chain__NotSet();
-        if (_accountImpl == address(0) || _routeImpl == address(0)) revert Error.Account__InvalidImpl();
-        if (_resetPeriod == 0) revert Error.Account__InvalidResetPeriod();
+        if (_userImpl == address(0) || _bodyImpl == address(0)) revert Error.Account__InvalidImpl();
         chain = _chain;
-        accountImpl = _accountImpl;
-        designatorHash = keccak256(abi.encodePacked(hex"ef0100", _accountImpl));
-        routeImpl = _routeImpl;
-        resetPeriod = _resetPeriod;
-        lastAttestedAt = block.timestamp;
+        userImpl = _userImpl;
+        bodyImpl = _bodyImpl;
+        bodyHash = keccak256(abi.encodePacked(hex"ef0100", _bodyImpl));
+        withdrawDelay = _withdrawDelay;
     }
 
-    function userOf(
-        address _account
-    ) public view returns (address) {
-        if (_account.codehash != designatorHash) revert Error.Account__NotDelegated(_account);
-        return userMap[_account];
-    }
-
-    function predictDepositRoute(
+    function predictUserAccount(
         address _user
     ) public view returns (address) {
         return LibClone.predictDeterministicAddress(
-            routeImpl, abi.encodePacked(_user, address(this)), bytes32(0), address(this)
+            userImpl, abi.encodePacked(address(this), _user), bytes32(0), address(this)
         );
     }
 
-    uint constant MAX_SESSION_TTL = 30 days;
+    function createUserAccount(
+        address _user
+    ) public returns (address account_) {
+        if (_user == address(0)) revert Error.Account__InvalidUser();
+        account_ = predictUserAccount(_user);
+        if (account_.code.length == 0) {
+            LibClone.cloneDeterministic(userImpl, abi.encodePacked(address(this), _user), bytes32(0));
+            _emit(
+                account_,
+                bytes32(0),
+                "",
+                abi.encode(this.createUserAccount.selector, _user),
+                new IAccount.Call[](0),
+                new bytes[](0),
+                new address[](0)
+            );
+        }
+    }
 
     function createAccount(
         address _account,
-        address _user,
-        address _signer,
-        uint _expiry,
+        address _parent,
         bytes calldata _keySignature,
-        bytes calldata _userSignature
+        bytes calldata _approval
     ) external auth {
-        if (block.timestamp > _expiry) revert Error.Account__SessionExpired(_expiry, block.timestamp);
-        if (_expiry > block.timestamp + MAX_SESSION_TTL) revert Error.Account__SessionTooLong(_expiry, MAX_SESSION_TTL);
-        if (_user == address(0) || _signer == address(0)) revert Error.Account__InvalidUser();
-        if (_account.codehash != designatorHash) revert Error.Account__NotDelegated(_account);
-        if (
-            ECDSA.tryRecoverCalldata(AccountLib.sessionDigest(address(this), _user, _signer, _expiry), _userSignature)
-                != _user
-        ) {
+        if (_account.codehash != bodyHash) revert Error.Account__NotDelegated(_account);
+        if (_parent != predictUserAccount(UserAccount(payable(_parent)).user())) revert Error.Account__InvalidUser();
+        bytes32 _digest = FundAccount(payable(_account)).genesis(_parent, _keySignature);
+        if (!UserAccount(payable(_parent)).approves(_digest, _approval)) {
             revert Error.Account__InvalidSignature();
         }
-        userMap[_account] = _user;
-        LibClone.cloneDeterministic(routeImpl, abi.encodePacked(_user, address(this)), bytes32(0));
-        bytes32 _digest = Account(payable(_account)).genesis(_user, _signer, _keySignature);
         _emit(
             _account,
             _digest,
             _keySignature,
-            abi.encode(this.createAccount.selector, _user, _signer),
+            abi.encode(this.createAccount.selector, _parent),
             new IAccount.Call[](0),
-            new bytes[](0)
+            new bytes[](0),
+            new address[](0)
         );
     }
 
     function dispatch(
         IAccount _account,
         address _attestor,
-        bytes32 _digest,
-        bytes calldata _signature,
+        bytes32 _structHash,
+        bytes calldata _coSig,
         bytes calldata _executionData,
-        IAccount.Call[] calldata _callList
-    ) external payable auth {
-        lastAttestedAt = block.timestamp;
-        bytes[] memory _resultList = _account.execute{value: msg.value}(_attestor, _digest, _signature, _callList);
-        _emit(address(_account), _digest, _signature, _executionData, _callList, _resultList);
+        IAccount.Call[] calldata _callList,
+        address[] memory _tokenList
+    ) external auth returns (bytes32 digest_) {
+        bytes[] memory _resultList;
+        (digest_, _resultList) = _account.execute(_attestor, _structHash, _coSig, _callList);
+        _emit(address(_account), digest_, _coSig, _executionData, _callList, _resultList, _tokenList);
     }
 
-    function forcedWithdrawal(
-        address _account,
-        address _token,
-        uint _amount,
-        address _to
+    function recordSelf(
+        bytes calldata _executionData,
+        address[] memory _tokenList
     ) external {
-        address _user = userOf(_account);
-        if (_user != msg.sender) revert Error.Account__UnauthorizedCaller();
-        uint _quietSince = lastAttestedAt + resetPeriod;
-        if (block.timestamp < _quietSince) revert Error.Account__AttestorAlive(_quietSince);
-        (IAccount.Call[] memory _callList, bytes[] memory _resultList) =
-            Account(payable(_account)).forcedWithdrawal(predictDepositRoute(_user), _token, _amount, _to);
-        _emit(
-            _account,
-            bytes32(0),
-            "",
-            abi.encode(this.forcedWithdrawal.selector, _token, _amount, _to),
-            _callList,
-            _resultList
-        );
+        if (msg.sender != predictUserAccount(UserAccount(payable(msg.sender)).user())) {
+            revert Error.Account__UnauthorizedCaller();
+        }
+        _emit(msg.sender, bytes32(0), "", _executionData, new IAccount.Call[](0), new bytes[](0), _tokenList);
     }
 
-    function record(address _account, bytes32 _digest, bytes calldata _executionData) external auth {
-        _emit(_account, _digest, "", _executionData, new IAccount.Call[](0), new bytes[](0));
-    }
-
-    function markConsumed(
-        bytes32 _digest
+    function record(
+        address _account,
+        bytes32 _digest,
+        bytes calldata _executionData,
+        address[] memory _tokenList
     ) external auth {
-        if (consumedMap[_digest]) revert Error.Account__DigestConsumed(_digest);
-        consumedMap[_digest] = true;
+        _emit(_account, _digest, "", _executionData, new IAccount.Call[](0), new bytes[](0), _tokenList);
     }
 
     function _emit(
         address _account,
         bytes32 _digest,
-        bytes memory _signature,
+        bytes memory _coSig,
         bytes memory _executionData,
         IAccount.Call[] memory _callList,
-        bytes[] memory _resultList
+        bytes[] memory _resultList,
+        address[] memory _tokenList
     ) internal {
+        BalanceLib.Balance[] memory _balanceList = new BalanceLib.Balance[](_tokenList.length);
+        for (uint _i; _i < _tokenList.length; ++_i) {
+            _balanceList[_i] =
+                BalanceLib.Balance({token: _tokenList[_i], amount: BalanceLib.balanceOf(_tokenList[_i], _account)});
+        }
         uint _block = chain.blockNumber();
-        uint _modulePrevBlock = lastCallBlock;
-        uint _accountPrevBlock = accountBlockMap[_account];
-        lastCallBlock = _block;
-        accountBlockMap[_account] = _block;
-
-        emit AccountCall(
-            _account,
-            msg.sender,
-            _digest,
-            _modulePrevBlock,
-            _accountPrevBlock,
+        Tip storage _tip = accountTipMap[_account];
+        bytes memory _data = abi.encode(
+            lastCallBlock,
+            uint(_tip.blockNumber),
             block.timestamp,
-            _signature,
+            _digest,
+            _coSig,
             _executionData,
             _callList,
-            _resultList
+            _resultList,
+            _balanceList
         );
+        lastCallBlock = _block;
+        _tip.blockNumber = uint64(_block);
+        _tip.digest = bytes24(keccak256(abi.encodePacked(_tip.digest, msg.sender, _data)));
+
+        bytes32 _topic = AccountCall.selector;
+        address _source = msg.sender;
+        assembly ("memory-safe") {
+            log3(add(_data, 0x20), mload(_data), _topic, _account, _source)
+        }
     }
 }

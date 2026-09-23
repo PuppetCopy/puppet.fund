@@ -1,10 +1,9 @@
-import { accountAbi } from '@puppet/contracts/abi'
+import { fundaccountAbi } from '@puppet/contracts/abi'
 import { ACCOUNT_CALL_MAP, accountCallEvent } from '@puppet/contracts/events'
 import type { IAccountCallEntry, IIAccount__Call } from '@puppet/contracts/types'
 import type { AbiParameter, Address, Chain, Client, Hex, TransactionReceipt, Transport } from 'viem'
 import { decodeAbiParameters, decodeEventLog, getAddress, size, slice, toEventSelector } from 'viem'
-import { getCode, getLogs, readContract } from 'viem/actions'
-import { awaitWhile } from '../core/await.js'
+import { readContract } from 'viem/actions'
 
 export const ACCOUNT_CALL_TOPIC: Hex = toEventSelector(accountCallEvent)
 if (
@@ -21,40 +20,12 @@ if (
 export type { IAccountCallEntry }
 export { ACCOUNT_CALL_MAP }
 
-export type AccountClient = Client<Transport, Chain | undefined>
-
-export const FRESH_ACCOUNT_NONCE = 1n
+type AccountClient = Client<Transport, Chain | undefined>
 
 export function accountNonce(client: AccountClient, account: Address): Promise<bigint> {
-  return readContract(client, { address: account, abi: accountAbi, functionName: 'nonce' })
+  return readContract(client, { address: account, abi: fundaccountAbi, functionName: 'nonce' })
 }
 
-export const intentNonceOf = (accountNonce: bigint | null): bigint =>
-  accountNonce === null || accountNonce === 0n ? FRESH_ACCOUNT_NONCE : accountNonce
-
-const SETTLEMENT_POLL_START_MS = 250
-const SETTLEMENT_POLL_MAX_MS = 500
-
-export async function awaitAccountSettlement(
-  client: AccountClient,
-  account: Address,
-  relayNonce: bigint,
-  timeoutMs: number
-): Promise<void> {
-  await awaitWhile(
-    {
-      timeoutMs,
-      pollMs: SETTLEMENT_POLL_START_MS,
-      maxPollMs: SETTLEMENT_POLL_MAX_MS,
-      timeoutMessage: `account ${account} nonce did not advance past ${relayNonce} within ${timeoutMs}ms`
-    },
-    async () => {
-      const code = await getCode(client, { address: account })
-      if (code === undefined || code === '0x') return undefined
-      return (await accountNonce(client, account)) > relayNonce ? true : undefined
-    }
-  )
-}
 
 export interface IReceiptAccountCall {
   chainId: number
@@ -155,22 +126,4 @@ export function decodeAccountCall(entry: { source: Address; executionData: Hex }
     decoded[(param as { name: string }).name] = values[i]
   })
   return decoded as IAccountCallEntry
-}
-
-export async function findSettledAccountCall(
-  client: AccountClient,
-  chainId: number,
-  accountModule: Address,
-  account: Address,
-  fromBlock: bigint
-): Promise<IReceiptAccountCall | undefined> {
-  const logs = await getLogs(client, {
-    address: accountModule,
-    event: accountCallEvent,
-    args: { account },
-    fromBlock,
-    toBlock: 'latest'
-  })
-  const log = logs[logs.length - 1]
-  return log === undefined ? undefined : accountCallFromLog(chainId, log as unknown as IAccountCallLog)
 }

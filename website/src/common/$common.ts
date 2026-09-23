@@ -1,7 +1,7 @@
 import { PROTOCOL } from '@puppet/contracts/const'
 import type { ChainId } from '@puppet/sdk/const'
-import { dustToZeroUsd, getAccountExplorerUrl, getMappedValueFallback, getTokenDescription, type ITokenDescription, readableAddress, readableLeverage, readablePnl, readableUsd } from '@puppet/sdk/core'
-import { empty, type IStream, just, map, skipRepeats, switchMap, toStream } from 'aelea/stream'
+import { dustToZeroUsd, getAccountExplorerUrl, getTokenDescription, type ITokenDescription, readableAddress, readableLeverage, readablePnl, readableUsd } from '@puppet/sdk/core'
+import { type IStream, just, map, skipRepeats, switchMap, toStream } from 'aelea/stream'
 import { PromiseStatus, promiseState } from 'aelea/stream-extended'
 import { $node, $text, attr, type I$Node, style, styleBehavior } from 'aelea/ui'
 import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
@@ -27,45 +27,19 @@ export const $size = (size: bigint, collateral: bigint, $divider = $separator2) 
   return $column(spacing.tiny)($text(readableUsd(size)), $divider, $leverage(size, collateral))
 }
 
-export const $route = (collateralTokenDescription: ITokenDescription, displayLabel = true) => {
-  return $row(spacing.small, style({ alignItems: 'center', position: 'relative' }))(
-    $row(
-      style({
-        width: '32px',
-        height: '34x'
-      })($tokenIcon(collateralTokenDescription))
-    ),
-    displayLabel ? $column($text(`${collateralTokenDescription.symbol}`)) : empty
-  )
-}
-
-export const $tokenLabeled = (indexDescription: ITokenDescription) => {
-  return $row(spacing.small, style({ alignItems: 'center' }))(
-    style({ width: '18px', height: '18px' })($tokenIcon(indexDescription)),
-    $text(`${indexDescription.symbol}`)
-  )
-}
-
-export const $tokenIcon = (tokenDesc: Pick<ITokenDescription, 'symbol'>, size = '32px', color = palette.message) => {
-  const $token = getMappedValueFallback($tokenIconMap, tokenDesc.symbol, $unknown)
-
-  if (!$token) {
-    throw new Error('Unable to find matched token')
-  }
-
-  return $icon({
-    $content: $token,
+export const $tokenIcon = (symbol: string, size = '28px'): I$Node =>
+  $icon({
+    $content: $tokenIconMap[symbol] ?? $unknown,
     size,
-    fill: color,
+    fill: palette.message,
     svgOps: style({ borderRadius: '50%' }),
     viewBox: '0 0 32 32'
   })
-}
 
 const $detail = (label: string, $value: I$Node) =>
   $row(spacing.small, style({ alignItems: 'center' }))($node(style({ color: palette.foreground, minWidth: '56px' }))($text(label)), $value)
 
-export const $tokenProfile = (chainId: ChainId, token: Address, size = 32) => {
+export const $tokenProfile = (chainId: ChainId, token: Address, size = 32, badge = true) => {
   const description = getTokenDescription(chainId, token)
   const native = isAddressEqual(token, PROTOCOL.nativeToken)
   const $tip = $Tooltip({
@@ -89,7 +63,7 @@ export const $tokenProfile = (chainId: ChainId, token: Address, size = 32) => {
       )
     ),
     $anchor: $node(style({ display: 'flex', cursor: 'help' }))(
-      $tokenWithChainBadge($tokenIcon(description, `${size}px`), chainId, size, Math.round(size * 0.45))
+      badge ? $tokenWithChainBadge($tokenIcon(description.symbol, `${size}px`), chainId, size, Math.round(size * 0.45)) : $tokenIcon(description.symbol, `${size}px`)
     )
   })({})
   return $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
@@ -97,6 +71,12 @@ export const $tokenProfile = (chainId: ChainId, token: Address, size = 32) => {
     $node(style({ fontWeight: '600', fontSize: text.base, color: palette.message }))($text(description.symbol))
   )
 }
+
+export const $tokenProfileStub = (size = 32) =>
+  $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
+    $node(style({ width: `${size}px`, height: `${size}px`, borderRadius: '50%', background: palette.horizon, flexShrink: '0' }))(),
+    $node(style({ width: '3em', height: '1.2em', borderRadius: '4px', background: palette.horizon, fontSize: text.base }))()
+  )
 
 export const $leverage = (size: bigint, collateral: bigint) => {
   return $node(style({ fontWeight: 'bold', letterSpacing: '0.05em', fontSize: text.xs }))(
@@ -120,12 +100,5 @@ export const $pnlDisplay = (pnlSrc: IStream<bigint> | bigint, bold = true) => {
   )
 
   return $node(colorStyle, style({ fontWeight: bold ? 'bold' : 'normal' }))($text(display))
-}
-
-export const $drawdownDisplay = (maxDrawdown: bigint) => {
-  const percentage = Number(maxDrawdown) / 100
-  const color =
-    maxDrawdown > 2000n ? palette.negative : maxDrawdown > 1000n ? palette.indeterminate : palette.foreground
-  return $node(style({ color }))($text(`${percentage.toFixed(1)}%`))
 }
 

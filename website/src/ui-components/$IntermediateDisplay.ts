@@ -1,5 +1,5 @@
-import { type Fn, type IStream, map, switchLatest, switchMap } from 'aelea/stream'
-import { PromiseStatus, promiseState } from 'aelea/stream-extended'
+import { type Fn, filterNull, type IStream, map, op, reduce, switchLatest } from 'aelea/stream'
+import { type PromiseState, PromiseStatus, promiseState } from 'aelea/stream-extended'
 import { $node, $text, type I$Node, style } from 'aelea/ui'
 import { $column, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
@@ -131,15 +131,20 @@ export const $intermediatePromise = <T>({
   $$fail = res => style({ placeSelf: 'center', margin: 'auto' })($errorLabel(res)),
   $display
 }: I$IntermediatPromise<T>) =>
-  switchMap(state => {
-    if (state.status === PromiseStatus.PENDING) {
-      return $loader
-    }
-
-    if (state.status === PromiseStatus.ERROR) {
-      console.error(state.error)
-      return $$fail(state.error)
-    }
-
-    return state.value
-  }, promiseState($display))
+  op(
+    promiseState($display),
+    reduce(
+      (shown: { node: I$Node | null; settled: boolean }, state: PromiseState<I$Node>) => {
+        if (state.status === PromiseStatus.PENDING) return { node: shown.settled ? null : $loader, settled: shown.settled }
+        if (state.status === PromiseStatus.ERROR) {
+          console.error(state.error)
+          return { node: $$fail(state.error), settled: false }
+        }
+        return { node: state.value, settled: true }
+      },
+      { node: null, settled: false }
+    ),
+    map(shown => shown.node),
+    filterNull,
+    switchLatest
+  )
