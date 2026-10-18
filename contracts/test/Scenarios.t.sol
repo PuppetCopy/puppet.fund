@@ -5,253 +5,409 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
 
-import {HubGate, MANDATE_INTENT_TYPEHASH, PRICE_TYPEHASH, REDEEM_INTENT_TYPEHASH} from "src/HubGate.sol";
-import {Fund} from "src/core/Fund.sol";
+import {HubGate, MANDATE_INTENT_TYPEHASH, MAX_SKIN, SELL_INTENT_TYPEHASH} from "src/HubGate.sol";
+import {Fund, PRICE_PRECISION, VIRTUAL_SHARES, VIRTUAL_VALUE} from "src/core/Fund.sol";
 import {FundAccount} from "src/core/FundAccount.sol";
-import {FundStore} from "src/core/FundStore.sol";
-import {Share} from "src/core/Share.sol";
+import {FundStore, isOpen} from "src/core/FundStore.sol";
+import {Redeem} from "src/core/Redeem.sol";
+import {GRID_BYTES, ShareToken} from "src/core/ShareToken.sol";
 import {Error} from "src/utils/Error.sol";
 import {AccountLib} from "src/utils/AccountLib.sol";
-import {LiquidityGate} from "src/utils/LiquidityGate.sol";
-import {NATIVE_TOKEN} from "src/utils/Native.sol";
+import {RETURN_ESCROW_TYPEHASH} from "src/utils/LiquidityGate.sol";
+import {MandateLib} from "src/utils/MandateLib.sol";
 import {HotPathTest} from "./HotPath.t.sol";
 
 contract ScenariosTest is HotPathTest {
-    uint constant SPOT = 3000;
-    uint constant VU = 1e12;
-    uint constant VV = 1e24;
-    uint constant ACC = 1e48;
     uint constant NMAX = 6;
-    uint constant OTHER_FUNDS = 1_000_000e6;
+    uint constant DFN = 4;
+    uint constant BILLED = FEE * USD;
+    uint constant BASIS = 1e18;
     address constant SINK = address(0x51AC);
+
+    struct LfHolder {
+        uint shares;
+        uint queued;
+        uint cost;
+        uint allocatedAt;
+        uint redeemedAt;
+        uint usdc;
+        uint weth;
+        uint basis;
+        uint entries;
+        bool mandated;
+    }
+
+    struct LfRound {
+        uint slice;
+        uint supply;
+        uint nav;
+        uint masterShares;
+        uint contributed;
+        uint masterBilled;
+        uint minted;
+        uint rows;
+        uint[] shares;
+    }
+
+    struct LfOpen {
+        uint fraction;
+        uint join;
+        uint masterPart;
+        uint owed;
+        uint cash;
+        uint value;
+        bool full;
+        uint nav;
+        uint base;
+        uint pot;
+        uint masterPay;
+    }
+
+    struct DfExit {
+        uint nav;
+        uint base;
+        uint price;
+        uint masterValue;
+        uint owner;
+        uint fees;
+        uint cuts;
+        uint[DFN] shares;
+        uint[DFN] claim;
+        uint[DFN] weth;
+    }
+
+    uint rng;
+
+    uint lfN;
+    uint lfStep;
+    string lfTrace;
+    address[NMAX] lfUsers;
+    uint[NMAX] lfKeys;
+    address[NMAX] lfAccts;
+    MandateLib.Mandate[NMAX] lfMandates;
+    LfHolder[NMAX] lfHolder;
+    FundStore.Redemption lfRedemption;
+    uint lfSupply;
+    uint lfMasterShares;
+    uint lfBodyUsdc;
+    uint lfBodyWeth;
+    uint lfBodyNative;
+    uint lfFeeUsdc;
+    uint lfFeeWeth;
+    uint lfProtocolWeth;
+    uint lfOwnerUsdc;
+    uint lfOwnerWeth;
+    uint lfEscrowUsdc;
+    uint lfNav;
+    uint lfBase;
+    uint lfExo;
+    address[] lfTracked;
+    uint lfOtherFenced;
+    uint lfOtherCost;
+    uint lfOtherPrice;
+    ShareToken lfOtherShare;
+    address lfOtherBody;
+    address lfOtherMaster;
+    address lfOtherUser;
+    address lfOtherAcct;
+
+    address[DFN] dfUsers;
+    uint[DFN] dfKeys;
+    address[DFN] dfAccts;
+    MandateLib.Mandate dfTerms;
+    uint[DFN] dfBasis;
+    uint[DFN] dfEntries;
 
     function _openFund(
         bytes32 _symbol
     ) internal {
-        _fundWallet(master, 2000e6);
-        bytes memory _pixels = new bytes(154);
-        share = Share(
+        _escrowOnHub(address(usdc), 500e6);
+        bytes memory _pixels = new bytes(GRID_BYTES);
+        shareToken = ShareToken(
             LibClone.predictDeterministicAddress(
                 fundModule.shareImpl(),
-                abi.encodePacked(_symbol, _pixels, uint16(1000)),
+                abi.encodePacked(body, _symbol, _pixels, uint16(PERFORMANCE_FEE)),
                 bytes32(uint(uint160(body))),
                 address(hub)
             )
         );
-        _escrow(LiquidityGate(address(hub)), address(usdc), 500e6);
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
             _allocateIntent(0, 0, _credit(block.chainid, address(usdc), 500e6), new Fund.Allocation[](0));
         bytes32 _genesis = AccountLib.genesisDigest(address(accountModule), body, _account(master));
-        hub.createFund(_symbol, _pixels, _coSig(bodyKey, _genesis), _coSig(masterKey, _genesis), _i, _sig);
+        hub.createFund(_symbol, _pixels, _coSig(bodyKey, _genesis), _fundApproval(masterKey, body), _i, _sig, _ownerCoSig(_i));
     }
 
     function _terms(
         uint _skin
-    ) internal view returns (AccountLib.Mandate memory) {
-        return AccountLib.Mandate({
-            master: body, skin: _skin, allocationRate: 5000, cooldownPeriod: 0, expiry: block.timestamp + 365 days
+    ) internal view returns (MandateLib.Mandate memory) {
+        return MandateLib.Mandate({
+            master: body, skin: _skin, allocationRate: 5000, exitCap: 10_000, cooldownPeriod: 0, expiry: block.timestamp + 365 days
         });
     }
 
     function _mandateIntent(
         address _user,
         uint _key,
-        AccountLib.Mandate memory _m,
-        address[] memory _tokens,
-        bool _arm
-    ) internal view returns (HubGate.MandateIntent memory i_, bytes memory sig_) {
+        MandateLib.Mandate memory _m
+    ) internal returns (HubGate.MandateIntent memory i_, bytes memory sig_) {
         address _acct = accountModule.predictUserAccount(_user);
-        AccountLib.Mandate[] memory _list = new AccountLib.Mandate[](1);
+        MandateLib.Mandate[] memory _list = new MandateLib.Mandate[](1);
         _list[0] = _m;
         bytes[] memory _sigs = new bytes[](1);
-        _sigs[0] = _coSig(_key, this.digestOf(_acct, _m));
+        _sigs[0] = _mandateSig(_key, _acct, _m);
         i_ = HubGate.MandateIntent({
             header: _header(_acct, _user, _nonceOf(_acct)),
             mandateList: _list,
-            signatureList: _sigs,
-            tokenList: _tokens,
-            arm: _arm
+            signatureList: _sigs
         });
         sig_ = _pair(
             _key,
             _typed(
                 _acct,
+                i_.header.deadline,
                 keccak256(
                     abi.encode(
                         MANDATE_INTENT_TYPEHASH,
                         _hashHeader(i_.header),
-                        keccak256(abi.encode(_list)),
-                        keccak256(abi.encodePacked(_tokens)),
-                        _arm
+                        keccak256(abi.encode(_list))
                     )
                 )
             )
         );
     }
 
-    function _arm(
+    function _signMandate(
         address _user,
         uint _key,
-        AccountLib.Mandate memory _m,
-        address _token
+        MandateLib.Mandate memory _m
     ) internal {
-        address[] memory _tokens = new address[](1);
-        _tokens[0] = _token;
-        (HubGate.MandateIntent memory _i, bytes memory _sig) = _mandateIntent(_user, _key, _m, _tokens, true);
+        (HubGate.MandateIntent memory _i, bytes memory _sig) = _mandateIntent(_user, _key, _m);
         hub.mandate(_i, _sig);
     }
 
     function _one(
         address _puppet,
-        AccountLib.Mandate memory _m,
+        MandateLib.Mandate memory _m,
         uint _amount
-    ) internal pure returns (Fund.Allocation[] memory rows_) {
+    ) internal view returns (Fund.Allocation[] memory rows_) {
         rows_ = new Fund.Allocation[](1);
-        rows_[0] = Fund.Allocation({puppet: _puppet, mandate: _m, amount: _amount});
+        rows_[0] = _row(_puppet, _m, _amount);
     }
 
-    function _usd() internal view returns (Fund.Price memory) {
-        return Fund.Price({token: address(usdc), amount: 1e6, value: 1e6 * USD});
+    function _spot() internal pure returns (Fund.Price memory) {
+        return Fund.Price({amount: 1 ether, value: ETH_USD * USD});
     }
 
-    function _spot(
-        address _token
-    ) internal pure returns (Fund.Price memory) {
-        return Fund.Price({token: _token, amount: 1e18, value: SPOT * 1e6 * USD});
+    function _bodyValue() internal view returns (uint) {
+        return usdc.balanceOf(body) * USD + wnt.balanceOf(body) + body.balance;
     }
 
-    function _navUsdc() internal view returns (uint) {
-        return usdc.balanceOf(body) + (outToken.balanceOf(body) + body.balance) * SPOT / 1e12;
-    }
-
-    function _balance(
-        address _token,
-        address _who
-    ) internal view returns (uint) {
-        return _token == NATIVE_TOKEN ? _who.balance : IERC20(_token).balanceOf(_who);
-    }
-
-    function _redeemIntent(
-        uint _retire,
-        uint _drain,
-        Fund.Price memory _price,
-        uint _nav,
-        uint _fee
-    ) internal view returns (Fund.RedeemIntent memory i_, bytes memory sig_) {
-        AccountLib.IntentHeader memory _h = _fundHeader(_nonceOf(body));
-        _h.fee = _fee;
-        i_ = Fund.RedeemIntent({
-            header: _h, share: share, valuation: _valuation(_nav), price: _price, retire: _retire, drain: _drain
-        });
-        sig_ = _pair(
-            masterKey,
-            _typed(
-                body,
-                keccak256(
-                    abi.encode(
-                        REDEEM_INTENT_TYPEHASH,
-                        _hashHeader(_h),
-                        share,
-                        _valuationHash(i_.valuation),
-                        keccak256(abi.encode(PRICE_TYPEHASH, _price.token, _price.amount, _price.value)),
-                        _retire,
-                        _drain
-                    )
-                )
-            )
-        );
-    }
-
-    function _redeemAt(
-        uint _retire,
-        uint _drain,
-        Fund.Price memory _price
+    function _toWeth(
+        uint _usdcAmount
     ) internal {
-        (Fund.RedeemIntent memory _i, bytes memory _sig) = _redeemIntent(_retire, _drain, _price, _navUsdc(), FEE * USD);
-        hub.redeem(_i, _sig);
+        vm.prank(body);
+        IERC20(address(usdc)).transfer(SINK, _usdcAmount);
+        _wethTo(body, _usdcAmount * USD);
     }
 
-    function _redeemReverts(
-        uint _retire,
-        uint _drain,
-        bytes memory _err
-    ) internal {
-        (Fund.RedeemIntent memory _i, bytes memory _sig) = _redeemIntent(_retire, _drain, _usd(), _navUsdc(), FEE * USD);
-        vm.expectRevert(_err);
-        hub.redeem(_i, _sig);
+    function _toWethAll() internal {
+        uint _held = usdc.balanceOf(body);
+        if (_held > 0) _toWeth(_held);
     }
 
-    function _claimSplit(
-        address _holder,
-        uint _basis
-    ) internal returns (uint fee_) {
-        FundStore.Position memory _p = fundStore.getPosition(body, _holder);
-        assertEq(_p.basis, _basis, "the sell moved the holding basis into the exit position");
-        assertEq(_p.shortfall, 0, "a first exit carries no shortfall");
-        uint _payout = Math.mulDiv(_p.weight, fundStore.accruedMap(body, _p.epoch) - _p.cursor, ACC);
-        fee_ = _payout > _basis ? (_payout - _basis) * 1000 / 10_000 : 0;
-        address _owner = _account(master);
-        address[] memory _tokens = fundStore.getEpochTokenList(body, _p.epoch);
-        uint[] memory _gross = new uint[](_tokens.length);
-        uint[] memory _held = new uint[](_tokens.length);
-        uint[] memory _owned = new uint[](_tokens.length);
-        for (uint _t; _t < _tokens.length; ++_t) {
-            _gross[_t] = Math.mulDiv(
-                _p.weight,
-                fundStore.tokenAccruedMap(body, _p.epoch, _tokens[_t])
-                    - fundStore.tokenCursorMap(body, _holder, _p.epoch, _tokens[_t]),
-                ACC
-            );
-            _held[_t] = _balance(_tokens[_t], _holder);
-            _owned[_t] = _balance(_tokens[_t], _owner);
-        }
-        hub.claim(body, share, _holder);
-        for (uint _t; _t < _tokens.length; ++_t) {
-            uint _fee = _payout == 0 ? 0 : Math.mulDiv(_gross[_t], fee_, _payout);
-            assertGt(_gross[_t], 0, "every token the epoch paid in reaches the holder");
-            assertEq(
-                _balance(_tokens[_t], _holder) - _held[_t],
-                _gross[_t] - _fee,
-                "the holder gets its weight of the token, net of its fee slice"
-            );
-            assertEq(_balance(_tokens[_t], _owner) - _owned[_t], _fee, "the owner gets the fee slice in the same token");
-        }
-        vm.expectRevert(abi.encodeWithSelector(Error.Fund__NothingToClaim.selector, _holder));
-        hub.claim(body, share, _holder);
+    function _rand() internal returns (uint) {
+        rng = uint(keccak256(abi.encode(rng)));
+        return rng;
     }
 
     function test_opening_round_is_signed_at_body_nonce_zero() public {
         _fundWallet(master, 2000e6);
+        _escrowOnHub(address(usdc), 600e6);
         bytes32 _symbol = bytes32("ZERO");
-        bytes memory _pixels = new bytes(154);
-        share = Share(
+        bytes memory _pixels = new bytes(GRID_BYTES);
+        shareToken = ShareToken(
             LibClone.predictDeterministicAddress(
                 fundModule.shareImpl(),
-                abi.encodePacked(_symbol, _pixels, uint16(1000)),
+                abi.encodePacked(body, _symbol, _pixels, uint16(PERFORMANCE_FEE)),
                 bytes32(uint(uint160(body))),
                 address(hub)
             )
         );
-        _escrow(LiquidityGate(address(hub)), address(usdc), 500e6);
         bytes32 _genesis = AccountLib.genesisDigest(address(accountModule), body, _account(master));
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
             _allocateIntent(1, 0, _credit(block.chainid, address(usdc), 500e6), new Fund.Allocation[](0));
+        bytes memory _ownerSig = _ownerCoSig(_i);
         vm.expectRevert(abi.encodeWithSelector(Error.Account__NonceMismatch.selector, body, 0, 1));
-        hub.createFund(_symbol, _pixels, _coSig(bodyKey, _genesis), _coSig(masterKey, _genesis), _i, _sig);
+        hub.createFund(_symbol, _pixels, _coSig(bodyKey, _genesis), _fundApproval(masterKey, body), _i, _sig, _ownerSig);
 
         uint _feeBefore = usdc.balanceOf(feeReceiver);
         (_i, _sig) = _allocateIntent(0, 0, _credit(block.chainid, address(usdc), 500e6), new Fund.Allocation[](0));
-        hub.createFund(_symbol, _pixels, _coSig(bodyKey, _genesis), _coSig(masterKey, _genesis), _i, _sig);
+        hub.createFund(_symbol, _pixels, _coSig(bodyKey, _genesis), _fundApproval(masterKey, body), _i, _sig, _ownerCoSig(_i));
         assertEq(FundAccount(payable(body)).nonce(), 1, "the opening round spends body nonce zero");
-        assertEq(share.balanceOf(body), 499e18, "the escrow net of the round fee mints at one dollar a unit");
-        assertEq(share.totalSupply(), 499e18, "the master holds the whole supply");
+        assertEq(shareToken.balanceOf(body), 499e18, "the escrow net of the round fee mints one share unit per wei of value");
+        assertEq(shareToken.totalSupply(), 499e18, "the master holds the whole supply");
         assertEq(usdc.balanceOf(body), 499e6, "the escrow lands in the body net of the fee");
-        assertEq(usdc.balanceOf(feeReceiver) - _feeBefore, FEE, "the fee is billed from the escrow store");
-        assertEq(escrowStore.fulfilledMap(_account(master), body, address(usdc)), 500e6, "the escrow is consumed");
-        assertEq(fundStore.skinMap(body), 0, "a round with no backers sets no floor");
+        assertEq(usdc.balanceOf(feeReceiver) - _feeBefore, FEE, "the fee is billed from the owner's credit");
+        assertEq(
+            hubEscrowStore.releasedMap(_account(master), address(usdc)),
+            500e6,
+            "the opening round releases the stake from the owner's hub escrow"
+        );
+        assertEq(usdc.balanceOf(address(hubEscrowStore)), 100e6, "and keeps only what the round did not credit");
+        assertEq(usdc.balanceOf(_account(master)), 2000e6, "leaving the owner's account alone");
+
+        address _owner = _account(master);
+        uint _deadline = block.timestamp + 300;
+        bytes memory _returnSig = _coSig(
+            attestorKey,
+            AccountLib.typedDigest(
+                block.chainid,
+                _owner,
+                keccak256(abi.encode(RETURN_ESCROW_TYPEHASH, address(hubEscrowStore), address(usdc), 0, 100e6, _deadline))
+            )
+        );
+        hub.returnEscrow(_owner, address(usdc), 0, 100e6, _deadline, _returnSig);
+        assertEq(usdc.balanceOf(master), 100e6, "the unused escrow returns to the owner's wallet");
+        assertEq(usdc.balanceOf(_owner), 2000e6, "not to its account");
+        assertEq(usdc.balanceOf(address(hubEscrowStore)), 0, "and the hub escrow holds nothing more");
     }
 
-    function test_rounds_in_two_tokens_price_units_by_value_and_exits_split_by_weight() public {
+    function test_skin_caps_each_backer_against_the_master_alone_and_ignores_the_crowd() public {
+        _openFund("AR");
+        (address _g, uint _gKey) = makeAddrAndKey("ar-griefer");
+        _fundWallet(_g, 40e6);
+        (HubGate.MandateIntent memory _mi, bytes memory _ms) = _mandateIntent(_g, _gKey, _terms(MAX_SKIN + 1));
+        vm.expectRevert(abi.encodeWithSelector(Error.Mandate__InvalidSkin.selector, MAX_SKIN + 1));
+        hub.mandate(_mi, _ms);
+
+        MandateLib.Mandate memory _half = _terms(5000);
+        _signMandate(_g, _gKey, _half);
+        (Fund.AllocateIntent memory _i, bytes memory _sig) =
+            _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_g), _half, 15e6));
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        assertEq(shareToken.balanceOf(_account(_g)), 14e18, "the dust backer is minted");
+        assertEq(
+            fundStore.getHolding(body, _account(_g)).cost, PRICE_PRECISION, "at the round's price of one ETH of value per share"
+        );
+
+        (address _a, uint _aKey) = makeAddrAndKey("ar-normal");
+        _fundWallet(_a, 1000e6);
+        _signMandate(_a, _aKey, _half);
+        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_a), _half, 251e6));
+        bytes memory _ownerSig = _ownerCoSig(_i);
+        vm.expectRevert(Error.Balance__ZeroAmount.selector);
+        hub.allocate(_i, _sig, _ownerSig);
+        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_a), _half, 250e6));
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        assertEq(shareToken.balanceOf(_account(_a)), 249e18, "a backer fills half of the master's own shares");
+        assertEq(shareToken.balanceOf(body), 499e18, "the master's shares are untouched");
+        assertGt(
+            shareToken.totalSupply() - shareToken.balanceOf(body),
+            shareToken.balanceOf(body) / 2,
+            "the crowd together holds more than any one backer's cap"
+        );
+        assertEq(wnt.balanceOf(address(fundStore)), 0, "and nothing is parked in a store");
+
+        (address _z, uint _zKey) = makeAddrAndKey("ar-skinless");
+        _fundWallet(_z, 2000e6);
+        MandateLib.Mandate memory _bare = _terms(0);
+        _signMandate(_z, _zKey, _bare);
+        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_z), _bare, 900e6));
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        assertEq(shareToken.balanceOf(_account(_z)), 899e18, "a skin of zero asks no master stake of the round");
+        assertGt(shareToken.balanceOf(_account(_z)), shareToken.balanceOf(body), "so its backer may outgrow the master");
+    }
+
+    function test_revoking_one_mandate_keeps_the_other_and_a_revoked_row_skips() public {
+        _openFund("RV");
+        (address _a, uint _aKey) = makeAddrAndKey("ar-revoke");
+        _fundWallet(_a, 1000e6);
+        address _acct = _account(_a);
+        MandateLib.Mandate memory _ma = _terms(MAX_SKIN);
+        _signMandate(_a, _aKey, _ma);
+        assertEq(mandateStore.mandateMap(_acct, body), this.digestOf(_acct, _ma), "the mandate digest is stored");
+
+        MandateLib.Mandate memory _other = MandateLib.Mandate({
+            master: address(0xBEEF), skin: 0, allocationRate: 5000, exitCap: 10_000, cooldownPeriod: 0, expiry: block.timestamp + 1 days
+        });
+        _signMandate(_a, _aKey, _other);
+        assertEq(mandateStore.mandateMap(_acct, address(0xBEEF)), this.digestOf(_acct, _other), "a second fund is mandated");
+        _other.expiry = 0;
+        _signMandate(_a, _aKey, _other);
+        assertEq(mandateStore.mandateMap(_acct, address(0xBEEF)), bytes32(0), "an expiry of zero is a revoke");
+        assertEq(mandateStore.mandateMap(_acct, body), this.digestOf(_acct, _ma), "the other fund's mandate stands");
+
+        (Fund.AllocateIntent memory _i, bytes memory _sig) =
+            _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_acct, _ma, 400e6));
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        assertEq(shareToken.balanceOf(_acct), 399e18, "the standing mandate allocates");
+
+        Fund.Allocation[] memory _rows = _one(_acct, _ma, 100e6);
+        _signMandate(
+            _a,
+            _aKey,
+            MandateLib.Mandate({
+                master: body, skin: 0, allocationRate: 5000, exitCap: 10_000, cooldownPeriod: 0, expiry: 0
+            })
+        );
+        assertEq(mandateStore.mandateMap(_acct, body), bytes32(0), "the backer revokes the fund");
+        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _rows);
+        bytes memory _ownerSig = _ownerCoSig(_i);
+        vm.expectRevert(Error.Balance__ZeroAmount.selector);
+        hub.allocate(_i, _sig, _ownerSig);
+    }
+
+    function _queueRedeemAt(
+        uint _value,
+        address[] memory _holderList
+    ) internal returns (uint paid_) {
+        uint[] memory _held = new uint[](_holderList.length);
+        for (uint _k; _k < _holderList.length; ++_k) {
+            _held[_k] = wnt.balanceOf(_holderList[_k]);
+        }
+        uint[4] memory _b =
+            [wnt.balanceOf(body), wnt.balanceOf(feeReceiver), wnt.balanceOf(master), wnt.balanceOf(protocolReceiver)];
+        uint _pot = Math.mulDiv(
+            fundStore.getRedemption(body).queued, _value + VIRTUAL_VALUE, shareToken.totalSupply() + VIRTUAL_SHARES
+        );
+        _redeemAt(_value, _holderList);
+        for (uint _k; _k < _holderList.length; ++_k) {
+            paid_ += wnt.balanceOf(_holderList[_k]) - _held[_k];
+        }
+        assertGe(_pot, 10 * BILLED, "these redemptions move at least ten relay fees");
+        assertEq(_b[0] - wnt.balanceOf(body), _pot, "the body pays exactly the queue's value in WETH");
+        assertEq(
+            _pot,
+            paid_ + wnt.balanceOf(feeReceiver) - _b[1] + wnt.balanceOf(master) - _b[2] + wnt.balanceOf(protocolReceiver)
+                - _b[3],
+            "every wei reaches a seller, the fee receiver, the master's share of a fee or the protocol's cut"
+        );
+        assertEq(wnt.balanceOf(address(fundStore)), 0, "and nothing stays ring-fenced once every seller is listed");
+    }
+
+    function _redeemAt(
+        uint _value,
+        address[] memory _holderList
+    ) internal {
+        Fund.Valuation memory _v = _valuation(0);
+        _v.assetList[0].value = _value;
+        _redeem(0, 0, _v, _holderList);
+    }
+
+    function _backer(
+        string memory _tag,
+        uint _amount
+    ) internal returns (address user_, uint key_, address acct_) {
+        (user_, key_) = makeAddrAndKey(_tag);
+        _fundWallet(user_, 1000e6);
+        acct_ = _account(user_);
+        MandateLib.Mandate memory _m = _terms(MAX_SKIN);
+        _signMandate(user_, key_, _m);
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(_nonceOf(body), _nav(), _one(acct_, _m, _amount));
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+    }
+
+    function test_rounds_in_two_canonical_tokens_price_shares_by_value_and_a_redemption_pays_weth_pro_rata() public {
         _openFund("MT");
         (address _a, uint _aKey) = makeAddrAndKey("rt-a");
         (address _b, uint _bKey) = makeAddrAndKey("rt-b");
@@ -259,1257 +415,1169 @@ contract ScenariosTest is HotPathTest {
         _fundWallet(_a, 1000e6);
         _fundWallet(_b, 10e6);
         _fundWallet(_c, 10e6);
-        outToken.mint(_account(_b), 1e18);
-        outToken.mint(_account(_c), 1e18);
-        AccountLib.Mandate memory _m = _terms(0);
-        _arm(_a, _aKey, _m, address(usdc));
-        _arm(_b, _bKey, _m, address(outToken));
-        _arm(_c, _cKey, _m, address(usdc));
+        _wethTo(_account(_b), 3000e18);
+        _wethTo(_account(_c), 3000e18);
+        MandateLib.Mandate memory _m = _terms(MAX_SKIN);
+        _signMandate(_a, _aKey, _m);
+        _signMandate(_b, _bKey, _m);
+        _signMandate(_c, _cKey, _m);
 
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), _navUsdc(), _one(_account(_a), _m, 400e6));
-        hub.allocate(_i, _sig);
-        uint _unitsA = share.balanceOf(_account(_a));
-        assertEq(_unitsA, 399e18, "a USDC row mints its value net of its relay slice at one dollar a unit");
+            _allocateIntent(_nonceOf(body), _nav(), _one(_account(_a), _m, 400e6));
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        uint _sharesA = shareToken.balanceOf(_account(_a));
+        assertEq(_sharesA, 399e18, "a USDC row mints its value net of its relay slice at one share unit per wei");
+        assertEq(fundStore.getHolding(body, _account(_a)).cost, PRICE_PRECISION, "and keeps that price as its cost");
 
         (_i, _sig) = _allocateIntent(
-            _nonceOf(body),
-            _navUsdc(),
-            _spot(address(outToken)),
-            _credit(block.chainid, address(usdc), 10e6),
-            new Fund.Allocation[](0)
+            _nonceOf(body), _nav(), address(wnt), _spot(), _credit(block.chainid, address(usdc), 10e6), new Fund.Allocation[](0)
         );
-        vm.expectRevert(
-            abi.encodeWithSelector(Error.Fund__CreditTokenMismatch.selector, address(usdc), address(outToken))
-        );
-        hub.allocate(_i, _sig);
+        bytes memory _ownerSig = _ownerCoSig(_i);
+        vm.expectRevert(abi.encodeWithSelector(Error.Fund__CreditTokenMismatch.selector, address(usdc), address(wnt)));
+        hub.allocate(_i, _sig, _ownerSig);
 
+        uint _sharesB = _wethRound(_account(_b), _account(_c), _m);
+        _sell(_a, _aKey, _sharesA);
+        _sell(_b, _bKey, _sharesB);
+        assertEq(_queuedOf(_account(_a)), _sharesA, "a sell queues its shares");
+        _redeemThenClose(_account(_a), _account(_b), _sharesA, _sharesB);
+    }
+
+    function _wethRound(
+        address _bAcct,
+        address _cAcct,
+        MandateLib.Mandate memory _m
+    ) internal returns (uint sharesB_) {
         uint _slice = FEE * USD / 2;
-        uint _billed = Math.mulDiv(_slice, 1e18, SPOT * 1e6 * USD);
-        uint _feeOut = outToken.balanceOf(feeReceiver);
+        uint _feeWeth = wnt.balanceOf(feeReceiver);
         Fund.Allocation[] memory _rows = new Fund.Allocation[](2);
-        (address _lo, uint _loAmount, address _hi, uint _hiAmount) = uint160(_account(_b)) < uint160(_account(_c))
-            ? (_account(_b), 0.2e18, _account(_c), 0.1e18)
-            : (_account(_c), 0.1e18, _account(_b), 0.2e18);
-        _rows[0] = Fund.Allocation({puppet: _lo, mandate: _m, amount: _loAmount});
-        _rows[1] = Fund.Allocation({puppet: _hi, mandate: _m, amount: _hiAmount});
-        (_i, _sig) =
-            _allocateIntent(_nonceOf(body), _navUsdc(), _spot(address(outToken)), _credit(0, address(0), 0), _rows);
-        hub.allocate(_i, _sig);
-        uint _unitsB = share.balanceOf(_account(_b));
-        assertEq(_unitsB, (600e30 - _slice) / 1e12, "an OUT row mints at the round price, the same unit value as USDC");
-        assertEq(share.balanceOf(_account(_c)), 0, "a backer who never armed the round token is skipped");
-        assertEq(outToken.balanceOf(_account(_c)), 1e18, "and keeps its OUT");
-        assertEq(outToken.balanceOf(feeReceiver) - _feeOut, _billed, "only the minted row's slice is billed, in OUT");
-        assertEq(outToken.balanceOf(body), 0.2e18 - _billed, "the body keeps the OUT net of that slice");
-        assertEq(fundStore.getHolding(body, _account(_b)).basis, 600e30, "the basis is the row's full value");
-
-        _sell(_a, _aKey, _unitsA);
-        _sell(_b, _bKey, _unitsB);
-        uint _pool = _unitsA + _unitsB;
-        assertEq(fundStore.getQueue(body).weight, _pool, "a first epoch weighs units one to one");
-        usdc.mint(body, 300e6);
-        address _owner = _account(master);
-        uint _ownerUsdc = usdc.balanceOf(_owner);
-
-        uint _drain = _pool * 6 / 10;
-        uint _cvUsdc = Math.mulDiv(_drain, _navUsdc() * USD + VV, share.totalSupply() + VU);
-        uint _parkedUsdc = _drainAt(1e18, _drain, _navUsdc());
-        assertEq(fundStore.retiredMap(body), 1e18, "the master may retire while backers wait");
-        assertEq(
-            share.balanceOf(address(fundStore)),
-            _pool - _drain + 1e18,
-            "the drain came out of the backer pool and the retired units wait behind it"
-        );
-        assertEq(usdc.balanceOf(_owner), _ownerUsdc, "the owner is paid nothing while backers are queued");
-
-        _redeemReverts(
-            0,
-            _pool - _drain + 1,
-            abi.encodeWithSelector(Error.Fund__DrainExceedsQueue.selector, _pool - _drain + 1, _pool - _drain)
-        );
-
-        uint _cvOut = Math.mulDiv(_pool - _drain, _navUsdc() * USD + VV, share.totalSupply() + VU);
-        uint _cashOut = Math.mulDiv(_cvOut, 1e18, SPOT * 1e6 * USD);
-        uint _relayOut = Math.mulDiv(FEE * USD, 1e18, SPOT * 1e6 * USD, Math.Rounding.Ceil);
-        uint[3] memory _outBefore = [
-            outToken.balanceOf(body), outToken.balanceOf(address(fundStore)), outToken.balanceOf(feeReceiver)
-        ];
-        _redeemAt(0, _pool - _drain, _spot(address(outToken)));
-        assertGe(_cvOut, 10 * FEE * USD, "the OUT drain moves at least ten relay fees");
-        assertEq(_outBefore[0] - outToken.balanceOf(body), _cashOut, "the OUT drain moves the drained units' value in OUT");
-        assertEq(outToken.balanceOf(feeReceiver) - _outBefore[2], _relayOut, "and bills the signed relay fee in OUT");
-        assertEq(
-            outToken.balanceOf(address(fundStore)) - _outBefore[1],
-            _cashOut - _relayOut,
-            "and parks the rest for the pool"
-        );
-        assertEq(share.balanceOf(address(fundStore)), 1e18, "both drains emptied the backer pool");
-        assertEq(fundStore.getQueue(body).epoch, 1, "emptying the pool closes the epoch");
-        assertEq(fundStore.getQueue(body).weight, 0, "and the next epoch starts weightless");
-        address[] memory _paid = fundStore.getEpochTokenList(body, 0);
-        assertEq(_paid.length, 2, "the epoch paid in two tokens");
-        assertEq(_paid[0], address(usdc), "USDC first");
-        assertEq(_paid[1], address(outToken), "then OUT");
-        assertEq(
-            fundStore.accruedMap(body, 0),
-            Math.mulDiv(_cvUsdc - FEE * USD, ACC, _pool) + Math.mulDiv(_cvOut - FEE * USD, ACC, _pool),
-            "each drain accrues its value net of the relay fee per unit of weight"
-        );
-        assertEq(
-            fundStore.tokenAccruedMap(body, 0, address(usdc)),
-            Math.mulDiv(_parkedUsdc, ACC, _pool),
-            "the USDC accrual is what the USDC drain parked"
-        );
-        assertEq(
-            fundStore.tokenAccruedMap(body, 0, address(outToken)),
-            Math.mulDiv(_cashOut - _relayOut, ACC, _pool),
-            "the OUT accrual is what the OUT drain parked"
-        );
-
-        assertGt(_claimSplit(_account(_a), 400e30), 0, "a USDC backer pays the performance fee on its gain");
-        assertGt(_claimSplit(_account(_b), 600e30), 0, "an OUT backer pays it on the same terms");
-
-        uint _outLeft = outToken.balanceOf(body);
-        vm.prank(body);
-        outToken.transfer(SINK, _outLeft);
-        usdc.mint(body, _outLeft * SPOT / 1e12);
-        uint _masterUnits = share.balanceOf(body);
-        assertEq(_masterUnits, 498e18, "the retired unit left the master's balance");
-        uint _cashValue = Math.mulDiv(_masterUnits + 1e18, _navUsdc() * USD + VV, share.totalSupply() + VU);
-        _ownerUsdc = usdc.balanceOf(_owner);
-        _redeemAt(_masterUnits, _masterUnits + 1e18, _usd());
-        assertEq(share.totalSupply(), 0, "with every backer paid out, the master may leave entirely");
-        assertEq(fundStore.retiredMap(body), 0, "every retired unit drained");
-        assertEq(
-            usdc.balanceOf(_owner) - _ownerUsdc,
-            _cashValue / 1e24 - FEE,
-            "the owner is paid the retired cash net of the relay fee"
-        );
-    }
-
-    function test_skin_law_counts_queued_backers_ranks_retirement_behind_them_and_lifts_when_they_leave() public {
-        _openFund("SK");
-        address _owner = _account(master);
-        (address _a, uint _aKey) = makeAddrAndKey("sk-a");
-        _fundWallet(_a, 1000e6);
-        address _acctA = _account(_a);
-        AccountLib.Mandate memory _strict = _terms(5000);
-        _arm(_a, _aKey, _strict, address(usdc));
+        bool _bFirst = uint160(_bAcct) < uint160(_cAcct);
+        _rows[0] = _row(_bFirst ? _bAcct : _cAcct, _m, _bFirst ? 600e18 : 1800e18);
+        _rows[1] = _row(_bFirst ? _cAcct : _bAcct, _m, _bFirst ? 1800e18 : 600e18);
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_acctA, _strict, 400e6));
-        hub.allocate(_i, _sig);
-        assertEq(share.balanceOf(_acctA), 399e18, "the strict backer is minted");
-        assertEq(fundStore.skinMap(body), 5000, "its mandate sets the floor");
-
-        _sell(_a, _aKey, 100e18);
-
-        (address _b, uint _bKey) = makeAddrAndKey("sk-b");
-        _fundWallet(_b, 1000e6);
-        AccountLib.Mandate memory _lax = _terms(0);
-        _arm(_b, _bKey, _lax, address(usdc));
-        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_b), _lax, 200e6));
-        vm.expectRevert(abi.encodeWithSelector(Error.Fund__SkinBelowFloor.selector, 499e18, 898e18 + 199e18, 5000));
-        hub.allocate(_i, _sig);
-
-        uint _ownerUsdc = usdc.balanceOf(_owner);
-        assertEq(_drainAt(10e18, 10e18, _navUsdc()), 9e6, "the ten drained backer units park nine dollars");
-        assertEq(fundStore.retiredMap(body), 10e18, "a retire within the floor is accepted while a backer waits");
-        assertEq(share.balanceOf(body), 489e18, "the retired units leave the master");
-        assertEq(share.balanceOf(address(fundStore)), 100e18, "ninety queued backer units and ten retired ones");
-        assertEq(usdc.balanceOf(_owner), _ownerUsdc, "the drain paid the backer pool, not the owner");
-
-        _redeemReverts(0, 91e18, abi.encodeWithSelector(Error.Fund__DrainExceedsQueue.selector, 91e18, 90e18));
-        assertEq(_drainAt(0, 90e18, _navUsdc()), 89e6, "the rest of the pool parks eighty-nine");
-        assertEq(share.balanceOf(address(fundStore)), 10e18, "only the retired units remain queued");
-        assertEq(fundStore.getQueue(body).epoch, 1, "the backer epoch closed");
-        assertEq(usdc.balanceOf(_owner), _ownerUsdc, "still nothing for the owner");
-        _redeemAt(0, 10e18, _usd());
-        assertEq(usdc.balanceOf(_owner) - _ownerUsdc, 9e6, "the retired units drain to the owner once no backer waits");
-        assertEq(fundStore.retiredMap(body), 0, "and leave the retired book");
-
-        _redeemReverts(
-            250e18, 250e18, abi.encodeWithSelector(Error.Fund__SkinBelowFloor.selector, 239e18, 538e18, 5000)
-        );
-        _redeemReverts(
-            190e18 + 1,
-            190e18 + 1,
-            abi.encodeWithSelector(Error.Fund__SkinBelowFloor.selector, 299e18 - 1, 598e18 - 1, 5000)
-        );
-        _ownerUsdc = usdc.balanceOf(_owner);
-        _redeemAt(190e18, 190e18, _usd());
-        assertEq(share.balanceOf(body), 299e18, "the master retires exactly down to the floor");
-        assertEq(usdc.balanceOf(_owner) - _ownerUsdc, 189e6, "and is paid for it at once, no backer being queued");
-
-        uint _before = usdc.balanceOf(_acctA);
-        _sell(_a, _aKey, 299e18);
+            _allocateIntent(_nonceOf(body), _nav(), address(wnt), _spot(), _credit(0, address(0), 0), _rows);
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        sharesB_ = shareToken.balanceOf(_bAcct);
+        assertEq(sharesB_, 600e18 - _slice, "a WETH row mints at the round price, the same share value as USDC");
         assertEq(
-            usdc.balanceOf(_acctA) - _before, 98e6 - FEE, "the next sell settles the closed epoch at a loss, no fee"
+            fundStore.getHolding(body, _bAcct).cost, PRICE_PRECISION, "so a WETH row keeps the same cost as a USDC row of its round"
         );
-        assertEq(usdc.balanceOf(address(fundStore)), 0, "the closed epoch paid out whole");
-
-        _redeemReverts(299e18, 1, abi.encodeWithSelector(Error.Fund__SkinBelowFloor.selector, 0, 299e18, 5000));
-        assertEq(_drainAt(0, 299e18, _navUsdc()), 298e6, "the second epoch's pool parks its value net of the fee");
-        _ownerUsdc = usdc.balanceOf(_owner);
-        _redeemAt(299e18, 299e18, _usd());
-        assertEq(share.totalSupply(), 0, "with no backers left the floor lifts and the master leaves entirely");
-        assertEq(usdc.balanceOf(_owner) - _ownerUsdc, 298e6, "the full exit pays the owner");
-
-        _before = usdc.balanceOf(_acctA);
-        _ownerUsdc = usdc.balanceOf(_owner);
-        uint _paid = Math.mulDiv(299e18, Math.mulDiv(298e6, ACC, 299e18), ACC);
-        hub.claim(body, share, _acctA);
-        assertEq(usdc.balanceOf(_acctA) - _before, _paid, "the last backer collects its epoch");
-        assertEq(usdc.balanceOf(_owner), _ownerUsdc, "a losing epoch pays the owner nothing");
-        assertEq(usdc.balanceOf(address(fundStore)), 298e6 - _paid, "only rounding dust stays in the store");
+        assertEq(shareToken.balanceOf(_cAcct), 0, "a row above the backer's allocation rate is skipped");
+        assertEq(wnt.balanceOf(_cAcct), 3000e18, "and keeps its WETH");
+        assertEq(wnt.balanceOf(feeReceiver) - _feeWeth, _slice, "only the minted row's slice is billed, in WETH");
+        assertEq(wnt.balanceOf(body), 600e18 - _slice, "the body keeps the WETH net of that slice");
     }
 
-    function test_native_drain_pays_backers_in_native() public {
-        _openFund("EE");
-        vm.deal(master, 1 ether);
-        vm.prank(master);
-        hub.depositEscrow{value: 1 ether}(body, NATIVE_TOKEN, 1 ether);
-        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(
-            _nonceOf(body),
-            _navUsdc(),
-            _spot(NATIVE_TOKEN),
-            _credit(block.chainid, NATIVE_TOKEN, 1 ether),
-            new Fund.Allocation[](0)
+    function _redeemThenClose(
+        address _aAcct,
+        address _bAcct,
+        uint _sharesA,
+        uint _sharesB
+    ) internal {
+        _toWethAll();
+        uint _owner = wnt.balanceOf(master);
+        uint _net = _queueRedeemAt(_bodyValue(), _list(_aAcct, _bAcct));
+        assertEq(fundStore.getRedemption(body).price, PRICE_PRECISION, "the fund exits at the price both holders paid");
+        assertEq(wnt.balanceOf(master), _owner, "so neither pays a fee and the master earns nothing");
+        assertApproxEqAbs(
+            wnt.balanceOf(_aAcct) + BILLED,
+            Math.mulDiv(_net + 2 * BILLED, _sharesA, _sharesA + _sharesB),
+            1,
+            "the redemption pays A its share of the pot"
         );
-        uint _relayEth = Math.mulDiv(FEE * USD, 1e18, SPOT * 1e6 * USD, Math.Rounding.Ceil);
-        hub.allocate(_i, _sig);
-        assertEq(body.balance, 1 ether - _relayEth, "the body holds native net of the fee");
+        assertApproxEqAbs(
+            wnt.balanceOf(_bAcct) - 2400e18 + BILLED,
+            Math.mulDiv(_net + 2 * BILLED, _sharesB, _sharesA + _sharesB),
+            1,
+            "and B its share, whatever its round token"
+        );
+        assertEq(fundStore.getRedemption(body).queued, 0, "the queue is drained");
 
-        (address _a, uint _aKey) = makeAddrAndKey("ee-native");
-        _fundWallet(_a, 1000e6);
-        address _acct = _account(_a);
-        AccountLib.Mandate memory _m = _terms(0);
-        _arm(_a, _aKey, _m, address(usdc));
-        (_i, _sig) = _allocateIntent(_nonceOf(body), _navUsdc(), _one(_acct, _m, 400e6));
-        uint _minted = Math.mulDiv(399e30, share.totalSupply() + VU, _navUsdc() * USD + VV);
-        hub.allocate(_i, _sig);
-        uint _units = share.balanceOf(_acct);
-        assertEq(_units, _minted, "a USDC row is priced against a valuation that counts the native");
-        _sell(_a, _aKey, _units);
-
-        uint _storeEth = address(fundStore).balance;
-        uint _bodyEth = body.balance;
-        uint _relayBefore = feeReceiver.balance;
-        uint _cashEth = Math.mulDiv(
-            Math.mulDiv(_units / 10, _navUsdc() * USD + VV, share.totalSupply() + VU), 1e18, SPOT * 1e6 * USD
-        );
-        _redeemAt(0, _units / 10, _spot(NATIVE_TOKEN));
-        uint _parked = _cashEth - _relayEth;
-        assertEq(_bodyEth - body.balance, _cashEth, "a native drain moves the drained units' value in native");
-        assertEq(feeReceiver.balance - _relayBefore, _relayEth, "and bills the signed relay fee in native");
-        assertEq(address(fundStore).balance - _storeEth, _parked, "and parks the rest for the backers");
-
-        uint _parkedUsdc = _drainAt(0, _units - _units / 10, _navUsdc());
-        address[] memory _paid = fundStore.getEpochTokenList(body, 0);
-        assertEq(_paid.length, 2, "the epoch paid in two tokens");
-        assertEq(_paid[0], NATIVE_TOKEN, "the epoch first paid in native");
-        assertEq(_paid[1], address(usdc), "and then in USDC");
-        assertEq(
-            fundStore.tokenAccruedMap(body, 0, NATIVE_TOKEN),
-            Math.mulDiv(_parked, ACC, _units),
-            "the native accrual is what the native drain parked"
-        );
-        assertEq(
-            fundStore.tokenAccruedMap(body, 0, address(usdc)),
-            Math.mulDiv(_parkedUsdc, ACC, _units),
-            "the USDC accrual is what the USDC drain parked"
-        );
-        assertEq(_claimSplit(_acct, 400e30), 0, "a losing exit pays no performance fee");
-        assertEq(
-            address(fundStore).balance,
-            _storeEth + _parked - Math.mulDiv(_units, Math.mulDiv(_parked, ACC, _units), ACC),
-            "the native parked for the backer left the store but rounding dust"
-        );
+        uint[2] memory _before = [wnt.balanceOf(master), wnt.balanceOf(body)];
+        Fund.Valuation memory _v = _valuation(0);
+        _v.assetList[0].value = _before[1];
+        _redeem(10_000, 0, _v, new address[](0));
+        assertEq(shareToken.totalSupply(), 0, "with every backer paid out, the master closes the fund");
+        assertEq(wnt.balanceOf(body), 0, "paying out its whole WETH balance");
+        assertEq(wnt.balanceOf(master) - _before[0], _before[1] - BILLED, "to the owner's wallet net of the relay fee");
     }
 
-    function test_known_stall_steady_sells_with_half_drains_end_in_drain_leaves_dust() public {
+    function test_steady_sells_redeem_one_round_at_a_time_forever() public {
         _openFund("ST");
-        (address _a, uint _aKey) = makeAddrAndKey("ee-steady");
-        _fundWallet(_a, 1000e6);
-        AccountLib.Mandate memory _m = _terms(0);
-        _arm(_a, _aKey, _m, address(usdc));
-        (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_a), _m, 400e6));
-        hub.allocate(_i, _sig);
-        uint _clampedAt;
-        uint _stalledAt;
+        (address _a, uint _aKey, address _acct) = _backer("ee-steady", 400e6);
+        _toWethAll();
         for (uint _k; _k < 40; ++_k) {
             _sell(_a, _aKey, 8e18);
-            uint _pool = share.balanceOf(address(fundStore));
-            FundStore.Queue memory _q = fundStore.getQueue(body);
-            uint _floor = Math.ceilDiv(_q.weight, 1e6);
-            (Fund.RedeemIntent memory _r, bytes memory _rs) =
-                _redeemIntent(0, _pool / 2, _usd(), usdc.balanceOf(body), FEE * USD);
-            if (_pool <= _floor) {
-                vm.expectRevert(abi.encodeWithSelector(Error.Fund__DrainLeavesDust.selector, _pool, _floor));
-                hub.redeem(_r, _rs);
-                _stalledAt = _k + 1;
-                break;
-            }
-            hub.redeem(_r, _rs);
-            uint _drained = _pool - share.balanceOf(address(fundStore));
-            assertEq(_drained, Math.min(_pool / 2, _pool - _floor), "a partial drain stops at the weight floor");
-            if (_drained < _pool / 2 && _clampedAt == 0) _clampedAt = _k + 1;
-            assertEq(fundStore.getQueue(body).epoch, 0, "a partial drain never closes the epoch");
+            uint _paid = wnt.balanceOf(_acct);
+            uint _owner = wnt.balanceOf(master);
+            _redeemAt(_bodyValue(), _list(_acct));
+            assertEq(fundStore.getRedemption(body).queued, 0, "every redemption empties the queue");
+            assertEq(
+                wnt.balanceOf(_acct) - _paid, 8e18 - BILLED, "and pays the seller its shares at the unchanged price, with no fee on no gain"
+            );
+            assertEq(wnt.balanceOf(master), _owner, "so the master is paid nothing");
+            assertFalse(isOpen(fundStore.getRedemption(body)), "in the one transaction that opened it");
         }
-        assertEq(_clampedAt, 20, "the weight ratio doubles per half drain until the floor clamps the twentieth");
-        assertEq(_stalledAt, 21, "and the next one finds the floor has swallowed the whole pool");
-        _redeemAt(0, share.balanceOf(address(fundStore)), _usd());
-        assertEq(share.balanceOf(address(fundStore)), 0, "a full drain of the pool still clears the stall");
-        assertEq(fundStore.getQueue(body).epoch, 1, "and opens a fresh epoch");
-        assertEq(fundStore.getQueue(body).weight, 0, "with no weight carried over");
+        assertEq(fundStore.getRedemption(body).id, 40, "one redemption per sale, however long the fund runs");
+        assertEq(shareToken.balanceOf(_acct), 399e18 - 40 * 8e18);
     }
 
-    function _backer(
-        string memory _tag,
-        uint _skin,
-        uint _amount
-    ) internal returns (address user_, uint key_, address acct_) {
-        (user_, key_) = makeAddrAndKey(_tag);
-        _fundWallet(user_, 1000e6);
-        acct_ = _account(user_);
-        AccountLib.Mandate memory _m = _terms(_skin);
-        _arm(user_, key_, _m, address(usdc));
-        (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), _navUsdc(), _one(acct_, _m, _amount));
-        hub.allocate(_i, _sig);
-    }
-
-    function _drainAt(
-        uint _retire,
-        uint _units,
-        uint _nav
-    ) internal returns (uint parked_) {
-        uint _body = usdc.balanceOf(body);
-        uint _store = usdc.balanceOf(address(fundStore));
-        uint _relay = usdc.balanceOf(feeReceiver);
-        uint _cashValue = Math.mulDiv(_units, _nav * USD + VV, share.totalSupply() + VU);
-        (Fund.RedeemIntent memory _i, bytes memory _sig) = _redeemIntent(_retire, _units, _usd(), _nav, FEE * USD);
-        hub.redeem(_i, _sig);
-        parked_ = _cashValue / 1e24 - FEE;
-        assertGe(_cashValue, 10 * FEE * USD, "these drains move at least ten relay fees");
-        assertEq(_body - usdc.balanceOf(body), _cashValue / 1e24, "the drain moves exactly the drained units' value");
-        assertEq(usdc.balanceOf(feeReceiver) - _relay, FEE, "the drain pays its own relay fee out of that cash");
-        assertEq(usdc.balanceOf(address(fundStore)) - _store, parked_, "and parks the rest for the pool");
-    }
-
-    function _twoDrainExit(
-        address _acct,
-        uint _units,
-        uint _firstNav,
-        uint _secondNav,
-        bool _settleBetween
-    ) internal returns (uint[6] memory out_) {
-        address _owner = _account(master);
-        uint _held = usdc.balanceOf(_acct);
-        uint _owned = usdc.balanceOf(_owner);
-        out_[4] = _drainAt(0, _units / 2, _firstNav);
-        if (_settleBetween) {
-            vm.prank(master);
-            hub.claim(body, share, _acct);
-            out_[0] = usdc.balanceOf(_acct) - _held;
-            out_[1] = usdc.balanceOf(_owner) - _owned;
-        }
-        out_[5] = _drainAt(0, share.balanceOf(address(fundStore)), _secondNav);
-        hub.claim(body, share, _acct);
-        out_[2] = usdc.balanceOf(_acct) - _held;
-        out_[3] = usdc.balanceOf(_owner) - _owned;
-    }
-
-    function test_fee_is_path_independent_when_a_loss_drain_precedes_a_gain_drain() public {
-        _openFund("LG");
-        (address _a, uint _aKey, address _acct) = _backer("lg-a", 0, 400e6);
-        _sell(_a, _aKey, 399e18);
-        uint _snap = vm.snapshotState();
-        uint[6] memory _between = _twoDrainExit(_acct, 399e18, 450e6, 2000e6, true);
-        vm.revertToState(_snap);
-        uint[6] memory _atEnd = _twoDrainExit(_acct, 399e18, 450e6, 2000e6, false);
-
-        assertLt(_between[0], 200e6, "the first window paid back less than its half of the basis");
-        assertApproxEqAbs(_between[0], _between[4], 1, "the lone holder collects all the first drain parked");
-        assertEq(_between[1], 0, "no fee on a losing window");
-        uint _gross = _atEnd[2] + _atEnd[3];
-        assertGt(_gross, 400e6, "the exit was profitable overall");
-        assertApproxEqAbs(
-            _gross, _atEnd[4] + _atEnd[5], 1, "the holder and the owner split exactly what both drains parked"
-        );
-        assertApproxEqAbs(
-            _atEnd[3], (_gross - 400e6) / 10, 2, "the fee is a tenth of the net profit over the whole basis"
-        );
-        assertApproxEqAbs(_between[3], _atEnd[3], 1, "a settle between the drains changes nothing about the fee");
-        assertApproxEqAbs(_between[2], _atEnd[2], 1, "nor about what the holder collects");
-    }
-
-    function test_fee_is_path_independent_when_a_gain_drain_precedes_a_loss_drain() public {
-        _openFund("GL");
-        (address _a, uint _aKey, address _acct) = _backer("gl-a", 0, 400e6);
-        _sell(_a, _aKey, 399e18);
-        uint _snap = vm.snapshotState();
-
-        uint[6] memory _between = _twoDrainExit(_acct, 399e18, 1350e6, 175e6, true);
-        vm.revertToState(_snap);
-        uint[6] memory _atEnd = _twoDrainExit(_acct, 399e18, 1350e6, 175e6, false);
-        assertGt(_between[0], 200e6, "the first window alone paid more than its half of the basis");
-        assertApproxEqAbs(_between[0], _between[4], 1, "the lone holder collects all the first drain parked");
-        assertEq(_between[1], 0, "yet basis comes back first, so that settle charges nothing");
-        assertLt(_atEnd[2], 400e6, "the exit lost money overall");
-        assertApproxEqAbs(_atEnd[2], _atEnd[4] + _atEnd[5], 1, "the losing holder collects all both drains parked");
-        assertEq(_between[3], 0, "a losing exit pays no fee when settled between the drains");
-        assertEq(_atEnd[3], 0, "nor when settled once at the end");
-        assertApproxEqAbs(_between[2], _atEnd[2], 1, "the holder collects the same either way");
-
-        vm.revertToState(_snap);
-        _between = _twoDrainExit(_acct, 399e18, 2000e6, 175e6, true);
-        vm.revertToState(_snap);
-        _atEnd = _twoDrainExit(_acct, 399e18, 2000e6, 175e6, false);
-        uint _gross = _atEnd[2] + _atEnd[3];
-        assertGt(_between[0] + _between[1], 400e6, "the first window alone returned the whole basis");
-        assertApproxEqAbs(
-            _between[0] + _between[1], _between[4], 1, "the first settle splits exactly what the first drain parked"
-        );
-        assertApproxEqAbs(
-            _between[1], (_between[0] + _between[1] - 400e6) / 10, 1, "so its settle charges a tenth of the excess only"
-        );
-        assertGt(_gross, 400e6, "the exit gained overall");
-        assertApproxEqAbs(
-            _gross, _atEnd[4] + _atEnd[5], 1, "the holder and the owner split exactly what both drains parked"
-        );
-        assertApproxEqAbs(_atEnd[3], (_gross - 400e6) / 10, 2, "the fee is a tenth of the net profit");
-        assertApproxEqAbs(_between[3], _atEnd[3], 1, "whatever the settle order");
-        assertApproxEqAbs(_between[2], _atEnd[2], 1, "and the holder collects the same");
-    }
-
-    function test_drain_relay_fee_is_capped_at_a_tenth_of_the_cash_it_moves() public {
-        _openFund("CAP");
-        (address _a, uint _aKey,) = _backer("cap-a", 0, 400e6);
-        _sell(_a, _aKey, 399e18);
-        uint _relay = usdc.balanceOf(feeReceiver);
-        uint _store = usdc.balanceOf(address(fundStore));
-        uint _body = usdc.balanceOf(body);
-        _redeemAt(0, 5e18, _usd());
-        assertEq(_body - usdc.balanceOf(body), 5e6, "a five dollar drain moves five dollars");
-        assertEq(
-            usdc.balanceOf(feeReceiver) - _relay,
-            0.5e6,
-            "a five dollar drain bills a tenth of its cash, not the signed dollar"
-        );
-        assertEq(usdc.balanceOf(address(fundStore)) - _store, 4.5e6, "the pool gets the rest");
-
-        _relay = usdc.balanceOf(feeReceiver);
-        _store = usdc.balanceOf(address(fundStore));
-        _body = usdc.balanceOf(body);
-        _redeemAt(0, 20e18, _usd());
-        assertEq(_body - usdc.balanceOf(body), 20e6, "a twenty dollar drain moves twenty dollars");
-        assertEq(usdc.balanceOf(feeReceiver) - _relay, FEE, "above ten dollars the signed fee binds");
-        assertEq(usdc.balanceOf(address(fundStore)) - _store, 19e6, "the pool gets the rest");
-
-        _relay = usdc.balanceOf(feeReceiver);
-        _store = usdc.balanceOf(address(fundStore));
-        _body = usdc.balanceOf(body);
-        uint _queued = share.balanceOf(address(fundStore));
-        _redeemAt(0, 1, _usd());
-        assertEq(
-            share.balanceOf(address(fundStore)),
-            _queued - 1,
-            "a one-wei drain is accepted rather than refused as unfunded"
-        );
-        assertEq(usdc.balanceOf(feeReceiver), _relay, "it bills nothing");
-        assertEq(usdc.balanceOf(address(fundStore)), _store, "parks nothing");
-        assertEq(usdc.balanceOf(body), _body, "and moves nothing out of the body");
-    }
-
-    function _gainingExit(
-        string memory _tag
-    ) internal returns (address acct_, uint gross_, uint fee_) {
-        (address _a, uint _aKey, address _acct) = _backer(_tag, 0, 400e6);
-        acct_ = _acct;
-        _sell(_a, _aKey, 399e18);
-        usdc.mint(body, 300e6);
-        uint _parked = _drainAt(0, 399e18, _navUsdc());
-        FundStore.Position memory _p = fundStore.getPosition(body, acct_);
-        gross_ = Math.mulDiv(_p.weight, fundStore.tokenAccruedMap(body, 0, address(usdc)), ACC);
-        assertApproxEqAbs(gross_, _parked, 1, "the lone holder is owed all the drain parked");
-        uint _payout = Math.mulDiv(_p.weight, fundStore.accruedMap(body, 0), ACC);
-        fee_ = Math.mulDiv(gross_, (_payout - 400e30) * 1000 / 10_000, _payout);
-        assertGt(fee_, 0, "the exit gained, so it owes a fee");
-    }
-
-    function test_owner_who_cannot_receive_is_owed_and_the_backer_exit_still_settles() public {
-        _openFund("OWN");
-        (address _acct, uint _gross, uint _fee) = _gainingExit("own-a");
-        address _owner = _account(master);
-        uint _held = usdc.balanceOf(_acct);
-        uint _owned = usdc.balanceOf(_owner);
-        vm.mockCallRevert(address(usdc), abi.encodeWithSelector(IERC20.transfer.selector, _owner), "blocked");
-        hub.claim(body, share, _acct);
-        vm.clearMockedCalls();
-        assertEq(
-            usdc.balanceOf(_acct) - _held, _gross - _fee, "the backer is paid in full although the owner cannot receive"
-        );
-        assertEq(usdc.balanceOf(_owner), _owned, "the blocked owner received nothing");
-        assertEq(fundStore.owedMap(_owner, address(usdc)), _fee, "its fee is booked as owed");
-
-        hub.payOwed(_owner, address(usdc));
-        assertEq(usdc.balanceOf(_owner) - _owned, _fee, "anyone can push the owed fee once the owner can receive");
-        assertEq(fundStore.owedMap(_owner, address(usdc)), 0, "and the debt is cleared");
-        vm.expectRevert(abi.encodeWithSelector(Error.Fund__NothingToClaim.selector, _owner));
-        hub.payOwed(_owner, address(usdc));
-    }
-
-    function test_holder_who_cannot_receive_is_owed_and_the_owner_fee_still_settles() public {
-        _openFund("OWH");
-        (address _acct, uint _gross, uint _fee) = _gainingExit("owh-a");
-        address _owner = _account(master);
-        uint _held = usdc.balanceOf(_acct);
-        uint _owned = usdc.balanceOf(_owner);
-        vm.mockCallRevert(address(usdc), abi.encodeWithSelector(IERC20.transfer.selector, _acct), "blocked");
-        hub.claim(body, share, _acct);
-        vm.clearMockedCalls();
-        assertEq(usdc.balanceOf(_owner) - _owned, _fee, "the owner fee settles although the holder cannot receive");
-        assertEq(usdc.balanceOf(_acct), _held, "the blocked holder received nothing");
-        assertEq(fundStore.owedMap(_acct, address(usdc)), _gross - _fee, "its payout is booked as owed");
-        vm.expectRevert(abi.encodeWithSelector(Error.Fund__NothingToClaim.selector, _acct));
-        hub.claim(body, share, _acct);
-
-        hub.payOwed(_acct, address(usdc));
-        assertEq(usdc.balanceOf(_acct) - _held, _gross - _fee, "the owed payout is pulled in full later");
-        assertEq(fundStore.owedMap(_acct, address(usdc)), 0, "and the debt is cleared");
-    }
-
-    function test_mandate_skin_is_capped_at_symmetric_and_the_cap_leaves_room_to_match_the_master() public {
-        _openFund("AR");
-        (address _g, uint _gKey) = makeAddrAndKey("ar-griefer");
-        _fundWallet(_g, 40e6);
-        (HubGate.MandateIntent memory _mi, bytes memory _ms) =
-            _mandateIntent(_g, _gKey, _terms(9000), new address[](0), true);
-        vm.expectRevert(abi.encodeWithSelector(Error.Mandate__InvalidSkin.selector, 9000));
-        hub.mandate(_mi, _ms);
-        (_mi, _ms) = _mandateIntent(_g, _gKey, _terms(5001), new address[](0), true);
-        vm.expectRevert(abi.encodeWithSelector(Error.Mandate__InvalidSkin.selector, 5001));
-        hub.mandate(_mi, _ms);
-
-        AccountLib.Mandate memory _mg = _terms(5000);
-        _arm(_g, _gKey, _mg, address(usdc));
-        (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_g), _mg, 15e6));
-        hub.allocate(_i, _sig);
-        assertEq(share.balanceOf(_account(_g)), 14e18, "the dust backer is minted");
-        assertEq(fundStore.skinMap(body), 5000, "the strictest floor any backer can set is symmetric skin");
-
-        (address _a, uint _aKey) = makeAddrAndKey("ar-normal");
-        _fundWallet(_a, 1000e6);
-        AccountLib.Mandate memory _ma = _terms(0);
-        _arm(_a, _aKey, _ma, address(usdc));
-        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_a), _ma, 487e6));
-        vm.expectRevert(abi.encodeWithSelector(Error.Fund__SkinBelowFloor.selector, 499e18, 999e18, 5000));
-        hub.allocate(_i, _sig);
-        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_a), _ma, 486e6));
-        hub.allocate(_i, _sig);
-        assertEq(share.balanceOf(_account(_a)), 485e18, "the raise is minted");
-        assertEq(
-            share.totalSupply(),
-            2 * share.balanceOf(body),
-            "a symmetric floor lets backers match the master's own units exactly"
-        );
-    }
-
-    function test_a_backer_exits_in_full_at_a_loss_without_a_fee() public {
+    function test_a_backer_exits_in_full_at_a_loss_at_the_open_price() public {
         _openFund("SD");
-        (address _a, uint _aKey, address _acct) = _backer("sd-a", 0, 400e6);
+        (address _a, uint _aKey, address _acct) = _backer("sd-a", 400e6);
+        _toWethAll();
+        vm.prank(body);
+        wnt.transfer(SINK, 300e18);
         _sell(_a, _aKey, 399e18);
-        uint _parked = _drainAt(0, 399e18, _navUsdc());
-        assertEq(_claimSplit(_acct, 400e30), 0, "the backer still exits in full at a loss, no fee");
-        assertEq(share.balanceOf(_acct), 0, "nothing of it stays in the fund");
-        assertEq(
-            usdc.balanceOf(address(fundStore)),
-            _parked - Math.mulDiv(399e18, Math.mulDiv(_parked, ACC, 399e18), ACC),
-            "the exit took everything parked for it but rounding dust"
+        uint _value = _bodyValue();
+        uint _owedValue = Math.mulDiv(399e18, _value + VIRTUAL_VALUE, shareToken.totalSupply() + VIRTUAL_SHARES);
+        assertLt(_owedValue, 399e18, "the fund lost value since the backer joined");
+        uint[3] memory _before = [wnt.balanceOf(feeReceiver), wnt.balanceOf(protocolReceiver), wnt.balanceOf(master)];
+        _queueRedeemAt(_value, _list(_acct));
+        assertEq(wnt.balanceOf(_acct), _owedValue - BILLED, "the backer is paid its shares at the lower price, less one fee");
+        assertGt(
+            fundStore.getHolding(body, _acct).cost, fundStore.getRedemption(body).price, "it exits below the price it paid"
         );
+        assertEq(wnt.balanceOf(feeReceiver) - _before[0], BILLED, "so the fee receiver takes the relay fee");
+        assertEq(wnt.balanceOf(protocolReceiver), _before[1], "the protocol receiver takes no cut");
+        assertEq(wnt.balanceOf(master), _before[2], "and the master earns nothing on a loss");
+        assertEq(shareToken.balanceOf(_acct), 0, "nothing of it stays in the fund");
+        assertEq(_queuedOf(_acct), 0);
     }
 
-    function test_revoking_one_mandate_keeps_other_funds_armed_and_disarming_skips_the_row() public {
-        _openFund("RV");
-        (address _a, uint _aKey) = makeAddrAndKey("ar-revoke");
-        _fundWallet(_a, 1000e6);
-        address _acct = _account(_a);
-        AccountLib.Mandate memory _ma = _terms(0);
-        _arm(_a, _aKey, _ma, address(usdc));
-        assertEq(
-            IERC20(address(usdc)).allowance(_acct, address(fundModule)), type(uint).max, "arming grants the fund module"
-        );
-        assertEq(mandateStore.mandateMap(_acct, body), this.digestOf(_acct, _ma), "and stores the mandate digest");
-
-        AccountLib.Mandate memory _other = AccountLib.Mandate({
-            master: address(0xBEEF), skin: 0, allocationRate: 5000, cooldownPeriod: 0, expiry: block.timestamp + 1 days
-        });
-        _arm(_a, _aKey, _other, address(usdc));
-        assertEq(
-            mandateStore.mandateMap(_acct, address(0xBEEF)), this.digestOf(_acct, _other), "a second fund is armed"
-        );
-        _other.expiry = block.timestamp;
-        (HubGate.MandateIntent memory _mi, bytes memory _ms) =
-            _mandateIntent(_a, _aKey, _other, new address[](0), false);
-        hub.mandate(_mi, _ms);
-        assertEq(mandateStore.mandateMap(_acct, address(0xBEEF)), bytes32(0), "an expired mandate is a revoke");
-        assertEq(mandateStore.mandateMap(_acct, body), this.digestOf(_acct, _ma), "the other fund's mandate stands");
-        assertEq(
-            IERC20(address(usdc)).allowance(_acct, address(fundModule)),
-            type(uint).max,
-            "revoking one fund keeps USDC armed"
-        );
-
-        address[] memory _tokens = new address[](1);
-        _tokens[0] = address(usdc);
-        (_mi, _ms) = _mandateIntent(_a, _aKey, _ma, _tokens, false);
-        hub.mandate(_mi, _ms);
-        assertEq(IERC20(address(usdc)).allowance(_acct, address(fundModule)), 0, "a disarm zeroes the allowance");
-        assertEq(mandateStore.mandateMap(_acct, body), this.digestOf(_acct, _ma), "but keeps the mandate");
+    function test_each_holder_pays_the_fee_on_its_own_gain_and_the_master_collects_it_at_the_close() public {
+        _openFund("EQ");
+        address[] memory _all = new address[](3);
+        address[3] memory _user;
+        uint[3] memory _key;
+        (_user[0], _key[0], _all[0]) = _backer("eq-early", 400e6);
+        (_user[1], _key[1], _all[1]) = _backer("eq-twice", 200e6);
+        usdc.mint(body, shareToken.totalSupply() / 2 / USD);
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_acct, _ma, 400e6));
-        vm.expectRevert(Error.Balance__ZeroAmount.selector);
-        hub.allocate(_i, _sig);
+            _allocateIntent(_nonceOf(body), _nav(), _one(_all[1], _terms(MAX_SKIN), 300e6));
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        (_user[2], _key[2], _all[2]) = _backer("eq-late", 301e6);
+        uint[3] memory _cost;
+        uint[3] memory _shares;
+        for (uint _k; _k < 3; ++_k) {
+            _cost[_k] = fundStore.getHolding(body, _all[_k]).cost;
+            _shares[_k] = shareToken.balanceOf(_all[_k]);
+        }
+        assertEq(_cost[0], PRICE_PRECISION, "the early holder paid one ETH of value per share");
+        assertEq(_cost[1], 498e18 * PRICE_PRECISION / _shares[1], "a holder that entered twice keeps the average it paid per share");
+        assertApproxEqRel(_cost[2], PRICE_PRECISION * 3 / 2, 1e9, "the late holder paid the risen price of one and a half");
+        assertTrue(_cost[0] < _cost[1] && _cost[1] < _cost[2], "so the three hold three different costs");
 
-        _arm(_a, _aKey, _ma, address(usdc));
-        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_acct, _ma, 400e6));
-        hub.allocate(_i, _sig);
-        assertEq(share.balanceOf(_acct), 399e18, "re-armed, the backer's live fund allocates");
-    }
+        uint _drop = usdc.balanceOf(body) - (Math.mulDiv(shareToken.totalSupply() + VIRTUAL_SHARES, 13, 10) - VIRTUAL_VALUE) / USD;
+        vm.prank(body);
+        IERC20(address(usdc)).transfer(SINK, _drop);
+        _toWethAll();
+        for (uint _k; _k < 3; ++_k) {
+            _sell(_user[_k], _key[_k], _shares[_k]);
+        }
 
-    function test_native_round_refuses_backer_rows() public {
-        _openFund("NR");
-        (address _a, uint _aKey) = makeAddrAndKey("ar-native");
-        _fundWallet(_a, 1000e6);
-        vm.deal(_account(_a), 10 ether);
-        AccountLib.Mandate memory _ma = _terms(0);
-        _arm(_a, _aKey, _ma, address(usdc));
-        vm.deal(master, 1 ether);
-        vm.prank(master);
-        hub.depositEscrow{value: 1 ether}(body, NATIVE_TOKEN, 1 ether);
-        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(
-            _nonceOf(body),
-            usdc.balanceOf(body),
-            _spot(NATIVE_TOKEN),
-            _credit(block.chainid, NATIVE_TOKEN, 1 ether),
-            _one(_account(_a), _ma, 1 ether)
+        uint _value = _bodyValue();
+        uint _owed = (_shares[0] + _shares[1] + _shares[2]) * 1e4;
+        uint _pot = Math.mulDiv(_owed, _value + VIRTUAL_VALUE, (shareToken.totalSupply() + VIRTUAL_SHARES) * 1e4);
+        uint _price = Math.mulDiv((_value + VIRTUAL_VALUE) * PRICE_PRECISION, 1, shareToken.totalSupply() + VIRTUAL_SHARES);
+        uint[3] memory _payout;
+        _payout[2] = Math.mulDiv(_pot, _shares[2] * 1e4, _owed);
+        _payout[0] = Math.mulDiv(_pot - _payout[2], _shares[0] * 1e4, _owed - _shares[2] * 1e4);
+        _payout[1] = _pot - _payout[2] - _payout[0];
+        uint[6] memory _before = [
+            wnt.balanceOf(_all[0]),
+            wnt.balanceOf(_all[1]),
+            wnt.balanceOf(_all[2]),
+            wnt.balanceOf(master),
+            wnt.balanceOf(feeReceiver),
+            wnt.balanceOf(protocolReceiver)
+        ];
+        _redeemAt(_value, _list(_all[2]));
+        assertEq(fundStore.getRedemption(body).price, _price, "the open prices a share at the fund's value per share");
+        assertTrue(_cost[1] < _price && _price < _cost[2], "the exit sits above two entries and below the third");
+        assertEq(
+            wnt.balanceOf(_all[2]) - _before[2], _payout[2] - BILLED, "a holder at a loss is paid its claim less only the relay fee"
         );
-        vm.expectRevert(abi.encodeWithSelector(Error.Fund__NativeRowsUnsupported.selector, 1));
-        hub.allocate(_i, _sig);
+        assertTrue(isOpen(fundStore.getRedemption(body)), "the others are still owed");
+        assertEq(wnt.balanceOf(master), _before[3], "so nothing reaches the master yet");
+
+        hub.redeemCohort(shareToken, _all);
+        uint[2] memory _paid = [uint(399e18), 498e18];
+        uint _masterPay;
+        uint _cuts;
+        for (uint _k; _k < 2; ++_k) {
+            uint _fee = Math.mulDiv(_payout[_k], PERFORMANCE_FEE * (_price - _cost[_k]), _price * 1e4);
+            assertApproxEqRel(
+                _fee,
+                (_payout[_k] - _paid[_k]) * PERFORMANCE_FEE / 1e4,
+                1e9,
+                "each holder's fee is a tenth of its own gain over everything it paid in"
+            );
+            assertEq(
+                wnt.balanceOf(_all[_k]) - _before[_k], _payout[_k] - _fee - BILLED, "and it keeps the rest of its claim less the relay fee"
+            );
+            uint _cut = Math.mulDiv(_fee, PROTOCOL_FEE_SHARE, 1e4);
+            _masterPay += _fee - _cut;
+            _cuts += _cut;
+        }
+        assertEq(
+            wnt.balanceOf(master) - _before[3],
+            _masterPay - BILLED,
+            "the master's part of both fees reaches the owner's wallet at the close, less one relay fee"
+        );
+        assertEq(wnt.balanceOf(feeReceiver) - _before[4], 4 * BILLED, "the fee receiver collects four relay fees alone");
+        assertEq(
+            wnt.balanceOf(protocolReceiver) - _before[5], _cuts, "and the protocol receiver the protocol's tenth of each fee"
+        );
+        assertFalse(isOpen(fundStore.getRedemption(body)), "the overlapping cohort settles the rest and closes");
+        assertEq(wnt.balanceOf(address(fundStore)), 0, "leaving nothing in the store");
+
+        uint[2] memory _close = [wnt.balanceOf(master), wnt.balanceOf(body)];
+        Fund.Valuation memory _v = _valuation(0);
+        _v.assetList[0].value = _close[1];
+        _redeem(10_000, 0, _v, new address[](0));
+        assertEq(
+            wnt.balanceOf(master) - _close[0], _close[1] - BILLED, "the master's own shares exit at the fund's cash with no fee"
+        );
+        assertEq(shareToken.totalSupply(), 0, "and the fund closes");
     }
 
-    uint vfRng;
-    uint vfN;
-    address[NMAX] vfUsers;
-    uint[NMAX] vfKeys;
-    address[NMAX] vfAccts;
-    AccountLib.Mandate[NMAX] vfMandates;
-    address vfOwner;
-    uint vfExtra;
-    uint vfStep;
-    uint vfDrains;
-    uint vfBodyOut;
-    uint vfRelayIn;
-    uint vfOwnerIn;
-    uint vfStoreIn;
-    uint vfStoreOut;
-    uint[NMAX] vfExpected;
-    uint[NMAX] vfGross;
-    uint[NMAX] vfFee;
-    uint[NMAX] vfBasisSold;
-    uint[NMAX] vfTol;
-    string vfTrace;
-
-    function _vfR() internal returns (uint) {
-        vfRng = uint(keccak256(abi.encode(vfRng)));
-        return vfRng;
+    function _lfEq(
+        uint _a,
+        uint _b,
+        string memory _what
+    ) internal view {
+        if (_a != _b) assertEq(_a, _b, string.concat(_what, ". trace=", lfTrace));
     }
 
-    function _vfLog(
+    function _lfTrue(
+        bool _ok,
+        string memory _what
+    ) internal view {
+        if (!_ok) assertTrue(_ok, string.concat(_what, ". trace=", lfTrace));
+    }
+
+    function _lfApprox(
+        uint _a,
+        uint _b,
+        uint _tolerance,
+        string memory _what
+    ) internal view {
+        if ((_a > _b ? _a - _b : _b - _a) > _tolerance) {
+            assertApproxEqAbs(_a, _b, _tolerance, string.concat(_what, ". trace=", lfTrace));
+        }
+    }
+
+    function _lfLog(
         string memory _s
     ) internal {
-        vfTrace = string.concat(vfTrace, vm.toString(vfStep), ":", _s, " | ");
+        lfTrace = string.concat(lfTrace, vm.toString(lfStep), ":", _s, " | ");
     }
 
-    function _vfPool() internal view returns (uint) {
-        return share.balanceOf(address(fundStore)) - fundStore.retiredMap(body);
+    function _lfIndex(
+        address _acct
+    ) internal view returns (uint j_) {
+        while (lfAccts[j_] != _acct) ++j_;
     }
 
-    function _vfNav() internal view returns (uint) {
-        return (usdc.balanceOf(body) + vfExtra) * USD;
+    function _lfBodyValue() internal view returns (uint) {
+        return lfBodyUsdc * USD + lfBodyWeth + lfBodyNative;
     }
 
-    function _vfSetup(
+    function _lfEvery() internal view returns (address[] memory list_) {
+        list_ = new address[](lfN);
+        for (uint _j; _j < lfN; ++_j) {
+            list_[_j] = lfAccts[_j];
+        }
+    }
+
+    function _lfMask() internal returns (address[] memory list_) {
+        uint _mask = _rand() % 2 ** lfN;
+        uint _count;
+        for (uint _j; _j < lfN; ++_j) {
+            if ((_mask >> _j) & 1 == 1) ++_count;
+        }
+        list_ = new address[](_count);
+        uint _n;
+        for (uint _j; _j < lfN; ++_j) {
+            if ((_mask >> _j) & 1 == 1) list_[_n++] = lfAccts[_j];
+        }
+        if (_count > 1 && _rand() % 2 == 0) {
+            for (uint _k; _k < _count / 2; ++_k) {
+                (list_[_k], list_[_count - 1 - _k]) = (list_[_count - 1 - _k], list_[_k]);
+            }
+        }
+    }
+
+    function _lfOtherFund() internal {
+        (address _body, uint _bodyKey, address _master, uint _masterKey, ShareToken _share) =
+            (body, bodyKey, master, masterKey, shareToken);
+        (master, masterKey) = makeAddrAndKey("lf-other-master");
+        (body, bodyKey) = makeAddrAndKey("lf-other-body");
+        vm.signAndAttachDelegation(accountModule.bodyImpl(), bodyKey);
+        _openFund("LFO");
+        (address _user, uint _key, address _acct) = _backer("lf-other-backer", 400e6);
+        usdc.mint(body, 1e6 + _rand() % 400e6);
+        _sell(_user, _key, shareToken.balanceOf(_acct));
+        _toWethAll();
+        _redeemAt(_bodyValue(), new address[](0));
+        FundStore.Redemption memory _r = fundStore.getRedemption(body);
+        lfOtherFenced = wnt.balanceOf(address(fundStore));
+        assertEq(lfOtherFenced, _r.potLeft, "the other fund leaves its seller's pot ring-fenced in the shared store");
+        assertGt(lfOtherFenced, 0);
+        lfOtherPrice = _r.price;
+        lfOtherCost = fundStore.getHolding(body, _acct).cost;
+        assertLt(lfOtherCost, lfOtherPrice, "the other fund gained since its seller joined");
+        (lfOtherShare, lfOtherBody, lfOtherMaster, lfOtherUser, lfOtherAcct) = (shareToken, body, master, _user, _acct);
+        (body, bodyKey, master, masterKey, shareToken) = (_body, _bodyKey, _master, _masterKey, _share);
+    }
+
+    function _lfSetup(
         uint _n,
-        uint _seed
+        uint _seed,
+        bool _extended
     ) internal {
-        vfN = _n;
-        usdc.mint(address(fundStore), OTHER_FUNDS);
-        _openFund("VF");
-        vfOwner = _account(master);
-        uint[4] memory _skins = [uint(0), 0, 1000, 5000];
+        lfN = _n;
+        if (_extended) _lfOtherFund();
+        _openFund("LF");
+        uint[5] memory _skins = [MAX_SKIN, 20_000, 1000, 5000, 0];
         for (uint _j; _j < _n; ++_j) {
-            (vfUsers[_j], vfKeys[_j]) = makeAddrAndKey(string.concat("vf-", vm.toString(_j)));
-            vfAccts[_j] = _account(vfUsers[_j]);
-            _fundWallet(vfUsers[_j], 20_000e6);
-            vfMandates[_j] = AccountLib.Mandate({
+            (lfUsers[_j], lfKeys[_j]) = makeAddrAndKey(string.concat("lf-", vm.toString(_j)));
+            lfAccts[_j] = _account(lfUsers[_j]);
+            _fundWallet(lfUsers[_j], 20_000e6);
+            lfMandates[_j] = MandateLib.Mandate({
                 master: body,
-                skin: _skins[uint(keccak256(abi.encode(_seed, _j))) % 4],
+                skin: _skins[uint(keccak256(abi.encode(_seed, _j))) % 5],
                 allocationRate: 9000,
+                exitCap: 10_000,
                 cooldownPeriod: 0,
                 expiry: block.timestamp + 365 days
             });
-            _arm(vfUsers[_j], vfKeys[_j], vfMandates[_j], address(usdc));
+            _signMandate(lfUsers[_j], lfKeys[_j], lfMandates[_j]);
+            lfHolder[_j].usdc = 20_000e6 - FEE;
+            lfHolder[_j].mandated = true;
+            lfTracked.push(lfAccts[_j]);
+            lfTracked.push(lfUsers[_j]);
+        }
+        lfSupply = 499e18;
+        lfMasterShares = 499e18;
+        lfBodyUsdc = 499e6;
+        lfFeeUsdc = usdc.balanceOf(feeReceiver);
+        lfFeeWeth = wnt.balanceOf(feeReceiver);
+        lfProtocolWeth = wnt.balanceOf(protocolReceiver);
+        lfTracked.push(body);
+        lfTracked.push(address(fundStore));
+        lfTracked.push(address(hubEscrowStore));
+        lfTracked.push(master);
+        lfTracked.push(_account(master));
+        lfTracked.push(feeReceiver);
+        lfTracked.push(protocolReceiver);
+        if (_extended) {
+            lfTracked.push(lfOtherBody);
+            lfTracked.push(lfOtherMaster);
+            lfTracked.push(_account(lfOtherMaster));
+            lfTracked.push(lfOtherUser);
+            lfTracked.push(lfOtherAcct);
+        }
+        lfExo = _lfLedger();
+        _lfCheck();
+    }
+
+    function _lfLedger() internal view returns (uint value_) {
+        for (uint _k; _k < lfTracked.length; ++_k) {
+            value_ += _lfValueOf(lfTracked[_k]);
         }
     }
 
-    function _vfPriceNotDown(
-        uint _navBefore,
-        uint _supplyBefore,
-        string memory _what
-    ) internal view {
-        uint _supplyAfter = share.totalSupply();
-        if (_supplyAfter == 0) return;
-        assertGe(
-            Math.mulDiv(_vfNav() + VV, _supplyBefore + VU, _supplyAfter + VU)
-                + Math.mulDiv(2 * USD, _supplyBefore + VU, _supplyAfter + VU) + 2,
-            _navBefore + VV,
-            string.concat(_what, ": the unit price fell for the holders who stayed. trace=", vfTrace)
-        );
+    function _lfTopUp(
+        uint _j
+    ) internal {
+        if (lfHolder[_j].usdc >= 10e6) return;
+        _fundWallet(lfUsers[_j], 1000e6);
+        lfHolder[_j].usdc += 1000e6;
+        lfExo += 1000e6 * USD;
     }
 
-    function _vfAllocate() internal {
-        uint _mask = _vfR() % 2 ** vfN;
-        bool _masterLeg = _vfR() % 3 == 0;
-        uint _count;
-        for (uint _j; _j < vfN; ++_j) {
-            if ((_mask >> _j) & 1 == 1) ++_count;
-        }
-        Fund.Allocation[] memory _rows = new Fund.Allocation[](_count);
-        uint _n;
-        for (uint _j; _j < vfN; ++_j) {
-            if ((_mask >> _j) & 1 == 0) continue;
-            uint _stake = 5e6 + _vfR() % 3000e6;
+    function _lfToWethAll() internal {
+        uint _held = lfBodyUsdc;
+        if (_held == 0) return;
+        _toWeth(_held);
+        lfBodyUsdc = 0;
+        lfBodyWeth += _held * USD;
+    }
+
+    function _lfAllocate(
+        bool _every
+    ) internal {
+        address[] memory _list = _every ? _lfEvery() : _lfMask();
+        Fund.Allocation[] memory _rows = new Fund.Allocation[](_list.length);
+        for (uint _n; _n < _list.length; ++_n) {
             uint _k = _n;
-            while (_k > 0 && uint160(_rows[_k - 1].puppet) > uint160(vfAccts[_j])) {
+            while (_k > 0 && uint160(_rows[_k - 1].puppet) > uint160(_list[_n])) {
                 _rows[_k] = _rows[_k - 1];
                 --_k;
             }
-            _rows[_k] = Fund.Allocation({puppet: vfAccts[_j], mandate: vfMandates[_j], amount: _stake});
-            ++_n;
+            _rows[_k] = _row(_list[_n], lfMandates[_lfIndex(_list[_n])], 5e6 + _rand() % 3000e6);
         }
-        Fund.Credit memory _c = _credit(0, address(0), 0);
-        if (_masterLeg) {
-            uint _amt = 1e6 + _vfR() % 2000e6;
-            _fundWallet(master, _amt + FEE);
-            _escrow(LiquidityGate(address(hub)), address(usdc), _amt);
-            _c = _credit(block.chainid, address(usdc), _amt);
+        uint _credited = _rand() % 3 == 0 ? 10e6 + _rand() % 2000e6 : 0;
+        if (_credited > 0) {
+            _escrowOnHub(address(usdc), _credited);
+            lfEscrowUsdc += _credited;
+            lfExo += _credited * USD;
         }
-        if (_count == 0 && !_masterLeg) return;
-        _vfLog(string.concat("alloc mask=", vm.toString(_mask), " master=", vm.toString(_c.amount)));
-        _vfAllocateChecked(_rows, _c);
+        if (_rows.length == 0 && _credited == 0) return;
+        LfRound memory _m = _lfRound(_rows, _credited, _lfBodyValue() / USD * USD);
+        _lfLog(string.concat("alloc n=", vm.toString(_rows.length), " minted=", vm.toString(_m.rows), " credit=", vm.toString(_credited)));
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(
+            _nonceOf(body),
+            _lfBodyValue() / USD,
+            address(usdc),
+            Fund.Price({amount: 1e6, value: 1e6 * USD}),
+            _credited > 0 ? _credit(block.chainid, address(usdc), _credited) : _credit(0, address(0), 0),
+            _rows
+        );
+        bytes memory _ownerSig = _ownerCoSig(_i);
+        if (isOpen(lfRedemption)) {
+            vm.expectRevert(abi.encodeWithSelector(Error.Redeem__Open.selector, lfRedemption.id));
+        } else if (_m.minted == 0) {
+            vm.expectRevert(Error.Balance__ZeroAmount.selector);
+        }
+        hub.allocate(_i, _sig, _ownerSig);
+        if (!isOpen(lfRedemption) && _m.minted > 0) _lfMinted(_rows, _m, _credited);
     }
 
-    function _vfAllocateExpect(
+    function _lfMinted(
         Fund.Allocation[] memory _rows,
-        Fund.Credit memory _c
-    ) internal view returns (uint[] memory units_, uint masterUnits_, uint relay_, bytes memory refusal_) {
-        uint _supply = share.totalSupply() + VU;
-        uint _nav = _vfNav() + VV;
-        uint _mu = share.balanceOf(body);
-        uint _exposed = share.totalSupply() - fundStore.retiredMap(body);
-        uint _skin = _exposed > _mu ? fundStore.skinMap(body) : 0;
-        uint _leg = _c.amount > 0 ? 1 : 0;
-        uint _slice = FEE * USD / (_rows.length + _leg);
-        uint _included;
-        uint _minted;
-        units_ = new uint[](_rows.length);
-        for (uint _k; _k < _rows.length; ++_k) {
-            uint _value = _rows[_k].amount * USD;
-            uint _basis = fundStore.getHolding(body, _rows[_k].puppet).basis;
-            if (
-                _slice * 10 >= _value
-                    || (_basis + _value) * 10_000
-                        > (usdc.balanceOf(_rows[_k].puppet) * USD + _basis) * _rows[_k].mandate.allocationRate
-            ) continue;
-            ++_included;
-            units_[_k] = Math.mulDiv(_value - _slice, _supply, _nav);
-            if (_rows[_k].mandate.skin > _skin) _skin = _rows[_k].mandate.skin;
-            _minted += units_[_k];
+        LfRound memory _m,
+        uint _credited
+    ) internal {
+        if (_credited > 0) {
+            lfEscrowUsdc -= _credited;
+            lfFeeUsdc += _m.masterBilled;
+            lfBodyUsdc += _credited - _m.masterBilled;
+            lfMasterShares += _m.contributed;
+            lfSupply += _m.contributed;
         }
-        relay_ = _slice * _included / USD;
-        if (_leg > 0) {
-            uint _masterBilled = Math.ceilDiv(_slice, USD);
-            if (_c.amount <= _masterBilled) {
-                return (
-                    units_, 0, 0, abi.encodeWithSelector(Error.Fund__FeeUnfunded.selector, _c.amount, _masterBilled)
-                );
-            }
-            masterUnits_ = Math.mulDiv(_c.amount * USD - _slice, _supply, _nav);
-            relay_ += _masterBilled;
-            _mu += masterUnits_;
-            _minted += masterUnits_;
+        for (uint _r; _r < _rows.length; ++_r) {
+            uint _shares = _m.shares[_r];
+            if (_shares == 0) continue;
+            LfHolder storage _h = lfHolder[_lfIndex(_rows[_r].puppet)];
+            uint _net = _rows[_r].amount * USD - _m.slice;
+            _h.cost = (_h.cost * _h.shares + _net * PRICE_PRECISION) / (_h.shares + _shares);
+            _h.basis += _net * BASIS;
+            _h.allocatedAt = block.timestamp;
+            ++_h.entries;
+            _h.shares += _shares;
+            _h.usdc -= _rows[_r].amount;
+            lfBodyUsdc += _rows[_r].amount;
+            lfSupply += _shares;
         }
-        if (_minted == 0) {
-            refusal_ = abi.encodeWithSelector(Error.Balance__ZeroAmount.selector);
-        } else if (_mu * 10_000 < (_exposed + _minted) * _skin) {
-            refusal_ = abi.encodeWithSelector(Error.Fund__SkinBelowFloor.selector, _mu, _exposed + _minted, _skin);
-        }
+        uint _billed = Math.mulDiv(_m.slice * _m.rows, 1e6, 1e6 * USD);
+        lfBodyUsdc -= _billed;
+        lfFeeUsdc += _billed;
     }
 
-    function _vfAllocateChecked(
+    function _lfRound(
         Fund.Allocation[] memory _rows,
-        Fund.Credit memory _c
-    ) internal returns (bool ok_) {
-        (uint[] memory _units, uint _masterUnits, uint _relay, bytes memory _refusal) = _vfAllocateExpect(_rows, _c);
-        uint[] memory _held = new uint[](_rows.length);
-        for (uint _k; _k < _rows.length; ++_k) {
-            _held[_k] = share.balanceOf(_rows[_k].puppet);
+        uint _credited,
+        uint _valuation
+    ) internal view returns (LfRound memory m_) {
+        m_.slice = BILLED / (_rows.length + (_credited > 0 ? 1 : 0));
+        m_.supply = lfSupply + VIRTUAL_SHARES;
+        m_.nav = _valuation + VIRTUAL_VALUE;
+        m_.masterShares = lfMasterShares;
+        m_.shares = new uint[](_rows.length);
+        if (_credited > 0) {
+            m_.masterBilled = Math.mulDiv(m_.slice, 1e6, 1e6 * USD, Math.Rounding.Ceil);
+            m_.contributed = Math.mulDiv(_credited * USD - m_.slice, m_.supply, m_.nav);
+            m_.masterShares += m_.contributed;
+            m_.minted += m_.contributed;
         }
-        uint[4] memory _b = [
-            share.balanceOf(body),
-            usdc.balanceOf(feeReceiver),
-            usdc.balanceOf(address(fundStore)),
-            share.totalSupply()
-        ];
-        uint _navBefore = _vfNav();
-        (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), usdc.balanceOf(body) + vfExtra, _c, _rows);
-        try hub.allocate(_i, _sig) {
-            ok_ = true;
-        } catch (bytes memory _err) {
-            assertEq(_err, _refusal, string.concat("the allocate refused where the round rules do not. trace=", vfTrace));
-            _vfLog("alloc-revert");
-            return false;
+        uint _exiting = Math.mulDiv(lfRedemption.queued, 1e4, m_.supply, Math.Rounding.Ceil);
+        for (uint _r; _r < _rows.length; ++_r) {
+            uint _shares = _lfRowShares(_rows[_r], m_, _exiting);
+            m_.shares[_r] = _shares;
+            m_.minted += _shares;
+            if (_shares > 0) ++m_.rows;
         }
-        assertEq(_refusal.length, 0, string.concat("the allocate went through where a refusal was due. trace=", vfTrace));
-        for (uint _k; _k < _rows.length; ++_k) {
-            assertEq(
-                share.balanceOf(_rows[_k].puppet) - _held[_k],
-                _units[_k],
-                "each row mints its value net of its fee slice at the round's unit price, or is skipped"
-            );
-        }
-        assertEq(share.balanceOf(body) - _b[0], _masterUnits, "the master leg mints its value net of its fixed slice");
-        assertEq(usdc.balanceOf(feeReceiver) - _b[1], _relay, "the round bills exactly the slices it took");
-        assertEq(usdc.balanceOf(address(fundStore)), _b[2], "allocate never touches the exit store");
-        _vfPriceNotDown(_navBefore, _b[3], "allocate");
     }
 
-    function _vfPark() internal {
-        uint _amt = _vfR() % (usdc.balanceOf(body) + 1);
-        if (_amt == 0) return;
-        vm.prank(body);
-        IERC20(address(usdc)).transfer(SINK, _amt);
-        vfExtra += _amt;
-        _vfLog(string.concat("park ", vm.toString(_amt)));
+    function _lfRowShares(
+        Fund.Allocation memory _row,
+        LfRound memory _m,
+        uint _exiting
+    ) internal view returns (uint shares_) {
+        LfHolder storage _h = lfHolder[_lfIndex(_row.puppet)];
+        uint _value = _row.amount * USD;
+        if (_m.slice * 1e4 >= _value * 1000 || !_h.mandated) return 0;
+        uint _open = _row.mandate.exitCap > _exiting ? _row.mandate.exitCap - _exiting : 0;
+        if (_open == 0 || _value * 1e4 * _row.mandate.exitCap > _h.usdc * USD * _row.mandate.allocationRate * _open) return 0;
+        shares_ = Math.mulDiv(_value - _m.slice, _m.supply, _m.nav);
+        if (_row.mandate.skin == 0) return shares_;
+        uint _skinRoom = _m.masterShares * _row.mandate.skin;
+        uint _held = _h.shares * 1e4;
+        if (_skinRoom < _held || shares_ * 1e4 * _row.mandate.exitCap > (_skinRoom - _held) * _open) return 0;
     }
 
-    function _vfRealize() internal {
-        if (vfExtra == 0) return;
-        usdc.mint(body, vfExtra);
-        _vfLog(string.concat("realize ", vm.toString(vfExtra)));
-        vfExtra = 0;
+    function _lfRemandate() internal {
+        uint _j = _rand() % lfN;
+        _lfTopUp(_j);
+        _signMandate(lfUsers[_j], lfKeys[_j], lfMandates[_j]);
+        lfHolder[_j].usdc -= FEE;
+        lfHolder[_j].mandated = true;
+        lfFeeUsdc += FEE;
+        _lfLog(string.concat("remandate ", vm.toString(_j)));
     }
 
-    function _vfShock() internal {
-        uint _bal = usdc.balanceOf(body);
-        if (_vfR() % 2 == 0) {
-            uint _amt = _bal * (90 + _vfR() % 10) / 100;
+    function _lfMarket(
+        uint _op
+    ) internal {
+        if (_op == 0) {
+            uint _amt = _rand() % (lfBodyUsdc * 3 / 10 + 1);
+            usdc.mint(body, _amt);
+            lfBodyUsdc += _amt;
+            lfExo += _amt * USD;
+            _lfLog("gain");
+        } else if (_op == 1) {
+            uint _amt = _rand() % (lfBodyUsdc * 3 / 10 + 1);
             vm.prank(body);
             IERC20(address(usdc)).transfer(SINK, _amt);
-            vfExtra = vfExtra * (100 - 90 - _vfR() % 10) / 100;
-            _vfLog(string.concat("crash ", vm.toString(_amt)));
+            lfBodyUsdc -= _amt;
+            lfExo -= _amt * USD;
+            _lfLog("loss");
+        } else if (_op == 2) {
+            uint _amt = _rand() % (lfBodyUsdc + 1);
+            if (_amt > 0) _toWeth(_amt);
+            lfBodyUsdc -= _amt;
+            lfBodyWeth += _amt * USD;
+            _lfLog("swap");
+        } else if (_op == 3) {
+            uint _amt = _rand() % (lfBodyWeth + 1);
+            vm.prank(body);
+            wnt.transfer(SINK, _amt);
+            vm.deal(body, body.balance + _amt);
+            lfBodyWeth -= _amt;
+            lfBodyNative += _amt;
+            _lfLog("native");
+        } else if (_op == 4) {
+            uint _amt = _rand() % 5000e18;
+            _wethTo(body, _amt);
+            lfBodyWeth += _amt;
+            lfExo += _amt;
+            _lfLog("inflow");
         } else {
-            uint _amt = _bal * (1 + _vfR() % 20);
-            usdc.mint(body, _amt);
-            _vfLog(string.concat("moon ", vm.toString(_amt)));
+            uint _amt = _rand() % (lfBodyWeth * 3 / 10 + 1);
+            vm.prank(body);
+            wnt.transfer(SINK, _amt);
+            lfBodyWeth -= _amt;
+            lfExo -= _amt;
+            _lfLog("drawdown");
         }
     }
 
-    function _vfGain() internal {
-        uint _amt = _vfR() % (usdc.balanceOf(body) * 3 / 10 + 1);
-        usdc.mint(body, _amt);
-        _vfLog(string.concat("gain ", vm.toString(_amt)));
-    }
-
-    function _vfLoss() internal {
-        uint _amt = _vfR() % (usdc.balanceOf(body) * 3 / 10 + 1);
-        if (_amt == 0) return;
-        vm.prank(body);
-        IERC20(address(usdc)).transfer(SINK, _amt);
-        _vfLog(string.concat("loss ", vm.toString(_amt)));
-    }
-
-    function _vfSell() internal {
-        uint _j = _vfR() % vfN;
-        uint _units = share.balanceOf(vfAccts[_j]);
-        if (_units == 0) return;
-        uint _amt = _units * (1 + _vfR() % 100) / 100;
-        _vfSellTracked(_j, _amt == 0 ? _units : _amt);
-    }
-
-    function _vfSellTracked(
+    function _lfSettle(
         uint _j,
-        uint _amt
+        bool _cohort
+    ) internal returns (uint fees_) {
+        LfHolder storage _h = lfHolder[_j];
+        FundStore.Redemption storage _r = lfRedemption;
+        uint _queued = _h.queued;
+        uint _free = _h.shares - _queued;
+        uint _claim = _queued * 1e4 + _free * _r.fraction;
+        uint _exit = _queued + _free * _r.fraction / 1e4;
+        uint _payout = Math.mulDiv(_r.potLeft, _claim, _r.owedLeft);
+        uint _profitFee =
+            _h.cost < _r.price ? Math.mulDiv(_payout, PERFORMANCE_FEE * (_r.price - _h.cost), _r.price * 1e4) : 0;
+        uint _cut = Math.mulDiv(_profitFee, PROTOCOL_FEE_SHARE, 1e4);
+        if (_claim > 0) _lfIndependent(_h, _claim, _payout, _profitFee, _exit);
+        _h.shares -= _exit;
+        lfSupply -= _exit;
+        _r.potLeft -= uint96(_payout);
+        _r.owedLeft -= uint128(_claim);
+        _r.queued -= uint128(_queued);
+        _r.masterPay += uint96(_profitFee - _cut);
+        _h.queued = 0;
+        _h.redeemedAt = _r.id;
+        lfProtocolWeth += _cut;
+        if (!_cohort) {
+            _h.weth += _payout - _profitFee;
+            return 0;
+        }
+        if (_payout - _profitFee > _r.fee) {
+            fees_ = _r.fee;
+            _h.weth += _payout - _profitFee - _r.fee;
+        } else {
+            fees_ = _payout - _profitFee;
+        }
+    }
+
+    function _lfIndependent(
+        LfHolder storage _h,
+        uint _claim,
+        uint _payout,
+        uint _profitFee,
+        uint _exit
     ) internal {
-        uint _store = usdc.balanceOf(address(fundStore));
-        uint _held = usdc.balanceOf(vfAccts[_j]);
-        uint _owned = usdc.balanceOf(vfOwner);
-        uint _relay = usdc.balanceOf(feeReceiver);
-        uint _basis = fundStore.getHolding(body, vfAccts[_j]).basis;
-        uint _weight = fundStore.getQueue(body).weight;
-        uint _pool = _vfPool();
-        _vfLog(string.concat("sell ", vm.toString(_j), " ", vm.toString(_amt)));
-        _sell(vfUsers[_j], vfKeys[_j], _amt);
-        assertEq(
-            fundStore.getQueue(body).weight - _weight,
-            _weight == 0 ? _amt : Math.mulDiv(_amt, _weight, _pool),
-            "a sell buys queue weight at the pool's weight per unit"
+        uint _atPrice = Math.mulDiv(_claim, lfNav, lfBase * 1e4);
+        _lfApprox(_payout, _atPrice, lfN + 2, "every settled claim is paid at the open price");
+        uint _paid = Math.mulDiv(_h.basis, _claim, _h.shares * 1e4 * BASIS);
+        uint _fee = _atPrice > _paid ? (_atPrice - _paid) * PERFORMANCE_FEE / 1e4 : 0;
+        _lfApprox(
+            _profitFee,
+            _fee,
+            Math.mulDiv(_payout, _h.entries + 2, Math.max(lfRedemption.price, 1)) + lfN + 4,
+            "each holder pays the fee on its own gain over what it paid for its shares"
         );
-        assertEq(_vfPool(), _pool + _amt, "and its units join the pool");
-        vfBasisSold[_j] += _basis - fundStore.getHolding(body, vfAccts[_j]).basis;
-        uint _out = _store - usdc.balanceOf(address(fundStore));
-        uint _toOwner = usdc.balanceOf(vfOwner) - _owned;
-        assertEq(
-            _out,
-            usdc.balanceOf(vfAccts[_j]) + FEE - _held + _toOwner,
-            "a sell's settlement pays the holder and the owner exactly what left the store"
-        );
-        assertEq(usdc.balanceOf(feeReceiver) - _relay, FEE, "a sell bills its own relay fee only");
-        vfGross[_j] += _out;
-        vfFee[_j] += _toOwner;
-        vfStoreOut += _out;
+        _h.basis -= Math.mulDiv(_h.basis, _exit, _h.shares);
     }
 
-    function _vfWeights() internal view returns (uint[NMAX] memory w_, uint pw_) {
-        FundStore.Queue memory _q = fundStore.getQueue(body);
-        uint _sum;
-        for (uint _j; _j < vfN; ++_j) {
-            FundStore.Position memory _p = fundStore.getPosition(body, vfAccts[_j]);
-            if (_p.epoch == _q.epoch) {
-                w_[_j] = _p.weight;
-                _sum += _p.weight;
-            }
+    function _lfCohortModel(
+        address[] memory _list
+    ) internal {
+        FundStore.Redemption storage _r = lfRedemption;
+        uint _fees;
+        for (uint _k; _k < _list.length && _r.potLeft > _r.fee; ++_k) {
+            uint _j = _lfIndex(_list[_k]);
+            LfHolder storage _h = lfHolder[_j];
+            if (_h.redeemedAt == _r.id || _h.queued * 1e4 + (_h.shares - _h.queued) * _r.fraction == 0) continue;
+            _fees += _lfSettle(_j, true);
         }
-        pw_ = _q.weight;
-        assertEq(_sum, pw_, "the positions of the open epoch carry exactly the queue weight");
+        bool _cutting = _r.owedLeft > 0 && _r.potLeft <= _r.fee;
+        if (_cutting) {
+            _lfTrue(_r.potLeft <= _r.fee, "only a cut tail of at most one fee comes back to the fund");
+            lfBodyWeth += _r.potLeft;
+            _r.owedLeft = 0;
+            _r.potLeft = 0;
+        }
+        if (_cutting || (_r.owedLeft == 0 && _r.masterPay > 0)) {
+            uint _masterFee = Math.min(_r.masterPay, _r.fee);
+            _fees += _masterFee;
+            lfOwnerWeth += _r.masterPay - _masterFee;
+            _r.masterPay = 0;
+        }
+        lfFeeWeth += _fees;
     }
 
-    function _vfRedeemExpect(
-        uint _retire,
-        uint _drain,
-        uint _pw
-    ) internal view returns (uint drained_, bytes memory refusal_) {
-        uint _supply = share.totalSupply();
-        uint _retired = fundStore.retiredMap(body);
-        uint _pool = _vfPool();
-        uint _mu = share.balanceOf(body);
-        if (_retire > 0) {
-            if (_mu < _retire) {
-                return (0, abi.encodeWithSelector(Error.Fund__InsufficientUnits.selector, _mu, _retire));
-            }
-            uint _exposed = _supply - _retired - _retire;
-            uint _staying = _mu - _retire;
-            uint _skin = fundStore.skinMap(body);
-            if (_exposed > _staying && _staying * 10_000 < _exposed * _skin) {
-                return (0, abi.encodeWithSelector(Error.Fund__SkinBelowFloor.selector, _staying, _exposed, _skin));
-            }
-        }
-        uint _queued = _pool > 0 ? _pool : _retired + _retire;
-        if (_drain > _queued) {
-            return (0, abi.encodeWithSelector(Error.Fund__DrainExceedsQueue.selector, _drain, _queued));
-        }
-        uint _bal = usdc.balanceOf(body);
-        uint _gross = Math.mulDiv(_drain, _vfNav() + VV, _supply + VU) / USD;
-        drained_ = _gross > _bal ? Math.mulDiv(_drain, _bal, _gross) : _drain;
-        if (drained_ == 0) {
-            return (0, abi.encodeWithSelector(Error.Balance__InsufficientFund.selector, address(usdc), _bal, _gross));
-        }
-        if (_pool > 0 && drained_ < _pool) {
-            uint _floor = Math.ceilDiv(_pw, 1e6);
-            if (_pool <= _floor) {
-                return (0, abi.encodeWithSelector(Error.Fund__DrainLeavesDust.selector, _pool, _floor));
-            }
-            drained_ = Math.min(drained_, _pool - _floor);
-        }
-    }
-
-    function _vfRedeem(
-        uint _retire,
-        uint _drain
-    ) internal returns (bool ok_) {
-        (uint[NMAX] memory _w, uint _pw) = _vfWeights();
-        (uint _expected, bytes memory _refusal) = _vfRedeemExpect(_retire, _drain, _pw);
-        uint _poolBefore = _vfPool();
-        uint _retiredBefore = fundStore.retiredMap(body);
-        (Fund.RedeemIntent memory _i, bytes memory _sig) =
-            _redeemIntent(_retire, _drain, _usd(), usdc.balanceOf(body) + vfExtra, FEE * USD);
-        uint[4] memory _b = [
-            usdc.balanceOf(body),
-            usdc.balanceOf(address(fundStore)),
-            usdc.balanceOf(vfOwner),
-            usdc.balanceOf(feeReceiver)
-        ];
-        uint _navBefore = _vfNav();
-        uint _supplyBefore = share.totalSupply();
-        uint _queuedBefore = share.balanceOf(address(fundStore)) + _retire;
-        _vfLog(
-            string.concat(
-                "redeem r=", vm.toString(_retire), " d=", vm.toString(_drain), " pool=", vm.toString(_poolBefore)
+    function _lfSell() internal {
+        uint _j = _rand() % lfN;
+        LfHolder storage _h = lfHolder[_j];
+        bool _settles = lfRedemption.owedLeft > 0 && _h.redeemedAt != lfRedemption.id;
+        uint _free = _h.shares - _h.queued;
+        uint _left = _free - (_settles ? _free * lfRedemption.fraction / 1e4 : 0);
+        uint _shares = _left == 0 || _rand() % 8 == 0
+            ? _left + 1
+            : 1 + _rand() % (_rand() % 3 == 0 ? Math.min(_left, 2e18) : _left);
+        _lfTopUp(_j);
+        _lfLog(string.concat("sell ", vm.toString(_j), " ", vm.toString(_shares)));
+        address _acct = lfAccts[_j];
+        Redeem.SellIntent memory _i =
+            Redeem.SellIntent({header: _header(_acct, lfUsers[_j], _nonceOf(_acct)), shareToken: shareToken, shares: _shares});
+        bytes memory _sig = _pair(
+            lfKeys[_j],
+            _typed(
+                _acct,
+                _i.header.deadline,
+                keccak256(abi.encode(SELL_INTENT_TYPEHASH, _hashHeader(_i.header), _i.shareToken, _i.shares))
             )
         );
-        try hub.redeem(_i, _sig) {
-            ok_ = true;
-        } catch (bytes memory _err) {
-            assertEq(_err, _refusal, string.concat("the redeem refused where the exit rules do not. trace=", vfTrace));
-            _vfLog("redeem-revert");
-            return false;
-        }
-        assertEq(_refusal.length, 0, string.concat("the redeem went through where a refusal was due. trace=", vfTrace));
-        ++vfDrains;
-        uint _bodyOut = _b[0] - usdc.balanceOf(body);
-        uint _in = usdc.balanceOf(address(fundStore)) - _b[1];
-        uint _toOwner = usdc.balanceOf(vfOwner) - _b[2];
-        uint _toRelay = usdc.balanceOf(feeReceiver) - _b[3];
-        uint _drained = _queuedBefore - share.balanceOf(address(fundStore));
-        assertEq(_drained, _expected, "a drain burns the asked units, clamped only by the body's cash and the pool floor");
-        uint _cashValue = Math.mulDiv(_drained, _navBefore + VV, _supplyBefore + VU);
-        assertEq(_bodyOut, _cashValue / USD, "a drain moves exactly the drained units' value");
-        assertEq(
-            _toRelay,
-            Math.min(Math.ceilDiv(Math.min(FEE * USD, _cashValue / 10), USD), _bodyOut),
-            "a drain bills the signed fee capped at a tenth of its cash"
-        );
-        assertEq(_bodyOut, _in + _toOwner + _toRelay, "a drain's legs sum to what left the body");
-        if (_poolBefore > 0) {
-            assertEq(_toOwner, 0, "while backers are queued a drain pays the pool, never the owner");
-            assertEq(fundStore.retiredMap(body), _retiredBefore + _retire, "and every retired unit keeps waiting");
-        } else {
-            assertEq(_in, 0, "with no backer queued nothing is parked in the store");
-            assertEq(
-                fundStore.retiredMap(body),
-                _retiredBefore + _retire - _drained,
-                "the drain comes out of the retired units"
-            );
-        }
-        vfBodyOut += _bodyOut;
-        vfRelayIn += _toRelay;
-        vfOwnerIn += _toOwner;
-        vfStoreIn += _in;
-        if (_pw > 0) {
-            for (uint _j; _j < vfN; ++_j) {
-                vfExpected[_j] += Math.mulDiv(_in, _w[_j], _pw);
-                if (_w[_j] > 0) vfTol[_j] += _w[_j] / 1e30 + 2;
-            }
-        }
-        _vfPriceNotDown(_navBefore, _supplyBefore, "redeem");
-    }
-
-    function _vfDrain() internal {
-        uint _pool = _vfPool();
-        uint _queued = _pool > 0 ? _pool : fundStore.retiredMap(body);
-        if (_queued == 0) return;
-        uint _drain = _vfR() % 4 < 2 ? _queued : Math.max(1, _queued * (1 + _vfR() % 99) / 100);
-        _vfRedeem(0, _drain);
-    }
-
-    function _vfRetire() internal {
-        if (_vfPool() > 0 && _vfR() % 2 == 0) _vfRedeem(0, _vfPool());
-        uint _mu = share.balanceOf(body);
-        if (_mu == 0) return;
-        uint _retire = Math.max(1, _mu * (1 + _vfR() % 100) / 100);
-        _vfRedeem(_retire, 1 + _vfR() % (share.balanceOf(address(fundStore)) + _retire));
-    }
-
-    function _vfClaimOne(
-        uint _j,
-        address _caller
-    ) internal returns (bool ok_) {
-        address _holder = vfAccts[_j];
-        uint _store = usdc.balanceOf(address(fundStore));
-        uint _held = usdc.balanceOf(_holder);
-        uint _owned = usdc.balanceOf(vfOwner);
-        FundStore.Position memory _p = fundStore.getPosition(body, _holder);
-        bool _owed = Math.mulDiv(_p.weight, fundStore.accruedMap(body, _p.epoch) - _p.cursor, ACC) > 0;
-        vm.prank(_caller);
-        try hub.claim(body, share, _holder) {
-            ok_ = true;
-        } catch (bytes memory _err) {
-            assertEq(
-                _err,
-                abi.encodeWithSelector(Error.Fund__NothingToClaim.selector, _holder),
-                string.concat("a claim refuses only for want of a payout. trace=", vfTrace)
-            );
-        }
-        assertEq(ok_, _owed, string.concat("a claim goes through exactly when the holder is owed. trace=", vfTrace));
-        if (!ok_) return false;
-        uint _out = _store - usdc.balanceOf(address(fundStore));
-        uint _toOwner = usdc.balanceOf(vfOwner) - _owned;
-        assertEq(
-            _out,
-            usdc.balanceOf(_holder) - _held + _toOwner,
-            "a claim pays the holder and the owner exactly what left the store"
-        );
-        vfGross[_j] += _out;
-        vfFee[_j] += _toOwner;
-        vfStoreOut += _out;
-    }
-
-    function _vfClaim() internal {
-        uint _pick = _vfR() % (vfN + 1);
-        address _caller = address(uint160(_vfR()));
-        if (_pick == vfN) {
-            address _stranger = address(uint160(_vfR()));
-            vm.prank(_caller);
-            vm.expectRevert(abi.encodeWithSelector(Error.Fund__NothingToClaim.selector, _stranger));
-            hub.claim(body, share, _stranger);
+        if (_shares > _left) {
+            vm.expectRevert(abi.encodeWithSelector(Error.Fund__InsufficientShares.selector, _left, _shares));
+            hub.sell(_i, _sig);
             return;
         }
-        _vfLog(string.concat("claim ", vm.toString(_pick)));
-        _vfClaimOne(_pick, _caller);
+        hub.sell(_i, _sig);
+        if (_settles) _lfSettle(_j, false);
+        _h.queued += _shares;
+        lfRedemption.queued += uint128(_shares);
+        _h.usdc -= FEE;
+        _h.mandated = false;
+        lfFeeUsdc += FEE;
     }
 
-    function _vfRoundTrip() internal {
-        if (_vfPool() != 0) _vfRedeem(0, _vfPool());
-        if (_vfPool() != 0) return;
-        uint _j = _vfR() % vfN;
-        if (share.balanceOf(vfAccts[_j]) != 0) {
-            _vfSellTracked(_j, share.balanceOf(vfAccts[_j]));
-            _vfRedeem(0, _vfPool());
-            if (_vfPool() != 0) return;
+    function _lfOpen() internal {
+        if (_rand() % 2 == 0) _lfToWethAll();
+        FundStore.Redemption memory _r = lfRedemption;
+        LfOpen memory _o;
+        uint _active = lfSupply - lfMasterShares - _r.queued;
+        uint _mode = _rand() % 16;
+        _o.fraction = _mode < 6 ? 0 : _mode == 15 ? 10_000 : _mode > 12 ? 1 + _rand() % 50 : 1 + _rand() % 9999;
+        uint _cap = _active + _r.queued > 0 ? Math.mulDiv(lfMasterShares, _r.queued, _active + _r.queued) : lfMasterShares;
+        if (_mode < 3) _o.join = _rand() % (_cap + 1);
+        else if (_mode == 3 && _cap < lfMasterShares) _o.join = _cap + 1;
+        _o.masterPart = _o.fraction > 0 ? Math.mulDiv(lfMasterShares, _o.fraction, 1e4) : _o.join;
+        _o.owed = _r.queued * 1e4 + _active * _o.fraction;
+        _o.full = _o.owed + _o.masterPart * 1e4 == lfSupply * 1e4;
+        if (_o.full && _rand() % 4 != 0) _lfToWethAll();
+        _o.cash = lfBodyWeth + lfBodyNative;
+        _o.value = _lfBodyValue();
+        _o.nav = _o.full ? _o.cash : _o.value + VIRTUAL_VALUE;
+        _o.base = _o.full ? lfSupply : lfSupply + VIRTUAL_SHARES;
+        if (_o.owed + _o.masterPart > 0) {
+            _o.pot = Math.mulDiv(_o.owed, _o.nav, _o.base * 1e4);
+            _o.masterPay = _o.full ? _o.cash - _o.pot : Math.mulDiv(_o.masterPart, _o.nav, _o.base);
         }
-        _vfClaimOne(_j, address(this));
-        uint _stake = 50e6 + _vfR() % 2000e6;
-        uint _before = usdc.balanceOf(vfAccts[_j]);
-        _vfLog(string.concat("roundtrip ", vm.toString(_j), " stake=", vm.toString(_stake)));
-        if (!_vfAllocateChecked(_one(vfAccts[_j], vfMandates[_j], _stake), _credit(0, address(0), 0))) return;
-        uint _units = share.balanceOf(vfAccts[_j]);
-        uint _store = usdc.balanceOf(address(fundStore));
-        vfBasisSold[_j] += fundStore.getHolding(body, vfAccts[_j]).basis;
-        _sell(vfUsers[_j], vfKeys[_j], _units);
-        assertEq(usdc.balanceOf(address(fundStore)), _store, "a settled position's sell pays nothing");
-        assertTrue(_vfRedeem(0, _units), "a full drain of a fresh position at an unchanged valuation goes through");
-        _vfClaimOne(_j, address(this));
-        assertApproxEqAbs(
-            _before - usdc.balanceOf(vfAccts[_j]),
-            3 * FEE,
-            4 + _units / 1e30,
+
+        bytes memory _want;
+        if (isOpen(_r)) {
+            _want = abi.encodeWithSelector(Error.Redeem__Open.selector, _r.id);
+        } else if (_o.join * (_active + _r.queued) > lfMasterShares * _r.queued) {
+            _want = abi.encodeWithSelector(
+                Error.Redeem__JoinAboveSymmetry.selector, _o.join, Math.mulDiv(lfMasterShares, _r.queued, _active + _r.queued)
+            );
+        } else if (_o.owed + _o.masterPart == 0) {
+            _want = abi.encodeWithSelector(Error.Balance__ZeroAmount.selector);
+        } else if (_o.full && _o.value > _o.cash) {
+            _want = abi.encodeWithSelector(Error.Balance__InsufficientFund.selector, address(wnt), _o.cash, _o.value);
+        } else if (_o.pot + _o.masterPay > _o.cash) {
+            _want = abi.encodeWithSelector(Error.Balance__InsufficientFund.selector, address(wnt), _o.cash, _o.pot + _o.masterPay);
+        } else if (_o.pot + _o.masterPay < BILLED) {
+            _want = abi.encodeWithSelector(Error.Redeem__Dust.selector, _o.pot + _o.masterPay, BILLED);
+        }
+
+        Fund.Valuation memory _v = _valuation(0);
+        _v.assetList[0].value = _o.value;
+        Redeem.RedeemIntent memory _i = _redeemIntent(_o.fraction, _o.join, _v);
+        bytes memory _sig = _redeemSig(_i);
+        address[] memory _first = _lfMask();
+        _lfLog(
             string.concat(
-                "entering and leaving at an unchanged valuation costs exactly three relay fees. trace=", vfTrace
+                "open f=",
+                vm.toString(_o.fraction),
+                " join=",
+                vm.toString(_o.join),
+                " first=",
+                vm.toString(_first.length),
+                _want.length > 0 ? string(" refused") : string("")
             )
         );
+        if (_want.length > 0) {
+            vm.expectRevert(_want);
+            hub.redeem(_i, _sig, _first);
+            return;
+        }
+        hub.redeem(_i, _sig, _first);
+        lfNav = _o.nav;
+        lfBase = _o.base;
+        uint _out = _o.pot + _o.masterPay;
+        if (_out > lfBodyWeth) {
+            lfBodyNative -= _out - lfBodyWeth;
+            lfBodyWeth = 0;
+        } else {
+            lfBodyWeth -= _out;
+        }
+        lfMasterShares -= _o.masterPart;
+        lfSupply -= _o.masterPart;
+        lfRedemption = FundStore.Redemption({
+            id: _r.id + 1,
+            fraction: uint32(_o.fraction),
+            fee: uint64(BILLED),
+            masterPay: uint96(_o.masterPay),
+            queued: _r.queued,
+            owedLeft: uint128(_o.owed),
+            potLeft: uint96(_o.pot),
+            token: address(wnt),
+            price: Math.mulDiv(_o.nav * PRICE_PRECISION, 1, _o.base)
+        });
+        _lfCohortModel(_first);
     }
 
-    function _vfCheck() internal {
-        uint _retired = fundStore.retiredMap(body);
-        uint _queued = share.balanceOf(address(fundStore));
-        assertGe(_queued, _retired, "the retired units sit in the store");
-        uint _exposed = share.totalSupply() - _retired;
-        uint _mu = share.balanceOf(body);
-        if (_exposed > _mu && _mu * 10_000 < _exposed * fundStore.skinMap(body)) {
-            fail(string.concat("the skin floor broke. trace=", vfTrace));
+    function _lfCohort() internal {
+        address[] memory _list = _lfMask();
+        _lfLog(string.concat("cohort n=", vm.toString(_list.length)));
+        hub.redeemCohort(shareToken, _list);
+        _lfCohortModel(_list);
+    }
+
+    function _lfCheck() internal view {
+        FundStore.Redemption memory _r = fundStore.getRedemption(body);
+        FundStore.Redemption memory _m = lfRedemption;
+        _lfEq(_r.id, _m.id, "the redemption id follows the model");
+        _lfEq(_r.fraction, _m.fraction, "the fraction follows the model");
+        _lfEq(_r.fee, _m.fee, "the relay fee follows the model");
+        _lfEq(_r.masterPay, _m.masterPay, "the master's pay, with its part of every fee, follows the model");
+        _lfEq(_r.queued, _m.queued, "the queue follows the model");
+        _lfEq(_r.owedLeft, _m.owedLeft, "the claims left follow the model");
+        _lfEq(_r.potLeft, _m.potLeft, "the pot left follows the model");
+        _lfEq(_r.price, _m.price, "the open's price follows the model");
+        _lfTrue(_r.token == _m.token, "the payout token follows the model");
+        uint _queued;
+        uint _held = shareToken.balanceOf(body);
+        uint _owed;
+        for (uint _j; _j < lfN; ++_j) {
+            (uint _balance, uint _q, uint _claim) = _lfCheckHolder(_j, _r);
+            _queued += _q;
+            _held += _balance;
+            _owed += _claim;
         }
-        assertLe(vfStoreOut, vfStoreIn, "the store never pays out more than it took in");
-        assertGe(usdc.balanceOf(address(fundStore)), OTHER_FUNDS, "the store never dips into other funds' money");
-        assertEq(
-            fundStore.getQueue(body).weight == 0,
-            _queued == _retired,
-            "the queue weighs something exactly when a backer unit waits"
+        _lfEq(_r.queued, _queued, "the stored queue is the sum of every holder's queue");
+        _lfEq(shareToken.totalSupply(), _held, "every share sits with the master or a backer");
+        _lfEq(shareToken.totalSupply(), lfSupply, "the supply follows the model");
+        _lfEq(shareToken.balanceOf(body), lfMasterShares, "the master's shares follow the model");
+        if (_r.owedLeft > 0) _lfEq(_r.owedLeft, _owed, "the open owes exactly the live claims");
+        if (!isOpen(_r)) _lfEq(_r.potLeft, 0, "a closed redemption holds no pot");
+        _lfEq(
+            wnt.balanceOf(address(fundStore)),
+            uint(_r.potLeft) + _r.masterPay + lfOtherFenced,
+            "the store holds exactly both funds' ring-fenced pay"
+        );
+        _lfEq(usdc.balanceOf(body), lfBodyUsdc, "the fund's USDC follows the model");
+        _lfEq(wnt.balanceOf(body), lfBodyWeth, "the fund's WETH follows the model");
+        _lfEq(body.balance, lfBodyNative, "the fund's native balance follows the model");
+        _lfEq(usdc.balanceOf(feeReceiver), lfFeeUsdc, "the fee receiver's USDC follows the model");
+        _lfEq(wnt.balanceOf(feeReceiver), lfFeeWeth, "the fee receiver's WETH, relay fees alone, follows the model");
+        _lfEq(wnt.balanceOf(protocolReceiver), lfProtocolWeth, "the protocol receiver's WETH, every protocol cut, follows the model");
+        _lfEq(wnt.balanceOf(master), lfOwnerWeth, "the master's wallet is paid exactly the model's master pay");
+        _lfEq(usdc.balanceOf(master), lfOwnerUsdc, "the master's wallet USDC follows the model");
+        _lfEq(usdc.balanceOf(address(hubEscrowStore)), lfEscrowUsdc, "the hub escrow holds exactly the unreleased credits");
+        _lfEq(
+            _lfLedger(),
+            lfExo,
+            "every wei the fund and its holders hold stays with a holder, the master, the fee receiver, the protocol receiver, the escrow or the fund"
         );
     }
 
-    function _vfEnd() internal {
-        _vfRealize();
-        for (uint _k; _k < 8; ++_k) {
-            uint _pool = _vfPool();
-            uint _queued = _pool > 0 ? _pool : fundStore.retiredMap(body);
-            if (_queued == 0) break;
-            uint _needNav = Math.mulDiv(10 * USD * 1e6, share.totalSupply() + VU, _queued);
-            if (_vfNav() < _needNav) usdc.mint(body, (_needNav - _vfNav()) / USD + 1);
-            _vfRedeem(0, _queued);
-        }
-        assertEq(
-            share.balanceOf(address(fundStore)),
-            0,
-            string.concat("the pool and the retired units fully drain once the body holds the cash. trace=", vfTrace)
+    function _lfCheckHolder(
+        uint _j,
+        FundStore.Redemption memory _r
+    ) internal view returns (uint balance_, uint queued_, uint claim_) {
+        address _acct = lfAccts[_j];
+        LfHolder memory _h = lfHolder[_j];
+        FundStore.Holding memory _c = fundStore.getHolding(body, _acct);
+        balance_ = shareToken.balanceOf(_acct);
+        queued_ = _c.queued;
+        _lfEq(balance_, _h.shares, "each holder's shares follow the model");
+        _lfEq(queued_, _h.queued, "each holder's queue follows the model");
+        _lfEq(_c.cost, _h.cost, "each holder's average entry cost follows the model");
+        _lfEq(_c.allocatedAt, _h.allocatedAt, "each holder's last allocation follows the model");
+        _lfEq(_c.redeemedAt, _h.redeemedAt, "each holder's last settlement follows the model");
+        _lfEq(wnt.balanceOf(_acct), _h.weth, "each holder is paid exactly what the model pays it");
+        _lfEq(usdc.balanceOf(_acct), _h.usdc, "each holder spends exactly what the model spends");
+        _lfTrue((mandateStore.mandateMap(_acct, body) != bytes32(0)) == _h.mandated, "each holder's mandate follows the model");
+        _lfTrue(balance_ >= queued_, "a holder's queue never exceeds its shares");
+        if (_r.owedLeft > 0 && _c.redeemedAt != _r.id) claim_ = queued_ * 1e4 + (balance_ - queued_) * _r.fraction;
+    }
+
+    function _lfReturnEscrow() internal {
+        address _owner = _account(master);
+        uint _returned = hubEscrowStore.returnedMap(_owner, address(usdc));
+        uint _open = hubEscrowStore.escrowedMap(_owner, address(usdc)) - hubEscrowStore.releasedMap(_owner, address(usdc)) - _returned;
+        _lfEq(_open, lfEscrowUsdc, "the hub escrow holds exactly the credits no round released");
+        if (_open == 0) return;
+        uint _deadline = vm.getBlockTimestamp() + 300;
+        bytes memory _sig = _coSig(
+            attestorKey,
+            AccountLib.typedDigest(
+                block.chainid,
+                _owner,
+                keccak256(
+                    abi.encode(RETURN_ESCROW_TYPEHASH, address(hubEscrowStore), address(usdc), _returned, _returned + _open, _deadline)
+                )
+            )
         );
-        assertEq(fundStore.retiredMap(body), 0, "nothing stays retired");
-        for (uint _j; _j < vfN; ++_j) {
-            _vfClaimOne(_j, address(uint160(0xC1A1)));
+        hub.returnEscrow(_owner, address(usdc), _returned, _returned + _open, _deadline, _sig);
+        lfOwnerUsdc += _open;
+        lfEscrowUsdc = 0;
+    }
+
+    function _lfEnd() internal {
+        if (isOpen(lfRedemption)) {
+            address[] memory _every = _lfEvery();
+            hub.redeemCohort(shareToken, _every);
+            _lfCohortModel(_every);
         }
-        _vfCheck();
-        assertEq(vfBodyOut, vfRelayIn + vfOwnerIn + vfStoreIn, "every wei that left the body for exits is accounted");
-        uint _tolSum;
-        for (uint _j; _j < vfN; ++_j) {
-            _tolSum += vfTol[_j];
-        }
-        assertLe(vfStoreIn - vfStoreOut, (vfDrains + 1) * (vfN + 1) + _tolSum, "only rounding dust stays in the store");
-        for (uint _j; _j < vfN; ++_j) {
-            assertApproxEqAbs(
-                vfGross[_j],
-                vfExpected[_j],
-                vfTol[_j] + 2,
-                string.concat("holder ", vm.toString(_j), " got its weight share of every drain. trace=", vfTrace)
+        _lfTrue(!isOpen(fundStore.getRedemption(body)), "one cohort of every holder closes any redemption");
+        _lfCheck();
+        if (lfOtherFenced > 0) {
+            uint _fee = Math.mulDiv(lfOtherFenced, PERFORMANCE_FEE * (lfOtherPrice - lfOtherCost), lfOtherPrice * 1e4);
+            uint _cut = Math.mulDiv(_fee, PROTOCOL_FEE_SHARE, 1e4);
+            uint _masterFee = Math.min(_fee - _cut, BILLED);
+            uint[2] memory _before = [wnt.balanceOf(lfOtherAcct), wnt.balanceOf(lfOtherMaster)];
+            hub.redeemCohort(lfOtherShare, _list(lfOtherAcct));
+            _lfEq(
+                wnt.balanceOf(lfOtherAcct) - _before[0],
+                lfOtherFenced - _fee - BILLED,
+                "the other fund's seller is paid its whole pot out of the shared store, less its own fee"
             );
-            assertLe(vfFee[_j] * 10_000, vfGross[_j] * 1000 + 10_000, "the fee never exceeds a tenth of gross");
-            if (vfGross[_j] * USD > vfBasisSold[_j]) {
-                assertGe(
-                    vfFee[_j] * USD + (vfDrains + 2) * USD,
-                    (vfGross[_j] * USD - vfBasisSold[_j]) / 10,
-                    "the fee is at least a tenth of the net gain"
-                );
-            }
+            _lfEq(
+                wnt.balanceOf(lfOtherMaster) - _before[1],
+                _fee - _cut - _masterFee,
+                "and that fund's master collects its part of the fee at the close"
+            );
+            _lfTrue(!isOpen(fundStore.getRedemption(lfOtherBody)), "which closes the other fund's redemption");
+            lfFeeWeth += BILLED + _masterFee;
+            lfProtocolWeth += _cut;
+            lfOtherFenced = 0;
         }
+        _lfReturnEscrow();
+        _lfCheck();
+        assertEq(wnt.balanceOf(address(fundStore)), 0, "the shared store ends empty");
+        assertEq(usdc.balanceOf(address(hubEscrowStore)), 0, "and the hub escrow returns every credit no round used");
+        uint _ends = _lfValueOf(master) + _lfValueOf(feeReceiver) + _lfValueOf(protocolReceiver) + _lfValueOf(body)
+            + _lfValueOf(_account(master));
+        for (uint _j; _j < lfN; ++_j) {
+            _ends += _lfValueOf(lfAccts[_j]) + _lfValueOf(lfUsers[_j]);
+        }
+        if (lfOtherAcct != address(0)) {
+            _ends += _lfValueOf(lfOtherAcct) + _lfValueOf(lfOtherBody) + _lfValueOf(lfOtherMaster)
+                + _lfValueOf(_account(lfOtherMaster)) + _lfValueOf(lfOtherUser);
+        }
+        _lfEq(
+            _ends,
+            lfExo,
+            "every wei the fund and its holders started with ends with a holder, the master's wallet, the fee receiver, the protocol receiver or the fund"
+        );
     }
 
-    function _vfRun(
+    function _lfValueOf(
+        address _a
+    ) internal view returns (uint) {
+        return usdc.balanceOf(_a) * USD + wnt.balanceOf(_a) + _a.balance;
+    }
+
+    function _lfRun(
         uint _seed,
         uint _n,
-        uint _steps
+        uint _steps,
+        bool _extended
     ) internal {
-        vfRng = _seed;
-        _vfSetup(_n, _seed);
-        for (vfStep = 0; vfStep < _steps; ++vfStep) {
-            uint _op = _vfR() % 15;
-            if (_op < 3) _vfAllocate();
-            else if (_op == 3) _vfGain();
-            else if (_op == 4) _vfLoss();
-            else if (_op < 7) _vfSell();
-            else if (_op < 9) _vfDrain();
-            else if (_op == 9) _vfClaim();
-            else if (_op == 10) _vfRetire();
-            else if (_op == 11) _vfRoundTrip();
-            else if (_op == 12) _vfPark();
-            else if (_op == 13) _vfRealize();
-            else _vfShock();
-            _vfCheck();
+        rng = _seed;
+        _lfSetup(_n, _seed, _extended);
+        _lfAllocate(true);
+        _lfMarket(0);
+        _lfAllocate(false);
+        _lfMarket(1);
+        _lfCheck();
+        for (lfStep = 0; lfStep < _steps; ++lfStep) {
+            uint _op = _rand() % 12;
+            if (_op < 3) _lfAllocate(false);
+            else if (_op < 5) _lfSell();
+            else if (_op < 7) _lfOpen();
+            else if (_op < 9) _lfCohort();
+            else if (_op == 9) _lfRemandate();
+            else _lfMarket(_rand() % 6);
+            _lfCheck();
         }
-        _vfEnd();
+        _lfEnd();
     }
 
-    function testFuzz_value_is_conserved_and_split_by_weight(
+    function testFuzz_value_is_conserved_and_paid_at_one_price(
         uint _seed,
         uint8 _n
     ) public {
-        _vfRun(_seed, 1 + uint(_n) % NMAX, 40);
+        _lfRun(_seed, 3 + uint(_n) % (NMAX - 2), 40, false);
     }
 
     function testFuzz_value_is_conserved_over_long_fund_lives(
         uint _seed,
         uint8 _n
     ) public {
-        _vfRun(_seed, 1 + uint(_n) % NMAX, 150);
+        _lfRun(_seed, 3 + uint(_n) % (NMAX - 2), 150, false);
     }
 
-    function test_value_fuzz_inflated_supply_regression_seed() public {
-        _vfRun(86017427602058517891884715591118, 1 + uint(17) % NMAX, 150);
+    function testFuzz_value_is_conserved_beside_another_fund_in_the_shared_store(
+        uint _seed,
+        uint8 _n
+    ) public {
+        _lfRun(_seed, 3 + uint(_n) % (NMAX - 2), 60, true);
     }
 
-    function test_value_fuzz_audit_regression_seed() public {
-        _vfRun(79_457_649_971_524_723_584_351_866_203_717_501_195_530_595_307_072, 1, 150);
+    function _dfList(
+        uint _mask
+    ) internal view returns (address[] memory list_) {
+        uint _count;
+        for (uint _k; _k < DFN; ++_k) {
+            if ((_mask >> _k) & 1 == 1) ++_count;
+        }
+        list_ = new address[](_count);
+        uint _n;
+        for (uint _k; _k < DFN; ++_k) {
+            if ((_mask >> _k) & 1 == 1) list_[_n++] = dfAccts[_k];
+        }
+    }
+
+    function _dfPrice(
+        uint _bps
+    ) internal {
+        _toWethAll();
+        uint _target = Math.mulDiv(shareToken.totalSupply() + VIRTUAL_SHARES, _bps, 1e4) - VIRTUAL_VALUE;
+        uint _cash = wnt.balanceOf(body);
+        if (_target > _cash) {
+            _wethTo(body, _target - _cash);
+        } else if (_target < _cash) {
+            vm.prank(body);
+            wnt.transfer(SINK, _cash - _target);
+        }
+    }
+
+    function _dfEnter(
+        uint _mask
+    ) internal {
+        address[] memory _list = _dfList(_mask);
+        uint _len = _list.length;
+        Fund.Allocation[] memory _rows = new Fund.Allocation[](_len);
+        for (uint _n; _n < _len; ++_n) {
+            uint _k = _n;
+            while (_k > 0 && uint160(_rows[_k - 1].puppet) > uint160(_list[_n])) {
+                _rows[_k] = _rows[_k - 1];
+                --_k;
+            }
+            _rows[_k] = _row(_list[_n], dfTerms, 200e6 + _rand() % 1800e6);
+        }
+        uint[] memory _held = new uint[](_len);
+        for (uint _n; _n < _len; ++_n) {
+            _held[_n] = shareToken.balanceOf(_rows[_n].puppet);
+        }
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(_nonceOf(body), _bodyValue() / USD, _rows);
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        for (uint _n; _n < _len; ++_n) {
+            address _acct = _rows[_n].puppet;
+            uint _k;
+            while (dfAccts[_k] != _acct) ++_k;
+            uint _shares = shareToken.balanceOf(_acct);
+            assertGt(_shares, _held[_n], "every row of the round mints");
+            dfBasis[_k] += (_rows[_n].amount * USD - BILLED / _len) * BASIS;
+            ++dfEntries[_k];
+            assertApproxEqAbs(
+                fundStore.getHolding(body, _acct).cost,
+                Math.mulDiv(dfBasis[_k], PRICE_PRECISION, _shares * BASIS),
+                dfEntries[_k] + 1,
+                "the stored cost is the average price the holder paid for the shares it holds"
+            );
+        }
+    }
+
+    function _dfExit(
+        uint _fraction,
+        uint _join,
+        uint _first,
+        uint _seller
+    ) internal returns (uint[DFN] memory fee_) {
+        _toWethAll();
+        DfExit memory _x;
+        uint _supply = shareToken.totalSupply();
+        uint _masterShares = shareToken.balanceOf(body);
+        bool _full = _fraction == 10_000;
+        _x.nav = _full ? wnt.balanceOf(body) : _bodyValue() + VIRTUAL_VALUE;
+        _x.base = _full ? _supply : _supply + VIRTUAL_SHARES;
+        _x.masterValue =
+            Math.mulDiv(_fraction > 0 ? Math.mulDiv(_masterShares, _fraction, 1e4) : _join, _x.nav, _x.base);
+        for (uint _k; _k < DFN; ++_k) {
+            address _acct = dfAccts[_k];
+            uint _queued = fundStore.getHolding(body, _acct).queued;
+            _x.shares[_k] = shareToken.balanceOf(_acct);
+            _x.claim[_k] = _queued * 1e4 + (_x.shares[_k] - _queued) * _fraction;
+            _x.weth[_k] = wnt.balanceOf(_acct);
+        }
+        _x.owner = wnt.balanceOf(master);
+        _x.fees = wnt.balanceOf(feeReceiver);
+        _x.cuts = wnt.balanceOf(protocolReceiver);
+        Fund.Valuation memory _v = _valuation(0);
+        _v.assetList[0].value = _bodyValue();
+        _redeem(_fraction, _join, _v, _dfList(_first));
+        _x.price = fundStore.getRedemption(body).price;
+        if (_seller < DFN) {
+            uint _free = _x.shares[_seller] - fundStore.getHolding(body, dfAccts[_seller]).queued;
+            _sell(dfUsers[_seller], dfKeys[_seller], (_free - _free * _fraction / 1e4) / 2 + 1);
+        }
+        hub.redeemCohort(shareToken, _dfList(2 ** DFN - 1));
+        assertFalse(isOpen(fundStore.getRedemption(body)), "overlapping cohorts settle every holder and close the redemption");
+        fee_ = _dfSettled(_x, _seller);
+    }
+
+    function _dfSettled(
+        DfExit memory _x,
+        uint _seller
+    ) internal returns (uint[DFN] memory fee_) {
+        uint _masterTotal = _x.masterValue;
+        uint _relay;
+        uint _cuts;
+        uint _tolerance;
+        for (uint _k; _k < DFN; ++_k) {
+            address _acct = dfAccts[_k];
+            if (_x.claim[_k] == 0) {
+                assertEq(wnt.balanceOf(_acct), _x.weth[_k], "a holder with nothing to exit is paid nothing");
+                continue;
+            }
+            uint _atPrice = Math.mulDiv(_x.claim[_k], _x.nav, _x.base * 1e4);
+            uint _paid = Math.mulDiv(dfBasis[_k], _x.claim[_k], _x.shares[_k] * 1e4 * BASIS);
+            fee_[_k] = _atPrice > _paid ? (_atPrice - _paid) * PERFORMANCE_FEE / 1e4 : 0;
+            uint _relayed = _k == _seller ? 0 : BILLED;
+            uint _t = Math.mulDiv(_atPrice, dfEntries[_k] + 2, _x.price) + 2 * DFN + 4;
+            assertApproxEqAbs(
+                wnt.balanceOf(_acct) - _x.weth[_k],
+                _atPrice - fee_[_k] - _relayed,
+                _t,
+                "each holder receives its claim at the exit price less the fee on its own gain over its entries"
+            );
+            uint _cut = fee_[_k] * PROTOCOL_FEE_SHARE / 1e4;
+            _masterTotal += fee_[_k] - _cut;
+            _cuts += _cut;
+            _relay += _relayed;
+            _tolerance += _t;
+            dfBasis[_k] -= Math.mulDiv(dfBasis[_k], _x.shares[_k] - shareToken.balanceOf(_acct), _x.shares[_k]);
+        }
+        uint _masterFee = Math.min(_masterTotal, BILLED);
+        assertApproxEqAbs(
+            wnt.balanceOf(master) - _x.owner,
+            _masterTotal - _masterFee,
+            _tolerance + 2,
+            "the master's wallet collects its own exit beside every holder's fee net of the protocol cut"
+        );
+        assertApproxEqAbs(
+            wnt.balanceOf(feeReceiver) - _x.fees,
+            _relay + _masterFee,
+            _tolerance / 10 + 2 * DFN + 4,
+            "the fee receiver collects the relay fees alone"
+        );
+        assertApproxEqAbs(
+            wnt.balanceOf(protocolReceiver) - _x.cuts,
+            _cuts,
+            _tolerance / 10 + 2 * DFN + 4,
+            "and the protocol receiver the protocol's cut of every fee"
+        );
+    }
+
+    function testFuzz_each_holder_pays_the_fee_on_its_own_gain_and_nothing_on_a_loss(
+        uint _seed
+    ) public {
+        rng = _seed;
+        _openFund("DF");
+        dfTerms = _terms(MAX_SKIN);
+        for (uint _k; _k < DFN; ++_k) {
+            (dfUsers[_k], dfKeys[_k]) = makeAddrAndKey(string.concat("df-", vm.toString(_k)));
+            dfAccts[_k] = _account(dfUsers[_k]);
+            _fundWallet(dfUsers[_k], 50_000e6);
+            _signMandate(dfUsers[_k], dfKeys[_k], dfTerms);
+        }
+        _dfEnter(7);
+        uint _peak = 12_000 + _rand() % 8000;
+        _dfPrice(_peak);
+        _dfEnter(9);
+        _dfExit(2000 + _rand() % 6000, 0, 1 + _rand() % 15, DFN);
+        _dfPrice(5000 + _rand() % 4500);
+        _dfEnter(6);
+        _dfPrice(10_500 + _rand() % (_peak * 95 / 100 - 10_500));
+        _sell(dfUsers[3], dfKeys[3], shareToken.balanceOf(dfAccts[3]) / 3);
+        _signMandate(dfUsers[3], dfKeys[3], dfTerms);
+        _dfEnter(8);
+        uint _first = 1 + _rand() % 7;
+        uint[DFN] memory _fee = _dfExit(2000 + _rand() % 6000, 0, (_first & 1) | (_first & 6) << 1, 1);
+        assertGt(_fee[1], 0, "a holder whose entries average below the exit price pays a fee, also when it sells into the open");
+        assertGt(_fee[2], 0, "as does every such holder");
+        assertEq(_fee[3], 0, "the holder who entered at the peak exits at a loss and pays nothing");
+        assertGe(
+            fundStore.getHolding(body, dfAccts[3]).cost,
+            fundStore.getRedemption(body).price,
+            "because its cost, blended over its queued shares too, sits above the exit price"
+        );
+        uint _queued = fundStore.getRedemption(body).queued;
+        uint _master = shareToken.balanceOf(body);
+        uint _cap = Math.mulDiv(_master, _queued, shareToken.totalSupply() - _master);
+        _dfExit(0, _rand() % (_cap + 1), 2, DFN);
+        _dfPrice(8000 + _rand() % 6000);
+        _dfExit(10_000, 0, 1 + _rand() % 15, DFN);
+        assertEq(shareToken.totalSupply(), 0, "the master's close retires every share");
+        assertEq(wnt.balanceOf(body), 0, "and pays out the whole fund");
+        assertEq(wnt.balanceOf(address(fundStore)), 0, "leaving nothing in the store");
     }
 }

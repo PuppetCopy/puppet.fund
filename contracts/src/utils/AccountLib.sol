@@ -3,16 +3,13 @@ pragma solidity ^0.8.36;
 
 bytes32 constant INTENT_HEADER_TYPEHASH =
     keccak256("IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)");
-bytes32 constant MANDATE_TYPEHASH = keccak256(
-    "Mandate(address master,uint256 skin,uint256 allocationRate,uint256 cooldownPeriod,uint256 expiry)"
-);
 
 bytes32 constant GENESIS_TYPEHASH = keccak256("Genesis(address account,address parent)");
 bytes32 constant SESSION_TYPEHASH = keccak256(
-    "Session(string statement,address user,address signer,uint256 issuedAt,uint256 expiry,uint256 epoch)"
+    "Session(string statement,address user,address signer,uint256 issuedAt,uint256 expiry,uint256 epoch,address fund)"
 );
 string constant SESSION_STATEMENT =
-    "Authorize this signer to act for my https://puppet.fund account.\n\nVerify the website address.";
+    "Authorize this signer to act for my https://puppet.fund account. If a fund is named below, it belongs to my account.\n\nVerify the website address.";
 
 bytes32 constant DOMAIN_TYPEHASH =
     keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -22,16 +19,11 @@ bytes32 constant CHAINLESS_DOMAIN_TYPEHASH =
     keccak256("EIP712Domain(string name,string version,address verifyingContract)");
 
 uint constant MAX_SESSION_TTL = 30 days;
+uint constant MAX_SESSION_BYTES = 1024;
+bytes32 constant WALLET_SIGNATURE_TAG = keccak256("puppet.wallet-signature");
+uint constant SESSION_REVOKE_DELAY = 10 minutes;
 
 library AccountLib {
-    struct Mandate {
-        address master;
-        uint skin;
-        uint allocationRate;
-        uint cooldownPeriod;
-        uint expiry;
-    }
-
     struct Genesis {
         address parent;
         bytes key;
@@ -72,6 +64,7 @@ library AccountLib {
     function intentDigest(
         address _account,
         uint _nonce,
+        uint _deadline,
         bytes32 _structHash
     ) internal view returns (bytes32) {
         return keccak256(
@@ -84,7 +77,7 @@ library AccountLib {
                         keccak256("1"),
                         block.chainid,
                         _account,
-                        bytes32(_nonce)
+                        bytes32((_deadline << 128) | _nonce)
                     )
                 ),
                 _structHash
@@ -101,25 +94,6 @@ library AccountLib {
                 hex"1901",
                 keccak256(abi.encode(CHAINLESS_DOMAIN_TYPEHASH, keccak256("Puppet"), keccak256("1"), _account)),
                 _structHash
-            )
-        );
-    }
-
-    function mandateDigest(
-        address _puppet,
-        Mandate calldata _m
-    ) internal pure returns (bytes32) {
-        return chainlessDigest(
-            _puppet,
-            keccak256(
-                abi.encode(
-                    MANDATE_TYPEHASH,
-                    _m.master,
-                    _m.skin,
-                    _m.allocationRate,
-                    _m.cooldownPeriod,
-                    _m.expiry
-                )
             )
         );
     }
@@ -147,7 +121,8 @@ library AccountLib {
         address _signer,
         uint _issuedAt,
         uint _expiry,
-        uint _epoch
+        uint _epoch,
+        address _fund
     ) internal pure returns (bytes32) {
         return chainlessDigest(
             _module,
@@ -159,7 +134,8 @@ library AccountLib {
                     _signer,
                     _issuedAt,
                     _expiry,
-                    _epoch
+                    _epoch,
+                    _fund
                 )
             )
         );

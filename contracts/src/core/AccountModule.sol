@@ -3,11 +3,13 @@ pragma solidity ^0.8.36;
 
 import {IAccount} from "../utils/interfaces/IAccount.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
+import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
 
 import {FundAccount} from "./FundAccount.sol";
 import {UserAccount} from "./UserAccount.sol";
 import {Access} from "../utils/auth/Access.sol";
 import {Error} from "../utils/Error.sol";
+import {AccountLib} from "../utils/AccountLib.sol";
 import {IChain} from "../utils/interfaces/IChain.sol";
 import {BalanceLib} from "../utils/BalanceLib.sol";
 
@@ -30,7 +32,6 @@ contract AccountModule is Access {
     address public immutable userImpl;
     address public immutable bodyImpl;
     bytes32 public immutable bodyHash;
-    uint public immutable withdrawDelay;
 
     struct Tip {
         uint64 blockNumber;
@@ -44,8 +45,7 @@ contract AccountModule is Access {
         address _authority,
         IChain _chain,
         address _userImpl,
-        address _bodyImpl,
-        uint _withdrawDelay
+        address _bodyImpl
     ) Access(_authority) {
         if (address(_chain) == address(0)) revert Error.Chain__NotSet();
         if (_userImpl == address(0) || _bodyImpl == address(0)) revert Error.Account__InvalidImpl();
@@ -53,7 +53,6 @@ contract AccountModule is Access {
         userImpl = _userImpl;
         bodyImpl = _bodyImpl;
         bodyHash = keccak256(abi.encodePacked(hex"ef0100", _bodyImpl));
-        withdrawDelay = _withdrawDelay;
     }
 
     function predictUserAccount(
@@ -90,11 +89,16 @@ contract AccountModule is Access {
         bytes calldata _approval
     ) external auth {
         if (_account.codehash != bodyHash) revert Error.Account__NotDelegated(_account);
-        if (_parent != predictUserAccount(UserAccount(payable(_parent)).user())) revert Error.Account__InvalidUser();
+        address _user = UserAccount(payable(_parent)).user();
+        if (_parent != predictUserAccount(_user)) revert Error.Account__InvalidUser();
         bytes32 _digest = FundAccount(payable(_account)).genesis(_parent, _keySignature);
-        if (!UserAccount(payable(_parent)).approves(_digest, _approval)) {
-            revert Error.Account__InvalidSignature();
-        }
+        (address _signer, uint _issuedAt, uint _expiry, uint _epoch, bytes memory _grant) =
+            abi.decode(_approval, (address, uint, uint, uint, bytes));
+        if (
+            !SignatureCheckerLib.isValidSignatureNow(
+                _user, AccountLib.sessionDigest(address(this), _user, _signer, _issuedAt, _expiry, _epoch, _account), _grant
+            )
+        ) revert Error.Account__InvalidSignature();
         _emit(
             _account,
             _digest,
@@ -110,13 +114,14 @@ contract AccountModule is Access {
         IAccount _account,
         address _attestor,
         bytes32 _structHash,
+        uint _deadline,
         bytes calldata _coSig,
         bytes calldata _executionData,
         IAccount.Call[] calldata _callList,
         address[] memory _tokenList
     ) external auth returns (bytes32 digest_) {
         bytes[] memory _resultList;
-        (digest_, _resultList) = _account.execute(_attestor, _structHash, _coSig, _callList);
+        (digest_, _resultList) = _account.execute(_attestor, _structHash, _deadline, _coSig, _callList);
         _emit(address(_account), digest_, _coSig, _executionData, _callList, _resultList, _tokenList);
     }
 
@@ -173,7 +178,7 @@ contract AccountModule is Access {
         bytes32 _topic = AccountCall.selector;
         address _source = msg.sender;
         assembly ("memory-safe") {
-            log3(add(_data, 0x20), mload(_data), _topic, _account, _source)
+            log3(add(_data, 0x20), mload(_data), _topic, shr(96, shl(96, _account)), _source)
         }
     }
 }

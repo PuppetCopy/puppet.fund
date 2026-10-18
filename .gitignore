@@ -1,10 +1,7 @@
 node_modules
 .env
 .env*.*
-!.env.example
 dist
-*.tsbuildinfo
-.tsbuildinfo
 *.local.*
 
 # This repo uses bun.lock as the authoritative lockfile.
@@ -14,3 +11,4 @@ pnpm-lock.yaml
 
 .DS_Store
 .claude/
+website/CLAUDE.md

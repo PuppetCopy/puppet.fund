@@ -41,16 +41,6 @@ library TransferUtils {
         }
     }
 
-    function tryTransferFrom(
-        IERC20 _token,
-        address _from,
-        address _to,
-        uint _amount,
-        uint _gasLimit
-    ) internal returns (bool) {
-        return _callOptionalReturnBool(_token, abi.encodeCall(_token.transferFrom, (_from, _to, _amount)), _gasLimit);
-    }
-
     function _callOptionalReturnBool(
         IERC20 _token,
         bytes memory _data,

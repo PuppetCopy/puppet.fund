@@ -8,28 +8,13 @@ import {LibString} from "solady/utils/LibString.sol";
 
 import {Error} from "../utils/Error.sol";
 
-uint constant GRID_SIDE = 11;
-uint constant PALETTE_BYTES = 33;
+uint constant GRID_SIDE = 13;
+uint constant PALETTE_BYTES = 39;
 uint constant GRID_BYTES = PALETTE_BYTES + GRID_SIDE * GRID_SIDE;
 
-contract Share is ERC20 {
-    address public immutable issuer;
-
-    constructor(
-        address _issuer
-    ) {
-        if (_issuer == address(0)) revert Error.Gate__InvalidModule();
-        issuer = _issuer;
-    }
-
-    modifier onlyIssuer() {
-        _onlyIssuer();
-        _;
-    }
-
-    function _onlyIssuer() internal view {
-        if (msg.sender != issuer) revert Error.Share__NotIssuer();
-    }
+contract ShareToken is ERC20 {
+    address public burner;
+    uint public pendingBurn;
 
     function tokenURI() external view returns (string memory) {
         string memory _symbol = symbol();
@@ -53,18 +38,33 @@ contract Share is ERC20 {
         );
     }
 
+    function master() public view returns (address) {
+        return address(bytes20(LibClone.argsOnClone(address(this), 0, 20)));
+    }
+
     function pixels() public view returns (bytes memory) {
-        return LibClone.argsOnClone(address(this), 32, 32 + GRID_BYTES);
+        return LibClone.argsOnClone(address(this), 52, 52 + GRID_BYTES);
     }
 
     function performanceFee() public view returns (uint) {
-        return uint16(bytes2(LibClone.argsOnClone(address(this), 32 + GRID_BYTES, 34 + GRID_BYTES)));
+        return uint16(bytes2(LibClone.argsOnClone(address(this), 52 + GRID_BYTES, 54 + GRID_BYTES)));
     }
 
     function _svg() internal view returns (string memory svg_) {
         bytes memory _pixels = pixels();
-        svg_ =
-            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 11 11" shape-rendering="crispEdges" width="264" height="264">';
+        string memory _side = LibString.toString(GRID_SIDE);
+        string memory _size = LibString.toString(GRID_SIDE * 24);
+        svg_ = string.concat(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ',
+            _side,
+            " ",
+            _side,
+            '" shape-rendering="crispEdges" width="',
+            _size,
+            '" height="',
+            _size,
+            '">'
+        );
         for (uint _i; _i < GRID_SIDE * GRID_SIDE; ++_i) {
             uint _at = uint(uint8(_pixels[PALETTE_BYTES + _i])) * 3;
             uint _rgb = (uint(uint8(_pixels[_at])) << 16) | (uint(uint8(_pixels[_at + 1])) << 8)
@@ -84,7 +84,7 @@ contract Share is ERC20 {
     }
 
     function symbol() public view override returns (string memory symbol_) {
-        bytes32 _word = bytes32(LibClone.argsOnClone(address(this), 0, 32));
+        bytes32 _word = bytes32(LibClone.argsOnClone(address(this), 20, 52));
         uint _len;
         while (_len < 32 && _word[_len] != 0) {
             ++_len;
@@ -102,14 +102,28 @@ contract Share is ERC20 {
     function mint(
         address _to,
         uint _amount
-    ) external onlyIssuer {
+    ) external {
+        if (msg.sender != master()) revert Error.ShareToken__Forbidden();
         _mint(_to, _amount);
+    }
+
+    function allowBurn(
+        address _spender,
+        uint _amount
+    ) external {
+        if (msg.sender != master()) revert Error.ShareToken__Forbidden();
+        burner = _spender;
+        pendingBurn = _amount;
     }
 
     function burn(
         address _from,
         uint _amount
-    ) external onlyIssuer {
+    ) external {
+        if (msg.sender != _from || msg.sender != master()) {
+            if (msg.sender != burner || _amount > pendingBurn) revert Error.ShareToken__Forbidden();
+            pendingBurn -= _amount;
+        }
         _burn(_from, _amount);
     }
 
@@ -117,14 +131,14 @@ contract Share is ERC20 {
         address,
         uint
     ) public pure override returns (bool) {
-        revert Error.Share__NotIssuer();
+        revert Error.ShareToken__Forbidden();
     }
 
     function approve(
         address,
         uint
     ) public pure override returns (bool) {
-        revert Error.Share__NotIssuer();
+        revert Error.ShareToken__Forbidden();
     }
 
     function permit(
@@ -136,7 +150,7 @@ contract Share is ERC20 {
         bytes32,
         bytes32
     ) public pure override {
-        revert Error.Share__NotIssuer();
+        revert Error.ShareToken__Forbidden();
     }
 
     function _givePermit2InfiniteAllowance() internal pure override returns (bool) {
@@ -144,11 +158,10 @@ contract Share is ERC20 {
     }
 
     function transferFrom(
-        address _from,
-        address _to,
-        uint _amount
-    ) public override onlyIssuer returns (bool) {
-        _transfer(_from, _to, _amount);
-        return true;
+        address,
+        address,
+        uint
+    ) public pure override returns (bool) {
+        revert Error.ShareToken__Forbidden();
     }
 }

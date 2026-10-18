@@ -4,7 +4,6 @@ pragma solidity ^0.8.36;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {AccountModule} from "./AccountModule.sol";
-import {Register} from "./Register.sol";
 import {GateConfig} from "../utils/GateConfig.sol";
 import {Access} from "../utils/auth/Access.sol";
 import {AccountLib} from "../utils/AccountLib.sol";
@@ -26,72 +25,41 @@ contract Deposit is Access {
     }
 
     AccountModule public immutable accountModule;
-    Register internal immutable registerModule;
-    IWNT internal immutable wnt;
+    IWNT public immutable wnt;
 
     constructor(
         address _authority,
         AccountModule _accountModule,
-        Register _register,
         IWNT _wnt
     ) Access(_authority) {
-        if (address(_accountModule) == address(0) || address(_register) == address(0) || address(_wnt) == address(0)) {
+        if (address(_accountModule) == address(0) || address(_wnt) == address(0)) {
             revert Error.Gate__InvalidModule();
         }
         accountModule = _accountModule;
-        registerModule = _register;
         wnt = _wnt;
     }
 
-    function depositEscrow(
-        address _store,
-        address _account,
-        address _user,
-        address _master,
-        address _token,
-        uint _amount,
-        GateConfig calldata _config
-    ) external payable auth {
-        accountModule.record(
-            _account, bytes32(0), abi.encode(msg.sig, _master, _token, _amount), new address[](0)
-        );
-        if (_token == NATIVE_TOKEN) {
-            if (msg.value != _amount) revert Error.Balance__ValueMismatch(msg.value, _amount);
-            TransferUtils.transferStrictly(NATIVE_TOKEN, _store, _amount, _config.transferGasLimit);
-        } else {
-            if (msg.value != 0) revert Error.Balance__ValueMismatch(msg.value, 0);
-            TransferUtils.transferStrictlyFrom(IERC20(_token), _user, _store, _amount, _config.transferGasLimit);
-        }
-    }
-
     function deposit(
-        address _account,
         address _user,
+        address _to,
         address _token,
         uint _amount,
         GateConfig calldata _config
     ) external payable auth {
         if (_amount == 0) revert Error.Balance__ZeroAmount();
-        IntentLib.verifyRegistered(registerModule, _token);
         uint _attachable = _token == NATIVE_TOKEN || _token == address(wnt) ? _amount : 0;
         if (msg.value > _attachable) revert Error.Balance__ValueMismatch(msg.value, _attachable);
         uint _pull = _amount - msg.value;
         if (_token == NATIVE_TOKEN) {
-            if (msg.value > 0) TransferUtils.transferStrictly(NATIVE_TOKEN, _account, msg.value, _config.transferGasLimit);
-            if (_pull > 0) TransferUtils.transferStrictlyFrom(wnt, _user, _account, _pull, _config.transferGasLimit);
+            if (msg.value > 0) TransferUtils.transferStrictly(NATIVE_TOKEN, _to, msg.value, _config.transferGasLimit);
+            if (_pull > 0) TransferUtils.transferStrictlyFrom(wnt, _user, _to, _pull, _config.transferGasLimit);
         } else {
             if (msg.value > 0) {
                 wnt.deposit{value: msg.value}();
-                TransferUtils.transferStrictly(address(wnt), _account, msg.value, _config.transferGasLimit);
+                TransferUtils.transferStrictly(address(wnt), _to, msg.value, _config.transferGasLimit);
             }
-            if (_pull > 0) TransferUtils.transferStrictlyFrom(IERC20(_token), _user, _account, _pull, _config.transferGasLimit);
+            if (_pull > 0) TransferUtils.transferStrictlyFrom(IERC20(_token), _user, _to, _pull, _config.transferGasLimit);
         }
-        accountModule.record(
-            _account,
-            bytes32(0),
-            abi.encode(msg.sig, _user, _token, _amount, msg.value),
-            _token == NATIVE_TOKEN || msg.value > 0 ? BalanceLib.list(_token, address(wnt)) : BalanceLib.list(_token)
-        );
     }
 
     function depositAcross(
@@ -116,21 +84,20 @@ contract Deposit is Access {
             ) {
                 revert Error.Balance__InvalidDeposit();
             }
-            IntentLib.verifyRegistered(registerModule, _swap.outputToken);
         }
 
         uint _convert;
+        uint _inputBefore;
         if (_fused) {
             uint _wrapped = BalanceLib.balanceOf(address(wnt), _account);
             uint _native = BalanceLib.balanceOf(NATIVE_TOKEN, _account);
-            if (_wrapped + _native < _swap.inputAmount) {
-                revert Error.Balance__InsufficientBalance(_wrapped + _native, _swap.inputAmount);
-            }
+            _inputBefore = _wrapped + _native;
+            if (_inputBefore < _swap.inputAmount) revert Error.Balance__InsufficientBalance(_inputBefore, _swap.inputAmount);
             uint _heldForm = _inputToken == NATIVE_TOKEN ? _native : _wrapped;
             if (_heldForm < _swap.inputAmount) _convert = _swap.inputAmount - _heldForm;
         } else {
-            uint _held = BalanceLib.balanceOf(_inputToken, _account);
-            if (_held < _swap.inputAmount) revert Error.Balance__InsufficientBalance(_held, _swap.inputAmount);
+            _inputBefore = BalanceLib.balanceOf(_inputToken, _account);
+            if (_inputBefore < _swap.inputAmount) revert Error.Balance__InsufficientBalance(_inputBefore, _swap.inputAmount);
         }
 
         IAccount.Call[] memory _calls = SwapLib.calls(
@@ -165,6 +132,7 @@ contract Deposit is Access {
             IAccount(_account),
             _config.attestor,
             _structHash,
+            _intent.header.deadline,
             _coSig,
             abi.encode(
                 msg.sig,
@@ -179,6 +147,12 @@ contract Deposit is Access {
             _legs,
             _tokenList
         );
+        uint _inputAfter = _fused
+            ? BalanceLib.balanceOf(address(wnt), _account) + BalanceLib.balanceOf(NATIVE_TOKEN, _account)
+            : BalanceLib.balanceOf(_inputToken, _account);
+        if (_inputAfter + _swap.inputAmount != _inputBefore) {
+            revert Error.Balance__SwapInputNotSpent(_inputToken, _inputBefore, _inputAfter);
+        }
         if (_local) {
             uint _received = BalanceLib.balanceOf(_swap.outputToken, _account) - _outputBefore;
             if (_received < _swap.outputAmount) {
@@ -199,15 +173,14 @@ contract Deposit is Access {
         if (_intent.header.feeToken != _inputToken) revert Error.Intent__FeeTokenMismatch(_intent.header.feeToken, _inputToken);
         SwapLib.verify(_swap, _intent.header.fee, _config.maxRelayFeeBps);
         bool _local = _intent.destinationChainId == block.chainid;
-        if (_local) {
-            if (_swap.outputToken == _inputToken) revert Error.Balance__InvalidSwap();
-            IntentLib.verifyRegistered(registerModule, _swap.outputToken);
-        }
+        if (_local && _swap.outputToken == _inputToken) revert Error.Balance__InvalidSwap();
+        uint _inputBefore = BalanceLib.balanceOf(_inputToken, _account);
         uint _outputBefore = _local ? BalanceLib.balanceOf(_swap.outputToken, _account) : 0;
         accountModule.dispatch(
             IAccount(_account),
             _config.attestor,
             _structHash,
+            _intent.header.deadline,
             _coSig,
             abi.encode(
                 msg.sig,
@@ -230,6 +203,10 @@ contract Deposit is Access {
             ),
             _local ? BalanceLib.list(_inputToken, _swap.outputToken) : BalanceLib.list(_inputToken)
         );
+        uint _inputAfter = BalanceLib.balanceOf(_inputToken, _account);
+        if (_inputAfter + _swap.inputAmount != _inputBefore) {
+            revert Error.Balance__SwapInputNotSpent(_inputToken, _inputBefore, _inputAfter);
+        }
         if (_local) {
             uint _received = BalanceLib.balanceOf(_swap.outputToken, _account) - _outputBefore;
             if (_received < _swap.outputAmount) {
@@ -283,6 +260,7 @@ contract Deposit is Access {
             IAccount(_account),
             _config.attestor,
             _structHash,
+            _intent.header.deadline,
             _coSig,
             abi.encode(
                 msg.sig,

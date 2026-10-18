@@ -34,4 +34,40 @@ library BalanceLib {
         list_[0] = _a;
         list_[1] = _b;
     }
+
+    function list(
+        address _a,
+        address _b,
+        address _c
+    ) internal pure returns (address[] memory list_) {
+        if (_c == _a || _c == _b) return list(_a, _b);
+        if (_a == _b) return list(_a, _c);
+        list_ = new address[](3);
+        list_[0] = _a;
+        list_[1] = _b;
+        list_[2] = _c;
+    }
+
+    function list(
+        address _a,
+        address _b,
+        address _c,
+        address _d
+    ) internal pure returns (address[] memory) {
+        return list(list(_a, _b, _c), _d);
+    }
+
+    function list(
+        address[] memory _list,
+        address _token
+    ) internal pure returns (address[] memory list_) {
+        for (uint _i; _i < _list.length; ++_i) {
+            if (_list[_i] == _token) return _list;
+        }
+        list_ = new address[](_list.length + 1);
+        for (uint _i; _i < _list.length; ++_i) {
+            list_[_i] = _list[_i];
+        }
+        list_[_list.length] = _token;
+    }
 }

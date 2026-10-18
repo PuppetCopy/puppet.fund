@@ -16,6 +16,7 @@ interface IAccount {
     function execute(
         address attestor,
         bytes32 structHash,
+        uint deadline,
         bytes calldata coSig,
         Call[] calldata callList
     ) external returns (bytes32 digest, bytes[] memory resultList);

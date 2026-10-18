@@ -8,7 +8,7 @@ capital follows under rules you sign, and every action is co-signed and enforced
 on-chain. Custody never moves into the protocol. Copy-trading, finally without
 the custodian.
 
-🔗 Live on Arbitrum mainnet at **[puppet.fund](https://puppet.fund)**.
+🔗 Live at **[puppet.fund](https://puppet.fund)**, with its hub on OP Mainnet.
 
 ## Demo
 
@@ -39,22 +39,23 @@ self-custody.
   actually trades. One deposit can back many traders at once, each pull bounded
   by the rule you signed; unfunded or throttled matches simply skip.
 - **Shares at an attested NAV.** A capital pull mints non-transferable shares at
-  a net asset value attested from a median of six price sources (Binance,
-  Coinbase, Kraken, OKX, Chainlink, GMX), verified on-chain. Backers redeem at
-  that same NAV.
+  a net asset value attested from a median of nine exchanges (Binance, Coinbase,
+  Kraken, OKX, Bybit, KuCoin, Bitget, Gate, Bitfinex) and Uniswap v3 pools,
+  verified on-chain. Backers redeem at that same NAV.
 - **Skin in the game.** A trader can never exit ahead of the people who backed
   them; their queued shares redeem pro-rata with the backers'.
 
 ## Fund an AI agent
 
-A trader doesn't have to be human. The open [operator kit](operator/) scaffolds a
-running agent in one command and pairs it to a fund in minutes through an
-encrypted, local-only (`127.0.0.1`) handshake. Guardrails are built in: dry-run
-by default, an on-chain stop, a drawdown halt, a cost budget. In the LLM
-template, Claude proposes long / flat / close through structured tool use and
-deterministic code enforces every cap, the model can never size, route, or
-withdraw. The operator key can never withdraw at all: withdrawals return to your
-wallet and require a separate signature.
+A trader doesn't have to be human. On the app's Agent link page you create a
+link and copy its instruction; paste it into Claude Code or any LLM with your
+strategy in plain words, and the agent it builds connects to your fund through the
+Puppet app you have open. The agent holds no key: the app runs each request on its
+own session, only within the scopes you approved when the agent connected (trade,
+run rounds, redeem), on any venue the attestor screens and on any chain Puppet runs
+on. It can never withdraw, and every action it takes is co-signed by the attestor
+inside its screens. The starter strategies carry the guardrails as instructions:
+on-chain stops, a drawdown halt, a daily cost budget.
 
 > **Fund the agent. Don't trust it.**
 
@@ -62,13 +63,13 @@ wallet and require a separate signature.
 
 - **Venue:** GMX V2 perpetuals, the live, attestor-screened trading venue. Every
   new venue is one screen, not a newly trusted contract.
-- **Hub chain:** Arbitrum. Subscribe / allocate / redeem / claim settle here;
-  deposits can bridge and swap in from Base, Optimism, Polygon, and Ethereum.
+- **Hub chain:** OP Mainnet. Subscribe / allocate / redeem / claim settle here;
+  deposits can bridge and swap in from other chains.
 - **End-to-end flows:** create wallet + fund, deposit (cross-chain bridge + swap
   into the fund's base token), subscribe with signed copy rules, allocate (lazy
   capital pull at NAV), trade GMX by hand via a WalletConnect tunnel (your fund
   appears as the wallet) or via an agent, then redeem / sell / claim.
-- Contracts verified on Arbiscan; the operator kit ships open-source.
+- Contracts verified on Arbiscan.
 
 ## Packages
 
@@ -76,17 +77,22 @@ wallet and require a separate signature.
   the share economy, and the co-sign model (Solidity / Foundry).
 - **`sdk/`** — `@puppet/sdk`: intent builders, attestation, state, and evaluation.
 - **`website/`** — the puppet.fund web app (aelea), installable as a PWA.
-- **`operator/`** — the open agent operator kit and GMX trading templates.
 
 ## Tech
 
-Arbitrum + account-abstraction smart accounts; an attestor relay over a compact
-WebSocket protocol; a median price oracle for NAV; Across bridging and LI.FI
-swaps screened in-domain; an Envio/Hasura indexer; a TypeScript/Bun operator kit
-with Claude (Anthropic) in the loop.
+A hub gate on OP Mainnet with spoke gates on the other chains; EIP-7702
+accounts whose key is a two-party ECDSA (DKLs18) split between the owner's app
+and the attestor; an attestor that simulates every intent before it co-signs; a
+median price oracle for NAV; Across bridging and LI.FI, KyberSwap and Relay swaps
+screened in-domain; an event-sourced indexer; agents linked locally to the app,
+built by Claude (Anthropic) or any LLM from the app's instruction.
 
 ## License
 
 Business Source License 1.1; see [LICENSE.md](LICENSE.md).
+
+## Trademarks
+
+Puppet, puppet.fund and the Puppet logo are trademarks of puppetdao.eth. The Business Source License grants no trademark rights: forks and derivative works must use their own name, logo and domain.
 
 Security disclosures: [SECURITY.md](SECURITY.md).

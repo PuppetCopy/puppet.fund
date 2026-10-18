@@ -5,14 +5,9 @@
   "version": "0.1.0",
   "scripts": {
     "build": "forge build",
-    "build:prod": "FOUNDRY_PROFILE=prod forge build",
     "test": "forge test -vvv",
-    "deploy": "FOUNDRY_PROFILE=prod forge script script/deploy/Deploy.s.sol --skip test --sig \"deploy()\" --slow --rpc-url",
     "coverage": "forge coverage --report lcov",
-    "sizes": "FOUNDRY_PROFILE=prod forge build --sizes",
-    "verify": "FOUNDRY_PROFILE=prod forge verify-contract",
-    "verify:all": "FOUNDRY_PROFILE=prod forge script script/deploy/Deploy.s.sol --sig \"verify()\" --ffi --rpc-url",
-    "clean": "rm -rf forge-cache forge-cache-prod forge-artifacts forge-artifacts-prod broadcast .docgen cache",
+    "clean": "rm -rf forge-cache forge-artifacts .docgen cache",
     "docgen": "forge doc --out '.docgen' --build",
     "lint": "forge fmt --check",
     "lint:fmt": "forge fmt"

@@ -6,7 +6,7 @@ Copyright (c) 2020 MariaDB Corporation Ab, All Rights Reserved.
 ## Parameters
 
 - **Licensor:** puppetdao.eth (the holder of the `puppetdao.eth` ENS name on Ethereum mainnet at the time of the relevant act of distribution, modification, or enforcement).
-- **Licensed Work:** The Puppet Protocol monorepo, including the `contracts`, `sdk`, and `indexer/database` workspaces. The Licensed Work is © 2026 puppetdao.eth.
+- **Licensed Work:** The Puppet Protocol monorepo, including the `contracts`, `contracts-manifest`, `sdk`, `website` and `og` workspaces. The Licensed Work is © 2026 puppetdao.eth.
 - **Additional Use Grant:** Any uses listed and defined at `puppetdao.eth`.
 - **Change Date:** October 31, 2029, or four years from the first publicly available distribution of a specific version of the Licensed Work, whichever comes first.
 - **Change License:** GNU General Public License v2.0 or later.

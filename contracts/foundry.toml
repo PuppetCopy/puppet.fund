@@ -2,21 +2,16 @@
 
 [profile.default]
   src = "src"
-  script = "script/deploy"
   out = "forge-artifacts"
   cache_path = "forge-cache"
   libs = ["lib"]
   ignored_error_codes = [2424, 4591]  # Suppress deprecated natspec memory-safe-assembly and "more than 256 warnings" warnings
   ignored_warnings_from = ["test", "lib"]  # Silence solc warnings from test fixtures and vendored libs; src/ + script/ stay verbose
-  fs_permissions = [
-    { access = "read-write", path = "./deployments.toml" },
-    { access = "read", path = "./const.toml" },
-    { access = "read-write", path = "./broadcast" },
-    { access = "read", path = "./forge-artifacts-prod" }
-  ]
   remappings = [
     "forge-std/=lib/forge-std/",
-    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/"
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@openzeppelin/uniswap-hooks/=lib/uniswap-hooks/src/",
+    "@uniswap/v4-core/=lib/v4-core/"
   ]
   evm_version = "prague"
   solc_version = "0.8.36"
@@ -39,32 +34,6 @@
 [profile.default.fuzz]
   max_test_rejects = 1_000_000 # Number of times `vm.assume` can fail
   runs = 256
-
-[profile.prod]
-  out = "forge-artifacts-prod"
-  cache_path = "forge-cache-prod"
-  optimizer_runs = 1_000
-
-# Under via_ir the whole compilation unit decides a contract's bytecode, so
-# script/ and test/ are pinned to their own harness profile: without it foundry
-# merges same-settings files into one unit, baking forge-std/scripts into the
-# deployed bytecode and its verification input. The cost is that every src
-# contract gets a second <Name>.harness.json artifact from the test/script units,
-# so Deploy._creationCode must load the PROD ARTIFACT BY PATH: both
-# type(X).creationCode and a bare "File.sol:Name" qualifier resolve to the 1-run
-# harness build (v12 and v13 each shipped a whole universe of harness bytecode
-# that way).
-[[profile.prod.additional_compiler_profiles]]
-  name = "harness"
-  optimizer_runs = 1
-
-[[profile.prod.compilation_restrictions]]
-  paths = "script/**"
-  max_optimizer_runs = 1
-
-[[profile.prod.compilation_restrictions]]
-  paths = "test/**"
-  max_optimizer_runs = 1
 
 [profile.ci.fuzz]
   runs = 1000
@@ -111,11 +80,3 @@
     "erc20-unchecked-transfer",
     "unsafe-typecast"
   ]
-
-[rpc_endpoints]
-  arbitrum = { url = "${RPC_URL}/arbitrum/${RPC_KEY}", chain_id = 42161 }
-  optimism = { url = "${RPC_URL}/optimism/${RPC_KEY}", chain_id = 10 }
-
-[etherscan]
-  arbitrum = { key = "${ETHERSCAN_API_KEY}" }
-  optimism = { key = "${ETHERSCAN_API_KEY}" }
