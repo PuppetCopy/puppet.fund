@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.36;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 library Error {
     error Account__UnauthorizedCaller();
@@ -15,7 +14,8 @@ library Error {
     error Account__CallReturnedFalse(address target);
     error Account__NotDelegated(address account);
     error Account__HeaderMismatch(address account);
-
+    error Account__WithdrawClosed(uint revokedAt);
+    error Account__ForbiddenPull();
 
     error Chain__Locked();
     error Chain__NotSet();
@@ -25,15 +25,15 @@ library Error {
     error Access__Reentrant();
     error Access__Unauthorized();
 
-    error Dictate__InvalidOwner();
-    error Dictate__Unauthorized();
+    error GovernorAccount__Forbidden(address caller);
+    error GovernorAccount__CallFailed(bytes result);
+    error GovernorAccount__ExpiredDeadline(uint deadline, uint currentTimestamp);
 
-
-    error TransferUtils__TokenTransferError(IERC20 token, address receiver, uint amount);
-    error TransferUtils__TokenTransferFromError(IERC20 token, address from, address to, uint amount);
+    error TransferUtils__TokenTransferError(address token, address receiver, uint amount);
+    error TransferUtils__TokenTransferFromError(address token, address from, address to, uint amount);
     error TransferUtils__InvalidReceiver();
     error TransferUtils__NativeTransferError(address receiver, uint amount);
-    error TransferUtils__EmptyTokenTransferGasLimit(IERC20 token);
+    error TransferUtils__EmptyTokenTransferGasLimit(address token);
 
     error Gate__InvalidModule();
     error Gate__InvalidRelayFeeBps(uint maxRelayFeeBps);
@@ -52,13 +52,11 @@ library Error {
     error Intent__InvalidProvider();
 
     error Mandate__ListNotSorted(address prev, address curr);
-    error Mandate__ListLengthMismatch(uint mandates, uint signatures);
     error Mandate__InvalidAllocationRate(uint rate);
     error Mandate__InvalidSkin(uint skin);
     error Mandate__InvalidExitCap(uint exitCap);
+    error Mandate__StaleEpoch(uint signedEpoch, uint epoch);
     error Mandate__Cooldown(address puppet, uint allocatedAt, uint cooldownPeriod);
-    error Mandate__Expired(uint expiry);
-    error Mandate__ForbiddenCall();
 
     error Fund__CreditTokenMismatch(address credit, address round);
     error Fund__TokenNotCanonical(address token);
@@ -67,22 +65,28 @@ library Error {
     error Fund__ShareMismatch(address master, address shareToken);
     error Fund__NotHolder(address holder);
     error Fund__AllocationListNotSorted(address prev, address curr);
+    error Fund__NotAccount(address puppet);
+    error Fund__CreditNotIncreasing(uint credited, uint total);
+    error Fund__CreditFeeMismatch(uint signed, uint billed);
 
     error Redeem__Open(uint64 id);
     error Redeem__InvalidMode(uint fraction, uint join);
     error Redeem__JoinAboveSymmetry(uint join, uint cap);
     error Redeem__Dust(uint amount, uint fee);
     error Redeem__TokenUnpriced(address token);
+    error Redeem__OutOfGas(uint left, uint needed);
 
     error Escrow__InvalidFulfil(uint fulfilled, uint submitted);
-    error Escrow__InvalidReturn(uint returned, uint submitted);
     error Escrow__Unfunded(address token, uint balance, uint held);
+    error Escrow__ReturnNotReady(uint returnAt);
+
+    error FundStore__Unfunded(address token, uint balance, uint held);
+    error FundStore__Unbooked(address master, address token, uint booked, uint amount);
 
     error ShareToken__Forbidden();
     error ShareToken__InvalidSymbol(bytes32 symbol);
     error ShareToken__InvalidGrid(uint length);
     error ShareToken__InvalidPixel(uint cell, uint color);
-
 
     error Balance__ZeroAmount();
     error Balance__ValueMismatch(uint provided, uint expected);
@@ -98,26 +102,5 @@ library Error {
     error Balance__InvalidDeposit();
     error Balance__InvalidSwap();
 
-    error PuppetToken__InvalidReceiver();
-
-    error Vesting__Forbidden();
-
-    error Reserve__InvalidConfig();
-    error Reserve__Forbidden(address caller);
-    error Reserve__NotStarted(uint start);
-    error Reserve__AboveCap(uint paid, uint cap);
-
-    error LiquidityLock__InvalidConfig();
-    error LiquidityLock__OffMarket(int24 spot, int24 twap);
-    error LiquidityLock__Forbidden(address caller);
-    error LiquidityLock__Permanent();
-
-    error LiquidityRange__InvalidConfig();
-    error LiquidityRange__OffMarket(int24 spot, int24 twap);
-    error LiquidityRange__TooSoon(uint nextAt);
-    error LiquidityRange__Unmoved(int24 center, int24 last);
-    error LiquidityRange__Forbidden(address caller);
-
-    error Hook__InvalidConfig();
-    error Hook__Forbidden(address sender);
+    error Token__InvalidReceiver();
 }

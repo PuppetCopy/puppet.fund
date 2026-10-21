@@ -6,7 +6,6 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Vm} from "forge-std/src/Vm.sol";
 
 import {MAX_SKIN} from "src/HubGate.sol";
-import {FULFIL_TYPEHASH} from "src/SpokeGate.sol";
 import {AccountModule} from "src/core/AccountModule.sol";
 import {EscrowStore} from "src/core/EscrowStore.sol";
 import {Fund, PRICE_PRECISION, VIRTUAL_SHARES, VIRTUAL_VALUE} from "src/core/Fund.sol";
@@ -14,14 +13,15 @@ import {Redeem} from "src/core/Redeem.sol";
 import {FundAccount} from "src/core/FundAccount.sol";
 import {FundStore, isOpen} from "src/core/FundStore.sol";
 import {GRID_BYTES, ShareToken} from "src/core/ShareToken.sol";
+import {UserAccount} from "src/core/UserAccount.sol";
 import {Error} from "src/utils/Error.sol";
-import {AccountLib} from "src/utils/AccountLib.sol";
+import {AccountLib, ESCROW_RETURN_DELAY} from "src/utils/AccountLib.sol";
 import {MandateLib} from "src/utils/MandateLib.sol";
 import {BalanceLib} from "src/utils/BalanceLib.sol";
 import {SwapLib} from "src/utils/SwapLib.sol";
 import {Deposit} from "src/core/Deposit.sol";
 import {IAccount} from "src/utils/interfaces/IAccount.sol";
-import {LiquidityGate, RETURN_ESCROW_TYPEHASH, WITHDRAW_INTENT_TYPEHASH} from "src/utils/LiquidityGate.sol";
+import {LiquidityGate, WITHDRAW_INTENT_TYPEHASH} from "src/utils/LiquidityGate.sol";
 
 import {HotPathTest} from "./HotPath.t.sol";
 
@@ -59,6 +59,13 @@ contract ExitMatrixTest is HotPathTest {
         _wethTo(body, 10_000e18);
     }
 
+    function _openSecondFund() internal {
+        (master, masterKey) = makeAddrAndKey("master-2");
+        (body, bodyKey) = makeAddrAndKey("body-2");
+        vm.signAndAttachDelegation(accountModule.bodyImpl(), bodyKey);
+        _open();
+    }
+
     function _back(
         string memory _tag,
         uint _amount,
@@ -74,7 +81,7 @@ contract ExitMatrixTest is HotPathTest {
         _mandate(user_, key_, _one);
         address _acct = _account(user_);
         Fund.Allocation[] memory _rows = new Fund.Allocation[](1);
-        _rows[0] = _row(_acct, _m, _amount);
+        _rows[0] = _row(_acct, _amount);
         uint _supply = shareToken.totalSupply() + VIRTUAL_SHARES;
         uint _nav = Math.mulDiv(_sharePrice, _supply, PRICE_PRECISION);
         uint _stake = shareToken.balanceOf(_acct);
@@ -130,10 +137,21 @@ contract ExitMatrixTest is HotPathTest {
         vm.stopPrank();
     }
 
+    function _assertBooked() internal view {
+        FundStore.Redemption memory _r = fundStore.getRedemption(body);
+        assertEq(
+            fundStore.bookedMap(body, _r.token),
+            uint(_r.potLeft) + _r.masterPay,
+            "the fund's booking is exactly its pot left and the master's pay"
+        );
+    }
+
     function _assertClosed() internal view {
         FundStore.Redemption memory _r = fundStore.getRedemption(body);
         assertFalse(isOpen(_r), "the redemption is closed");
         assertEq(_r.potLeft, 0, "with nothing left in its pot");
+        assertEq(fundStore.bookedMap(body, _r.token), 0, "nor in its booking");
+        assertEq(fundStore.heldMap(_r.token), 0, "the store owes nothing more in that token");
         assertEq(IERC20(_r.token).balanceOf(address(fundStore)), 0, "and nothing ring-fenced for it");
     }
 
@@ -152,7 +170,7 @@ contract ExitMatrixTest is HotPathTest {
         _redeemAt(0, 0, 1.2e12, _list(_aAcct, _bAcct));
         assertEq(wnt.balanceOf(_aAcct), 117e18, "A is paid its 100 shares at 1.2, less a tenth of its 20 gain and one fee");
         assertEq(wnt.balanceOf(_bAcct), 58e18, "B its 50 at the same price, less a tenth of its 10 gain and one fee");
-        assertEq(wnt.balanceOf(master), 1.7e18, "the owner's wallet takes the master's 2.7 of those fees, less one fee");
+        assertEq(wnt.balanceOf(_ownerAccount()), 1.7e18, "the owner's account takes the master's 2.7 of those fees, less one fee");
         assertEq(wnt.balanceOf(feeReceiver) - _fees, 3e18, "the fee receiver takes the three fee slices");
         assertEq(wnt.balanceOf(protocolReceiver), 0.3e18, "and the protocol receiver the 0.3 cut");
         assertEq(shareToken.balanceOf(_aAcct), 300e18, "the queued shares burn");
@@ -179,6 +197,7 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(_r.owedLeft, 200e18 * 1e4, "with their claims owed");
         assertEq(_r.potLeft, 200e18, "and their payout ring-fenced");
         assertEq(wnt.balanceOf(address(fundStore)), 200e18);
+        assertEq(fundStore.bookedMap(body, address(wnt)), 200e18, "and booked to this fund");
 
         vm.prank(makeAddr("anyone"));
         hub.redeemCohort(shareToken, _list(_account(_b), _account(_c)));
@@ -264,13 +283,13 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(wnt.balanceOf(_aAcct), _paid[0], "the master's racing cohort skips whoever the attacker paid");
         assertEq(wnt.balanceOf(_cAcct), _paid[2]);
         assertEq(wnt.balanceOf(_bAcct) - _paid[1], 39e18, "and pays the rest");
-        assertEq(wnt.balanceOf(master), 98.8e18, "the master once, last");
+        assertEq(wnt.balanceOf(_ownerAccount()), 98.8e18, "the master once, last");
         _assertClosed();
 
         _paid[3] = wnt.balanceOf(feeReceiver);
         vm.prank(makeAddr("attacker"));
         hub.redeemCohort(shareToken, _list3(_aAcct, _bAcct, _cAcct));
-        assertEq(wnt.balanceOf(master), 98.8e18, "a late racer finds nothing to pay");
+        assertEq(wnt.balanceOf(_ownerAccount()), 98.8e18, "a late racer finds nothing to pay");
         assertEq(wnt.balanceOf(feeReceiver), _paid[3], "and charges nobody");
     }
 
@@ -289,7 +308,7 @@ contract ExitMatrixTest is HotPathTest {
         _redeemAt(0, 199.6e18, 1.5e12, _list(_account(_a)));
         assertEq(wnt.balanceOf(_account(_a)), 231e18, "A is paid its 160 at 1.5, less a tenth of its 80 gain and one fee");
         assertEq(
-            wnt.balanceOf(master),
+            wnt.balanceOf(_ownerAccount()),
             305.6e18,
             "the master's 199.6 at the same price, no fee on its own gain, with 7.2 of A's fee, less one fee, paid last"
         );
@@ -303,7 +322,7 @@ contract ExitMatrixTest is HotPathTest {
     function test_a_join_without_a_queue_needs_the_master_alone_in_the_fund() public {
         _open();
         _redeemAt(0, 100e18, 1e12, new address[](0));
-        assertEq(wnt.balanceOf(master), 99e18, "a sole master redeems any part in one transaction");
+        assertEq(wnt.balanceOf(_ownerAccount()), 99e18, "a sole master redeems any part in one transaction");
         assertEq(shareToken.balanceOf(body), 399e18);
         _assertClosed();
 
@@ -327,7 +346,7 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(wnt.balanceOf(_account(_a)), 108e18, "A's 100 at 1.1, less a tenth of its 10 gain and one fee");
         assertEq(wnt.balanceOf(_account(_b)), 53.5e18, "B's 50 at 1.1, less a tenth of its 5 gain and one fee");
         assertEq(
-            wnt.balanceOf(master), 137.575e18, "the master's 124.75 at 1.1 with no fee, plus 1.35 of the backers' fees, less one fee"
+            wnt.balanceOf(_ownerAccount()), 137.575e18, "the master's 124.75 at 1.1 with no fee, plus 1.35 of the backers' fees, less one fee"
         );
         assertEq(wnt.balanceOf(feeReceiver) - _fees, 3e18, "the fee receiver takes the three fee slices");
         assertEq(wnt.balanceOf(protocolReceiver), 0.15e18, "and the protocol receiver A's 0.1 and B's 0.05 cuts");
@@ -343,7 +362,7 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(_queuedOf(_account(_a)), 0);
         assertEq(wnt.balanceOf(_account(_a)), 249e18, "and is paid all 250 less one fee");
         assertEq(shareToken.balanceOf(body), 249.5e18);
-        assertEq(wnt.balanceOf(master), 248.5e18);
+        assertEq(wnt.balanceOf(_ownerAccount()), 248.5e18);
         _assertClosed();
     }
 
@@ -365,11 +384,11 @@ contract ExitMatrixTest is HotPathTest {
         _i.header.feeToken = address(usdc);
         _i.header.fee = FEE;
         uint _backer = usdc.balanceOf(_account(_a));
-        uint _wallet = usdc.balanceOf(master);
+        uint _wallet = usdc.balanceOf(_ownerAccount());
         uint _fees = usdc.balanceOf(feeReceiver);
         hub.redeem(_i, _redeemSig(_i), _holders);
         assertEq(usdc.balanceOf(_account(_a)) - _backer, 99e6, "the backer's quarter is paid in USDC at the line's price, less one fee");
-        assertEq(usdc.balanceOf(master) - _wallet, 123.75e6, "the master's quarter too, paid last");
+        assertEq(usdc.balanceOf(_ownerAccount()) - _wallet, 123.75e6, "the master's quarter too, paid last");
         assertEq(usdc.balanceOf(feeReceiver) - _fees, 2 * FEE, "each recipient's fee is billed in USDC");
         assertEq(usdc.balanceOf(body), _held - 224.75e6, "the fund pays out of its USDC");
         assertEq(usdc.balanceOf(address(fundStore)), 0, "and the store keeps none of it");
@@ -425,7 +444,7 @@ contract ExitMatrixTest is HotPathTest {
         _i.header.feeToken = address(usdc);
         _i.header.fee = FEE;
         uint _backer = usdc.balanceOf(_account(_a));
-        uint _wallet = usdc.balanceOf(master);
+        uint _wallet = usdc.balanceOf(_ownerAccount());
         uint _fees = usdc.balanceOf(feeReceiver);
         hub.redeem(_i, _redeemSig(_i), _holders);
         assertEq(
@@ -438,7 +457,7 @@ contract ExitMatrixTest is HotPathTest {
             109_011_123,
             "the backer's quarter at the USDC line's price, less a tenth of its gain and one fee"
         );
-        assertEq(usdc.balanceOf(master) - _wallet, 138_627_642, "and the master's with its part of the backer's fee, paid last");
+        assertEq(usdc.balanceOf(_ownerAccount()) - _wallet, 138_627_642, "and the master's with its part of the backer's fee, paid last");
         assertEq(usdc.balanceOf(feeReceiver) - _fees, 2 * FEE, "the fee receiver takes the two fee slices in USDC");
         assertEq(usdc.balanceOf(protocolReceiver), 111_234, "and the protocol receiver the backer's cut, in USDC");
         assertEq(usdc.balanceOf(body), 899e6 - 249_749_999, "paid out of the fund's USDC");
@@ -468,12 +487,14 @@ contract ExitMatrixTest is HotPathTest {
         hub.redeem(_i, _redeemSig(_i), new address[](0));
         assertEq(fundStore.getRedemption(body).potLeft, 150e6, "the queue's pot is ring-fenced in USDC");
         assertEq(usdc.balanceOf(address(fundStore)), 150e6, "and held by the store");
+        _assertBooked();
 
         uint _before = usdc.balanceOf(_aAcct);
         _sell(_a, _aKey, 50e18);
         assertEq(usdc.balanceOf(_aAcct) - _before, 100e6 - FEE, "the sell pays A's open claim in USDC first, less its own relay fee");
         assertEq(fundStore.getRedemption(body).potLeft, 50e6, "leaving B's part in the pot");
         assertEq(usdc.balanceOf(address(fundStore)), 50e6, "and in the store");
+        assertEq(fundStore.bookedMap(body, address(usdc)), 50e6, "and in the fund's booking");
         assertEq(_queuedOf(_aAcct), 50e18, "A's new 50 waits for the next redemption");
     }
 
@@ -494,11 +515,9 @@ contract ExitMatrixTest is HotPathTest {
         hub.redeem(_i, _redeemSig(_i), new address[](0));
         ShareToken _usdcFund = shareToken;
         address _usdcMaster = master;
+        address _usdcBody = body;
 
-        (master, masterKey) = makeAddrAndKey("master-2");
-        (body, bodyKey) = makeAddrAndKey("body-2");
-        vm.signAndAttachDelegation(accountModule.bodyImpl(), bodyKey);
-        _open();
+        _openSecondFund();
         (address _b,) = _back("iso-b", 201e6, 1e12);
         _sellUsdcAway();
         vm.startPrank(body);
@@ -509,29 +528,171 @@ contract ExitMatrixTest is HotPathTest {
         hub.redeem(_i, _redeemSig(_i), new address[](0));
         assertEq(usdc.balanceOf(address(fundStore)), 224.75e6, "the store ring-fences the USDC fund's pot and master pay");
         assertEq(wnt.balanceOf(address(fundStore)), 174.75e18, "beside the WETH fund's");
+        assertEq(fundStore.bookedMap(_usdcBody, address(usdc)), 224.75e6, "each fund books its own pot and master pay");
+        assertEq(fundStore.bookedMap(body, address(wnt)), 174.75e18, "in its own payout token");
+        assertEq(
+            fundStore.bookedMap(_usdcBody, address(wnt)) + fundStore.bookedMap(body, address(usdc)),
+            0,
+            "and nothing in the other's"
+        );
 
         uint _bUsdc = usdc.balanceOf(_account(_b));
         uint _bWeth = wnt.balanceOf(_account(_b));
         uint _feeUsdc = usdc.balanceOf(feeReceiver);
         uint _feeWeth = wnt.balanceOf(feeReceiver);
-        uint _wallet = wnt.balanceOf(master);
+        uint _wallet = wnt.balanceOf(_ownerAccount());
         hub.redeemCohort(shareToken, _list(_account(_b)));
         assertEq(wnt.balanceOf(_account(_b)) - _bWeth, 49e18, "the WETH fund pays its backer in WETH");
         assertEq(usdc.balanceOf(_account(_b)), _bUsdc, "and nothing in USDC");
-        assertEq(wnt.balanceOf(master) - _wallet, 123.75e18, "and its master last, in WETH");
+        assertEq(wnt.balanceOf(_ownerAccount()) - _wallet, 123.75e18, "and its master last, in WETH");
         assertEq(wnt.balanceOf(address(fundStore)), 0, "emptying its WETH from the store");
+        assertEq(fundStore.bookedMap(body, address(wnt)), 0, "and its booking");
         assertEq(usdc.balanceOf(address(fundStore)), 224.75e6, "without touching the USDC fund's");
+        assertEq(fundStore.bookedMap(_usdcBody, address(usdc)), 224.75e6, "nor its booking");
 
         uint _aUsdc = usdc.balanceOf(_account(_a));
         uint _aWeth = wnt.balanceOf(_account(_a));
-        _wallet = usdc.balanceOf(_usdcMaster);
+        _wallet = usdc.balanceOf(accountModule.predictUserAccount(_usdcMaster));
         hub.redeemCohort(_usdcFund, _list(_account(_a)));
         assertEq(usdc.balanceOf(_account(_a)) - _aUsdc, 99e6, "the USDC fund pays its backer in USDC");
         assertEq(wnt.balanceOf(_account(_a)), _aWeth, "and nothing in WETH");
-        assertEq(usdc.balanceOf(_usdcMaster) - _wallet, 123.75e6, "and its master last, in USDC");
+        assertEq(usdc.balanceOf(accountModule.predictUserAccount(_usdcMaster)) - _wallet, 123.75e6, "and its master last, in USDC");
         assertEq(usdc.balanceOf(address(fundStore)), 0, "emptying the store");
+        assertEq(fundStore.bookedMap(_usdcBody, address(usdc)), 0, "and the USDC fund's booking");
         assertEq(usdc.balanceOf(feeReceiver) - _feeUsdc, 2 * FEE, "each cohort pays its fees in its own token");
         assertEq(wnt.balanceOf(feeReceiver) - _feeWeth, 2 * FEE * USD);
+    }
+
+    function test_the_open_books_exactly_its_pot_and_master_pay_and_every_payment_draws_that_booking_down_to_zero()
+        public
+    {
+        _open();
+        (address _a, uint _aKey) = _back("bk-a", 401e6, 1e12);
+        (address _b, uint _bKey) = _back("bk-b", 201e6, 0.5e12);
+        (address _c,) = _back("bk-c", 11e6, 1e12);
+        address _aAcct = _account(_a);
+        address _bAcct = _account(_b);
+        address _cAcct = _account(_c);
+        _sell(_a, _aKey, 100e18);
+        uint _cash = wnt.balanceOf(body);
+
+        _redeemAt(1000, 0, 1e12, new address[](0));
+        assertEq(
+            fundStore.bookedMap(body, address(wnt)),
+            220.9e18,
+            "the open books the queue's 100 and a tenth of the active 710, beside the master's 49.9"
+        );
+        _assertBooked();
+        assertEq(fundStore.bookedMap(body, address(usdc)), 0, "in its payout token alone");
+        assertEq(fundStore.heldMap(address(wnt)), 220.9e18, "the store owes exactly that");
+        assertEq(wnt.balanceOf(address(fundStore)), 220.9e18, "and holds it");
+        assertEq(_cash - wnt.balanceOf(body), 220.9e18, "out of the fund's cash");
+        assertEq(shareToken.pendingBurn(), 171e18, "the open budgets the queue and a tenth of the active shares to burn");
+
+        _sell(_b, _bKey, 10e18);
+        assertEq(wnt.balanceOf(_bAcct), 38e18, "a sell settles B's tenth first, 40 less a tenth of its 20 gain");
+        assertEq(wnt.balanceOf(protocolReceiver), 0.2e18);
+        assertEq(
+            fundStore.bookedMap(body, address(wnt)),
+            182.7e18,
+            "drawing the booking down by what it paid out, while the master's part of the fee stays booked"
+        );
+        _assertBooked();
+        assertEq(shareToken.pendingBurn(), 131e18, "and burning B's tenth out of the budget");
+
+        uint _fundCash = wnt.balanceOf(body);
+        hub.redeemCohort(shareToken, _list(_cAcct));
+        assertEq(wnt.balanceOf(_cAcct), 0, "C's tenth is worth one fee, so it is cut");
+        assertEq(wnt.balanceOf(body) - _fundCash, 1e18, "back to the fund");
+        assertEq(fundStore.bookedMap(body, address(wnt)), 181.7e18, "and out of the booking");
+        _assertBooked();
+
+        uint _fees = wnt.balanceOf(feeReceiver);
+        hub.redeemCohort(shareToken, _list(_aAcct));
+        assertEq(wnt.balanceOf(_aAcct), 129e18, "A is paid its queued 100 and its tenth of 300, less one fee");
+        assertEq(
+            wnt.balanceOf(_ownerAccount()),
+            50.7e18,
+            "the close-out pays the owner's account the master's 49.9 and 1.8 of B's fee, less one fee"
+        );
+        assertEq(wnt.balanceOf(feeReceiver) - _fees, 2e18, "the fee receiver takes A's fee slice and the master's");
+        assertEq(shareToken.pendingBurn(), 1e18, "C's cut tenth stays unburned");
+        _assertClosed();
+    }
+
+    function test_a_fund_never_pays_beyond_its_own_booking_while_another_funds_pot_in_the_same_token_sits_in_the_store()
+        public
+    {
+        _open();
+        (address _a, uint _aKey) = _back("ub-a", 401e6, 1e12);
+        address _aAcct = _account(_a);
+        _sell(_a, _aKey, 100e18);
+        _redeemAt(0, 0, 1e12, new address[](0));
+        address _firstBody = body;
+        ShareToken _firstShare = shareToken;
+
+        _openSecondFund();
+        (address _b, uint _bKey) = _back("ub-b", 201e6, 1e12);
+        address _bAcct = _account(_b);
+        _sell(_b, _bKey, 50e18);
+        _redeemAt(0, 0, 1e12, new address[](0));
+        assertEq(fundStore.bookedMap(_firstBody, address(wnt)), 100e18, "the first fund books its queue's pot");
+        assertEq(fundStore.bookedMap(body, address(wnt)), 50e18, "the second its own, in the same token");
+        assertEq(wnt.balanceOf(address(fundStore)), 150e18, "so the store holds both pots in one balance");
+
+        vm.expectRevert(abi.encodeWithSelector(Error.FundStore__Unbooked.selector, body, address(wnt), 50e18, 50e18 + 1));
+        vm.prank(address(redeemModule));
+        fundStore.pay(body, address(wnt), _bAcct, 50e18 + 1, 200_000);
+
+        FundStore.Redemption memory _booked = fundStore.getRedemption(body);
+        FundStore.Redemption memory _inflated = fundStore.getRedemption(body);
+        _inflated.potLeft = 150e18;
+        vm.prank(address(redeemModule));
+        fundStore.setRedemption(body, _inflated);
+        vm.expectRevert(abi.encodeWithSelector(Error.FundStore__Unbooked.selector, body, address(wnt), 50e18, 149e18));
+        hub.redeemCohort(shareToken, _list(_bAcct));
+        assertEq(wnt.balanceOf(address(fundStore)), 150e18, "a cohort whose pot outgrows its booking cannot reach the first fund's");
+
+        vm.prank(address(redeemModule));
+        fundStore.setRedemption(body, _booked);
+        hub.redeemCohort(shareToken, _list(_bAcct));
+        assertEq(wnt.balanceOf(_bAcct), 49e18, "the second fund pays its seller out of its own booking");
+        assertEq(fundStore.bookedMap(body, address(wnt)), 0, "spending it");
+        assertEq(fundStore.bookedMap(_firstBody, address(wnt)), 100e18, "while the first fund's stays whole");
+        assertEq(wnt.balanceOf(address(fundStore)), 100e18, "beside its tokens");
+
+        hub.redeemCohort(_firstShare, _list(_aAcct));
+        assertEq(wnt.balanceOf(_aAcct), 99e18, "and the first fund still pays its own seller in full");
+        assertEq(fundStore.bookedMap(_firstBody, address(wnt)), 0);
+        assertEq(fundStore.heldMap(address(wnt)), 0, "leaving the store owing nothing");
+        assertEq(wnt.balanceOf(address(fundStore)), 0, "and holding nothing");
+    }
+
+    function test_a_booking_the_store_never_received_reverts_the_open_even_while_it_holds_another_funds_pot() public {
+        _open();
+        (address _a, uint _aKey) = _back("uf-a", 401e6, 1e12);
+        _sell(_a, _aKey, 100e18);
+        _redeemAt(0, 0, 1e12, new address[](0));
+        assertEq(fundStore.heldMap(address(wnt)), 100e18, "the store owes the first fund's pot");
+
+        _openSecondFund();
+        (address _b, uint _bKey) = _back("uf-b", 201e6, 1e12);
+        _sell(_b, _bKey, 50e18);
+        Redeem.RedeemIntent memory _i = _intentAt(0, 0, 1e12);
+        bytes memory _sig = _redeemSig(_i);
+        vm.mockCall(address(wnt), abi.encodeWithSelector(IERC20.transfer.selector, address(fundStore)), abi.encode(true));
+        vm.expectRevert(abi.encodeWithSelector(Error.FundStore__Unfunded.selector, address(wnt), 100e18, 150e18));
+        hub.redeem(_i, _sig, new address[](0));
+        vm.clearMockedCalls();
+
+        hub.redeem(_i, _sig, new address[](0));
+        assertEq(fundStore.bookedMap(body, address(wnt)), 50e18, "once the pot arrives the open books it");
+        assertEq(fundStore.heldMap(address(wnt)), 150e18, "beside the first fund's");
+        assertEq(wnt.balanceOf(address(fundStore)), 150e18, "and the store holds both");
+
+        vm.expectRevert(abi.encodeWithSelector(Error.FundStore__Unfunded.selector, address(wnt), 150e18, 150e18 + 1));
+        vm.prank(address(redeemModule));
+        fundStore.book(body, address(wnt), 1);
     }
 
     function test_a_usdc_partial_exit_pays_the_masters_part_and_every_fee_in_usdc_on_the_hub() public {
@@ -553,7 +714,7 @@ contract ExitMatrixTest is HotPathTest {
         _i.header.fee = FEE;
         uint _aBefore = usdc.balanceOf(_account(_a));
         uint _bBefore = usdc.balanceOf(_account(_b));
-        uint _wallet = usdc.balanceOf(master);
+        uint _wallet = usdc.balanceOf(_ownerAccount());
         uint _fees = usdc.balanceOf(feeReceiver);
         hub.redeem(_i, _redeemSig(_i), _list(_account(_a), _account(_b)));
 
@@ -574,7 +735,7 @@ contract ExitMatrixTest is HotPathTest {
         );
         assertEq(usdc.balanceOf(_account(_b)) - _bBefore, _pot - _aPayout - _bFee - FEE, "B too");
         assertEq(
-            usdc.balanceOf(master) - _wallet,
+            usdc.balanceOf(_ownerAccount()) - _wallet,
             _masterPart + _aFee + _bFee - _cuts - FEE,
             "the master's half is paid on the hub in USDC at the open's price, with the backers' fee parts, less one fee"
         );
@@ -614,11 +775,11 @@ contract ExitMatrixTest is HotPathTest {
         uint _aBefore = usdc.balanceOf(_account(_a));
         uint _bBefore = usdc.balanceOf(_account(_b));
         uint _fees = usdc.balanceOf(feeReceiver);
-        uint _wallet = usdc.balanceOf(master);
+        uint _wallet = usdc.balanceOf(_ownerAccount());
         hub.redeem(_i, _redeemSig(_i), _list(_account(_a), _account(_b)));
         assertEq(usdc.balanceOf(_account(_a)) - _aBefore, 399e6, "A is paid 400/1099 of the hub USDC less one fee");
         assertEq(usdc.balanceOf(_account(_b)) - _bBefore, 199e6);
-        assertEq(usdc.balanceOf(master) - _wallet, 498e6, "the master everything else, last");
+        assertEq(usdc.balanceOf(_ownerAccount()) - _wallet, 498e6, "the master everything else, last");
         assertEq(usdc.balanceOf(feeReceiver) - _fees, 3e6);
         assertEq(shareToken.totalSupply(), 0, "every share burned");
         assertEq(usdc.balanceOf(body), 0, "and the hub USDC paid out in full");
@@ -671,7 +832,7 @@ contract ExitMatrixTest is HotPathTest {
         (address _b,) = _back("ml-b", 201e6, 1e12);
         _redeemAt(2000, 0, 1e12, _list(_account(_a)));
         assertEq(wnt.balanceOf(_account(_a)), 79e18);
-        assertEq(wnt.balanceOf(master), 0, "the master waits while B is owed");
+        assertEq(wnt.balanceOf(_ownerAccount()), 0, "the master waits while B is owed");
         assertEq(shareToken.balanceOf(body), 399.2e18, "though its fifth burned at the open");
         FundStore.Redemption memory _r = fundStore.getRedemption(body);
         assertEq(_r.masterPay, 99.8e18);
@@ -679,7 +840,7 @@ contract ExitMatrixTest is HotPathTest {
 
         hub.redeemCohort(shareToken, _list(_account(_b)));
         assertEq(wnt.balanceOf(_account(_b)), 39e18);
-        assertEq(wnt.balanceOf(master), 98.8e18, "and is paid in the cohort that settles the last claim");
+        assertEq(wnt.balanceOf(_ownerAccount()), 98.8e18, "and is paid in the cohort that settles the last claim");
         _assertClosed();
     }
 
@@ -692,45 +853,162 @@ contract ExitMatrixTest is HotPathTest {
         FundStore.Redemption memory _r = fundStore.getRedemption(body);
         assertEq(_r.owedLeft, 0, "nobody else is owed");
         assertTrue(isOpen(_r), "but the master's pay keeps it open");
-        assertEq(wnt.balanceOf(master), 0);
+        assertEq(wnt.balanceOf(_ownerAccount()), 0);
 
         hub.redeemCohort(shareToken, new address[](0));
-        assertEq(wnt.balanceOf(master), 98.8e18, "an empty cohort pays the master");
+        assertEq(wnt.balanceOf(_ownerAccount()), 98.8e18, "an empty cohort pays the master");
         assertEq(fundStore.getRedemption(body).queued, 10e18, "A's new sale waits for the next redemption");
         _assertClosed();
     }
 
-    function test_a_dust_payout_goes_wholly_to_the_fee_receiver_and_its_shares_still_burn() public {
+    function test_a_sell_ends_the_sellers_mandate_and_payee_for_that_fund_and_keeps_its_others() public {
+        _open();
+        (address _a, uint _aKey) = _back("md-a", 401e6, 1e12);
+        address _aAcct = _account(_a);
+        MandateLib.Mandate[] memory _elsewhere = new MandateLib.Mandate[](1);
+        _elsewhere[0] = MandateLib.Mandate({
+            master: makeAddr("another-fund"),
+            skin: MAX_SKIN,
+            allocationRate: 2500,
+            exitCap: 5000,
+            cooldownPeriod: 1 days,
+            expiry: block.timestamp + 30 days
+        });
+        _mandate(_a, _aKey, _elsewhere);
+        assertEq(
+            mandateStore.mandateMap(_aAcct, body),
+            keccak256(abi.encode(mandateLog[_aAcct][body], UserAccount(payable(_aAcct)).epoch())),
+            "the hub holds the backer's live mandate for the fund"
+        );
+
+        _sell(_a, _aKey, 100e18);
+        assertEq(mandateStore.mandateMap(_aAcct, body), bytes32(0), "a sell clears the seller's mandate for that fund");
+        assertEq(
+            mandateStore.mandateMap(_aAcct, _elsewhere[0].master),
+            keccak256(abi.encode(_elsewhere[0], UserAccount(payable(_aAcct)).epoch())),
+            "and leaves its mandate for another fund as it was"
+        );
+
+        (address _c, uint _cKey) = makeAddrAndKey("md-c");
+        _fundWallet(_c, 410e6);
+        MandateLib.Mandate[] memory _one = new MandateLib.Mandate[](1);
+        _one[0] = MandateLib.Mandate({
+            master: body, skin: MAX_SKIN, allocationRate: 5000, exitCap: 10_000, cooldownPeriod: 0, expiry: block.timestamp + 365 days
+        });
+        _mandate(_c, _cKey, _one);
+        address _cAcct = _account(_c);
+        Fund.Allocation[] memory _rows = new Fund.Allocation[](2);
+        (_rows[0], _rows[1]) = uint160(_aAcct) < uint160(_cAcct)
+            ? (_row(_aAcct, 100e6), _row(_cAcct, 100e6))
+            : (_row(_cAcct, 100e6), _row(_aAcct, 100e6));
+        uint _aShares = shareToken.balanceOf(_aAcct);
+        uint _aCash = usdc.balanceOf(_aAcct);
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(_nonceOf(body), _nav(), _rows);
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        assertEq(shareToken.balanceOf(_aAcct), _aShares, "so the next round skips the seller");
+        assertEq(usdc.balanceOf(_aAcct), _aCash, "and pulls nothing from it");
+        assertGt(shareToken.balanceOf(_cAcct), 0, "while it still mints a backer whose mandate is live");
+    }
+
+    function test_a_dust_claim_is_cut_back_to_the_fund_and_keeps_its_shares_and_queue() public {
         _open();
         (address _a, uint _aKey) = _back("d-a", 401e6, 1e12);
         (address _b, uint _bKey) = _back("d-b", 201e6, 1e12);
         _sell(_a, _aKey, 100e18);
         _sell(_b, _bKey, 0.5e18);
+        address[] memory _cohort = _list(_account(_b), _account(_a));
         uint _fees = wnt.balanceOf(feeReceiver);
-        _redeemAt(0, 0, 1e12, _list(_account(_b), _account(_a)));
-        assertEq(wnt.balanceOf(_account(_b)), 0, "a payout below one fee pays the holder nothing");
-        assertEq(shareToken.balanceOf(_account(_b)), 199.5e18, "its queued shares still burn");
-        assertEq(wnt.balanceOf(_account(_a)), 99e18);
-        assertEq(wnt.balanceOf(feeReceiver) - _fees, 1.5e18, "the dust payout goes to the fee receiver with A's fee");
+        uint _cash = wnt.balanceOf(body);
+        _redeemAt(0, 0, 1e12, _cohort);
+        assertEq(wnt.balanceOf(_cohort[0]), 0, "a claim worth at most one fee pays the holder nothing");
+        assertEq(shareToken.balanceOf(_cohort[0]), 200e18, "and burns none of its shares");
+        assertEq(_queuedOf(_cohort[0]), 0.5e18, "so it keeps its place in the queue");
+        assertEq(wnt.balanceOf(_cohort[1]), 99e18);
+        assertEq(wnt.balanceOf(feeReceiver) - _fees, 1e18, "the fee receiver takes only A's fee");
+        assertEq(_cash - wnt.balanceOf(body), 100e18, "and the dust claim's part comes back to the fund");
+        assertEq(fundStore.getRedemption(body).queued, 0.5e18);
         _assertClosed();
     }
 
-    function test_a_dust_payout_at_a_gain_still_splits_its_fee_and_leaves_the_rest_to_the_fee_receiver() public {
+    function test_a_dust_claim_at_a_gain_is_cut_without_a_fee_and_keeps_its_shares() public {
         _open();
         (address _a, uint _aKey) = _back("dg-a", 401e6, 1e12);
         (address _b, uint _bKey) = _back("dg-b", 201e6, 1e12);
         _sell(_a, _aKey, 100e18);
         _sell(_b, _bKey, 0.5e18);
+        address[] memory _cohort = _list(_account(_b), _account(_a));
         uint _fees = wnt.balanceOf(feeReceiver);
-        _redeemAt(0, 0, 1.2e12, _list(_account(_b), _account(_a)));
-        assertEq(wnt.balanceOf(_account(_b)), 0, "B's 0.6 less its 0.01 fee is below one fee, so B is paid nothing");
-        assertEq(shareToken.balanceOf(_account(_b)), 199.5e18, "its queued shares still burn");
-        assertEq(wnt.balanceOf(_account(_a)), 117e18);
-        assertEq(wnt.balanceOf(master), 0.809e18, "the master still takes its 0.009 of B's fee beside its 1.8 of A's, less one fee");
-        assertEq(
-            wnt.balanceOf(feeReceiver) - _fees, 2.59e18, "the fee receiver takes B's 0.59, A's fee slice and the master's fee slice"
+        uint _cash = wnt.balanceOf(body);
+        _redeemAt(0, 0, 1.2e12, _cohort);
+        assertEq(wnt.balanceOf(_cohort[0]), 0, "B's 0.6 less its 0.01 fee is at most one fee, so B is cut");
+        assertEq(shareToken.balanceOf(_cohort[0]), 200e18, "and keeps its shares");
+        assertEq(wnt.balanceOf(_cohort[1]), 117e18);
+        assertEq(wnt.balanceOf(_ownerAccount()), 0.8e18, "the master takes its 1.8 of A's fee, less one fee, and nothing of B's");
+        assertEq(wnt.balanceOf(feeReceiver) - _fees, 2e18, "the fee receiver takes A's fee slice and the master's");
+        assertEq(wnt.balanceOf(protocolReceiver), 0.2e18, "and the protocol receiver only A's 0.2 cut");
+        assertEq(_cash - wnt.balanceOf(body), 120e18, "B's 0.6 comes back to the fund");
+        _assertClosed();
+    }
+
+    function test_value_a_body_holds_before_its_first_shares_is_minted_to_the_master() public {
+        _escrowOnHub(address(usdc), 500e6);
+        _wethTo(body, 1 ether);
+        bytes32 _symbol = bytes32("EXV");
+        bytes memory _pixels = new bytes(GRID_BYTES);
+        shareToken = ShareToken(
+            address(
+                uint160(
+                    uint(
+                        keccak256(
+                            abi.encodePacked(
+                                bytes1(0xff),
+                                address(hub),
+                                bytes32(uint(uint160(body))),
+                                keccak256(
+                                    _cloneCode(
+                                        fundModule.shareImpl(), abi.encodePacked(body, _symbol, _pixels, uint16(PERFORMANCE_FEE))
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
         );
-        assertEq(wnt.balanceOf(protocolReceiver), 0.201e18, "and the protocol receiver B's 0.001 cut and A's 0.2 cut");
+        (Fund.AllocateIntent memory _i, bytes memory _sig) =
+            _allocateIntent(0, 1e6, _credit(block.chainid, address(usdc), 500e6), new Fund.Allocation[](0));
+        bytes32 _genesis = AccountLib.genesisDigest(address(accountModule), body, _account(master));
+        hub.createFund(_symbol, _pixels, _coSig(bodyKey, _genesis), _fundApproval(masterKey, body), _i, _sig, _ownerCoSig(_i));
+        assertEq(
+            shareToken.balanceOf(body),
+            500e18,
+            "the master is minted the 1 the body already held beside its 499 credit, at one share per unit"
+        );
+        (address _a,) = _back("vh-a", 101e6, 1e12);
+        assertEq(shareToken.balanceOf(_account(_a)), 100e18, "so a backer joins at that same price, owning none of it");
+    }
+
+    function test_identical_dust_claims_get_identical_outcomes_in_any_list_order() public {
+        _open();
+        (address _a, uint _aKey) = _back("o-a", 401e6, 1e12);
+        (address _b, uint _bKey) = _back("o-b", 201e6, 1e12);
+        (address _c, uint _cKey) = _back("o-c", 201e6, 1e12);
+        _sell(_a, _aKey, 100e18);
+        _sell(_b, _bKey, 0.6e18);
+        _sell(_c, _cKey, 0.6e18);
+        address[] memory _cohort = _list3(_account(_b), _account(_a), _account(_c));
+        uint _fees = wnt.balanceOf(feeReceiver);
+        uint _cash = wnt.balanceOf(body);
+        _redeemAt(0, 0, 1e12, _cohort);
+        assertEq(wnt.balanceOf(_cohort[1]), 99e18);
+        assertEq(wnt.balanceOf(_cohort[0]), 0, "B, listed while the pot is above one fee, is paid nothing");
+        assertEq(wnt.balanceOf(_cohort[2]), 0, "as C, reached once the pot is down to one fee");
+        assertEq(shareToken.balanceOf(_cohort[0]), 200e18, "and B keeps its shares");
+        assertEq(shareToken.balanceOf(_cohort[2]), 200e18, "as C does");
+        assertEq(_queuedOf(_cohort[0]), 0.6e18, "and its place in the queue");
+        assertEq(_queuedOf(_cohort[2]), 0.6e18);
+        assertEq(wnt.balanceOf(feeReceiver) - _fees, 1e18, "neither dust claim pays the fee receiver");
+        assertEq(_cash - wnt.balanceOf(body), 100e18, "both come back to the fund");
         _assertClosed();
     }
 
@@ -787,6 +1065,23 @@ contract ExitMatrixTest is HotPathTest {
         hub.redeem(_i, _sig, _first);
     }
 
+    function test_a_partial_master_exit_is_refused_while_the_queue_pot_is_at_most_one_fee() public {
+        _open();
+        (address _a, uint _aKey) = _back("jd-a", 401e6, 1e12);
+        address[] memory _queue = _list(_account(_a));
+        _sell(_a, _aKey, 0.5e18);
+        Redeem.RedeemIntent memory _i = _intentAt(0, 0.6e18, 1e12);
+        bytes memory _sig = _redeemSig(_i);
+        vm.expectRevert(abi.encodeWithSelector(Error.Redeem__Dust.selector, 0.5e18, 1e18));
+        hub.redeem(_i, _sig, _queue);
+
+        _sell(_a, _aKey, 1.5e18);
+        _i = _intentAt(0, 2e18, 1e12);
+        hub.redeem(_i, _redeemSig(_i), _queue);
+        assertEq(_queuedOf(_queue[0]), 0, "once the queue is worth more than one fee, the master exits beside it");
+        _assertClosed();
+    }
+
     function test_the_masters_fee_parts_join_its_own_part_at_the_close_and_the_store_ends_empty() public {
         _open();
         (address _u0,) = _back("mp-0", 401e6, 0.8e12);
@@ -813,12 +1108,13 @@ contract ExitMatrixTest is HotPathTest {
         for (uint _k; _k < 3; ++_k) {
             if (_k == 1) {
                 FundStore.Redemption memory _r = fundStore.getRedemption(body);
-                assertEq(wnt.balanceOf(master), 0, "the master waits while others are owed");
+                assertEq(wnt.balanceOf(_ownerAccount()), 0, "the master waits while others are owed");
                 assertEq(_r.potLeft, _potLeft, "the pot left is the pot less the first cohort's payout");
                 assertEq(_r.masterPay, _masterPay, "the master's pay holds its own part and the fee part so far");
                 assertEq(
                     wnt.balanceOf(address(fundStore)), _potLeft + _masterPay, "the store holds exactly the pot left and the master's pay"
                 );
+                _assertBooked();
                 hub.redeemCohort(shareToken, _list(_accts[2], _accts[1]));
             }
             uint _j = _order[_k];
@@ -836,7 +1132,7 @@ contract ExitMatrixTest is HotPathTest {
             _protocol += Math.mulDiv(_fee, PROTOCOL_FEE_SHARE, 10_000);
         }
         assertEq(_potLeft, 0);
-        assertEq(wnt.balanceOf(master), _masterPay - FEE * USD, "the close pays the master its own part with every fee part, less one fee");
+        assertEq(wnt.balanceOf(_ownerAccount()), _masterPay - FEE * USD, "the close pays the master its own part with every fee part, less one fee");
         assertEq(wnt.balanceOf(feeReceiver) - _fees, 4 * FEE * USD, "the fee receiver takes each holder's fee slice and the master's");
         assertEq(wnt.balanceOf(protocolReceiver), _protocol, "and the protocol receiver every cut");
         _assertClosed();
@@ -857,11 +1153,15 @@ contract ExitMatrixTest is HotPathTest {
         hub.redeem(_i, _sig, new address[](0));
 
         uint _fees = wnt.balanceOf(feeReceiver);
-        _v.assetList[0].value = _cash;
+        _v.assetList[0].value = _cash - 100e18;
         _i = _redeemIntent(10_000, 0, _v);
         hub.redeem(_i, _redeemSig(_i), _list(_account(_a)));
         uint _price = Math.mulDiv(_cash, PRICE_PRECISION, 1099e18);
-        assertEq(fundStore.getRedemption(body).price, _price, "a full exit prices a share at the hub cash over the supply");
+        assertEq(
+            fundStore.getRedemption(body).price,
+            _price,
+            "a full exit prices a share at the hub cash it pays over the supply, never at a lower signed valuation"
+        );
         uint _pot = Math.mulDiv(600e18, _cash, 1099e18);
         uint _aPaid = Math.mulDiv(_pot, 2, 3);
         uint _aFee = Math.mulDiv(_aPaid, PERFORMANCE_FEE * (_price - 1e12), _price * 10_000);
@@ -877,13 +1177,14 @@ contract ExitMatrixTest is HotPathTest {
             _pot - _aPaid + _cash - _pot + _aFee - _aCut,
             "the store holds exactly the pot left and the master's pay"
         );
+        _assertBooked();
 
         hub.redeemCohort(shareToken, _list(_account(_b)));
         uint _bFee = Math.mulDiv(_pot - _aPaid, PERFORMANCE_FEE * (_price - 1e12), _price * 10_000);
         uint _bCut = _bFee * PROTOCOL_FEE_SHARE / 10_000;
         assertEq(wnt.balanceOf(_account(_b)), _pot - _aPaid - _bFee - 1e18, "B the rest of the others' pot, less its own fee and one fee");
         assertEq(
-            wnt.balanceOf(master), _cash - _pot + _aFee - _aCut + _bFee - _bCut - 1e18, "the master everything else with both fee parts, last"
+            wnt.balanceOf(_ownerAccount()), _cash - _pot + _aFee - _aCut + _bFee - _bCut - 1e18, "the master everything else with both fee parts, last"
         );
         assertEq(wnt.balanceOf(feeReceiver) - _fees, 3e18, "the fee receiver takes the three fee slices");
         assertEq(wnt.balanceOf(protocolReceiver), _aCut + _bCut, "and the protocol receiver both cuts");
@@ -923,7 +1224,7 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(wnt.balanceOf(_account(_a)), _aPaid - _aFee - 1e18, "the backers are paid at the valuation, less their own fee");
         assertEq(wnt.balanceOf(_account(_b)), _pot - _aPaid - _bFee - 1e18);
         assertEq(
-            wnt.balanceOf(master),
+            wnt.balanceOf(_ownerAccount()),
             _masterPart + _aFee + _bFee - _cuts - 1e18,
             "the master's half is paid on the hub at the same price with the fee parts"
         );
@@ -960,7 +1261,7 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(wnt.balanceOf(_bAcct), _payout - _bFee - FEE * USD, "B pays the fee on its own doubling");
         assertEq(wnt.balanceOf(_bAcct), 379e18);
         uint _bCut = _bFee * PROTOCOL_FEE_SHARE / 10_000;
-        assertEq(wnt.balanceOf(master), _bFee - _bCut - FEE * USD, "the master's part of B's fee reaches the owner's wallet at the close");
+        assertEq(wnt.balanceOf(_ownerAccount()), _bFee - _bCut - FEE * USD, "the master's part of B's fee reaches the owner's account at the close");
         assertEq(wnt.balanceOf(feeReceiver) - _fees, 3 * FEE * USD, "the fee receiver takes the three fee slices");
         assertEq(wnt.balanceOf(protocolReceiver), _bCut, "and the protocol cut reaches the protocol receiver");
         assertEq(shareToken.totalSupply(), _supply - 800e18, "the exit only burns: no share is minted to pay a fee");
@@ -996,7 +1297,7 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(wnt.balanceOf(_bAcct), 299e18);
         uint _aCut = _aFee * PROTOCOL_FEE_SHARE / 10_000;
         assertEq(
-            wnt.balanceOf(master),
+            wnt.balanceOf(_ownerAccount()),
             Math.mulDiv(249.5e18, _price, PRICE_PRECISION) + _aFee - _aCut - FEE * USD,
             "the master's own half at 1.50 pays no fee and reaches the wallet with its part of A's fee"
         );
@@ -1021,7 +1322,7 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(wnt.balanceOf(_accts[1]), 79e18, "C at cost pays only the fee slice");
         assertEq(wnt.balanceOf(_accts[2]), 49e18, "L at a loss pays only the fee slice");
         assertEq(
-            wnt.balanceOf(master), 129.15e18, "the master's fifth, 99.8 at 1.25, pays no fee on its own gain and takes 5.4 of G's 6"
+            wnt.balanceOf(_ownerAccount()), 129.15e18, "the master's fifth, 99.8 at 1.25, pays no fee on its own gain and takes 5.4 of G's 6"
         );
         assertEq(wnt.balanceOf(feeReceiver) - _fees, 4e18, "the fee receiver takes the four fee slices");
         assertEq(wnt.balanceOf(protocolReceiver), 0.6e18, "and the protocol receiver G's 0.6 cut");
@@ -1036,7 +1337,7 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(wnt.balanceOf(_accts[1]) - 79e18, 159e18, "C at cost again pays only the fee slice");
         assertEq(wnt.balanceOf(_accts[2]) - 49e18, 99e18, "and L at a loss");
         assertEq(
-            wnt.balanceOf(master) - 129.15e18, 259.3e18, "the master's 199.6 joined at 1.25 pays no fee and takes 10.8 of G's 12"
+            wnt.balanceOf(_ownerAccount()) - 129.15e18, 259.3e18, "the master's 199.6 joined at 1.25 pays no fee and takes 10.8 of G's 12"
         );
         assertEq(wnt.balanceOf(feeReceiver) - _fees, 4e18, "the fee receiver again takes the four fee slices");
         assertEq(wnt.balanceOf(protocolReceiver) - 0.6e18, 1.2e18, "and the protocol receiver G's 1.2 cut");
@@ -1061,6 +1362,7 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(wnt.balanceOf(_aAcct), 100e18 - _cohortFee - FEE * USD);
         assertEq(_r.masterPay, 124.75e18 + _cohortFee - _cohortCut, "the master's pay holds its own quarter and its part of A's fee");
         assertEq(wnt.balanceOf(address(fundStore)), _r.potLeft + _r.masterPay, "the store holds exactly the pot left and the master's pay");
+        _assertBooked();
 
         uint _feeUsdc = usdc.balanceOf(feeReceiver);
         uint _feeWeth = wnt.balanceOf(feeReceiver);
@@ -1084,10 +1386,11 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(_after.owedLeft, 0);
         assertTrue(isOpen(_after), "which keeps the redemption open");
         assertEq(wnt.balanceOf(address(fundStore)), _after.masterPay, "the store holds exactly the master's pay");
+        _assertBooked();
         assertEq(_queuedOf(_bAcct), 50e18, "B's new sale waits for the next redemption");
 
         hub.redeemCohort(shareToken, new address[](0));
-        assertEq(wnt.balanceOf(master), 132.75e18, "an empty cohort pays the master its quarter and both fee parts, less one fee");
+        assertEq(wnt.balanceOf(_ownerAccount()), 132.75e18, "an empty cohort pays the master its quarter and both fee parts, less one fee");
         assertEq(wnt.balanceOf(feeReceiver) - _fees, 2e18, "the fee receiver took the two fee slices");
         assertEq(wnt.balanceOf(protocolReceiver), 1e18, "and the protocol receiver both 0.5 cuts");
         _assertClosed();
@@ -1135,6 +1438,53 @@ contract ExitMatrixTest is HotPathTest {
         assertEq(shareToken.balanceOf(_aAcct), 400e18);
     }
 
+    function test_only_the_redeem_proxy_burns_a_holders_shares_and_only_within_the_budget_the_master_sets() public {
+        _open();
+        (address _a,) = _back("bn-a", 401e6, 1e12);
+        address _aAcct = _account(_a);
+        assertEq(shareToken.burner(), address(redeemModule));
+        assertEq(shareToken.pendingBurn(), 0, "a fund that never redeemed has no burn budget");
+
+        vm.expectRevert(Error.ShareToken__Forbidden.selector);
+        vm.prank(_aAcct);
+        shareToken.allowBurn(1);
+        vm.expectRevert(Error.ShareToken__Forbidden.selector);
+        vm.prank(address(redeemModule));
+        shareToken.allowBurn(1);
+
+        vm.prank(body);
+        shareToken.allowBurn(5e18);
+        assertEq(shareToken.pendingBurn(), 5e18, "only the master sets the budget");
+        vm.prank(body);
+        shareToken.allowBurn(3e18);
+        assertEq(shareToken.pendingBurn(), 3e18, "and a later budget replaces it rather than adding to it");
+        assertEq(shareToken.burner(), address(redeemModule), "while the burner stays the Redeem proxy");
+
+        address[4] memory _others = [_aAcct, body, address(fundModule), address(hub)];
+        for (uint _k; _k < _others.length; ++_k) {
+            vm.expectRevert(Error.ShareToken__Forbidden.selector);
+            vm.prank(_others[_k]);
+            shareToken.burn(_aAcct, 1);
+        }
+        vm.expectRevert(Error.ShareToken__Forbidden.selector);
+        vm.prank(address(redeemModule));
+        shareToken.burn(_aAcct, 3e18 + 1);
+
+        vm.prank(address(redeemModule));
+        shareToken.burn(_aAcct, 2e18);
+        assertEq(shareToken.balanceOf(_aAcct), 398e18, "the Redeem proxy burns a holder's shares within the budget");
+        assertEq(shareToken.pendingBurn(), 1e18, "spending that much of it");
+        vm.prank(address(redeemModule));
+        shareToken.burn(_aAcct, 1e18);
+        assertEq(shareToken.pendingBurn(), 0, "down to nothing");
+        vm.expectRevert(Error.ShareToken__Forbidden.selector);
+        vm.prank(address(redeemModule));
+        shareToken.burn(_aAcct, 1);
+
+        vm.expectRevert(Error.ShareToken__Forbidden.selector);
+        new ShareToken(address(0));
+    }
+
     function test_the_cohort_cap_bounds_both_the_open_and_a_cohort() public {
         _open();
         address[] memory _many = new address[](101);
@@ -1147,6 +1497,109 @@ contract ExitMatrixTest is HotPathTest {
         bytes memory _sig = _redeemSig(_i);
         vm.expectRevert(abi.encodeWithSelector(Error.Gate__ListTooLong.selector, 101, 100));
         hub.redeem(_i, _sig, _many);
+    }
+
+    function _usdcRedemption() internal returns (Redeem.RedeemIntent memory intent_) {
+        vm.startPrank(body);
+        wnt.transfer(makeAddr("swapped-weth"), wnt.balanceOf(body));
+        vm.stopPrank();
+        uint _held = usdc.balanceOf(body);
+        Fund.Valuation memory _v;
+        _v.assetList = new Fund.Asset[](1);
+        _v.assetList[0] = Fund.Asset({chainId: block.chainid, token: address(usdc), id: 0, amount: _held, value: _held * 1e12});
+        _v.positionList = new Fund.Position[](0);
+        intent_ = _redeemIntent(2500, 0, _v);
+        intent_.token = address(usdc);
+        intent_.header.feeToken = address(usdc);
+        intent_.header.fee = FEE;
+    }
+
+    function test_a_holder_whose_payout_the_token_refuses_keeps_its_shares_and_queue_while_the_rest_are_paid_and_the_redemption_closes()
+        public
+    {
+        _open();
+        (address _a,) = _back("refused-a", 401e6, 1e12);
+        (address _b,) = _back("refused-b", 401e6, 1e12);
+        address _aAcct = _account(_a);
+        address _bAcct = _account(_b);
+        Redeem.RedeemIntent memory _i = _usdcRedemption();
+        address[] memory _holders = new address[](2);
+        (_holders[0], _holders[1]) = uint160(_aAcct) < uint160(_bAcct) ? (_aAcct, _bAcct) : (_bAcct, _aAcct);
+        vm.mockCallRevert(address(usdc), abi.encodeWithSelector(IERC20.transfer.selector, _aAcct), bytes("blocked"));
+        uint _aShares = shareToken.balanceOf(_aAcct);
+        uint _aQueued = fundStore.getHolding(body, _aAcct).queued;
+        uint _aCash = usdc.balanceOf(_aAcct);
+        uint _bCash = usdc.balanceOf(_bAcct);
+        uint _bShares = shareToken.balanceOf(_bAcct);
+        uint _ownerCash = usdc.balanceOf(_ownerAccount());
+        bytes memory _sig = _redeemSig(_i);
+        vm.recordLogs();
+        hub.redeem(_i, _sig, _holders);
+        Vm.Log[] memory _logs = vm.getRecordedLogs();
+
+        assertEq(shareToken.balanceOf(_aAcct), _aShares, "the holder the token refuses keeps every share");
+        assertEq(fundStore.getHolding(body, _aAcct).queued, _aQueued, "and its queue");
+        assertEq(usdc.balanceOf(_aAcct), _aCash, "and receives nothing");
+        assertGt(usdc.balanceOf(_bAcct), _bCash, "while the other holder is paid");
+        assertLt(shareToken.balanceOf(_bAcct), _bShares, "and burns its part");
+        assertGt(usdc.balanceOf(_ownerAccount()), _ownerCash, "the owner's close-out lands in the owner's account");
+        assertFalse(isOpen(fundStore.getRedemption(body)), "and one refused payee no longer holds the fund open");
+        assertEq(fundStore.bookedMap(body, address(usdc)), 0, "the refused share's cut spends its booking too");
+
+        (bytes memory _record,) = _execution(_logs, _aAcct, 0);
+        (,, uint _queued, uint _burned, uint _payout, uint _profitFee, uint _protocolCut,, bool _refused) =
+            abi.decode(_record, (bytes4, address, uint, uint, uint, uint, uint, FundStore.Redemption, bool));
+        assertTrue(_refused, "its record says the token refused the payout");
+        assertEq(_queued + _burned + _profitFee + _protocolCut, 0, "and that it burned and paid nothing");
+        assertGt(_payout, 0, "while naming the pot share that went back to the fund");
+        (_record,) = _execution(_logs, _bAcct, 0);
+        (,,,,,,,, _refused) = abi.decode(_record, (bytes4, address, uint, uint, uint, uint, uint, FundStore.Redemption, bool));
+        assertFalse(_refused, "a paid holder's record says it was not refused");
+        (bytes memory _owner,) = _execution(_logs, _ownerAccount(), 0);
+        (, address _master, address _token, uint _paid) = abi.decode(_owner, (bytes4, address, address, uint));
+        assertEq(_master, body, "the owner's record names its fund");
+        assertEq(_token, address(usdc), "and the token it was paid in");
+        assertEq(_paid, usdc.balanceOf(_ownerAccount()) - _ownerCash, "and exactly what reached the owner's account");
+        (bytes memory _close,) = _execution(_logs, body, 1);
+        (,, uint _cut,,) = abi.decode(_close, (bytes4, uint, uint, FundStore.Redemption, uint));
+        assertGe(_cut, _payout, "the refused share returns to the fund as a cut");
+    }
+
+    function test_a_payout_the_store_cannot_cover_still_reverts_and_is_never_taken_for_a_refusal() public {
+        _open();
+        (address _a,) = _back("short-a", 401e6, 1e12);
+        address _aAcct = _account(_a);
+        Redeem.RedeemIntent memory _i = _usdcRedemption();
+        hub.redeem(_i, _redeemSig(_i), new address[](0));
+        assertTrue(isOpen(fundStore.getRedemption(body)), "the open leaves the backer owed");
+        deal(address(usdc), address(fundStore), 0);
+        vm.mockCallRevert(address(usdc), abi.encodeWithSelector(IERC20.transfer.selector, _aAcct), bytes("blocked"));
+        address[] memory _holders = new address[](1);
+        _holders[0] = _aAcct;
+        try hub.redeemCohort(shareToken, _holders) {
+            revert("a payout the store could not cover settled");
+        } catch (bytes memory _reason) {
+            address _receiver;
+            assembly ("memory-safe") {
+                _receiver := mload(add(_reason, 68))
+            }
+            assertEq(bytes4(_reason), Error.TransferUtils__TokenTransferError.selector, "the holder's own transfer fails");
+            assertEq(_receiver, _aAcct, "and reverts the cohort as the holder's payout, never as a later cut");
+        }
+    }
+
+    function test_a_cohort_without_gas_for_a_whole_transfer_reverts_rather_than_take_the_payout_for_refused() public {
+        _open();
+        (address _a,) = _back("gas-a", 401e6, 1e12);
+        address _aAcct = _account(_a);
+        Redeem.RedeemIntent memory _i = _usdcRedemption();
+        hub.redeem(_i, _redeemSig(_i), new address[](0));
+        address[] memory _holders = new address[](1);
+        _holders[0] = _aAcct;
+        vm.expectPartialRevert(Error.Redeem__OutOfGas.selector);
+        hub.redeemCohort{gas: 300_000}(shareToken, _holders);
+        hub.redeemCohort(shareToken, _holders);
+        assertFalse(isOpen(fundStore.getRedemption(body)), "with gas for the transfer the same cohort settles and closes");
     }
 
     function _execution(
@@ -1239,7 +1692,7 @@ contract ExitMatrixTest is HotPathTest {
         (, uint _masterPayout, uint _cut, FundStore.Redemption memory _closed, uint _unburned) =
             abi.decode(_close, (bytes4, uint, uint, FundStore.Redemption, uint));
         assertEq(_masterPayout, 129.25e18, "the close-out record carries the master's part with every fee part");
-        assertEq(wnt.balanceOf(master), 128.25e18, "paid to the owner's wallet less one fee");
+        assertEq(wnt.balanceOf(_ownerAccount()), 128.25e18, "paid to the owner's account less one fee");
         assertEq(_cut, 0);
         assertEq(_unburned, shareToken.pendingBurn(), "the close-out record carries the burn budget left unspent");
         _assertSame(_closed, fundStore.getRedemption(body), "the close-out record carries the closed state");
@@ -1366,6 +1819,11 @@ contract ExitMatrixTest is HotPathTest {
             hub.redeem(_i, _sig, _head);
             return;
         }
+        if (!_full && _f.masterPart > 0 && _f.owed > 0 && _f.pot <= 1e18) {
+            vm.expectRevert(abi.encodeWithSelector(Error.Redeem__Dust.selector, _f.pot, 1e18));
+            hub.redeem(_i, _sig, _head);
+            return;
+        }
 
         uint[] memory _before = new uint[](_f.n);
         uint[] memory _held = new uint[](_f.n);
@@ -1375,7 +1833,7 @@ contract ExitMatrixTest is HotPathTest {
         }
         uint _fees = wnt.balanceOf(feeReceiver);
         uint _cuts = wnt.balanceOf(protocolReceiver);
-        uint _wallet = wnt.balanceOf(master);
+        uint _wallet = wnt.balanceOf(_ownerAccount());
         hub.redeem(_i, _sig, _head);
         assertEq(fundStore.getRedemption(body).price, _f.stored, "the open stores its value per share");
         bool[] memory _bySell = new bool[](_f.n);
@@ -1394,17 +1852,18 @@ contract ExitMatrixTest is HotPathTest {
         });
         uint[] memory _expected = new uint[](_f.n);
         bool[] memory _settled = new bool[](_f.n);
+        bool[] memory _kept = new bool[](_f.n);
+        uint _owedAtCall = _f.owed;
         for (uint _k; _k <= _f.n; ++_k) {
             if (_k == _f.first || _k == _f.n) {
-                bool _cutting = _s.owedLeft > 0 && _s.potLeft <= 1e18;
-                if (_cutting) {
-                    _s.cutBack = _s.potLeft;
+                if (_s.owedLeft > 0 && _s.potLeft <= 1e18) {
+                    _s.cutBack += _s.potLeft;
                     _s.owedLeft = 0;
                     _s.potLeft = 0;
                 }
-                if (_cutting || (_s.owedLeft == 0 && _s.masterPay > 0)) {
+                if (_s.owedLeft == 0 && (_owedAtCall > 0 || _s.masterPay > 0)) {
                     _s.fees += Math.min(_s.masterPay, 1e18);
-                    _s.master = _s.masterPay - Math.min(_s.masterPay, 1e18);
+                    _s.master += _s.masterPay - Math.min(_s.masterPay, 1e18);
                     _s.masterPay = 0;
                 }
             }
@@ -1423,6 +1882,7 @@ contract ExitMatrixTest is HotPathTest {
                     _expected[_sold] = _payout - _fee;
                     _settled[_sold] = true;
                 }
+                _owedAtCall = _s.owedLeft;
             }
             if (_k == _f.n || _s.potLeft <= 1e18) continue;
             uint _j = _order[_k];
@@ -1432,13 +1892,14 @@ contract ExitMatrixTest is HotPathTest {
             uint _fee = _cost < _f.stored ? Math.mulDiv(_payout, PERFORMANCE_FEE * (_f.stored - _cost), _f.stored * 10_000) : 0;
             _s.potLeft -= _payout;
             _s.owedLeft -= _claim[_j];
-            _s.masterPay += _fee - Math.mulDiv(_fee, PROTOCOL_FEE_SHARE, 10_000);
-            _s.cuts += Math.mulDiv(_fee, PROTOCOL_FEE_SHARE, 10_000);
             if (_payout - _fee > 1e18) {
+                _s.masterPay += _fee - Math.mulDiv(_fee, PROTOCOL_FEE_SHARE, 10_000);
+                _s.cuts += Math.mulDiv(_fee, PROTOCOL_FEE_SHARE, 10_000);
                 _s.fees += 1e18;
                 _expected[_j] = _payout - _fee - 1e18;
             } else {
-                _s.fees += _payout - _fee;
+                _s.cutBack += _payout;
+                _kept[_j] = true;
             }
             _settled[_j] = true;
         }
@@ -1448,65 +1909,22 @@ contract ExitMatrixTest is HotPathTest {
             assertEq(_got, _expected[_j], "every holder is paid its share of the one pot, less its own fee and one fee");
             assertEq(
                 _held[_j] - shareToken.balanceOf(_holders[_j]),
-                _settled[_j] ? _burn[_j] : 0,
-                "and burns its queue and its fraction once settled, while a cut tail keeps its shares"
+                _settled[_j] && !_kept[_j] ? _burn[_j] : 0,
+                "and burns its queue and its fraction once paid, while every cut claim keeps its shares"
             );
             _s.paidOut += _got;
-            if (_settled[_j]) _s.burned += _burn[_j];
+            if (_settled[_j] && !_kept[_j]) _s.burned += _burn[_j];
         }
-        assertEq(wnt.balanceOf(feeReceiver) - _fees, _s.fees, "the fee receiver takes every fee slice and every dust payout");
+        assertEq(wnt.balanceOf(feeReceiver) - _fees, _s.fees, "the fee receiver takes one fee slice per paid claim and the master's");
         assertEq(wnt.balanceOf(protocolReceiver) - _cuts, _s.cuts, "the protocol receiver takes every cut");
-        assertEq(wnt.balanceOf(master) - _wallet, _s.master, "the owner's wallet takes the master's part and every fee part, less one fee");
-        assertEq(wnt.balanceOf(body), _f.cash - _f.pot - _f.masterPay + _s.cutBack, "only a cut tail comes back to the fund");
+        assertEq(wnt.balanceOf(_ownerAccount()) - _wallet, _s.master, "the owner's account takes the master's part and every fee part, less one fee");
+        assertEq(wnt.balanceOf(body), _f.cash - _f.pot - _f.masterPay + _s.cutBack, "only cut claims come back to the fund");
         assertEq(shareToken.totalSupply(), _f.supply - _f.masterPart - _s.burned, "shares burn exactly as paid");
         assertEq(
             _s.paidOut + (wnt.balanceOf(feeReceiver) - _fees) + (wnt.balanceOf(protocolReceiver) - _cuts)
-                + (wnt.balanceOf(master) - _wallet) + _s.cutBack,
+                + (wnt.balanceOf(_ownerAccount()) - _wallet) + _s.cutBack,
             _f.pot + _f.masterPay,
-            "every wei of the pot and the master's part reaches a holder, the owner, the fee receiver or the protocol receiver, or comes back as a cut tail"
-        );
-    }
-
-    function _fulfilTo(
-        address _body,
-        bytes32 _round,
-        uint _from,
-        uint _total,
-        AccountLib.Genesis memory _genesis
-    ) internal {
-        spoke.fulfil(
-            _body,
-            address(usdc),
-            _round,
-            _from,
-            _total,
-            FEE,
-            _coSig(
-                attestorKey,
-                AccountLib.typedDigest(
-                    block.chainid,
-                    _body,
-                    keccak256(abi.encode(FULFIL_TYPEHASH, address(spokeEscrowStore), address(usdc), _round, _from, _total, FEE))
-                )
-            ),
-            _genesis
-        );
-    }
-
-    function _returnSig(
-        EscrowStore _store,
-        address _owner,
-        uint _from,
-        uint _total,
-        uint _deadline
-    ) internal view returns (bytes memory) {
-        return _coSig(
-            attestorKey,
-            AccountLib.typedDigest(
-                block.chainid,
-                _owner,
-                keccak256(abi.encode(RETURN_ESCROW_TYPEHASH, address(_store), address(usdc), _from, _total, _deadline))
-            )
+            "every wei of the pot and the master's part reaches a holder, the owner, the fee receiver or the protocol receiver, or comes back as a cut"
         );
     }
 
@@ -1515,78 +1933,158 @@ contract ExitMatrixTest is HotPathTest {
         address _owner = _account(master);
         _depositEscrow(address(usdc), 100e6);
         (address _fresh, uint _freshKey) = makeAddrAndKey("fresh-body");
-        bytes32 _round = keccak256("fresh-round");
-
         address _other = _account(backer);
-        bytes32 _g = AccountLib.genesisDigest(address(accountModule), _fresh, _other);
-        AccountLib.Genesis memory _wrong =
-            AccountLib.Genesis({parent: _other, key: _coSig(_freshKey, _g), approval: _fundApproval(backerKey, _fresh)});
-        vm.signAndAttachDelegation(accountModule.bodyImpl(), _freshKey);
-        vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 0, 50e6));
-        _fulfilTo(_fresh, _round, 0, 50e6, _wrong);
+        AccountLib.Genesis memory _wrong = AccountLib.Genesis({
+            parent: _other,
+            key: _coSig(_freshKey, AccountLib.genesisDigest(address(accountModule), _fresh, _other)),
+            approval: _fundApproval(backerKey, _fresh)
+        });
+        AccountLib.Genesis memory _right = AccountLib.Genesis({
+            parent: _owner,
+            key: _coSig(_freshKey, AccountLib.genesisDigest(address(accountModule), _fresh, _owner)),
+            approval: _fundApproval(masterKey, _fresh)
+        });
+        bytes memory _ownerSig =
+            _coSig(masterKey, AccountLib.creditDigest(_owner, _fresh, FOREIGN_CHAIN_ID, address(usdc), 50e6, FEE));
+        bytes memory _otherSig =
+            _coSig(backerKey, AccountLib.creditDigest(_other, _fresh, FOREIGN_CHAIN_ID, address(usdc), 50e6, FEE));
+        address _bodyImpl = accountModule.bodyImpl();
 
-        _g = AccountLib.genesisDigest(address(accountModule), _fresh, _owner);
-        AccountLib.Genesis memory _right =
-            AccountLib.Genesis({parent: _owner, key: _coSig(_freshKey, _g), approval: _fundApproval(masterKey, _fresh)});
-        vm.signAndAttachDelegation(accountModule.bodyImpl(), _freshKey);
-        _fulfilTo(_fresh, _round, 0, 50e6, _right);
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.signAndAttachDelegation(_bodyImpl, _freshKey);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(_fresh, address(usdc), 50e6, FEE, _ownerSig, _wrong);
+        vm.signAndAttachDelegation(_bodyImpl, _freshKey);
+        vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 0, 50e6));
+        spoke.fulfil(_fresh, address(usdc), 50e6, FEE, _otherSig, _wrong);
+        vm.signAndAttachDelegation(_bodyImpl, _freshKey);
+        spoke.fulfil(_fresh, address(usdc), 50e6, FEE, _ownerSig, _right);
+        vm.chainId(HUB_CHAIN);
         (, address _bound) = FundAccount(payable(_fresh)).bound();
-        assertEq(_bound, _owner, "the first fulfil binds the fresh fund to its owner");
+        assertEq(_bound, _owner, "the first fulfil binds the fresh fund to the owner whose signed total it carries");
         assertEq(usdc.balanceOf(_fresh), 50e6 - FEE, "and releases that owner's escrow to it net of the fee");
         assertEq(spokeEscrowStore.fulfilledMap(_owner, _fresh, address(usdc)), 50e6, "the per-fund total tracks its credit");
 
+        bytes memory _over = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 60e6, FEE);
+        vm.chainId(FOREIGN_CHAIN_ID);
         vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 50e6, 60e6));
-        _fulfilTo(body, _round, 0, 60e6, _noGenesis());
-        _fulfilTo(body, _round, 0, 50e6, _noGenesis());
+        spoke.fulfil(body, address(usdc), 60e6, FEE, _over, _noGenesis());
+        vm.chainId(HUB_CHAIN);
+        _fulfil(address(usdc), 50e6, FEE);
         assertEq(spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)), 50e6, "each fund keeps its own total");
         assertEq(spokeEscrowStore.releasedMap(_owner, address(usdc)), 100e6, "and the owner total never passes the escrow");
     }
 
-    function _returnsTheRestOnlyOnTheAttestorSignature(
+    function _settleOwnerTotal(
+        LiquidityGate _gate,
+        uint _increment,
+        bytes memory _revert
+    ) internal {
+        if (address(_gate) == address(spoke)) {
+            address _owner = _account(master);
+            uint _total = spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)) + _increment;
+            uint _feeTotal = spokeEscrowStore.feePaidMap(_owner, body, address(usdc)) + FEE;
+            bytes memory _signature = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), _total, _feeTotal);
+            vm.chainId(FOREIGN_CHAIN_ID);
+            if (_revert.length > 0) vm.expectRevert(_revert);
+            spoke.fulfil(body, address(usdc), _total, _feeTotal, _signature, _noGenesis());
+            vm.chainId(HUB_CHAIN);
+            return;
+        }
+        (Fund.AllocateIntent memory _i,) = _allocateIntent(
+            _nonceOf(body), _nav(), _credit(block.chainid, address(usdc), _increment), new Fund.Allocation[](0)
+        );
+        _i.header.deadline = vm.getBlockTimestamp() + 300;
+        bytes memory _sig = _pair(masterKey, _allocateDigest(_i));
+        bytes memory _ownerSig = _ownerCoSig(_i);
+        if (_revert.length > 0) vm.expectRevert(_revert);
+        hub.allocate(_i, _sig, _ownerSig);
+    }
+
+    function _returnsOnlyTheOpenRestADayAfterTheRequest(
         LiquidityGate _gate,
         EscrowStore _store
     ) internal {
         address _owner = _account(master);
         uint _wallet = usdc.balanceOf(master);
         uint _escrowed = _store.escrowedMap(_owner, address(usdc));
-        uint _deadline = vm.getBlockTimestamp() + 300;
-        vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 40e6, 41e6));
-        _gate.returnEscrow(_owner, address(usdc), 0, 41e6, _deadline, _returnSig(_store, _owner, 0, 41e6, _deadline));
+        assertEq(
+            _escrowed - _store.releasedMap(_owner, address(usdc)) - _store.returnedMap(_owner, address(usdc)),
+            40e6,
+            "the owner has 40 of its escrow open"
+        );
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, 0));
+        vm.prank(master);
+        _gate.returnEscrow(address(usdc));
 
-        bytes memory _dropped = _returnSig(_store, _owner, 0, 40e6, _deadline);
-        vm.warp(_deadline + 1);
-        vm.expectRevert(abi.encodeWithSelector(Error.Intent__ExpiredDeadline.selector, _deadline, _deadline + 1));
-        _gate.returnEscrow(_owner, address(usdc), 0, 40e6, _deadline, _dropped);
+        uint _requestedAt = vm.getBlockTimestamp();
+        vm.recordLogs();
+        vm.prank(master);
+        _gate.requestReturn(address(usdc));
+        (bytes memory _record,) = _execution(vm.getRecordedLogs(), _owner, 0);
+        (,, uint _returnAt) = abi.decode(_record, (bytes4, address, uint));
+        assertEq(_returnAt, _requestedAt + ESCROW_RETURN_DELAY, "a request records the return opening one day later");
+        assertEq(_store.returnAtMap(_owner, address(usdc)), _returnAt);
 
-        _deadline = vm.getBlockTimestamp() + 300;
-        bytes memory _rest = _returnSig(_store, _owner, 0, 40e6, _deadline);
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        _gate.returnEscrow(_owner, address(usdc), 0, 40e6, _deadline, _coSig(masterKey, keccak256("not-the-attestor")));
-        _gate.returnEscrow(_owner, address(usdc), 0, 40e6, _deadline, _rest);
-        assertEq(usdc.balanceOf(master) - _wallet, 40e6, "the unreleased rest returns to the owner's wallet");
-        assertEq(_store.returnedMap(_owner, address(usdc)), 40e6, "as a running total");
+        vm.warp(_returnAt - 1);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, _returnAt));
+        vm.prank(master);
+        _gate.returnEscrow(address(usdc));
+        _settleOwnerTotal(_gate, 15e6, "");
+
+        vm.warp(_returnAt);
+        vm.recordLogs();
+        vm.prank(master);
+        _gate.returnEscrow(address(usdc));
+        (_record,) = _execution(vm.getRecordedLogs(), _owner, 0);
+        (,, uint _returned) = abi.decode(_record, (bytes4, address, uint));
+        assertEq(
+            usdc.balanceOf(master) - _wallet,
+            25e6,
+            "a day on, only the escrow still open returns to the wallet, never the total the owner signed during the day"
+        );
+        assertEq(_returned, 25e6, "the record carries the returned running total");
+        assertEq(_store.returnedMap(_owner, address(usdc)), 25e6, "as the store keeps it");
         assertEq(_store.escrowedMap(_owner, address(usdc)), _escrowed, "while the escrowed total never falls");
+        assertEq(_store.returnAtMap(_owner, address(usdc)), 0, "and the request is spent");
 
-        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidReturn.selector, 40e6, 40e6));
-        _gate.returnEscrow(_owner, address(usdc), 0, 40e6, _deadline, _rest);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, 0));
+        vm.prank(master);
+        _gate.returnEscrow(address(usdc));
+        _settleOwnerTotal(_gate, 20e6, abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 0, 20e6));
+
         usdc.mint(master, 40e6);
         vm.startPrank(master);
         usdc.approve(address(depositModule), 40e6);
         _gate.depositEscrow(address(usdc), 40e6);
         vm.stopPrank();
-        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidReturn.selector, 40e6, 40e6));
-        _gate.returnEscrow(_owner, address(usdc), 0, 40e6, _deadline, _rest);
-        assertEq(usdc.balanceOf(master) - _wallet, 40e6, "a fresh deposit never revives a spent return signature");
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, 0));
+        vm.prank(master);
+        _gate.returnEscrow(address(usdc));
+        vm.prank(master);
+        _gate.requestReturn(address(usdc));
+        vm.warp(_returnAt + ESCROW_RETURN_DELAY);
+        vm.prank(master);
+        _gate.returnEscrow(address(usdc));
+        assertEq(usdc.balanceOf(master) - _wallet, 65e6, "a fresh deposit returns only on a request of its own, a day later");
+        assertEq(_store.returnedMap(_owner, address(usdc)), 65e6);
+
+        vm.prank(master);
+        _gate.requestReturn(address(usdc));
+        vm.warp(_returnAt + 2 * ESCROW_RETURN_DELAY);
+        vm.expectRevert(Error.Balance__NothingToWithdraw.selector);
+        vm.prank(master);
+        _gate.returnEscrow(address(usdc));
     }
 
-    function test_an_owner_escrow_returns_to_its_wallet_only_on_the_attestor_signature_with_running_totals_on_both_gates() public {
+    function test_an_owner_escrow_returns_only_its_open_rest_to_the_wallet_a_day_after_the_request_on_both_gates() public {
         _open();
         _depositEscrow(address(usdc), 100e6);
-        _fulfilTo(body, keccak256("round"), 0, 60e6, _noGenesis());
-        _returnsTheRestOnlyOnTheAttestorSignature(LiquidityGate(address(spoke)), spokeEscrowStore);
+        _fulfil(address(usdc), 60e6, FEE);
+        _returnsOnlyTheOpenRestADayAfterTheRequest(LiquidityGate(address(spoke)), spokeEscrowStore);
 
         assertEq(hubEscrowStore.releasedMap(_account(master), address(usdc)), 500e6, "the opening round released the hub escrow");
         _escrowOnHub(address(usdc), 40e6);
-        _returnsTheRestOnlyOnTheAttestorSignature(LiquidityGate(address(hub)), hubEscrowStore);
+        _returnsOnlyTheOpenRestADayAfterTheRequest(LiquidityGate(address(hub)), hubEscrowStore);
     }
 }

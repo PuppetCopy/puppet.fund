@@ -3,6 +3,7 @@ pragma solidity ^0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+import {ECDSA} from "solady/utils/ECDSA.sol";
 
 import {Access} from "../utils/auth/Access.sol";
 import {AccountLib} from "../utils/AccountLib.sol";
@@ -14,9 +15,10 @@ import {IntentLib, RATE_PRECISION} from "../utils/IntentLib.sol";
 import {IAccount} from "../utils/interfaces/IAccount.sol";
 import {AccountModule} from "./AccountModule.sol";
 import {EscrowStore} from "./EscrowStore.sol";
-import {MandateStore} from "./MandateStore.sol";
 import {FundAccount} from "./FundAccount.sol";
 import {FundStore, isOpen} from "./FundStore.sol";
+import {MandateStore} from "./MandateStore.sol";
+import {UserAccount} from "./UserAccount.sol";
 import {GateConfig} from "../utils/GateConfig.sol";
 import {ShareToken} from "./ShareToken.sol";
 
@@ -48,14 +50,14 @@ contract Fund is Access {
     struct Allocation {
         address puppet;
         MandateLib.Mandate mandate;
-        bytes signature;
         uint amount;
     }
 
     struct Credit {
         uint chainId;
         address token;
-        uint amount;
+        uint total;
+        uint feeTotal;
     }
 
     struct Price {
@@ -109,7 +111,7 @@ contract Fund is Access {
         bytes32 _structHash,
         uint _valuation,
         bytes calldata _coSig,
-        bytes calldata _ownerCoSig,
+        bytes calldata _ownerSignature,
         GateConfig calldata _config
     ) external auth {
         address _master = _intent.header.account;
@@ -126,14 +128,15 @@ contract Fund is Access {
         FundStore.Redemption memory _redemption = fundStore.getRedemption(_master);
         if (isOpen(_redemption)) revert Error.Redeem__Open(_redemption.id);
         uint _exiting = Math.mulDiv(_redemption.queued, RATE_PRECISION, _supply, Math.Rounding.Ceil);
-        uint _masterLeg = _intent.credit.amount > 0 ? 1 : 0;
+        uint _masterLeg = _intent.credit.total > 0 ? 1 : 0;
         if (_len + _masterLeg == 0) revert Error.Balance__ZeroAmount();
         address _owner = FundAccount(payable(_master)).parent();
         uint _slice = _intent.header.fee / (_len + _masterLeg);
 
         IAccount.Call[] memory _legs = new IAccount.Call[](_len + 2);
         uint _n;
-        uint _minted;
+        uint _existing = _supply == VIRTUAL_SHARES ? Math.mulDiv(_valuation, VIRTUAL_SHARES, VIRTUAL_VALUE) : 0;
+        uint _minted = _existing;
         uint _masterBilled;
         if (_masterLeg > 0) {
             Credit calldata _credit = _intent.credit;
@@ -141,32 +144,52 @@ contract Fund is Access {
             if (_local && _credit.token != _intent.token) {
                 revert Error.Fund__CreditTokenMismatch(_credit.token, _intent.token);
             }
-            uint _creditValue = Math.mulDiv(_credit.amount, _price.value, _price.amount);
-            _masterBilled = Math.mulDiv(_slice, _price.amount, _price.value, Math.Rounding.Ceil);
-            IntentLib.verifyRelayFeeRatio(_masterBilled, _credit.amount, _config.maxRelayFeeBps);
-            uint _fulfilledTotal = escrowStore.fulfilledMap(_owner, _master, _credit.token) + (_local ? _credit.amount : 0);
-            accountModule.dispatch(
-                IAccount(_owner),
-                _config.attestor,
-                _structHash,
-                _intent.header.deadline,
-                _ownerCoSig,
-                abi.encode(msg.sig, _master, _credit, _masterBilled, _fulfilledTotal),
-                new IAccount.Call[](0),
-                new address[](0)
+            FundStore.Credit memory _credited = _local
+                ? FundStore.Credit({
+                    total: escrowStore.fulfilledMap(_owner, _master, _credit.token),
+                    feeTotal: escrowStore.feePaidMap(_owner, _master, _credit.token)
+                })
+                : fundStore.getCredit(_master, _credit.chainId, _credit.token);
+            if (_credit.total <= _credited.total) revert Error.Fund__CreditNotIncreasing(_credited.total, _credit.total);
+            uint _amount = _credit.total - _credited.total;
+            _masterBilled = Math.mulDiv(_slice, _price.amount, _price.value);
+            if (_credit.feeTotal != _credited.feeTotal + _masterBilled) {
+                revert Error.Fund__CreditFeeMismatch(_credit.feeTotal, _credited.feeTotal + _masterBilled);
+            }
+            IntentLib.verifyRelayFeeRatio(_masterBilled, _amount, _config.maxRelayFeeBps);
+            bytes32 _digest = AccountLib.creditDigest(
+                _owner, _master, _credit.chainId, _credit.token, _credit.total, _credit.feeTotal
             );
+            if (
+                _local
+                    ? !UserAccount(payable(_owner)).approves(_digest, _ownerSignature)
+                    : ECDSA.tryRecoverCalldata(_digest, _ownerSignature) != UserAccount(payable(_owner)).user()
+            ) revert Error.Account__InvalidSignature();
+            accountModule.record(_owner, _digest, abi.encode(msg.sig, _master, _credit), new address[](0));
             if (_local) {
                 escrowStore.release(
-                    _owner, _master, _credit.token, _fulfilledTotal, _masterBilled, _config.transferGasLimit
+                    _owner,
+                    _master,
+                    _credit.token,
+                    _credit.total,
+                    _credit.feeTotal,
+                    _config.feeReceiver,
+                    _config.transferGasLimit
+                );
+            } else {
+                fundStore.setCredit(
+                    _master, _credit.chainId, _credit.token, FundStore.Credit({total: _credit.total, feeTotal: _credit.feeTotal})
                 );
             }
-            uint _contributed = Math.mulDiv(_creditValue - _slice, _supply, _nav);
-            _legs[_n++] = IAccount.Call({
-                target: address(_shareToken), value: 0, gasLimit: 0, callData: abi.encodeCall(ShareToken.mint, (_master, _contributed))
-            });
-            _masterShares += _contributed;
-            _minted += _contributed;
+            _minted += Math.mulDiv(Math.mulDiv(_amount, _price.value, _price.amount) - _slice, _supply + _existing, _nav);
         }
+        if (_minted > 0) {
+            _legs[_n++] = IAccount.Call({
+                target: address(_shareToken), value: 0, gasLimit: 0, callData: abi.encodeCall(ShareToken.mint, (_master, _minted))
+            });
+        }
+        _masterShares += _minted;
+        uint _first = _n;
         address _prev;
         for (uint _i; _i < _len; ++_i) {
             Allocation calldata _row = _intent.allocationList[_i];
@@ -174,10 +197,17 @@ contract Fund is Access {
             if (uint160(_puppet) <= uint160(_prev)) revert Error.Fund__AllocationListNotSorted(_prev, _puppet);
             _prev = _puppet;
             if (_puppet == _owner) continue;
+            if (accountModule.predictUserAccount(UserAccount(payable(_puppet)).user()) != _puppet) {
+                revert Error.Fund__NotAccount(_puppet);
+            }
             uint _value = Math.mulDiv(_row.amount, _price.value, _price.amount);
             if (_slice * RATE_PRECISION >= _value * _config.maxRelayFeeBps) continue;
             MandateLib.Mandate calldata _mandate = _row.mandate;
-            if (mandateStore.mandateMap(_puppet, _master) != MandateLib.digest(_puppet, _mandate) || _mandate.expiry <= block.timestamp) {
+            if (
+                mandateStore.mandateMap(_puppet, _master)
+                    != keccak256(abi.encode(_mandate, UserAccount(payable(_puppet)).epoch()))
+                    || _mandate.expiry <= block.timestamp
+            ) {
                 continue;
             }
             FundStore.Holding memory _holding = fundStore.getHolding(_master, _puppet);
@@ -186,10 +216,11 @@ contract Fund is Access {
             }
             uint _stake = _shareToken.balanceOf(_puppet);
             uint _open = _mandate.exitCap > _exiting ? _mandate.exitCap - _exiting : 0;
-            uint _rateRoom =
-                Math.mulDiv(BalanceLib.balanceOf(_intent.token, _puppet), _price.value, _price.amount) * _mandate.allocationRate;
+            uint _balance = BalanceLib.balanceOf(_intent.token, _puppet);
+            if (_row.amount * RATE_PRECISION > _balance * _mandate.allocationRate) continue;
+            uint _rateRoom = Math.mulDiv(_balance, _price.value, _price.amount) * _mandate.allocationRate;
             if (_open == 0 || _value * RATE_PRECISION * _mandate.exitCap > _rateRoom * _open) continue;
-            uint _shares = Math.mulDiv(_value - _slice, _supply, _nav);
+            uint _shares = Math.mulDiv(_value - _slice, _supply + _existing, _nav);
             if (_shares == 0) continue;
             if (_mandate.skin > 0) {
                 uint _skinRoom = _masterShares * _mandate.skin;
@@ -203,13 +234,13 @@ contract Fund is Access {
                 (_holding.cost * _stake + (_value - _slice) * PRICE_PRECISION) / (_stake + _shares)
             );
             IAccount.Call[] memory _pull = new IAccount.Call[](1);
-            _pull[0] = CallLib.pay(_intent.token, _master, _row.amount, _config.transferGasLimit);
+            _pull[0] = CallLib.pay(_intent.token, _master, _row.amount, 0);
             try accountModule.dispatch{gas: _config.transferGasLimit}(
                 IAccount(_puppet),
                 address(0),
                 bytes32(0),
                 _intent.header.deadline,
-                bytes.concat(abi.encode(_mandate), _row.signature),
+                "",
                 abi.encode(msg.sig, _master, _row.amount, _value, _slice, _shares, _holding),
                 _pull,
                 BalanceLib.list(_intent.token)
@@ -222,8 +253,8 @@ contract Fund is Access {
             });
             _minted += _shares;
         }
-        uint _billed = Math.mulDiv(_slice * (_n - _masterLeg), _price.amount, _price.value);
-        if (_minted == 0) revert Error.Balance__ZeroAmount();
+        uint _billed = Math.mulDiv(_slice * (_n - _first), _price.amount, _price.value);
+        if (_minted == _existing) revert Error.Balance__ZeroAmount();
 
         if (_billed > 0) _legs[_n++] = CallLib.pay(_intent.token, _config.feeReceiver, _billed, _config.transferGasLimit);
         assembly ("memory-safe") {
@@ -242,6 +273,7 @@ contract Fund is Access {
                 _intent.token,
                 _price,
                 _intent.credit,
+                _ownerSignature,
                 _minted,
                 _slice,
                 _billed,

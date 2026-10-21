@@ -2,6 +2,8 @@
 pragma solidity ^0.8.36;
 
 import {Access} from "../utils/auth/Access.sol";
+import {BalanceLib} from "../utils/BalanceLib.sol";
+import {Error} from "../utils/Error.sol";
 import {TransferUtils} from "../utils/TransferUtils.sol";
 
 contract FundStore is Access {
@@ -24,8 +26,16 @@ contract FundStore is Access {
         uint price;
     }
 
+    struct Credit {
+        uint total;
+        uint feeTotal;
+    }
+
     mapping(address master => Redemption) internal redemptionMap;
     mapping(address master => mapping(address holder => Holding)) internal holdingMap;
+    mapping(address master => mapping(uint chainId => mapping(address token => Credit))) internal creditMap;
+    mapping(address master => mapping(address token => uint booked)) public bookedMap;
+    mapping(address token => uint held) public heldMap;
 
     constructor(
         address _authority
@@ -44,6 +54,35 @@ contract FundStore is Access {
         return holdingMap[_master][_holder];
     }
 
+    function getCredit(
+        address _master,
+        uint _chainId,
+        address _token
+    ) external view returns (Credit memory) {
+        return creditMap[_master][_chainId][_token];
+    }
+
+    function setCredit(
+        address _master,
+        uint _chainId,
+        address _token,
+        Credit calldata _credit
+    ) external auth {
+        creditMap[_master][_chainId][_token] = _credit;
+    }
+
+    function book(
+        address _master,
+        address _token,
+        uint _amount
+    ) external auth {
+        uint _held = heldMap[_token] + _amount;
+        uint _balance = BalanceLib.balanceOf(_token, address(this));
+        if (_balance < _held) revert Error.FundStore__Unfunded(_token, _balance, _held);
+        heldMap[_token] = _held;
+        bookedMap[_master][_token] += _amount;
+    }
+
     function setRedemption(
         address _master,
         Redemption calldata _redemption
@@ -60,11 +99,16 @@ contract FundStore is Access {
     }
 
     function pay(
+        address _master,
         address _token,
         address _to,
         uint _amount,
         uint _gasLimit
     ) external auth {
+        uint _booked = bookedMap[_master][_token];
+        if (_amount > _booked) revert Error.FundStore__Unbooked(_master, _token, _booked, _amount);
+        bookedMap[_master][_token] = _booked - _amount;
+        heldMap[_token] -= _amount;
         TransferUtils.transferStrictly(_token, _to, _amount, _gasLimit);
     }
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.36;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
@@ -16,7 +17,6 @@ import {NATIVE_TOKEN} from "../utils/Native.sol";
 import {AccountModule} from "./AccountModule.sol";
 import {Fund, PRICE_PRECISION, VIRTUAL_SHARES, VIRTUAL_VALUE} from "./Fund.sol";
 import {FundAccount} from "./FundAccount.sol";
-import {UserAccount} from "./UserAccount.sol";
 import {FundStore, isOpen} from "./FundStore.sol";
 import {GateConfig} from "../utils/GateConfig.sol";
 import {ShareToken} from "./ShareToken.sol";
@@ -108,6 +108,9 @@ contract Redeem is Access {
         uint _masterPay = _full ? _cash - _pot : Math.mulDiv(_masterPart, _nav, _base);
         if (_pot + _masterPay > _cash) revert Error.Balance__InsufficientFund(_token, _cash, _pot + _masterPay);
         if (_pot + _masterPay < _intent.header.fee) revert Error.Redeem__Dust(_pot + _masterPay, _intent.header.fee);
+        if (!_full && _masterPart > 0 && _owed > 0 && _pot <= _intent.header.fee) {
+            revert Error.Redeem__Dust(_pot, _intent.header.fee);
+        }
 
         _redemption = FundStore.Redemption({
             id: _redemption.id + 1,
@@ -118,7 +121,7 @@ contract Redeem is Access {
             owedLeft: SafeCast.toUint128(_owed),
             potLeft: SafeCast.toUint96(_pot),
             token: _token,
-            price: Math.mulDiv(_full ? _valuation : _valuation + VIRTUAL_VALUE, PRICE_PRECISION, _base)
+            price: Math.mulDiv(_full ? Math.mulDiv(_cash, _rate.value, _rate.amount) : _valuation + VIRTUAL_VALUE, PRICE_PRECISION, _base)
         });
         fundStore.setRedemption(_master, _redemption);
 
@@ -142,7 +145,7 @@ contract Redeem is Access {
             value: 0,
             gasLimit: 0,
             callData: abi.encodeCall(
-                ShareToken.allowBurn, (address(this), _queued + Math.mulDiv(_active, _fraction, RATE_PRECISION))
+                ShareToken.allowBurn, (_queued + Math.mulDiv(_active, _fraction, RATE_PRECISION))
             )
         });
         _legs[_n++] = CallLib.pay(_token, address(fundStore), _pot + _masterPay, _config.transferGasLimit);
@@ -168,6 +171,7 @@ contract Redeem is Access {
             _legs,
             _wrappable ? BalanceLib.list(_token, NATIVE_TOKEN, address(_shareToken)) : BalanceLib.list(_token, address(_shareToken))
         );
+        fundStore.book(_master, _token, _pot + _masterPay);
     }
 
     function redeemCohort(
@@ -179,8 +183,10 @@ contract Redeem is Access {
         FundStore.Redemption memory _redemption = fundStore.getRedemption(_master);
         address[] memory _tokenList = BalanceLib.list(address(_shareToken), _redemption.token);
         uint _performanceFee = _shareToken.performanceFee();
+        uint _owed = _redemption.owedLeft;
         uint _fees;
         uint _protocolFees;
+        uint _cut;
         for (uint _i; _i < _holderList.length && _redemption.potLeft > _redemption.fee; ++_i) {
             address _holder = _holderList[_i];
             if (_holder == _master) revert Error.Fund__NotHolder(_holder);
@@ -190,47 +196,63 @@ contract Redeem is Access {
             uint _free = _shareToken.balanceOf(_holder) - _queued;
             uint _claim = _queued * RATE_PRECISION + _free * _redemption.fraction;
             if (_claim == 0) continue;
-            uint _burned = Math.mulDiv(_free, _redemption.fraction, RATE_PRECISION);
-            if (_queued + _burned > 0) _shareToken.burn(_holder, _queued + _burned);
             uint _payout = Math.mulDiv(_redemption.potLeft, _claim, _redemption.owedLeft);
             uint _profitFee = _holding.cost < _redemption.price
                 ? Math.mulDiv(
                     _payout, _performanceFee * (_redemption.price - _holding.cost), _redemption.price * RATE_PRECISION
                 )
                 : 0;
-            uint _protocolCut = Math.mulDiv(_profitFee, protocolFeeShare, RATE_PRECISION);
+            uint _burned;
+            uint _protocolCut;
+            bool _refused;
             _redemption.potLeft -= SafeCast.toUint96(_payout);
             _redemption.owedLeft -= SafeCast.toUint128(_claim);
-            _redemption.queued -= SafeCast.toUint128(_queued);
-            _redemption.masterPay += SafeCast.toUint96(_profitFee - _protocolCut);
-            _holding.queued = 0;
+            if (_payout - _profitFee > _redemption.fee) {
+                uint _net = _payout - _profitFee - _redemption.fee;
+                if (gasleft() < 2 * _config.transferGasLimit) revert Error.Redeem__OutOfGas(gasleft(), 2 * _config.transferGasLimit);
+                try fundStore.pay(_master, _redemption.token, _holder, _net, _config.transferGasLimit) {}
+                catch (bytes memory _reason) {
+                    if (
+                        bytes4(_reason) != Error.TransferUtils__TokenTransferError.selector
+                            || IERC20(_redemption.token).balanceOf(address(fundStore)) < _net
+                    ) {
+                        assembly ("memory-safe") {
+                            revert(add(_reason, 32), mload(_reason))
+                        }
+                    }
+                    _refused = true;
+                }
+            }
+            if (_payout - _profitFee > _redemption.fee && !_refused) {
+                _burned = Math.mulDiv(_free, _redemption.fraction, RATE_PRECISION);
+                if (_queued + _burned > 0) _shareToken.burn(_holder, _queued + _burned);
+                _protocolCut = Math.mulDiv(_profitFee, protocolFeeShare, RATE_PRECISION);
+                _redemption.queued -= SafeCast.toUint128(_queued);
+                _redemption.masterPay += SafeCast.toUint96(_profitFee - _protocolCut);
+                _holding.queued = 0;
+                _protocolFees += _protocolCut;
+                _fees += _redemption.fee;
+            } else {
+                _cut += _payout;
+                _queued = 0;
+                _profitFee = 0;
+            }
             _holding.redeemedAt = SafeCast.toUint40(_redemption.id);
             fundStore.setHolding(_master, _holder, _holding);
-            _protocolFees += _protocolCut;
-            if (_payout - _profitFee > _redemption.fee) {
-                _fees += _redemption.fee;
-                fundStore.pay(
-                    _redemption.token, _holder, _payout - _profitFee - _redemption.fee, _config.transferGasLimit
-                );
-            } else {
-                _fees += _payout - _profitFee;
-            }
             accountModule.record(
                 _holder,
                 bytes32(0),
-                abi.encode(msg.sig, _master, _queued, _burned, _payout, _profitFee, _protocolCut, _redemption),
+                abi.encode(msg.sig, _master, _queued, _burned, _payout, _profitFee, _protocolCut, _redemption, _refused),
                 _tokenList
             );
         }
-        uint _cut;
-        bool _cutting = _redemption.owedLeft > 0 && _redemption.potLeft <= _redemption.fee;
-        if (_cutting) {
-            _cut = _redemption.potLeft;
+        if (_redemption.owedLeft > 0 && _redemption.potLeft <= _redemption.fee) {
+            _cut += _redemption.potLeft;
             _redemption.owedLeft = 0;
             _redemption.potLeft = 0;
         }
         {
-            bool _closing = _cutting || (_redemption.owedLeft == 0 && _redemption.masterPay > 0);
+            bool _closing = _redemption.owedLeft == 0 && (_owed > 0 || _redemption.masterPay > 0);
             uint _payout = _closing ? _redemption.masterPay : 0;
             uint _masterFee = Math.min(_payout, _redemption.fee);
             if (_closing) {
@@ -238,25 +260,25 @@ contract Redeem is Access {
                 _redemption.masterPay = 0;
             }
             fundStore.setRedemption(_master, _redemption);
-            if (_closing) {
-                if (_payout > _masterFee) {
-                    fundStore.pay(
-                        _redemption.token,
-                        UserAccount(payable(FundAccount(payable(_master)).parent())).user(),
-                        _payout - _masterFee,
-                        _config.transferGasLimit
-                    );
-                }
-                if (_cut > 0) fundStore.pay(_redemption.token, _master, _cut, _config.transferGasLimit);
-                uint _unburned = _shareToken.pendingBurn();
+            if (_payout > _masterFee) {
+                address _owner = FundAccount(payable(_master)).parent();
+                uint _paid = _payout - _masterFee;
+                fundStore.pay(_master, _redemption.token, _owner, _paid, _config.transferGasLimit);
+                accountModule.record(
+                    _owner, bytes32(0), abi.encode(msg.sig, _master, _redemption.token, _paid), BalanceLib.list(_redemption.token)
+                );
+            }
+            if (_cut > 0) fundStore.pay(_master, _redemption.token, _master, _cut, _config.transferGasLimit);
+            if (_closing || _cut > 0) {
+                uint _unburned = _closing ? _shareToken.pendingBurn() : 0;
                 accountModule.record(
                     _master, bytes32(0), abi.encode(msg.sig, _payout, _cut, _redemption, _unburned), _tokenList
                 );
             }
         }
-        if (_fees > 0) fundStore.pay(_redemption.token, _config.feeReceiver, _fees, _config.transferGasLimit);
+        if (_fees > 0) fundStore.pay(_master, _redemption.token, _config.feeReceiver, _fees, _config.transferGasLimit);
         if (_protocolFees > 0) {
-            fundStore.pay(_redemption.token, protocolFeeReceiver, _protocolFees, _config.transferGasLimit);
+            fundStore.pay(_master, _redemption.token, protocolFeeReceiver, _protocolFees, _config.transferGasLimit);
         }
     }
 
@@ -308,10 +330,10 @@ contract Redeem is Access {
         fundStore.setHolding(_master, _puppet, _holding);
         fundStore.setRedemption(_master, _redemption);
         if (_payout > _profitFee) {
-            fundStore.pay(_redemption.token, _puppet, _payout - _profitFee, _config.transferGasLimit);
+            fundStore.pay(_master, _redemption.token, _puppet, _payout - _profitFee, _config.transferGasLimit);
         }
         if (_protocolCut > 0) {
-            fundStore.pay(_redemption.token, protocolFeeReceiver, _protocolCut, _config.transferGasLimit);
+            fundStore.pay(_master, _redemption.token, protocolFeeReceiver, _protocolCut, _config.transferGasLimit);
         }
 
         IAccount.Call[] memory _legs = new IAccount.Call[](1);

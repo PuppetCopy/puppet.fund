@@ -2,39 +2,43 @@
 pragma solidity ^0.8.36;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {stdError} from "forge-std/src/StdError.sol";
 import {Vm} from "forge-std/src/Vm.sol";
 import {Base64} from "solady/utils/Base64.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
 import {LibString} from "solady/utils/LibString.sol";
 
 import {HubGate} from "src/HubGate.sol";
-import {FULFIL_TYPEHASH, SpokeGate} from "src/SpokeGate.sol";
+import {SpokeGate} from "src/SpokeGate.sol";
 import {AccountModule} from "src/core/AccountModule.sol";
 import {EscrowStore} from "src/core/EscrowStore.sol";
 import {Fund} from "src/core/Fund.sol";
 import {FundAccount} from "src/core/FundAccount.sol";
 import {GRID_BYTES, GRID_SIDE, PALETTE_BYTES, ShareToken} from "src/core/ShareToken.sol";
-import {AccountLib} from "src/utils/AccountLib.sol";
+import {UserAccount} from "src/core/UserAccount.sol";
+import {AccountLib, ESCROW_RETURN_DELAY, WALLET_SIGNATURE_TAG} from "src/utils/AccountLib.sol";
 import {BalanceLib} from "src/utils/BalanceLib.sol";
 import {Error} from "src/utils/Error.sol";
 import {GateConfig} from "src/utils/GateConfig.sol";
-import {LiquidityGate, RETIRE_ESCROW_INTENT_TYPEHASH, RETURN_ESCROW_TYPEHASH} from "src/utils/LiquidityGate.sol";
+import {LiquidityGate, RETIRE_ESCROW_INTENT_TYPEHASH} from "src/utils/LiquidityGate.sol";
 import {NATIVE_TOKEN} from "src/utils/Native.sol";
 import {RouterProxy} from "src/utils/RouterProxy.sol";
+import {FULL_ACCESS} from "src/utils/auth/Access.sol";
 import {IAccount} from "src/utils/interfaces/IAccount.sol";
 
 import {HotPathTest} from "./HotPath.t.sol";
 import {MockTarget} from "./mock/MockTarget.t.sol";
+import {MockWallet1271} from "./mock/MockWallet1271.t.sol";
 
 contract EscrowGovernanceTest is HotPathTest {
-    bytes32 constant ROUND = keccak256("escrow-governance-round");
     address constant PERMIT2 = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
     bytes32 constant IMPLEMENTATION_SLOT = 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc;
 
     function _grid() internal pure returns (bytes memory pixels_) {
         pixels_ = new bytes(GRID_BYTES);
         for (uint _p; _p < GRID_BYTES; ++_p) {
-            pixels_[_p] = bytes1(uint8(_p < PALETTE_BYTES ? 1 + (_p * 37) % 255 : (_p - PALETTE_BYTES) % (PALETTE_BYTES / 3)));
+            pixels_[_p] =
+                bytes1(uint8(_p < PALETTE_BYTES ? 1 + (_p * 37) % 255 : (_p - PALETTE_BYTES) % (PALETTE_BYTES / 3)));
         }
     }
 
@@ -57,20 +61,22 @@ contract EscrowGovernanceTest is HotPathTest {
             )
         );
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(0, 0, _credit(block.chainid, address(usdc), _amount), new Fund.Allocation[](0));
+            _allocateIntent(0, 0, _credit(HUB_CHAIN, address(usdc), _amount), new Fund.Allocation[](0));
         bytes32 _genesis = AccountLib.genesisDigest(address(accountModule), body, _account(master));
-        hub.createFund(_symbol, _pixels, _coSig(bodyKey, _genesis), _fundApproval(masterKey, body), _i, _sig, _ownerCoSig(_i));
+        hub.createFund(
+            _symbol, _pixels, _coSig(bodyKey, _genesis), _fundApproval(masterKey, body), _i, _sig, _ownerCoSig(_i)
+        );
     }
 
     function _creditRound(
         uint _chainId,
         uint _amount
-    ) internal returns (bytes32 round_) {
-        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(
-            _nonceOf(body), _nav(), _credit(_chainId, address(usdc), _amount), new Fund.Allocation[](0)
-        );
-        round_ = _allocateDigest(_i);
-        hub.allocate(_i, _sig, _ownerCoSig(_i));
+    ) internal returns (Fund.Credit memory credit_) {
+        (Fund.AllocateIntent memory _i,) =
+            _allocateIntent(_nonceOf(body), _nav(), _credit(_chainId, address(usdc), _amount), new Fund.Allocation[](0));
+        _i.header.deadline = vm.getBlockTimestamp() + 300;
+        hub.allocate(_i, _pair(masterKey, _allocateDigest(_i)), _ownerCoSig(_i));
+        credit_ = _i.credit;
     }
 
     function _walletEscrow(
@@ -85,53 +91,27 @@ contract EscrowGovernanceTest is HotPathTest {
         vm.stopPrank();
     }
 
-    function _storeSignature(
-        address _store,
+    function _totalSignature(
+        uint _key,
+        address _owner,
         address _body,
-        uint _from,
         uint _total,
-        uint _fee
+        uint _feeTotal
     ) internal view returns (bytes memory) {
-        return _coSig(
-            attestorKey,
-            AccountLib.typedDigest(
-                block.chainid,
-                _body,
-                keccak256(abi.encode(FULFIL_TYPEHASH, _store, address(usdc), ROUND, _from, _total, _fee))
-            )
-        );
+        return _coSig(_key, AccountLib.creditDigest(_owner, _body, FOREIGN_CHAIN_ID, address(usdc), _total, _feeTotal));
     }
 
-    function _returnSignature(
-        EscrowStore _store,
-        address _owner,
-        address _token,
-        uint _from,
-        uint _total,
-        uint _deadline
-    ) internal view returns (bytes memory) {
-        return _coSig(
-            attestorKey,
-            AccountLib.typedDigest(
-                block.chainid,
-                _owner,
-                keccak256(abi.encode(RETURN_ESCROW_TYPEHASH, address(_store), _token, _from, _total, _deadline))
-            )
-        );
-    }
-
-    function _returnEscrow(
+    function _returnOpenEscrow(
         LiquidityGate _gate,
-        address _owner,
-        address _token,
-        uint _total
+        address _wallet,
+        address _token
     ) internal {
-        EscrowStore _store = _gate.escrowStore();
-        uint _from = _store.returnedMap(_owner, _token);
-        uint _deadline = vm.getBlockTimestamp() + 300;
-        _gate.returnEscrow(
-            _owner, _token, _from, _total, _deadline, _returnSignature(_store, _owner, _token, _from, _total, _deadline)
-        );
+        uint _start = vm.getBlockTimestamp();
+        vm.prank(_wallet);
+        _gate.requestReturn(_token);
+        vm.warp(_start + ESCROW_RETURN_DELAY);
+        vm.prank(_wallet);
+        _gate.returnEscrow(_token);
     }
 
     function _assertLedger(
@@ -141,9 +121,17 @@ contract EscrowGovernanceTest is HotPathTest {
         uint _released,
         uint _returned
     ) internal view {
-        assertEq(_store.escrowedMap(_owner, address(usdc)), _escrowed, "the escrowed total counts every booking and never falls");
+        assertEq(
+            _store.escrowedMap(_owner, address(usdc)),
+            _escrowed,
+            "the escrowed total counts every booking and never falls"
+        );
         assertEq(_store.releasedMap(_owner, address(usdc)), _released, "the released total counts every fund's draw");
-        assertEq(_store.returnedMap(_owner, address(usdc)), _returned, "the returned total counts what went back to the wallet");
+        assertEq(
+            _store.returnedMap(_owner, address(usdc)),
+            _returned,
+            "the returned total counts what went back to the wallet"
+        );
     }
 
     function _assertShareMismatch(
@@ -163,135 +151,99 @@ contract EscrowGovernanceTest is HotPathTest {
         assertLt(_spent, 100_000, "and without burning the forwarded gas");
     }
 
-    function test_fulfil_signature_is_bound_to_fromTotal() public {
+    function _lastRecordOf(
+        Vm.Log[] memory _logs,
+        address _acct
+    ) internal view returns (bytes32 digest_, bytes memory executionData_) {
+        for (uint _i; _i < _logs.length; ++_i) {
+            if (
+                _logs[_i].emitter != address(accountModule) || _logs[_i].topics[0] != AccountModule.AccountCall.selector
+            ) continue;
+            if (_logs[_i].topics[1] != bytes32(uint(uint160(_acct)))) continue;
+            (,,, digest_,, executionData_,,,) = abi.decode(
+                _logs[_i].data,
+                (uint, uint, uint, bytes32, bytes, bytes, IAccount.Call[], bytes[], BalanceLib.Balance[])
+            );
+        }
+    }
+
+    function test_fulfil_releases_each_signed_total_only_above_the_settled_total() public {
         _openFund();
         address _parent = _account(master);
         _walletEscrow(spoke, master, 300e6);
-        bytes memory _first = _fulfilSignature(address(usdc), ROUND, 0, 100e6, FEE);
-        bytes memory _overlap = _fulfilSignature(address(usdc), ROUND, 0, 250e6, FEE);
+        bytes memory _first = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 100e6, FEE);
+        bytes memory _later = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 250e6, 2 * FEE);
+        bytes memory _clawback = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 260e6, FEE);
         uint _fees = usdc.balanceOf(feeReceiver);
         uint _held = usdc.balanceOf(body);
 
-        spoke.fulfil(body, address(usdc), ROUND, 0, 100e6, FEE, _first, _noGenesis());
-        assertEq(spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)), 100e6, "the first release advances the total");
-
-        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidFulfil.selector, 100e6, 250e6));
-        spoke.fulfil(body, address(usdc), ROUND, 0, 250e6, FEE, _overlap, _noGenesis());
-
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        spoke.fulfil(body, address(usdc), ROUND, 100e6, 250e6, FEE, _overlap, _noGenesis());
-
-        assertEq(usdc.balanceOf(feeReceiver), _fees + FEE, "the stale overlapping signature bills nothing");
-        assertEq(usdc.balanceOf(body), _held + 100e6 - FEE, "and releases nothing");
+        vm.chainId(FOREIGN_CHAIN_ID);
+        spoke.fulfil(body, address(usdc), 100e6, FEE, _first, _noGenesis());
+        assertEq(
+            spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)),
+            100e6,
+            "the first signed total releases in full"
+        );
 
         vm.recordLogs();
-        spoke.fulfil(
-            body,
-            address(usdc),
-            ROUND,
-            100e6,
-            250e6,
-            FEE,
-            _fulfilSignature(address(usdc), ROUND, 100e6, 250e6, FEE),
-            _noGenesis()
-        );
-        assertEq(spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)), 250e6, "a re-signed delta releases");
+        spoke.fulfil(body, address(usdc), 250e6, 2 * FEE, _later, _noGenesis());
+        (bytes32 _digest, bytes memory _record) = _lastRecordOf(vm.getRecordedLogs(), body);
         assertEq(
-            _lastRecordOf(vm.getRecordedLogs(), body),
-            abi.encode(SpokeGate.fulfil.selector, address(usdc), ROUND, uint(100e6), uint(250e6), FEE),
-            "the record carries the totals it moved between, never the delta"
+            spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)),
+            250e6,
+            "a later total releases only what it adds"
         );
-        assertEq(usdc.balanceOf(feeReceiver), _fees + 2 * FEE, "one fee per priced delta");
-        assertEq(usdc.balanceOf(body), _held + 250e6 - 2 * FEE, "the body holds the whole release net of both fees");
+        assertEq(
+            _record,
+            abi.encode(SpokeGate.fulfil.selector, address(usdc), uint(250e6), 2 * FEE),
+            "the record carries the settled totals, never the increment"
+        );
+        assertEq(
+            _digest,
+            AccountLib.creditDigest(_parent, body, FOREIGN_CHAIN_ID, address(usdc), 250e6, 2 * FEE),
+            "under the owner's own credit digest"
+        );
 
         vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidFulfil.selector, 250e6, 100e6));
-        spoke.fulfil(body, address(usdc), ROUND, 0, 100e6, FEE, _first, _noGenesis());
-        assertEq(usdc.balanceOf(address(spokeEscrowStore)), 50e6, "the unreleased escrow stays in the store");
-    }
+        spoke.fulfil(body, address(usdc), 100e6, FEE, _first, _noGenesis());
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidFulfil.selector, 250e6, 250e6));
+        spoke.fulfil(body, address(usdc), 250e6, 2 * FEE, _later, _noGenesis());
+        vm.expectRevert(stdError.arithmeticError);
+        spoke.fulfil(body, address(usdc), 260e6, FEE, _clawback, _noGenesis());
+        vm.chainId(HUB_CHAIN);
 
-    function test_fulfil_signature_is_bound_to_the_escrow_store() public {
-        _openFund();
-        address _parent = _account(master);
-        _walletEscrow(spoke, master, 100e6);
-
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        spoke.fulfil(
-            body,
-            address(usdc),
-            ROUND,
-            0,
-            100e6,
-            FEE,
-            _storeSignature(makeAddr("another-store"), body, 0, 100e6, FEE),
-            _noGenesis()
+        assertEq(usdc.balanceOf(feeReceiver), _fees + 2 * FEE, "each total pays only its fee increment");
+        assertEq(usdc.balanceOf(body), _held + 250e6 - 2 * FEE, "the body holds both releases net of their fees");
+        assertEq(
+            usdc.balanceOf(address(spokeEscrowStore)), 50e6, "a stale, replayed or fee-lowering total moves nothing"
         );
-
-        bytes memory _old = _storeSignature(address(spokeEscrowStore), body, 0, 100e6, FEE);
-        spoke.fulfil(body, address(usdc), ROUND, 0, 100e6, FEE, _old, _noGenesis());
-        assertEq(spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)), 100e6, "the store the signature names releases");
-
-        EscrowStore _rekeyed = new EscrowStore(address(dictate), accountModule, feeReceiver, 1000);
-        vm.startPrank(owner);
-        address _proxy = dictate.setGate(
-            bytes32("SpokeGate"), address(new SpokeGate(accountModule, depositModule, _rekeyed, spoke.getConfig()))
-        );
-        dictate.setAccess(_rekeyed, _proxy);
-        vm.stopPrank();
-        assertEq(_proxy, address(spoke), "the re-key keeps the gate address");
-        assertEq(address(spoke.escrowStore()), address(_rekeyed), "and points it at the fresh ledger");
-
-        _walletEscrow(spoke, master, 100e6);
-        assertEq(_rekeyed.escrowedMap(_parent, address(usdc)), 100e6);
-        assertEq(_rekeyed.fulfilledMap(_parent, body, address(usdc)), 0, "the fresh ledger starts at zero");
-
-        uint _held = usdc.balanceOf(body);
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        spoke.fulfil(body, address(usdc), ROUND, 0, 100e6, FEE, _old, _noGenesis());
-
-        spoke.fulfil(
-            body,
-            address(usdc),
-            ROUND,
-            0,
-            100e6,
-            FEE,
-            _storeSignature(address(_rekeyed), body, 0, 100e6, FEE),
-            _noGenesis()
-        );
-        assertEq(_rekeyed.fulfilledMap(_parent, body, address(usdc)), 100e6, "only a signature naming the new store releases");
-        assertEq(usdc.balanceOf(body), _held + 100e6 - FEE, "exactly once");
-        assertEq(usdc.balanceOf(address(_rekeyed)), 0);
     }
 
     function test_fulfil_fee_is_capped_by_max_relay_fee_bps() public {
         _openFund();
-        _walletEscrow(spoke, master, 100e6);
+        _walletEscrow(spoke, master, 200e6);
         assertEq(spokeEscrowStore.maxFeeBps(), 1000, "the store's own cap is the limb a release checks");
-
-        vm.expectRevert(abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, 10e6 + 1, 100e6, 1000));
-        spoke.fulfil(
-            body,
-            address(usdc),
-            ROUND,
-            0,
-            100e6,
-            10e6 + 1,
-            _fulfilSignature(address(usdc), ROUND, 0, 100e6, 10e6 + 1),
-            _noGenesis()
-        );
-
-        vm.expectRevert(abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, 100e6, 100e6, 1000));
-        spoke.fulfil(
-            body, address(usdc), ROUND, 0, 100e6, 100e6, _fulfilSignature(address(usdc), ROUND, 0, 100e6, 100e6), _noGenesis()
-        );
-
+        bytes memory _over = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 100e6, 10e6 + 1);
+        bytes memory _whole = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 100e6, 100e6);
+        bytes memory _atCap = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 100e6, 10e6);
+        bytes memory _overIncrement = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 150e6, 15e6 + 1);
+        bytes memory _atIncrementCap = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 150e6, 15e6);
         uint _fees = usdc.balanceOf(feeReceiver);
         uint _held = usdc.balanceOf(body);
-        spoke.fulfil(
-            body, address(usdc), ROUND, 0, 100e6, 10e6, _fulfilSignature(address(usdc), ROUND, 0, 100e6, 10e6), _noGenesis()
-        );
-        assertEq(usdc.balanceOf(feeReceiver), _fees + 10e6, "a fee exactly at the cap is billed");
-        assertEq(usdc.balanceOf(body), _held + 90e6, "and the rest of the release lands in the body");
+
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.expectRevert(abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, 10e6 + 1, 100e6, 1000));
+        spoke.fulfil(body, address(usdc), 100e6, 10e6 + 1, _over, _noGenesis());
+        vm.expectRevert(abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, 100e6, 100e6, 1000));
+        spoke.fulfil(body, address(usdc), 100e6, 100e6, _whole, _noGenesis());
+        spoke.fulfil(body, address(usdc), 100e6, 10e6, _atCap, _noGenesis());
+        vm.expectRevert(abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, 5e6 + 1, 50e6, 1000));
+        spoke.fulfil(body, address(usdc), 150e6, 15e6 + 1, _overIncrement, _noGenesis());
+        spoke.fulfil(body, address(usdc), 150e6, 15e6, _atIncrementCap, _noGenesis());
+        vm.chainId(HUB_CHAIN);
+
+        assertEq(usdc.balanceOf(feeReceiver), _fees + 15e6, "a fee exactly at the cap of each increment is billed");
+        assertEq(usdc.balanceOf(body), _held + 135e6, "and the rest of each release lands in the body");
     }
 
     function test_fulfil_releases_only_the_escrow_of_the_bodys_bound_owner() public {
@@ -303,16 +255,23 @@ contract EscrowGovernanceTest is HotPathTest {
         assertEq(_module, address(accountModule));
         assertEq(_bound, _parent);
         uint _held = usdc.balanceOf(body);
+        bytes memory _signed = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 100e6, FEE);
+        bytes memory _strangers = _totalSignature(backerKey, _stranger, body, 100e6, FEE);
 
-        bytes memory _signed = _fulfilSignature(address(usdc), ROUND, 0, 100e6, FEE);
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(body, address(usdc), 100e6, FEE, _strangers, _noGenesis());
         vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 0, 100e6));
-        spoke.fulfil(body, address(usdc), ROUND, 0, 100e6, FEE, _signed, _noGenesis());
+        spoke.fulfil(body, address(usdc), 100e6, FEE, _signed, _noGenesis());
+        vm.chainId(HUB_CHAIN);
         assertEq(spokeEscrowStore.releasedMap(_stranger, address(usdc)), 0, "a stranger's escrow is never released");
         assertEq(spokeEscrowStore.escrowedMap(_stranger, address(usdc)), 100e6);
-        assertEq(usdc.balanceOf(body), _held, "into the body, even with an attestor signature");
+        assertEq(usdc.balanceOf(body), _held, "into the body, under its own signature or the owner's");
 
         _walletEscrow(spoke, master, 100e6);
-        spoke.fulfil(body, address(usdc), ROUND, 0, 100e6, FEE, _signed, _noGenesis());
+        vm.chainId(FOREIGN_CHAIN_ID);
+        spoke.fulfil(body, address(usdc), 100e6, FEE, _signed, _noGenesis());
+        vm.chainId(HUB_CHAIN);
         assertEq(usdc.balanceOf(body), _held + 100e6 - FEE, "the bound owner's escrow releases");
         assertEq(spokeEscrowStore.releasedMap(_parent, address(usdc)), 100e6, "drawn from the owner the body names");
         assertEq(spokeEscrowStore.releasedMap(_stranger, address(usdc)), 0, "and from no one else");
@@ -331,37 +290,329 @@ contract EscrowGovernanceTest is HotPathTest {
             key: _coSig(_freshKey, AccountLib.genesisDigest(address(accountModule), _fresh, _other)),
             approval: _fundApproval(backerKey, _fresh)
         });
+        bytes memory _forBody = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 60e6, FEE);
+        bytes memory _forFresh = _totalSignature(backerKey, _other, _fresh, 60e6, FEE);
+        bytes memory _beyond = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 101e6, FEE);
+        bytes memory _rest = _totalSignature(backerKey, _other, _fresh, 101e6, 2 * FEE);
 
-        bytes memory _forBody = _storeSignature(address(spokeEscrowStore), body, 0, 60e6, FEE);
+        vm.chainId(FOREIGN_CHAIN_ID);
         vm.expectRevert(Error.Account__InvalidSignature.selector);
-        spoke.fulfil(_fresh, address(usdc), ROUND, 0, 60e6, FEE, _forBody, _genesis);
-
-        spoke.fulfil(
-            _fresh, address(usdc), ROUND, 0, 60e6, FEE, _storeSignature(address(spokeEscrowStore), _fresh, 0, 60e6, FEE), _genesis
-        );
+        spoke.fulfil(_fresh, address(usdc), 60e6, FEE, _forBody, _genesis);
+        spoke.fulfil(_fresh, address(usdc), 60e6, FEE, _forFresh, _genesis);
+        vm.chainId(HUB_CHAIN);
         (, address _bound) = FundAccount(payable(_fresh)).bound();
-        assertEq(_bound, _other, "the first fulfil binds the fresh body to the parent its key signed");
+        assertEq(_bound, _other, "the first settlement binds the fresh body to the parent its key signed");
         assertEq(usdc.balanceOf(_fresh), 60e6 - FEE, "and releases to that body net of the fee");
-        assertEq(spokeEscrowStore.releasedMap(_other, address(usdc)), 60e6, "drawn from the escrow of the owner it read");
+        assertEq(
+            spokeEscrowStore.releasedMap(_other, address(usdc)), 60e6, "drawn from the escrow of the owner it read"
+        );
         assertEq(spokeEscrowStore.releasedMap(_owner, address(usdc)), 0, "never from another owner's");
 
         uint _held = usdc.balanceOf(body);
-        bytes memory _beyond = _storeSignature(address(spokeEscrowStore), body, 0, 101e6, FEE);
+        vm.chainId(FOREIGN_CHAIN_ID);
         vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 100e6, 101e6));
-        spoke.fulfil(body, address(usdc), ROUND, 0, 101e6, FEE, _beyond, _noGenesis());
-        spoke.fulfil(body, address(usdc), ROUND, 0, 60e6, FEE, _forBody, _noGenesis());
+        spoke.fulfil(body, address(usdc), 101e6, FEE, _beyond, _noGenesis());
+        spoke.fulfil(body, address(usdc), 60e6, FEE, _forBody, _noGenesis());
+        vm.chainId(HUB_CHAIN);
         assertEq(usdc.balanceOf(body) - _held, 60e6 - FEE, "the master's body is paid from the master's escrow");
         assertEq(spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)), 60e6, "each body keeps its own total");
         assertEq(spokeEscrowStore.fulfilledMap(_other, _fresh, address(usdc)), 60e6);
         assertEq(spokeEscrowStore.fulfilledMap(_owner, _fresh, address(usdc)), 0, "under its own owner only");
         assertEq(spokeEscrowStore.fulfilledMap(_other, body, address(usdc)), 0);
 
-        bytes memory _rest = _storeSignature(address(spokeEscrowStore), _fresh, 60e6, 101e6, FEE);
+        vm.chainId(FOREIGN_CHAIN_ID);
         vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 40e6, 41e6));
-        spoke.fulfil(_fresh, address(usdc), ROUND, 60e6, 101e6, FEE, _rest, _noGenesis());
+        spoke.fulfil(_fresh, address(usdc), 101e6, 2 * FEE, _rest, _noGenesis());
+        vm.chainId(HUB_CHAIN);
         assertEq(
-            spokeEscrowStore.heldMap(address(usdc)), 80e6, "a body never borrows the open escrow of another owner on the store"
+            spokeEscrowStore.heldMap(address(usdc)),
+            80e6,
+            "a body never borrows the open escrow of another owner on the store"
         );
+    }
+
+    function test_settlement_binds_an_unbound_body_only_under_the_genesis_its_key_and_owner_signed() public {
+        address _owner = _account(backer);
+        address _elsewhere = _account(master);
+        _walletEscrow(spoke, backer, 100e6);
+        (address _fresh, uint _freshKey) = makeAddrAndKey("unbound-body");
+        bytes memory _key = _coSig(_freshKey, AccountLib.genesisDigest(address(accountModule), _fresh, _owner));
+        AccountLib.Genesis memory _genesis =
+            AccountLib.Genesis({parent: _owner, key: _key, approval: _fundApproval(backerKey, _fresh)});
+        AccountLib.Genesis memory _otherParent =
+            AccountLib.Genesis({parent: _elsewhere, key: _key, approval: _fundApproval(masterKey, _fresh)});
+        AccountLib.Genesis memory _strangerApproval =
+            AccountLib.Genesis({parent: _owner, key: _key, approval: _fundApproval(masterKey, _fresh)});
+        AccountLib.Genesis memory _otherFund =
+            AccountLib.Genesis({parent: _owner, key: _key, approval: _fundApproval(backerKey, body)});
+        bytes memory _signed = _totalSignature(backerKey, _owner, _fresh, 60e6, FEE);
+        bytes memory _more = _totalSignature(backerKey, _owner, _fresh, 90e6, 2 * FEE);
+
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.expectRevert(abi.encodeWithSelector(Error.Account__NotDelegated.selector, _fresh));
+        spoke.fulfil(_fresh, address(usdc), 60e6, FEE, _signed, _genesis);
+        vm.chainId(HUB_CHAIN);
+        vm.signAndAttachDelegation(accountModule.bodyImpl(), _freshKey);
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(_fresh, address(usdc), 60e6, FEE, _signed, _otherParent);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(_fresh, address(usdc), 60e6, FEE, _signed, _strangerApproval);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(_fresh, address(usdc), 60e6, FEE, _signed, _otherFund);
+        vm.recordLogs();
+        spoke.fulfil(_fresh, address(usdc), 60e6, FEE, _signed, _genesis);
+        (, bytes memory _record) = _lastRecordOf(vm.getRecordedLogs(), _fresh);
+        spoke.fulfil(_fresh, address(usdc), 90e6, 2 * FEE, _more, _otherParent);
+        vm.chainId(HUB_CHAIN);
+
+        (address _module, address _bound) = FundAccount(payable(_fresh)).bound();
+        assertEq(_module, address(accountModule), "the first settlement binds the body under the module");
+        assertEq(_bound, _owner, "to the parent its key signed and its owner approved");
+        assertEq(
+            _record,
+            abi.encode(SpokeGate.fulfil.selector, address(usdc), uint(60e6), FEE),
+            "and settles in the same call"
+        );
+        assertEq(usdc.balanceOf(_fresh), 90e6 - 2 * FEE, "a bound body ignores any later genesis");
+        assertEq(spokeEscrowStore.releasedMap(_owner, address(usdc)), 90e6, "and keeps drawing on its owner's escrow");
+        assertEq(
+            spokeEscrowStore.releasedMap(_elsewhere, address(usdc)), 0, "never on the escrow a refused genesis named"
+        );
+    }
+
+    function test_an_abroad_credit_takes_only_the_owner_wallets_raw_signature_the_spoke_settles() public {
+        _openFund();
+        address _owner = _account(master);
+        _walletEscrow(spoke, master, 300e6);
+        _walletEscrow(hub, master, 100e6);
+        uint _now = vm.getBlockTimestamp();
+        address _signer = vm.addr(masterKey + 1);
+        bytes memory _grant = _coSig(
+            masterKey, AccountLib.sessionDigest(address(accountModule), master, _signer, _now, _now + 7 days, 0, body)
+        );
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(
+            _nonceOf(body), _nav(), _credit(FOREIGN_CHAIN_ID, address(usdc), 100e6), new Fund.Allocation[](0)
+        );
+        bytes32 _digest =
+            AccountLib.creditDigest(_owner, body, FOREIGN_CHAIN_ID, address(usdc), _i.credit.total, _i.credit.feeTotal);
+        bytes memory _session =
+            abi.encode(_signer, _now, _now + 7 days, uint(0), body, _grant, _coSig(masterKey + 1, _digest));
+        assertTrue(
+            UserAccount(payable(_owner)).approves(_digest, _session),
+            "the owner's account takes its session's signature as consent"
+        );
+
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        hub.allocate(_i, _sig, _session);
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(body, address(usdc), _i.credit.total, _i.credit.feeTotal, _session, _noGenesis());
+        vm.chainId(HUB_CHAIN);
+        assertEq(
+            fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total,
+            0,
+            "so the hub credits nothing abroad that the spoke would refuse to settle"
+        );
+
+        uint _shares = shareToken.balanceOf(body);
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        assertGt(shareToken.balanceOf(body), _shares, "the wallet's own signature over the same total mints");
+        assertEq(fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total, 100e6, "and the hub keeps the total");
+        _fulfil(address(usdc), _i.credit.total, _i.credit.feeTotal);
+        assertEq(spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)), 100e6, "which the spoke settles");
+
+        (Fund.AllocateIntent memory _local, bytes memory _localSig) =
+            _allocateIntent(_nonceOf(body), _nav(), _credit(HUB_CHAIN, address(usdc), 100e6), new Fund.Allocation[](0));
+        bytes32 _localDigest = AccountLib.creditDigest(
+            _owner, body, HUB_CHAIN, address(usdc), _local.credit.total, _local.credit.feeTotal
+        );
+        hub.allocate(
+            _local,
+            _localSig,
+            abi.encode(_signer, _now, _now + 7 days, uint(0), body, _grant, _coSig(masterKey + 1, _localDigest))
+        );
+        assertEq(
+            hubEscrowStore.fulfilledMap(_owner, body, address(usdc)),
+            600e6,
+            "a local credit takes any consent the account accepts, since the hub releases it at once"
+        );
+    }
+
+    function test_a_contract_wallet_owner_credits_locally_but_never_abroad() public {
+        MockWallet1271 _wallet = new MockWallet1271();
+        master = address(_wallet);
+        (body, bodyKey) = makeAddrAndKey("wallet-owned-body");
+        vm.signAndAttachDelegation(accountModule.bodyImpl(), bodyKey);
+        _openFund();
+        address _owner = _account(master);
+        assertEq(UserAccount(payable(_owner)).user(), address(_wallet), "the fund's owner is a contract wallet");
+        _walletEscrow(spoke, master, 300e6);
+        _walletEscrow(hub, master, 100e6);
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(
+            _nonceOf(body), _nav(), _credit(FOREIGN_CHAIN_ID, address(usdc), 100e6), new Fund.Allocation[](0)
+        );
+        bytes32 _digest =
+            AccountLib.creditDigest(_owner, body, FOREIGN_CHAIN_ID, address(usdc), _i.credit.total, _i.credit.feeTotal);
+        bytes memory _plain = _ownerCoSig(_i);
+        bytes memory _tagged = bytes.concat(WALLET_SIGNATURE_TAG, _plain);
+        assertTrue(
+            UserAccount(payable(_owner)).approves(_digest, _plain), "the wallet's own verdict accepts its signature"
+        );
+        assertTrue(UserAccount(payable(_owner)).approves(_digest, _tagged), "plain or tagged");
+
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        hub.allocate(_i, _sig, _plain);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        hub.allocate(_i, _sig, _tagged);
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(body, address(usdc), _i.credit.total, _i.credit.feeTotal, _plain, _noGenesis());
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(body, address(usdc), _i.credit.total, _i.credit.feeTotal, _tagged, _noGenesis());
+        vm.chainId(HUB_CHAIN);
+        assertEq(
+            fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total,
+            0,
+            "the hub never credits escrow abroad that only a wallet's verdict could release"
+        );
+
+        (Fund.AllocateIntent memory _local, bytes memory _localSig) =
+            _allocateIntent(_nonceOf(body), _nav(), _credit(HUB_CHAIN, address(usdc), 100e6), new Fund.Allocation[](0));
+        hub.allocate(_local, _localSig, bytes.concat(WALLET_SIGNATURE_TAG, _ownerCoSig(_local)));
+        assertEq(
+            hubEscrowStore.fulfilledMap(_owner, body, address(usdc)),
+            600e6,
+            "while the hub releases a wallet-signed local credit at once"
+        );
+        assertEq(
+            spokeEscrowStore.releasedMap(_owner, address(usdc)), 0, "and the spoke escrow stays the wallet's to return"
+        );
+    }
+
+    function test_anyone_settles_the_total_the_hub_published_but_only_under_the_chain_id_it_names() public {
+        _openFund();
+        address _owner = _account(master);
+        _walletEscrow(spoke, master, 300e6);
+        vm.recordLogs();
+        _creditRound(FOREIGN_CHAIN_ID, 120e6);
+        Vm.Log[] memory _logs = vm.getRecordedLogs();
+        (bytes32 _digest, bytes memory _record) = _lastRecordOf(_logs, _owner);
+        (bytes4 _selector, address _master, Fund.Credit memory _c) = abi.decode(_record, (bytes4, address, Fund.Credit));
+        assertEq(_selector, Fund.allocate.selector, "the hub records the owner's credit on its account");
+        assertEq(_master, body, "naming the fund");
+        assertEq(
+            _digest,
+            AccountLib.creditDigest(_owner, body, FOREIGN_CHAIN_ID, _c.token, _c.total, _c.feeTotal),
+            "under the credit digest the signature covers"
+        );
+        (, _record) = _lastRecordOf(_logs, body);
+        (,,,,, Fund.Credit memory _applied, bytes memory _signature,,,,) = abi.decode(
+            _record, (bytes4, uint, uint, address, Fund.Price, Fund.Credit, bytes, uint, uint, uint, uint)
+        );
+        assertEq(_applied.total, _c.total, "the fund's allocate record carries the same credit");
+        assertGt(_signature.length, 0, "and publishes the owner's consent beside it");
+        uint _fees = usdc.balanceOf(feeReceiver);
+        uint _held = usdc.balanceOf(body);
+        address _watcher = makeAddr("watcher");
+
+        vm.startPrank(_watcher);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(body, _c.token, _c.total, _c.feeTotal, _signature, _noGenesis());
+        vm.chainId(FOREIGN_CHAIN_ID + 1);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(body, _c.token, _c.total, _c.feeTotal, _signature, _noGenesis());
+        vm.chainId(FOREIGN_CHAIN_ID);
+        spoke.fulfil(body, _c.token, _c.total, _c.feeTotal, _signature, _noGenesis());
+        vm.stopPrank();
+        vm.chainId(HUB_CHAIN);
+        assertEq(
+            usdc.balanceOf(body),
+            _held + 120e6 - FEE,
+            "a watcher settles it from the record alone, on the chain it names"
+        );
+        assertEq(usdc.balanceOf(feeReceiver), _fees + FEE, "billing the master's slice where the capital sits");
+        assertEq(usdc.balanceOf(_watcher), 0, "and paying the settler nothing");
+
+        vm.recordLogs();
+        _creditRound(FOREIGN_CHAIN_ID, 80e6);
+        (, _record) = _lastRecordOf(vm.getRecordedLogs(), body);
+        (,,,,, _c, _signature,,,,) = abi.decode(
+            _record, (bytes4, uint, uint, address, Fund.Price, Fund.Credit, bytes, uint, uint, uint, uint)
+        );
+        assertEq(_c.total, 200e6, "the next abroad credit signs the running total");
+        assertEq(_c.feeTotal, 2 * FEE, "and the running fee total");
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.prank(_watcher);
+        spoke.fulfil(body, _c.token, _c.total, _c.feeTotal, _signature, _noGenesis());
+        vm.chainId(HUB_CHAIN);
+        assertEq(usdc.balanceOf(body), _held + 200e6 - 2 * FEE, "its settlement adds only the new credit");
+        assertEq(usdc.balanceOf(feeReceiver), _fees + 2 * FEE, "and bills only the new slice");
+        assertEq(
+            spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)),
+            fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total,
+            "the spoke settled exactly the total the hub credited"
+        );
+        assertEq(
+            spokeEscrowStore.feePaidMap(_owner, body, address(usdc)),
+            fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).feeTotal,
+            "and the fee total it billed"
+        );
+    }
+
+    function test_a_return_requested_after_an_abroad_credit_takes_back_only_what_stays_open_after_settlement() public {
+        _openFund();
+        address _owner = _account(master);
+        _walletEscrow(spoke, master, 300e6);
+        Fund.Credit memory _c = _creditRound(FOREIGN_CHAIN_ID, 200e6);
+        bytes memory _signed = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), _c.total, _c.feeTotal);
+        uint _held = usdc.balanceOf(body);
+        uint _start = vm.getBlockTimestamp();
+        vm.prank(master);
+        spoke.requestReturn(address(usdc));
+
+        vm.warp(_start + ESCROW_RETURN_DELAY - 1);
+        vm.prank(master);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, _start + ESCROW_RETURN_DELAY));
+        spoke.returnEscrow(address(usdc));
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.prank(makeAddr("watcher"));
+        spoke.fulfil(body, address(usdc), _c.total, _c.feeTotal, _signed, _noGenesis());
+        vm.chainId(HUB_CHAIN);
+
+        vm.warp(_start + ESCROW_RETURN_DELAY);
+        vm.prank(master);
+        spoke.returnEscrow(address(usdc));
+        assertEq(usdc.balanceOf(master), 100e6, "the return takes back only the open remainder");
+        assertEq(usdc.balanceOf(body) - _held, 200e6 - FEE, "the credited part reached the fund the hub minted against");
+        _assertLedger(spokeEscrowStore, _owner, 300e6, 200e6, 100e6);
+        assertEq(
+            spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)),
+            fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total,
+            "every unit the hub credited is settled"
+        );
+        assertEq(spokeEscrowStore.heldMap(address(usdc)), 0, "and the store owes nothing more");
+    }
+
+    function test_a_return_after_the_day_takes_a_credit_nobody_settled_and_its_settlement_then_reverts() public {
+        _openFund();
+        address _owner = _account(master);
+        _walletEscrow(spoke, master, 300e6);
+        Fund.Credit memory _c = _creditRound(FOREIGN_CHAIN_ID, 200e6);
+        bytes memory _signed = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), _c.total, _c.feeTotal);
+        _returnOpenEscrow(spoke, master, address(usdc));
+        assertEq(usdc.balanceOf(master), 300e6, "a credit left unsettled for the whole day is returned with the rest");
+
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 0, 200e6));
+        spoke.fulfil(body, address(usdc), _c.total, _c.feeTotal, _signed, _noGenesis());
+        vm.chainId(HUB_CHAIN);
+        assertEq(
+            fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total,
+            200e6,
+            "while the hub still counts the credit, so a settler has one day to land it"
+        );
+        _assertLedger(spokeEscrowStore, _owner, 300e6, 0, 300e6);
     }
 
     function test_one_owner_escrow_funds_several_funds_on_each_store_and_never_its_account() public {
@@ -375,69 +626,96 @@ contract EscrowGovernanceTest is HotPathTest {
         _walletEscrow(spoke, master, 200e6);
         _retireEscrow(spoke, spokeEscrowStore, address(usdc), 100e6);
         uint _accountHeld = usdc.balanceOf(_owner);
-        uint _consents = _nonceOf(_owner);
+        uint _nonce = _nonceOf(_owner);
         uint _fees = usdc.balanceOf(feeReceiver);
-        assertEq(_accountHeld, 1600e6 - 2 * FEE, "the account paid only the escrow it moved and the relay fees it signed");
+        assertEq(
+            _accountHeld, 1600e6 - 2 * FEE, "the account paid only the escrow it moved and the relay fees it signed"
+        );
 
         _createFund(bytes32("EGA"), 500e6);
         address _first = body;
-        _fulfil(address(usdc), _creditRound(FOREIGN_CHAIN_ID, 120e6), 120e6, FEE);
+        _creditRound(FOREIGN_CHAIN_ID, 120e6);
+        _fulfil(address(usdc), 120e6, FEE);
 
         (body, bodyKey) = makeAddrAndKey("second-body");
         vm.signAndAttachDelegation(accountModule.bodyImpl(), bodyKey);
         _createFund(bytes32("EGB"), 350e6);
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), _nav(), _credit(block.chainid, address(usdc), 60e6), new Fund.Allocation[](0));
+            _allocateIntent(_nonceOf(body), _nav(), _credit(HUB_CHAIN, address(usdc), 60e6), new Fund.Allocation[](0));
         bytes memory _ownerSig = _ownerCoSig(_i);
         vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 50e6, 60e6));
         hub.allocate(_i, _sig, _ownerSig);
         vm.recordLogs();
-        _creditRound(block.chainid, 30e6);
+        Fund.Credit memory _local = _creditRound(HUB_CHAIN, 30e6);
+        (bytes32 _digest, bytes memory _record) = _lastRecordOf(vm.getRecordedLogs(), _owner);
+        assertEq(_local.total, 380e6, "a local credit signs the fund's running total");
         assertEq(
-            _lastRecordOf(vm.getRecordedLogs(), _owner),
-            abi.encode(
-                Fund.allocate.selector,
-                body,
-                _credit(block.chainid, address(usdc), 30e6),
-                FEE,
-                hubEscrowStore.fulfilledMap(_owner, body, address(usdc))
-            ),
-            "the owner's consent record names the fund, the credit, the slice billed from it and the fulfilled total"
+            _record,
+            abi.encode(Fund.allocate.selector, body, _local),
+            "the owner's credit record names the fund and the signed totals"
         );
-        _fulfil(address(usdc), _creditRound(FOREIGN_CHAIN_ID, 150e6), 150e6, FEE);
+        assertEq(
+            _digest,
+            AccountLib.creditDigest(_owner, body, HUB_CHAIN, address(usdc), 380e6, 2 * FEE),
+            "under the owner's credit digest"
+        );
+        vm.recordLogs();
+        Fund.Credit memory _abroad = _creditRound(FOREIGN_CHAIN_ID, 150e6);
+        (, _record) = _lastRecordOf(vm.getRecordedLogs(), _owner);
+        assertEq(
+            _record,
+            abi.encode(Fund.allocate.selector, body, _abroad),
+            "an abroad credit's record has the same shape, its chain id naming the spoke that settles it"
+        );
+        _fulfil(address(usdc), 150e6, FEE);
 
-        bytes memory _over = _storeSignature(address(spokeEscrowStore), _first, 120e6, 151e6, FEE);
+        bytes memory _over = _totalSignature(masterKey, _owner, _first, 151e6, 2 * FEE);
+        vm.chainId(FOREIGN_CHAIN_ID);
         vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 30e6, 31e6));
-        spoke.fulfil(_first, address(usdc), ROUND, 120e6, 151e6, FEE, _over, _noGenesis());
+        spoke.fulfil(_first, address(usdc), 151e6, 2 * FEE, _over, _noGenesis());
+        vm.chainId(HUB_CHAIN);
 
-        _returnEscrow(hub, _owner, address(usdc), 15e6);
-        _returnEscrow(spoke, _owner, address(usdc), 25e6);
+        _returnOpenEscrow(hub, master, address(usdc));
+        _returnOpenEscrow(spoke, master, address(usdc));
 
-        _assertLedger(hubEscrowStore, _owner, 900e6, 880e6, 15e6);
-        _assertLedger(spokeEscrowStore, _owner, 300e6, 270e6, 25e6);
+        _assertLedger(hubEscrowStore, _owner, 900e6, 880e6, 20e6);
+        _assertLedger(spokeEscrowStore, _owner, 300e6, 270e6, 30e6);
         _assertLedger(hubEscrowStore, _backer, 70e6, 0, 0);
         _assertLedger(spokeEscrowStore, _backer, 30e6, 0, 0);
-        assertEq(hubEscrowStore.fulfilledMap(_owner, _first, address(usdc)), 500e6, "the first fund drew its local credit");
+        assertEq(
+            hubEscrowStore.fulfilledMap(_owner, _first, address(usdc)), 500e6, "the first fund drew its local credit"
+        );
         assertEq(hubEscrowStore.fulfilledMap(_owner, body, address(usdc)), 380e6, "the second its two");
-        assertEq(spokeEscrowStore.fulfilledMap(_owner, _first, address(usdc)), 120e6, "each fulfilled its abroad credit");
+        assertEq(spokeEscrowStore.fulfilledMap(_owner, _first, address(usdc)), 120e6, "each settled its abroad credit");
         assertEq(spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)), 150e6, "on the spoke");
-        assertEq(hubEscrowStore.heldMap(address(usdc)), 5e6 + 70e6, "the hub store owes each owner's open escrow");
-        assertEq(usdc.balanceOf(address(hubEscrowStore)), 75e6, "and holds exactly that");
-        assertEq(spokeEscrowStore.heldMap(address(usdc)), 5e6 + 30e6, "so does the spoke store");
-        assertEq(usdc.balanceOf(address(spokeEscrowStore)), 35e6);
-        assertEq(usdc.balanceOf(_first), 500e6 + 120e6 - 2 * FEE, "the first fund holds its credits net of their slices");
+        assertEq(
+            fundStore.getCredit(_first, FOREIGN_CHAIN_ID, address(usdc)).total, 120e6, "at the totals the hub credited"
+        );
+        assertEq(fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total, 150e6);
+        assertEq(
+            hubEscrowStore.heldMap(address(usdc)), 70e6, "after its return the hub store owes only the other owner"
+        );
+        assertEq(usdc.balanceOf(address(hubEscrowStore)), 70e6, "and holds exactly that");
+        assertEq(spokeEscrowStore.heldMap(address(usdc)), 30e6, "so does the spoke store");
+        assertEq(usdc.balanceOf(address(spokeEscrowStore)), 30e6);
+        assertEq(
+            usdc.balanceOf(_first), 500e6 + 120e6 - 2 * FEE, "the first fund holds its credits net of their slices"
+        );
         assertEq(usdc.balanceOf(body), 350e6 + 30e6 + 150e6 - 3 * FEE, "the second its own");
         assertEq(
             usdc.balanceOf(_first) + usdc.balanceOf(body) + usdc.balanceOf(feeReceiver) - _fees,
             hubEscrowStore.releasedMap(_owner, address(usdc)) + spokeEscrowStore.releasedMap(_owner, address(usdc)),
             "every released unit reached a fund or the fee receiver"
         );
-        assertEq(usdc.balanceOf(master), 40e6, "the wallet holds exactly what came back");
-        assertEq(usdc.balanceOf(_owner), _accountHeld, "no round, fulfil or return touched the owner's account");
-        assertEq(_nonceOf(_owner) - _consents, 5, "each settled credited round spent one owner consent");
+        assertEq(usdc.balanceOf(master), 50e6, "the wallet holds exactly the open escrow that came back");
+        assertEq(usdc.balanceOf(_owner), _accountHeld, "no round, settlement or return touched the owner's account");
+        assertEq(
+            _nonceOf(_owner), _nonce, "and no credit spent an owner nonce: each signed total is its own replay guard"
+        );
         assertEq(
             hubEscrowStore.escrowedMap(_first, address(usdc)) + hubEscrowStore.escrowedMap(body, address(usdc))
-                + spokeEscrowStore.escrowedMap(_first, address(usdc)) + spokeEscrowStore.escrowedMap(body, address(usdc)),
+                + spokeEscrowStore.escrowedMap(_first, address(usdc))
+                + spokeEscrowStore.escrowedMap(body, address(usdc)),
             0,
             "a fund body never holds escrow"
         );
@@ -448,7 +726,7 @@ contract EscrowGovernanceTest is HotPathTest {
         uint _retired,
         uint _first,
         uint _second,
-        uint _back
+        bool _back
     ) public {
         _wallet = bound(_wallet, 10e6, 1e15);
         _retired = bound(_retired, 1, 1e15);
@@ -462,26 +740,41 @@ contract EscrowGovernanceTest is HotPathTest {
         _first = bound(_first, 10e6, _escrowed);
         _second = bound(_second, 0, _escrowed - _first);
         if (_second < 10e6) _second = 0;
-        _back = bound(_back, 0, _escrowed - _first - _second);
+        uint _open = _escrowed - _first - _second;
         uint _fees = usdc.balanceOf(feeReceiver);
 
         _createFund(bytes32("EG"), _first);
-        if (_second > 0) _creditRound(block.chainid, _second);
-        if (_back > 0) _returnEscrow(hub, _owner, address(usdc), _back);
+        if (_second > 0) _creditRound(HUB_CHAIN, _second);
+        if (_back) {
+            uint _start = vm.getBlockTimestamp();
+            vm.prank(master);
+            hub.requestReturn(address(usdc));
+            vm.warp(_start + ESCROW_RETURN_DELAY);
+            if (_open == 0) vm.expectRevert(Error.Balance__NothingToWithdraw.selector);
+            vm.prank(master);
+            hub.returnEscrow(address(usdc));
+        }
+        uint _returned = _back ? _open : 0;
 
         uint _billed = (_second > 0 ? 2 : 1) * FEE;
-        assertEq(usdc.balanceOf(body), _first + _second - _billed, "the body receives each local credit net of its slice");
-        assertEq(usdc.balanceOf(feeReceiver) - _fees, _billed, "the store's fee receiver exactly the slices");
-        assertEq(usdc.balanceOf(master), _back, "the wallet exactly the return");
-        assertEq(usdc.balanceOf(_owner), 100e6, "and the owner's account nothing");
-        _assertLedger(hubEscrowStore, _owner, _escrowed, _first + _second, _back);
-        assertEq(hubEscrowStore.fulfilledMap(_owner, body, address(usdc)), _first + _second, "the body's total is its credits");
         assertEq(
-            hubEscrowStore.heldMap(address(usdc)),
-            70e6 + _escrowed - _first - _second - _back,
-            "the store owes each owner's open escrow"
+            usdc.balanceOf(body), _first + _second - _billed, "the body receives each local credit net of its slice"
         );
-        assertEq(usdc.balanceOf(address(hubEscrowStore)), hubEscrowStore.heldMap(address(usdc)), "and holds exactly that");
+        assertEq(usdc.balanceOf(feeReceiver) - _fees, _billed, "the store's fee receiver exactly the slices");
+        assertEq(usdc.balanceOf(master), _returned, "the wallet exactly the open escrow it asked back");
+        assertEq(usdc.balanceOf(_owner), 100e6, "and the owner's account nothing");
+        _assertLedger(hubEscrowStore, _owner, _escrowed, _first + _second, _returned);
+        assertEq(
+            hubEscrowStore.fulfilledMap(_owner, body, address(usdc)),
+            _first + _second,
+            "the body's total is its credits"
+        );
+        assertEq(
+            hubEscrowStore.heldMap(address(usdc)), 70e6 + _open - _returned, "the store owes each owner's open escrow"
+        );
+        assertEq(
+            usdc.balanceOf(address(hubEscrowStore)), hubEscrowStore.heldMap(address(usdc)), "and holds exactly that"
+        );
     }
 
     function testFuzz_the_spoke_escrow_ledger_matches_the_balance_deltas(
@@ -491,7 +784,7 @@ contract EscrowGovernanceTest is HotPathTest {
         uint _second,
         uint _firstFee,
         uint _secondFee,
-        uint _back
+        bool _back
     ) public {
         _wallet = bound(_wallet, 1, 1e15);
         _retired = bound(_retired, 1, 1e15);
@@ -503,131 +796,224 @@ contract EscrowGovernanceTest is HotPathTest {
         usdc.mint(_owner, _retired + FEE);
         _retireEscrow(spoke, spokeEscrowStore, address(usdc), _retired);
         uint _escrowed = _wallet + _retired;
-        _first = bound(_first, 1, _escrowed);
-        _second = bound(_second, _first, _escrowed);
+        _first = bound(_first, 1, _escrowed - 1);
+        _second = bound(_second, _first + 1, _escrowed);
         _firstFee = bound(_firstFee, 0, _first / 10);
         _secondFee = bound(_secondFee, 0, (_second - _first) / 10);
-        _back = bound(_back, 0, _escrowed - _second);
+        uint _open = _escrowed - _second;
         uint[3] memory _before = [usdc.balanceOf(body), usdc.balanceOf(feeReceiver), usdc.balanceOf(master)];
 
-        spoke.fulfil(
-            body, address(usdc), ROUND, 0, _first, _firstFee, _fulfilSignature(address(usdc), ROUND, 0, _first, _firstFee), _noGenesis()
-        );
-        spoke.fulfil(
-            body,
-            address(usdc),
-            ROUND,
-            _first,
-            _second,
-            _secondFee,
-            _fulfilSignature(address(usdc), ROUND, _first, _second, _secondFee),
-            _noGenesis()
-        );
-        if (_back > 0) _returnEscrow(spoke, _owner, address(usdc), _back);
+        _fulfil(address(usdc), _first, _firstFee);
+        _fulfil(address(usdc), _second, _firstFee + _secondFee);
+        if (_back) {
+            uint _start = vm.getBlockTimestamp();
+            vm.prank(master);
+            spoke.requestReturn(address(usdc));
+            vm.warp(_start + ESCROW_RETURN_DELAY);
+            if (_open == 0) vm.expectRevert(Error.Balance__NothingToWithdraw.selector);
+            vm.prank(master);
+            spoke.returnEscrow(address(usdc));
+        }
+        uint _left = _back ? 0 : _open;
 
-        assertEq(usdc.balanceOf(body) - _before[0], _second - _firstFee - _secondFee, "the body receives each release net of its fee");
-        assertEq(usdc.balanceOf(feeReceiver) - _before[1], _firstFee + _secondFee, "the fee receiver exactly the fees");
-        assertEq(usdc.balanceOf(master) - _before[2], _back, "the wallet exactly the return");
-        assertEq(usdc.balanceOf(_owner), 100e6, "and the owner's account nothing");
-        _assertLedger(spokeEscrowStore, _owner, _escrowed, _second, _back);
-        assertEq(spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)), _second, "the body's total is its last fulfil");
         assertEq(
-            spokeEscrowStore.heldMap(address(usdc)), 30e6 + _escrowed - _second - _back, "the store owes each owner's open escrow"
+            usdc.balanceOf(body) - _before[0],
+            _second - _firstFee - _secondFee,
+            "the body receives each release net of its fee"
         );
-        assertEq(usdc.balanceOf(address(spokeEscrowStore)), spokeEscrowStore.heldMap(address(usdc)), "and holds exactly that");
+        assertEq(
+            usdc.balanceOf(feeReceiver) - _before[1],
+            _firstFee + _secondFee,
+            "the fee receiver exactly the fee increments"
+        );
+        assertEq(usdc.balanceOf(master) - _before[2], _open - _left, "the wallet exactly the open escrow it asked back");
+        assertEq(usdc.balanceOf(_owner), 100e6, "and the owner's account nothing");
+        _assertLedger(spokeEscrowStore, _owner, _escrowed, _second, _open - _left);
+        assertEq(
+            spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)),
+            _second,
+            "the body's total is its last settled total"
+        );
+        assertEq(
+            spokeEscrowStore.feePaidMap(_owner, body, address(usdc)),
+            _firstFee + _secondFee,
+            "its fee total the last signed one"
+        );
+        assertEq(spokeEscrowStore.heldMap(address(usdc)), 30e6 + _left, "the store owes each owner's open escrow");
+        assertEq(
+            usdc.balanceOf(address(spokeEscrowStore)), spokeEscrowStore.heldMap(address(usdc)), "and holds exactly that"
+        );
 
-        uint _open = _escrowed - _second - _back;
-        bytes memory _beyond = _fulfilSignature(address(usdc), ROUND, _second, _second + _open + 1, 0);
-        vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, _open, _open + 1));
-        spoke.fulfil(body, address(usdc), ROUND, _second, _second + _open + 1, 0, _beyond, _noGenesis());
+        bytes memory _beyond =
+            _creditSignature(FOREIGN_CHAIN_ID, address(usdc), _second + _left + 1, _firstFee + _secondFee);
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, _left, _left + 1));
+        spoke.fulfil(body, address(usdc), _second + _left + 1, _firstFee + _secondFee, _beyond, _noGenesis());
+        vm.chainId(HUB_CHAIN);
     }
 
-    function test_returnEscrow_pays_the_owners_wallet_only_up_to_the_open_escrow() public {
+    function test_returnEscrow_pays_the_owners_wallet_the_open_escrow_a_day_after_its_request() public {
         _openFund();
         _fundWallet(master, 100e6);
+        _account(backer);
         address _owner = _account(master);
         _walletEscrow(hub, master, 300e6);
-        _creditRound(block.chainid, 100e6);
+        _creditRound(HUB_CHAIN, 100e6);
         _walletEscrow(spoke, master, 300e6);
-        _fulfil(address(usdc), _creditRound(FOREIGN_CHAIN_ID, 100e6), 100e6, FEE);
+        _creditRound(FOREIGN_CHAIN_ID, 100e6);
+        _fulfil(address(usdc), 100e6, FEE);
+        (Fund.AllocateIntent memory _i,) =
+            _allocateIntent(_nonceOf(body), _nav(), _credit(HUB_CHAIN, address(usdc), 10e6), new Fund.Allocation[](0));
+        bytes memory _ownerSig = _ownerCoSig(_i);
+        bytes memory _beyond = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 110e6, 2 * FEE);
 
-        _returnsOnlyTheOpenEscrow(hub, spokeEscrowStore);
-        _returnsOnlyTheOpenEscrow(spoke, hubEscrowStore);
+        _returnsTheOpenEscrowADayAfterItsRequest(hub);
+        _returnsTheOpenEscrowADayAfterItsRequest(spoke);
         assertEq(usdc.balanceOf(_owner), 100e6, "no return ever lands in the owner's account");
         assertEq(usdc.balanceOf(master), 400e6, "both stores returned their open escrow to the wallet");
 
-        (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), _nav(), _credit(block.chainid, address(usdc), 10e6), new Fund.Allocation[](0));
-        bytes memory _ownerSig = _ownerCoSig(_i);
+        _i.header.deadline = vm.getBlockTimestamp() + 300;
+        bytes memory _sig = _pair(masterKey, _allocateDigest(_i));
         vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 0, 10e6));
         hub.allocate(_i, _sig, _ownerSig);
-        bytes memory _signed = _fulfilSignature(address(usdc), ROUND, 100e6, 110e6, FEE);
+        vm.chainId(FOREIGN_CHAIN_ID);
         vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 0, 10e6));
-        spoke.fulfil(body, address(usdc), ROUND, 100e6, 110e6, FEE, _signed, _noGenesis());
+        spoke.fulfil(body, address(usdc), 110e6, 2 * FEE, _beyond, _noGenesis());
+        vm.chainId(HUB_CHAIN);
     }
 
-    function _returnsOnlyTheOpenEscrow(
-        LiquidityGate _gate,
-        EscrowStore _other
+    function _returnsTheOpenEscrowADayAfterItsRequest(
+        LiquidityGate _gate
     ) internal {
         EscrowStore _store = _gate.escrowStore();
         address _owner = _account(master);
         uint _released = _store.releasedMap(_owner, address(usdc));
         assertEq(_store.escrowedMap(_owner, address(usdc)) - _released, 200e6, "the owner's open escrow on this store");
         uint _wallet = usdc.balanceOf(master);
-        uint _now = vm.getBlockTimestamp();
+        uint _start = vm.getBlockTimestamp();
 
-        bytes memory _over = _returnSignature(_store, _owner, address(usdc), 0, 200e6 + 1, _now + 300);
-        vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 200e6, 200e6 + 1));
-        _gate.returnEscrow(_owner, address(usdc), 0, 200e6 + 1, _now + 300, _over);
+        vm.prank(master);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, 0));
+        _gate.returnEscrow(address(usdc));
+        vm.prank(makeAddr("no-account"));
+        vm.expectRevert(Error.Account__InvalidUser.selector);
+        _gate.requestReturn(address(usdc));
+        vm.prank(backer);
+        _gate.requestReturn(address(usdc));
+        assertEq(_store.returnAtMap(_owner, address(usdc)), 0, "a request starts only the caller's own return");
 
-        bytes memory _elsewhere = _returnSignature(_other, _owner, address(usdc), 0, 150e6, _now + 300);
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        _gate.returnEscrow(_owner, address(usdc), 0, 150e6, _now + 300, _elsewhere);
-
-        bytes memory _late = _returnSignature(_store, _owner, address(usdc), 0, 150e6, _now - 1);
-        vm.expectRevert(abi.encodeWithSelector(Error.Intent__ExpiredDeadline.selector, _now - 1, _now));
-        _gate.returnEscrow(_owner, address(usdc), 0, 150e6, _now - 1, _late);
-
-        bytes memory _far = _returnSignature(_store, _owner, address(usdc), 0, 150e6, _now + 601);
-        vm.expectRevert(abi.encodeWithSelector(Error.Intent__DeadlineTooFar.selector, _now + 601, _now, 600));
-        _gate.returnEscrow(_owner, address(usdc), 0, 150e6, _now + 601, _far);
-
-        bytes memory _part = _returnSignature(_store, _owner, address(usdc), 0, 150e6, _now + 300);
         vm.recordLogs();
-        _gate.returnEscrow(_owner, address(usdc), 0, 150e6, _now + 300, _part);
+        vm.prank(master);
+        _gate.requestReturn(address(usdc));
+        (, bytes memory _record) = _lastRecordOf(vm.getRecordedLogs(), _owner);
         assertEq(
-            _lastRecordOf(vm.getRecordedLogs(), _owner),
-            abi.encode(LiquidityGate.returnEscrow.selector, address(usdc), uint(0), uint(150e6)),
+            _record,
+            abi.encode(LiquidityGate.requestReturn.selector, address(usdc), _start + ESCROW_RETURN_DELAY),
+            "the request records when the return opens"
+        );
+        vm.warp(_start + ESCROW_RETURN_DELAY / 2);
+        vm.prank(master);
+        _gate.requestReturn(address(usdc));
+        uint _returnAt = _start + ESCROW_RETURN_DELAY * 3 / 2;
+        assertEq(_store.returnAtMap(_owner, address(usdc)), _returnAt, "a second request restarts the day");
+        vm.warp(_returnAt - 1);
+        vm.prank(master);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, _returnAt));
+        _gate.returnEscrow(address(usdc));
+
+        vm.warp(_returnAt);
+        vm.recordLogs();
+        vm.prank(master);
+        _gate.returnEscrow(address(usdc));
+        (, _record) = _lastRecordOf(vm.getRecordedLogs(), _owner);
+        assertEq(
+            _record,
+            abi.encode(LiquidityGate.returnEscrow.selector, address(usdc), uint(200e6)),
             "the record carries the running returned total"
         );
-        assertEq(usdc.balanceOf(master) - _wallet, 150e6, "the return pays the owner's wallet");
+        assertEq(usdc.balanceOf(master) - _wallet, 200e6, "the return pays the owner's wallet the whole open escrow");
+        assertEq(_store.returnAtMap(_owner, address(usdc)), 0, "and spends the request");
+        vm.prank(master);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, 0));
+        _gate.returnEscrow(address(usdc));
 
-        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidReturn.selector, 150e6, 150e6));
-        _gate.returnEscrow(_owner, address(usdc), 0, 150e6, _now + 300, _part);
-
-        vm.recordLogs();
-        _returnEscrow(_gate, _owner, address(usdc), 200e6);
-        assertEq(usdc.balanceOf(master) - _wallet, 200e6, "the rest follows on a fresh total");
-        assertEq(
-            _lastRecordOf(vm.getRecordedLogs(), _owner),
-            abi.encode(LiquidityGate.returnEscrow.selector, address(usdc), uint(150e6), uint(200e6)),
-            "recorded as the totals it moved between, never the delta"
-        );
-        bytes memory _beyond = _returnSignature(_store, _owner, address(usdc), 200e6, 200e6 + 1, _now + 300);
-        vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 0, 1));
-        _gate.returnEscrow(_owner, address(usdc), 200e6, 200e6 + 1, _now + 300, _beyond);
+        vm.prank(master);
+        _gate.requestReturn(address(usdc));
+        vm.warp(_returnAt + ESCROW_RETURN_DELAY);
+        vm.prank(master);
+        vm.expectRevert(Error.Balance__NothingToWithdraw.selector);
+        _gate.returnEscrow(address(usdc));
         assertEq(_store.returnedMap(_owner, address(usdc)), 200e6, "the returned total stops at the open escrow");
         assertEq(
-            _store.escrowedMap(_owner, address(usdc)), _released + 200e6, "every escrowed unit is now released or returned"
+            _store.escrowedMap(_owner, address(usdc)),
+            _released + 200e6,
+            "every escrowed unit is now released or returned"
         );
+    }
+
+    function test_a_new_escrow_cancels_a_pending_or_ready_return_so_a_later_escrow_needs_a_fresh_request_and_a_full_day()
+        public
+    {
+        _aNewEscrowCancelsTheReturn(hub);
+        _aNewEscrowCancelsTheReturn(spoke);
+    }
+
+    function _aNewEscrowCancelsTheReturn(
+        LiquidityGate _gate
+    ) internal {
+        EscrowStore _store = _gate.escrowStore();
+        address _owner = _account(master);
+        uint _wallet = usdc.balanceOf(master);
+        uint _start = vm.getBlockTimestamp();
+        uint _ready = _start + ESCROW_RETURN_DELAY;
+
+        vm.prank(master);
+        _gate.requestReturn(address(usdc));
+        vm.warp(_ready);
+        vm.prank(master);
+        vm.expectRevert(Error.Balance__NothingToWithdraw.selector);
+        _gate.returnEscrow(address(usdc));
+        assertEq(
+            _store.returnAtMap(_owner, address(usdc)),
+            _ready,
+            "a refund with nothing open reverts and keeps the ready request"
+        );
+
+        _walletEscrow(_gate, master, 100e6);
+        assertEq(_store.returnAtMap(_owner, address(usdc)), 0, "a new escrow cancels the ready request");
+        vm.prank(master);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, 0));
+        _gate.returnEscrow(address(usdc));
+
+        vm.prank(master);
+        _gate.requestReturn(address(usdc));
+        vm.warp(_ready + ESCROW_RETURN_DELAY / 2);
+        _walletEscrow(_gate, master, 50e6);
+        assertEq(_store.returnAtMap(_owner, address(usdc)), 0, "and a pending one");
+        vm.warp(_ready + ESCROW_RETURN_DELAY);
+        vm.prank(master);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, 0));
+        _gate.returnEscrow(address(usdc));
+
+        uint _fresh = _ready + 2 * ESCROW_RETURN_DELAY;
+        vm.prank(master);
+        _gate.requestReturn(address(usdc));
+        vm.warp(_fresh - 1);
+        vm.prank(master);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, _fresh));
+        _gate.returnEscrow(address(usdc));
+        vm.warp(_fresh);
+        vm.prank(master);
+        _gate.returnEscrow(address(usdc));
+        assertEq(usdc.balanceOf(master) - _wallet, 150e6, "a fresh request returns both escrows after its own full day");
+        _assertLedger(_store, _owner, 150e6, 0, 150e6);
     }
 
     function test_escrow_refuses_an_unfunded_booking_and_returns_the_new_escrowed_total() public {
         address _accessor = makeAddr("escrow-accessor");
-        vm.startPrank(owner);
-        dictate.setAccess(hubEscrowStore, _accessor);
-        dictate.setAccess(spokeEscrowStore, _accessor);
+        vm.startPrank(address(governorAccount));
+        hubEscrowStore.setAccess(_accessor, EscrowStore.escrow.selector);
+        spokeEscrowStore.setAccess(_accessor, EscrowStore.escrow.selector);
         vm.stopPrank();
         _booksOnlyWhatItHolds(hubEscrowStore, _accessor);
         _booksOnlyWhatItHolds(spokeEscrowStore, _accessor);
@@ -648,7 +1034,9 @@ contract EscrowGovernanceTest is HotPathTest {
         usdc.mint(address(_store), 70e6);
         assertEq(_store.escrow(_a, address(usdc), 40e6), 40e6, "a booking returns the owner's new escrowed total");
         assertEq(_store.escrow(_b, address(usdc), 10e6), 10e6, "kept per owner");
-        assertEq(_store.escrow(_a, address(usdc), 20e6), 60e6, "a second booking returns the running total, not its amount");
+        assertEq(
+            _store.escrow(_a, address(usdc), 20e6), 60e6, "a second booking returns the running total, not its amount"
+        );
         vm.expectRevert(abi.encodeWithSelector(Error.Escrow__Unfunded.selector, address(usdc), 70e6, 70e6 + 1));
         _store.escrow(_b, address(usdc), 1);
         vm.expectRevert(abi.encodeWithSelector(Error.Escrow__Unfunded.selector, address(wnt), 0, 1));
@@ -665,37 +1053,54 @@ contract EscrowGovernanceTest is HotPathTest {
         address _parent = _account(master);
         _walletEscrow(spoke, master, 40e6);
         address _rogue = makeAddr("rogue-accessor");
-        vm.prank(owner);
-        dictate.setAccess(spokeEscrowStore, _rogue);
+        vm.prank(address(governorAccount));
+        spokeEscrowStore.setAccess(_rogue, FULL_ACCESS);
         uint[4] memory _before =
             [usdc.balanceOf(_parent), usdc.balanceOf(master), usdc.balanceOf(body), usdc.balanceOf(feeReceiver)];
         assertEq(spokeEscrowStore.heldMap(address(usdc)), 40e6, "the store owes exactly the open escrow");
+        uint _start = vm.getBlockTimestamp();
 
         vm.startPrank(_rogue);
         vm.expectRevert(abi.encodeWithSelector(Error.Escrow__Unfunded.selector, address(usdc), 40e6, 40e6 + 1));
         spokeEscrowStore.escrow(_rogue, address(usdc), 1);
         vm.expectRevert(abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, 3e6 + 1, 30e6, 1000));
-        spokeEscrowStore.release(_parent, body, address(usdc), 30e6, 3e6 + 1, 200_000);
+        spokeEscrowStore.release(_parent, body, address(usdc), 30e6, 3e6 + 1, feeReceiver, 200_000);
         vm.expectRevert(abi.encodeWithSelector(Error.Account__NotDelegated.selector, _rogue));
-        spokeEscrowStore.release(_parent, _rogue, address(usdc), 30e6, 0, 200_000);
+        spokeEscrowStore.release(_parent, _rogue, address(usdc), 30e6, 0, feeReceiver, 200_000);
+        vm.expectRevert(abi.encodeWithSelector(Error.Account__HeaderMismatch.selector, body));
+        spokeEscrowStore.release(_rogue, body, address(usdc), 30e6, 0, feeReceiver, 200_000);
         vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 40e6, 41e6));
-        spokeEscrowStore.refund(_parent, address(usdc), 41e6, 200_000);
-        spokeEscrowStore.refund(_parent, address(usdc), 10e6, 200_000);
-        vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 30e6, 31e6));
-        spokeEscrowStore.release(_parent, body, address(usdc), 31e6, 3e6, 200_000);
-        spokeEscrowStore.release(_parent, body, address(usdc), 30e6, 3e6, 200_000);
+        spokeEscrowStore.release(_parent, body, address(usdc), 41e6, 0, feeReceiver, 200_000);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, 0));
+        spokeEscrowStore.refund(_parent, address(usdc), 200_000);
+        assertEq(
+            spokeEscrowStore.requestReturn(_parent, address(usdc)),
+            _start + ESCROW_RETURN_DELAY,
+            "an accessor can start a return, but only on the day's delay"
+        );
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, _start + ESCROW_RETURN_DELAY));
+        spokeEscrowStore.refund(_parent, address(usdc), 200_000);
+        spokeEscrowStore.release(_parent, body, address(usdc), 30e6, 3e6, feeReceiver, 200_000);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidFulfil.selector, 30e6, 30e6));
+        spokeEscrowStore.release(_parent, body, address(usdc), 30e6, 3e6, feeReceiver, 200_000);
+        vm.warp(_start + ESCROW_RETURN_DELAY);
+        assertEq(
+            spokeEscrowStore.refund(_parent, address(usdc), 200_000), 10e6, "and its refund pays only the open escrow"
+        );
         vm.stopPrank();
 
         assertEq(usdc.balanceOf(_parent), _before[0], "a refund never lands in the owner's account");
         assertEq(usdc.balanceOf(master) - _before[1], 10e6, "the store pays the owner's own wallet, whoever calls");
         assertEq(usdc.balanceOf(body) - _before[2], 27e6, "a release goes only to a fund the owner's account opened");
         assertEq(usdc.balanceOf(_rogue), 0, "so an accessor can never take escrow for itself");
-        assertEq(usdc.balanceOf(feeReceiver) - _before[3], 3e6, "with at most a tenth to the store's fixed fee receiver");
+        assertEq(
+            usdc.balanceOf(feeReceiver) - _before[3], 3e6, "with at most a tenth to the store's fixed fee receiver"
+        );
         assertEq(spokeEscrowStore.heldMap(address(usdc)), 0, "the ledger is settled");
         assertEq(usdc.balanceOf(address(spokeEscrowStore)), 0, "and so is the store");
     }
 
-    function test_a_native_escrow_carries_its_whole_amount_as_value() public {
+    function test_native_escrow_is_booked_as_weth_on_both_gates() public {
         _nativeEscrow(hub, "hub");
         _nativeEscrow(spoke, "spoke");
     }
@@ -707,34 +1112,73 @@ contract EscrowGovernanceTest is HotPathTest {
         EscrowStore _store = _gate.escrowStore();
         address _wallet = makeAddr(string.concat("native-", _tag));
         address _acct = accountModule.predictUserAccount(_wallet);
-        vm.deal(address(_store), 1 ether);
-        vm.deal(_wallet, 1.4 ether);
-        _wethTo(_wallet, 1 ether);
+        vm.deal(_wallet, 1 ether);
         vm.startPrank(_wallet);
-        IERC20(address(wnt)).approve(address(depositModule), 1 ether);
-        vm.expectRevert(abi.encodeWithSelector(Error.Balance__ValueMismatch.selector, 0, 1 ether));
-        _gate.depositEscrow(NATIVE_TOKEN, 1 ether);
-        vm.expectRevert(abi.encodeWithSelector(Error.Balance__ValueMismatch.selector, 0.4 ether, 1 ether));
-        _gate.depositEscrow{value: 0.4 ether}(NATIVE_TOKEN, 1 ether);
-        vm.recordLogs();
+        vm.expectRevert(Error.Balance__InvalidDeposit.selector);
         _gate.depositEscrow{value: 1 ether}(NATIVE_TOKEN, 1 ether);
+        vm.recordLogs();
+        _gate.depositEscrow{value: 1 ether}(address(wnt), 1 ether);
         vm.stopPrank();
+        (, bytes memory _record) = _lastRecordOf(vm.getRecordedLogs(), _acct);
         assertEq(
-            _store.escrowedMap(_acct, NATIVE_TOKEN),
+            _store.escrowedMap(_acct, address(wnt)),
             1 ether,
-            "a native escrow books only the native it carried, never wrapped value pulled beside it"
+            "native sent with a WETH escrow is wrapped and booked as WETH"
         );
-        assertEq(wnt.balanceOf(address(_store)), 0, "and no WETH lands in the store under a native booking");
+        assertEq(_store.escrowedMap(_acct, NATIVE_TOKEN), 0, "never as native");
+        assertEq(wnt.balanceOf(address(_store)), 1 ether, "so the store holds WETH");
         assertEq(
-            _lastRecordOf(vm.getRecordedLogs(), _acct),
-            abi.encode(LiquidityGate.depositEscrow.selector, NATIVE_TOKEN, uint(1 ether), uint(1 ether), uint(1 ether)),
+            _record,
+            abi.encode(LiquidityGate.depositEscrow.selector, address(wnt), uint(1 ether), uint(1 ether), uint(1 ether)),
             "the gate records the attached value beside the escrowed total"
         );
 
-        _returnEscrow(_gate, _acct, NATIVE_TOKEN, 1 ether);
-        assertEq(_wallet.balance, 1.4 ether, "the escrow returns to the wallet as native");
-        assertEq(_store.heldMap(NATIVE_TOKEN), 0, "the store owes nothing more");
-        assertEq(address(_store).balance, 1 ether, "and keeps only the balance it never booked");
+        _returnOpenEscrow(_gate, _wallet, address(wnt));
+        assertEq(
+            wnt.balanceOf(_wallet), 1 ether, "the escrow returns to the wallet as WETH, which any wallet can receive"
+        );
+        assertEq(_store.heldMap(address(wnt)), 0, "the store owes nothing more");
+    }
+
+    function test_a_native_retire_is_wrapped_and_booked_as_weth() public {
+        _fundWallet(master, 100e6);
+        address _acct = _account(master);
+        vm.deal(master, 2 ether);
+        vm.prank(master);
+        hub.deposit{value: 2 ether}(NATIVE_TOKEN, 2 ether);
+        assertEq(_acct.balance, 2 ether, "the account holds native");
+        uint _escrowed = hubEscrowStore.escrowedMap(_acct, address(wnt));
+        LiquidityGate.RetireEscrowIntent memory _i = LiquidityGate.RetireEscrowIntent({
+            header: _header(_acct, master, _nonceOf(_acct)), token: NATIVE_TOKEN, amount: 1.5 ether
+        });
+        vm.recordLogs();
+        hub.retireEscrow(
+            _i,
+            _pair(
+                masterKey,
+                _typed(
+                    _acct,
+                    _i.header.deadline,
+                    keccak256(abi.encode(RETIRE_ESCROW_INTENT_TYPEHASH, _hashHeader(_i.header), _i.token, _i.amount))
+                )
+            )
+        );
+        (, bytes memory _record) = _lastRecordOf(vm.getRecordedLogs(), _acct);
+        assertEq(_acct.balance, 0.5 ether, "the retire spends the account's native");
+        assertEq(hubEscrowStore.escrowedMap(_acct, address(wnt)), _escrowed + 1.5 ether, "and books it as WETH");
+        assertEq(hubEscrowStore.escrowedMap(_acct, NATIVE_TOKEN), 0, "never as native");
+        assertEq(
+            _record,
+            abi.encode(
+                LiquidityGate.retireEscrow.selector,
+                address(wnt),
+                uint(1.5 ether),
+                _escrowed + 1.5 ether,
+                _i.header.feeToken,
+                _i.header.fee
+            ),
+            "the record names the booked token"
+        );
     }
 
     function test_eth_escrows_fused_as_weth_from_attached_value_and_wallet_weth() public {
@@ -756,13 +1200,16 @@ contract EscrowGovernanceTest is HotPathTest {
         vm.recordLogs();
         _gate.depositEscrow{value: 0.4 ether}(address(wnt), 1 ether);
         vm.stopPrank();
+        (, bytes memory _record) = _lastRecordOf(vm.getRecordedLogs(), _acct);
         assertEq(_store.escrowedMap(_acct, address(wnt)), 1 ether, "the fused ETH escrow books WETH");
         assertEq(wnt.balanceOf(address(_store)), 1 ether, "wrapping the attached 0.4 ETH beside 0.6 wallet WETH");
         assertEq(_wallet.balance, 0, "the attached ETH is spent");
         assertEq(wnt.balanceOf(_wallet), 0, "and so is the wallet WETH");
         assertEq(
-            _lastRecordOf(vm.getRecordedLogs(), _acct),
-            abi.encode(LiquidityGate.depositEscrow.selector, address(wnt), uint(1 ether), uint(0.4 ether), uint(1 ether)),
+            _record,
+            abi.encode(
+                LiquidityGate.depositEscrow.selector, address(wnt), uint(1 ether), uint(0.4 ether), uint(1 ether)
+            ),
             "the record carries the amount, the attached value and the escrowed total"
         );
 
@@ -772,24 +1219,13 @@ contract EscrowGovernanceTest is HotPathTest {
         vm.recordLogs();
         _gate.depositEscrow(address(wnt), 0.5 ether);
         vm.stopPrank();
+        (, _record) = _lastRecordOf(vm.getRecordedLogs(), _acct);
         assertEq(
-            _lastRecordOf(vm.getRecordedLogs(), _acct),
+            _record,
             abi.encode(LiquidityGate.depositEscrow.selector, address(wnt), uint(0.5 ether), uint(0), uint(1.5 ether)),
             "a second escrow records the running total, never just its amount"
         );
         assertEq(_store.escrowedMap(_acct, address(wnt)), 1.5 ether);
-    }
-
-    function _lastRecordOf(
-        Vm.Log[] memory _logs,
-        address _acct
-    ) internal view returns (bytes memory executionData_) {
-        for (uint _i; _i < _logs.length; ++_i) {
-            if (_logs[_i].emitter != address(accountModule) || _logs[_i].topics[0] != AccountModule.AccountCall.selector) continue;
-            if (_logs[_i].topics[1] != bytes32(uint(uint160(_acct)))) continue;
-            (,,,,, executionData_,,,) =
-                abi.decode(_logs[_i].data, (uint, uint, uint, bytes32, bytes, bytes, IAccount.Call[], bytes[], BalanceLib.Balance[]));
-        }
     }
 
     function _escrowFromAccount(
@@ -807,7 +1243,11 @@ contract EscrowGovernanceTest is HotPathTest {
             _typed(
                 _acct,
                 intent_.header.deadline,
-                keccak256(abi.encode(RETIRE_ESCROW_INTENT_TYPEHASH, _hashHeader(intent_.header), intent_.token, intent_.amount))
+                keccak256(
+                    abi.encode(
+                        RETIRE_ESCROW_INTENT_TYPEHASH, _hashHeader(intent_.header), intent_.token, intent_.amount
+                    )
+                )
             )
         );
     }
@@ -825,19 +1265,27 @@ contract EscrowGovernanceTest is HotPathTest {
         (address _user, uint _userKey) = makeAddrAndKey(string.concat("bridged-user-", _tag));
         address _acct = accountModule.predictUserAccount(_user);
         usdc.mint(_acct, 150e6 + 2 * FEE);
-        (LiquidityGate.RetireEscrowIntent memory _intent, bytes memory _sig) = _escrowFromAccount(_userKey, _acct, 100e6);
+        (LiquidityGate.RetireEscrowIntent memory _intent, bytes memory _sig) =
+            _escrowFromAccount(_userKey, _acct, 100e6);
         uint _fees = usdc.balanceOf(feeReceiver);
         vm.recordLogs();
         vm.prank(makeAddr("matchmaker"));
         _gate.retireEscrow(_intent, _sig);
-        assertGt(_acct.code.length, 0, "a bridge that landed before the account existed escrows once the account is created");
-        assertEq(_store.escrowedMap(_acct, address(usdc)), 100e6, "under the account's own key, as a wallet escrow books it");
+        (, bytes memory _record) = _lastRecordOf(vm.getRecordedLogs(), _acct);
+        assertGt(
+            _acct.code.length, 0, "a bridge that landed before the account existed escrows once the account is created"
+        );
+        assertEq(
+            _store.escrowedMap(_acct, address(usdc)), 100e6, "under the account's own key, as a wallet escrow books it"
+        );
         assertEq(usdc.balanceOf(_acct), 50e6 + FEE, "the escrowed funds leave the account");
         assertEq(usdc.balanceOf(address(_store)), 100e6, "into the store of the gate that relayed it");
         assertEq(usdc.balanceOf(feeReceiver), _fees + FEE, "paying the relay fee it signed");
         assertEq(
-            _lastRecordOf(vm.getRecordedLogs(), _acct),
-            abi.encode(LiquidityGate.retireEscrow.selector, address(usdc), uint(100e6), uint(100e6), address(usdc), FEE),
+            _record,
+            abi.encode(
+                LiquidityGate.retireEscrow.selector, address(usdc), uint(100e6), uint(100e6), address(usdc), FEE
+            ),
             "the record carries the amount and the account's escrowed total after it"
         );
 
@@ -847,8 +1295,9 @@ contract EscrowGovernanceTest is HotPathTest {
         (_intent, _sig) = _escrowFromAccount(_userKey, _acct, 50e6);
         vm.recordLogs();
         _gate.retireEscrow(_intent, _sig);
+        (, _record) = _lastRecordOf(vm.getRecordedLogs(), _acct);
         assertEq(
-            _lastRecordOf(vm.getRecordedLogs(), _acct),
+            _record,
             abi.encode(LiquidityGate.retireEscrow.selector, address(usdc), uint(50e6), uint(150e6), address(usdc), FEE),
             "a second escrow records the running total"
         );
@@ -892,39 +1341,43 @@ contract EscrowGovernanceTest is HotPathTest {
         _openFund();
         address _parent = _account(master);
         usdc.mint(_parent, 100e6 + FEE);
-        (LiquidityGate.RetireEscrowIntent memory _intent, bytes memory _sig) = _escrowFromAccount(masterKey, _parent, 100e6);
+        (LiquidityGate.RetireEscrowIntent memory _intent, bytes memory _sig) =
+            _escrowFromAccount(masterKey, _parent, 100e6);
         spoke.retireEscrow(_intent, _sig);
         uint _held = usdc.balanceOf(body);
-        spoke.fulfil(
-            body, address(usdc), ROUND, 0, 100e6, FEE, _fulfilSignature(address(usdc), ROUND, 0, 100e6, FEE), _noGenesis()
+        _fulfil(address(usdc), 100e6, FEE);
+        assertEq(
+            spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)), 100e6, "the owner's signed total draws on it"
         );
-        assertEq(spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)), 100e6, "the round's release draws on it");
         assertEq(usdc.balanceOf(body), _held + 100e6 - FEE, "into the fund body, net of the round fee");
     }
 
-    function test_a_repeated_fulfil_lands_once_so_a_copied_call_cannot_fail_the_matchmakers() public {
+    function test_a_copied_settlement_lands_once_and_the_matchmakers_resubmission_reverts() public {
         _openFund();
         address _parent = _account(master);
         _walletEscrow(spoke, master, 300e6);
-        bytes memory _signed = _fulfilSignature(address(usdc), ROUND, 0, 100e6, FEE);
+        bytes memory _signed = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 100e6, FEE);
         uint _held = usdc.balanceOf(body);
 
+        vm.chainId(FOREIGN_CHAIN_ID);
         vm.recordLogs();
         vm.prank(makeAddr("copier"));
-        spoke.fulfil(body, address(usdc), ROUND, 0, 100e6, FEE, _signed, _noGenesis());
+        spoke.fulfil(body, address(usdc), 100e6, FEE, _signed, _noGenesis());
+        (, bytes memory _record) = _lastRecordOf(vm.getRecordedLogs(), body);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidFulfil.selector, 100e6, 100e6));
+        spoke.fulfil(body, address(usdc), 100e6, FEE, _signed, _noGenesis());
+        vm.chainId(HUB_CHAIN);
+
         assertEq(
-            _lastRecordOf(vm.getRecordedLogs(), body),
-            abi.encode(SpokeGate.fulfil.selector, address(usdc), ROUND, uint(0), uint(100e6), FEE),
+            _record,
+            abi.encode(SpokeGate.fulfil.selector, address(usdc), uint(100e6), FEE),
             "the record names no owner: the body's own parent is the owner"
         );
-        vm.recordLogs();
-        spoke.fulfil(body, address(usdc), ROUND, 0, 100e6, FEE, _signed, _noGenesis());
-        assertEq(vm.getRecordedLogs().length, 0, "the matchmaker's own submission after a copy lands nothing and reverts nothing");
         assertEq(spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)), 100e6, "the release counts once");
         assertEq(usdc.balanceOf(body), _held + 100e6 - FEE, "and pays once");
     }
 
-    function test_neither_gate_offers_a_user_refund_and_each_gate_escrows_into_its_own_store() public {
+    function test_each_gate_escrows_into_its_own_store_and_only_the_spoke_settles_a_signed_total() public {
         _openFund();
         address _owner = _account(master);
         _walletEscrow(spoke, master, 30e6);
@@ -935,18 +1388,21 @@ contract EscrowGovernanceTest is HotPathTest {
         _assertLedger(hubEscrowStore, _owner, 520e6, 500e6, 0);
         _assertLedger(spokeEscrowStore, _owner, 30e6, 0, 0);
 
-        (bool _ok,) = address(spoke).call(abi.encodeWithSignature("refund(address,address,uint256)", body, address(usdc), 1));
-        assertFalse(_ok, "a spoke cannot see hub credits, so it offers no refund outside the attested return");
+        (bool _ok,) =
+            address(spoke).call(abi.encodeWithSignature("refund(address,address,uint256)", body, address(usdc), 1));
+        assertFalse(_ok, "a spoke cannot see hub credits, so it offers no refund outside the delayed return");
         (_ok,) = address(hub).call(abi.encodeWithSignature("refund(address,address,uint256)", body, address(usdc), 1));
         assertFalse(_ok, "nor does the hub");
         bytes memory _call = abi.encodeCall(
             SpokeGate.fulfil,
-            (body, address(usdc), ROUND, 0, 10e6, FEE, _fulfilSignature(address(usdc), ROUND, 0, 10e6, FEE), _noGenesis())
+            (body, address(usdc), 10e6, FEE, _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 10e6, FEE), _noGenesis())
         );
+        vm.chainId(FOREIGN_CHAIN_ID);
         (_ok,) = address(hub).call(_call);
-        assertFalse(_ok, "the hub has no fulfil: its escrow leaves only through a round the owner co-signs, or a return");
+        assertFalse(_ok, "the hub has no fulfil: its escrow leaves only through a round the owner signs, or a return");
         (_ok,) = address(spoke).call(_call);
         assertTrue(_ok, "while the same call releases on the spoke");
+        vm.chainId(HUB_CHAIN);
         assertEq(spokeEscrowStore.releasedMap(_owner, address(usdc)), 10e6);
         assertEq(hubEscrowStore.releasedMap(_owner, address(usdc)), 500e6, "and leaves the hub store alone");
     }
@@ -954,15 +1410,12 @@ contract EscrowGovernanceTest is HotPathTest {
     function test_governance_wires_a_new_gate_to_an_escrow_store_and_removing_access_stops_it() public {
         _openFund();
         address _owner = _account(master);
-        vm.startPrank(owner);
-        SpokeGate _next = SpokeGate(
-            dictate.setGate(
-                bytes32("SpokeGate2"),
-                address(new SpokeGate(accountModule, depositModule, spokeEscrowStore, spoke.getConfig()))
-            )
-        );
-        dictate.setAccess(accountModule, address(_next));
-        dictate.setAccess(depositModule, address(_next));
+        vm.startPrank(address(governorAccount));
+        SpokeGate _next = SpokeGate(address(new RouterProxy(address(governorAccount))));
+        RouterProxy(payable(address(_next)))
+            .upgrade(address(new SpokeGate(accountModule, depositModule, spokeEscrowStore, spoke.getConfig())));
+        accountModule.setAccess(address(_next), FULL_ACCESS);
+        depositModule.setAccess(address(_next), FULL_ACCESS);
         vm.stopPrank();
         assertEq(address(_next.escrowStore()), address(spokeEscrowStore), "the new gate names the live store");
         usdc.mint(master, 150e6);
@@ -973,102 +1426,96 @@ contract EscrowGovernanceTest is HotPathTest {
         vm.expectRevert(Error.Access__Unauthorized.selector);
         _next.depositEscrow(address(usdc), 100e6);
         vm.prank(backer);
-        vm.expectRevert(Error.Dictate__Unauthorized.selector);
-        dictate.setAccess(spokeEscrowStore, address(_next));
         vm.expectRevert(Error.Access__CallerNotAuthority.selector);
-        spokeEscrowStore.setAccess(address(_next), true);
+        spokeEscrowStore.setAccess(address(_next), FULL_ACCESS);
+        vm.expectRevert(Error.Access__CallerNotAuthority.selector);
+        spokeEscrowStore.setAccess(address(_next), FULL_ACCESS);
 
-        vm.prank(owner);
-        dictate.setAccess(spokeEscrowStore, address(_next));
+        vm.prank(address(governorAccount));
+        spokeEscrowStore.setAccess(address(_next), FULL_ACCESS);
         vm.prank(master);
         _next.depositEscrow(address(usdc), 100e6);
-        assertEq(spokeEscrowStore.escrowedMap(_owner, address(usdc)), 100e6, "once wired, the new gate books into the live ledger");
+        assertEq(
+            spokeEscrowStore.escrowedMap(_owner, address(usdc)),
+            100e6,
+            "once wired, the new gate books into the live ledger"
+        );
 
-        bytes memory _signed = _fulfilSignature(address(usdc), ROUND, 0, 40e6, FEE);
-        _next.fulfil(body, address(usdc), ROUND, 0, 40e6, FEE, _signed, _noGenesis());
+        bytes memory _signed = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 40e6, FEE);
+        bytes memory _more = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 60e6, 2 * FEE);
+        vm.chainId(FOREIGN_CHAIN_ID);
+        _next.fulfil(body, address(usdc), 40e6, FEE, _signed, _noGenesis());
         uint _held = usdc.balanceOf(body);
-        spoke.fulfil(body, address(usdc), ROUND, 0, 40e6, FEE, _signed, _noGenesis());
-        assertEq(usdc.balanceOf(body), _held, "both gates read one fulfilled total, so the release lands once");
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidFulfil.selector, 40e6, 40e6));
+        spoke.fulfil(body, address(usdc), 40e6, FEE, _signed, _noGenesis());
+        vm.chainId(HUB_CHAIN);
+        assertEq(usdc.balanceOf(body), _held, "both gates read one settled total, so the release lands once");
         assertEq(spokeEscrowStore.releasedMap(_owner, address(usdc)), 40e6);
 
-        vm.prank(owner);
-        dictate.removeAccess(spokeEscrowStore, address(_next));
+        vm.prank(address(governorAccount));
+        spokeEscrowStore.setAccess(address(_next), bytes4(0));
         vm.prank(master);
         vm.expectRevert(Error.Access__Unauthorized.selector);
         _next.depositEscrow(address(usdc), 50e6);
-        bytes memory _more = _fulfilSignature(address(usdc), ROUND, 40e6, 60e6, FEE);
+        vm.prank(master);
         vm.expectRevert(Error.Access__Unauthorized.selector);
-        _next.fulfil(body, address(usdc), ROUND, 40e6, 60e6, FEE, _more, _noGenesis());
-        uint _deadline = vm.getBlockTimestamp() + 300;
-        bytes memory _back = _returnSignature(spokeEscrowStore, _owner, address(usdc), 0, 10e6, _deadline);
+        _next.requestReturn(address(usdc));
+        vm.chainId(FOREIGN_CHAIN_ID);
         vm.expectRevert(Error.Access__Unauthorized.selector);
-        _next.returnEscrow(_owner, address(usdc), 0, 10e6, _deadline, _back);
+        _next.fulfil(body, address(usdc), 60e6, 2 * FEE, _more, _noGenesis());
+        spoke.fulfil(body, address(usdc), 60e6, 2 * FEE, _more, _noGenesis());
+        vm.chainId(HUB_CHAIN);
 
-        spoke.fulfil(body, address(usdc), ROUND, 40e6, 60e6, FEE, _more, _noGenesis());
-        spoke.returnEscrow(_owner, address(usdc), 0, 10e6, _deadline, _back);
-        _assertLedger(spokeEscrowStore, _owner, 100e6, 60e6, 10e6);
-        assertEq(usdc.balanceOf(master), 60e6, "the gate that keeps its access still releases and returns");
-
-        vm.prank(owner);
-        dictate.removeAccess(hubEscrowStore, address(fundModule));
+        vm.prank(address(governorAccount));
+        hubEscrowStore.setAccess(address(fundModule), bytes4(0));
         _walletEscrow(hub, master, 50e6);
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), _nav(), _credit(block.chainid, address(usdc), 50e6), new Fund.Allocation[](0));
+            _allocateIntent(_nonceOf(body), _nav(), _credit(HUB_CHAIN, address(usdc), 50e6), new Fund.Allocation[](0));
         bytes memory _ownerSig = _ownerCoSig(_i);
         vm.expectRevert(Error.Access__Unauthorized.selector);
         hub.allocate(_i, _sig, _ownerSig);
         _creditRound(FOREIGN_CHAIN_ID, 50e6);
-        vm.prank(owner);
-        dictate.setAccess(hubEscrowStore, address(fundModule));
-        _creditRound(block.chainid, 50e6);
+        vm.prank(address(governorAccount));
+        hubEscrowStore.setAccess(address(fundModule), EscrowStore.release.selector);
+        _creditRound(HUB_CHAIN, 50e6);
         _assertLedger(hubEscrowStore, _owner, 550e6, 550e6, 0);
+
+        _returnOpenEscrow(spoke, master, address(usdc));
+        _assertLedger(spokeEscrowStore, _owner, 100e6, 60e6, 40e6);
+        assertEq(usdc.balanceOf(master), 90e6, "the gate that keeps its access still settles and returns");
     }
 
-    function test_gateOf_is_the_proxy_setGate_returns_and_setGate_is_idempotent() public {
-        assertEq(dictate.gateOf(bytes32("HubGate")), address(hub));
-        assertEq(dictate.gateOf(bytes32("SpokeGate")), address(spoke));
-        assertEq(dictate.gateOf(bytes32("Fund")), address(fundModule));
-        assertEq(dictate.gateOf(bytes32("Deposit")), address(depositModule));
-
-        bytes32 _name = bytes32("Fresh");
-        address _predicted = vm.computeCreate2Address(
-            _name,
-            keccak256(abi.encodePacked(type(RouterProxy).creationCode, abi.encode(address(dictate)))),
-            address(dictate)
-        );
-        assertEq(dictate.gateOf(_name), _predicted, "the gate address is the CREATE2 of the proxy under the name");
-        assertEq(_predicted.code.length, 0);
+    function test_a_router_proxy_keeps_its_address_across_upgrades_and_answers_only_to_its_authority() public {
+        address[5] memory _wired =
+            [address(depositModule), address(fundModule), address(redeemModule), address(hub), address(spoke)];
+        for (uint _k; _k < _wired.length; ++_k) {
+            assertTrue(vm.load(_wired[_k], IMPLEMENTATION_SLOT) != bytes32(0), "every wired router is a live proxy");
+        }
 
         address _first = address(new MockTarget());
         address _second = address(new MockTarget());
+        RouterProxy _proxy = new RouterProxy(address(governorAccount));
+        assertEq(vm.load(address(_proxy), IMPLEMENTATION_SLOT), bytes32(0), "a fresh proxy runs nothing");
 
-        vm.prank(backer);
-        vm.expectRevert(Error.Dictate__Unauthorized.selector);
-        dictate.setGate(_name, _first);
+        address[3] memory _refused = [backer, owner, governor];
+        for (uint _k; _k < _refused.length; ++_k) {
+            vm.prank(_refused[_k]);
+            vm.expectRevert(Error.Access__CallerNotAuthority.selector);
+            _proxy.upgrade(_first);
+        }
 
-        vm.prank(owner);
-        address _proxy = dictate.setGate(_name, _first);
-        assertEq(_proxy, _predicted, "setGate returns the derived address");
-        assertEq(address(uint160(uint(vm.load(_proxy, IMPLEMENTATION_SLOT)))), _first);
+        vm.prank(address(governorAccount));
+        _proxy.upgrade(_first);
+        assertEq(address(uint160(uint(vm.load(address(_proxy), IMPLEMENTATION_SLOT)))), _first);
 
-        vm.prank(owner);
-        assertEq(dictate.setGate(_name, _first), _proxy, "setting the same impl again is a no-op at the same address");
-        assertEq(address(uint160(uint(vm.load(_proxy, IMPLEMENTATION_SLOT)))), _first);
-
-        vm.prank(owner);
-        assertEq(dictate.setGate(_name, _second), _proxy, "an upgrade keeps the address");
-        assertEq(address(uint160(uint(vm.load(_proxy, IMPLEMENTATION_SLOT)))), _second);
+        vm.prank(address(governorAccount));
+        _proxy.upgrade(_second);
+        assertEq(
+            address(uint160(uint(vm.load(address(_proxy), IMPLEMENTATION_SLOT)))), _second, "an upgrade keeps the address"
+        );
         vm.expectCall(_second, abi.encodeCall(MockTarget.ping, ()), 1);
         vm.expectCall(_first, abi.encodeCall(MockTarget.ping, ()), 0);
-        MockTarget(_proxy).ping();
-
-        address _hubImpl = address(uint160(uint(vm.load(address(hub), IMPLEMENTATION_SLOT))));
-        vm.prank(owner);
-        assertEq(dictate.setGate(bytes32("HubGate"), _hubImpl), address(hub));
-
-        vm.prank(owner);
-        vm.expectRevert(Error.Access__CallerNotAuthority.selector);
-        RouterProxy(payable(_proxy)).upgrade(_first);
+        MockTarget(address(_proxy)).ping();
     }
 
     function test_canonical_list_lives_in_the_gate_implementation() public {
@@ -1076,7 +1523,9 @@ contract EscrowGovernanceTest is HotPathTest {
         assertTrue(hub.isCanonical(address(usdc)), "the proxy answers from the implementation's list");
         assertTrue(hub.isCanonical(address(wnt)), "every listed token is canonical");
         assertFalse(hub.isCanonical(address(outToken)), "an unlisted token is not");
-        assertTrue(HubGate(_impl).isCanonical(address(usdc)), "the implementation answers the same, from its own storage");
+        assertTrue(
+            HubGate(_impl).isCanonical(address(usdc)), "the implementation answers the same, from its own storage"
+        );
 
         GateConfig memory _config = hub.getConfig();
         vm.expectRevert(abi.encodeWithSelector(Error.Gate__InvalidCanonicalToken.selector, NATIVE_TOKEN));
@@ -1084,7 +1533,6 @@ contract EscrowGovernanceTest is HotPathTest {
             accountModule,
             depositModule,
             hubEscrowStore,
-            mandateStore,
             fundModule,
             redeemModule,
             _config,
@@ -1100,7 +1548,6 @@ contract EscrowGovernanceTest is HotPathTest {
             accountModule,
             depositModule,
             hubEscrowStore,
-            mandateStore,
             fundModule,
             redeemModule,
             _config,
@@ -1116,7 +1563,6 @@ contract EscrowGovernanceTest is HotPathTest {
                 accountModule,
                 depositModule,
                 hubEscrowStore,
-                mandateStore,
                 fundModule,
                 redeemModule,
                 _config,
@@ -1127,11 +1573,11 @@ contract EscrowGovernanceTest is HotPathTest {
                 WEBSITE_RELEASE
             )
         );
-        vm.prank(owner);
-        dictate.setGate(bytes32("HubGate"), _narrow);
+        vm.prank(address(governorAccount));
+        RouterProxy(payable(address(hub))).upgrade(_narrow);
         assertFalse(hub.isCanonical(address(wnt)), "the set changes only with the gate logic");
-        vm.prank(owner);
-        dictate.setGate(bytes32("HubGate"), _impl);
+        vm.prank(address(governorAccount));
+        RouterProxy(payable(address(hub))).upgrade(_impl);
         assertTrue(hub.isCanonical(address(wnt)), "and swapping the logic back restores it");
 
         outToken.mint(backer, 1e18);
@@ -1152,7 +1598,7 @@ contract EscrowGovernanceTest is HotPathTest {
 
     function test_createFund_refuses_a_pixel_index_past_the_palette() public {
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(0, 0, _credit(block.chainid, address(usdc), 500e6), new Fund.Allocation[](0));
+            _allocateIntent(0, 0, _credit(HUB_CHAIN, address(usdc), 500e6), new Fund.Allocation[](0));
         bytes memory _bad = _grid();
         _bad[PALETTE_BYTES + 57] = bytes1(uint8(PALETTE_BYTES / 3));
         bytes memory _ownerSig = _ownerCoSig(_i);
@@ -1180,7 +1626,13 @@ contract EscrowGovernanceTest is HotPathTest {
             LibString.contains(
                 _svg,
                 string.concat(
-                    '<rect x="', _last, '" y="', _last, '" width="1" height="1" fill="#', LibString.toHexStringNoPrefix(_rgb, 3), '"/>'
+                    '<rect x="',
+                    _last,
+                    '" y="',
+                    _last,
+                    '" width="1" height="1" fill="#',
+                    LibString.toHexStringNoPrefix(_rgb, 3),
+                    '"/>'
                 )
             ),
             "the last cell renders the last palette colour"
@@ -1251,7 +1703,9 @@ contract EscrowGovernanceTest is HotPathTest {
                     shareToken.DOMAIN_SEPARATOR(),
                     keccak256(
                         abi.encode(
-                            keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"),
+                            keccak256(
+                                "Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"
+                            ),
                             body,
                             backer,
                             1,

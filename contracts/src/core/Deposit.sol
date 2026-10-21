@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.36;
 
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 import {AccountModule} from "./AccountModule.sol";
 import {GateConfig} from "../utils/GateConfig.sol";
@@ -52,13 +51,13 @@ contract Deposit is Access {
         uint _pull = _amount - msg.value;
         if (_token == NATIVE_TOKEN) {
             if (msg.value > 0) TransferUtils.transferStrictly(NATIVE_TOKEN, _to, msg.value, _config.transferGasLimit);
-            if (_pull > 0) TransferUtils.transferStrictlyFrom(wnt, _user, _to, _pull, _config.transferGasLimit);
+            if (_pull > 0) TransferUtils.transferStrictlyFrom(address(wnt), _user, _to, _pull, _config.transferGasLimit);
         } else {
             if (msg.value > 0) {
                 wnt.deposit{value: msg.value}();
                 TransferUtils.transferStrictly(address(wnt), _to, msg.value, _config.transferGasLimit);
             }
-            if (_pull > 0) TransferUtils.transferStrictlyFrom(IERC20(_token), _user, _to, _pull, _config.transferGasLimit);
+            if (_pull > 0) TransferUtils.transferStrictlyFrom(_token, _user, _to, _pull, _config.transferGasLimit);
         }
     }
 
@@ -73,7 +72,7 @@ contract Deposit is Access {
         address _inputToken = _swap.inputToken;
         uint _fee = _intent.header.fee;
         if (_intent.header.feeToken != _inputToken) revert Error.Intent__FeeTokenMismatch(_intent.header.feeToken, _inputToken);
-        SwapLib.verify(_swap, _fee, _config.maxRelayFeeBps);
+        SwapLib.verify(_swap, _fee, _config.maxSwapRelayFeeBps);
 
         bool _local = _intent.destinationChainId == block.chainid;
         bool _fused = _inputToken == NATIVE_TOKEN || _inputToken == address(wnt);
@@ -171,7 +170,7 @@ contract Deposit is Access {
         SwapLib.SwapParams calldata _swap = _intent.swap;
         address _inputToken = _swap.inputToken;
         if (_intent.header.feeToken != _inputToken) revert Error.Intent__FeeTokenMismatch(_intent.header.feeToken, _inputToken);
-        SwapLib.verify(_swap, _intent.header.fee, _config.maxRelayFeeBps);
+        SwapLib.verify(_swap, _intent.header.fee, _config.maxSwapRelayFeeBps);
         bool _local = _intent.destinationChainId == block.chainid;
         if (_local && _swap.outputToken == _inputToken) revert Error.Balance__InvalidSwap();
         uint _inputBefore = BalanceLib.balanceOf(_inputToken, _account);
@@ -243,7 +242,7 @@ contract Deposit is Access {
             _spend[0] = CallLib.pay(_swap.inputToken, _intent.header.user, _swap.outputAmount, _config.transferGasLimit);
             _spend[1] = CallLib.pay(_swap.inputToken, _config.feeReceiver, _intent.header.fee, _config.transferGasLimit);
         } else {
-            SwapLib.verify(_swap, _intent.header.fee, _config.maxRelayFeeBps);
+            SwapLib.verify(_swap, _intent.header.fee, _config.maxSwapRelayFeeBps);
             _spend = SwapLib.calls(
                 _swap.inputToken,
                 _swap.inputAmount,
@@ -275,6 +274,12 @@ contract Deposit is Access {
             _spend,
             BalanceLib.list(_swap.inputToken)
         );
+        if (_swap.provider != address(0)) {
+            uint _inputAfter = BalanceLib.balanceOf(_swap.inputToken, _account);
+            if (_inputAfter + _swap.inputAmount != _held) {
+                revert Error.Balance__SwapInputNotSpent(_swap.inputToken, _held, _inputAfter);
+            }
+        }
         if (_measurable) {
             uint _received = BalanceLib.balanceOf(_swap.outputToken, _intent.header.user) - _outputBefore;
             if (_received < _swap.outputAmount) {

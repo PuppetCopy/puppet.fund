@@ -13,8 +13,15 @@ uint constant PALETTE_BYTES = 39;
 uint constant GRID_BYTES = PALETTE_BYTES + GRID_SIDE * GRID_SIDE;
 
 contract ShareToken is ERC20 {
-    address public burner;
+    address public immutable burner;
     uint public pendingBurn;
+
+    constructor(
+        address _burner
+    ) {
+        if (_burner == address(0)) revert Error.ShareToken__Forbidden();
+        burner = _burner;
+    }
 
     function tokenURI() external view returns (string memory) {
         string memory _symbol = symbol();
@@ -108,11 +115,9 @@ contract ShareToken is ERC20 {
     }
 
     function allowBurn(
-        address _spender,
         uint _amount
     ) external {
         if (msg.sender != master()) revert Error.ShareToken__Forbidden();
-        burner = _spender;
         pendingBurn = _amount;
     }
 

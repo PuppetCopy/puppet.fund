@@ -7,16 +7,14 @@ import {CallLib} from "./utils/CallLib.sol";
 import {BalanceLib} from "./utils/BalanceLib.sol";
 import {Error} from "./utils/Error.sol";
 import {AccountLib} from "./utils/AccountLib.sol";
-import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
+import {ECDSA} from "solady/utils/ECDSA.sol";
 
 import {AccountModule} from "./core/AccountModule.sol";
 import {EscrowStore} from "./core/EscrowStore.sol";
 import {Deposit} from "./core/Deposit.sol";
 import {FundAccount} from "./core/FundAccount.sol";
+import {UserAccount} from "./core/UserAccount.sol";
 import {IAccount} from "./utils/interfaces/IAccount.sol";
-
-bytes32 constant FULFIL_TYPEHASH =
-    keccak256("Fulfil(address store,address token,bytes32 round,uint256 fromTotal,uint256 fulfilledTotal,uint256 fee)");
 
 bytes32 constant CALL_TYPEHASH = keccak256("Call(address target,uint256 value,uint256 gasLimit,bytes callData)");
 
@@ -41,21 +39,11 @@ contract SpokeGate is LiquidityGate {
     function fulfil(
         address _body,
         address _token,
-        bytes32 _round,
-        uint _fromTotal,
-        uint _fulfilledTotal,
-        uint _fee,
-        bytes calldata _attestorSignature,
+        uint _total,
+        uint _feeTotal,
+        bytes calldata _ownerSignature,
         AccountLib.Genesis calldata _genesis
     ) external {
-        bytes32 _digest = AccountLib.typedDigest(
-            block.chainid,
-            _body,
-            keccak256(abi.encode(FULFIL_TYPEHASH, address(escrowStore), _token, _round, _fromTotal, _fulfilledTotal, _fee))
-        );
-        if (!SignatureCheckerLib.isValidSignatureNowCalldata(attestor, _digest, _attestorSignature)) {
-            revert Error.Account__InvalidSignature();
-        }
         if (_body.codehash != accountModule.bodyHash()) revert Error.Account__NotDelegated(_body);
         (address _module, address _owner) = FundAccount(payable(_body)).bound();
         if (_module == address(0)) {
@@ -63,13 +51,12 @@ contract SpokeGate is LiquidityGate {
             (_module, _owner) = FundAccount(payable(_body)).bound();
         }
         if (_module != address(accountModule)) revert Error.Account__HeaderMismatch(_body);
-        uint _fulfilled = escrowStore.fulfilledMap(_owner, _body, _token);
-        if (_fulfilled == _fulfilledTotal) return;
-        if (_fulfilled != _fromTotal) revert Error.Escrow__InvalidFulfil(_fulfilled, _fulfilledTotal);
-        escrowStore.release(_owner, _body, _token, _fulfilledTotal, _fee, transferGasLimit);
-        accountModule.record(
-            _body, _digest, abi.encode(msg.sig, _token, _round, _fromTotal, _fulfilledTotal, _fee), BalanceLib.list(_token)
-        );
+        bytes32 _digest = AccountLib.creditDigest(_owner, _body, block.chainid, _token, _total, _feeTotal);
+        if (ECDSA.tryRecoverCalldata(_digest, _ownerSignature) != UserAccount(payable(_owner)).user()) {
+            revert Error.Account__InvalidSignature();
+        }
+        escrowStore.release(_owner, _body, _token, _total, _feeTotal, feeReceiver, transferGasLimit);
+        accountModule.record(_body, _digest, abi.encode(msg.sig, _token, _total, _feeTotal), BalanceLib.list(_token));
     }
 
     function operate(

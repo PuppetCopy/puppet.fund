@@ -19,9 +19,12 @@ bytes32 constant CHAINLESS_DOMAIN_TYPEHASH =
     keccak256("EIP712Domain(string name,string version,address verifyingContract)");
 
 uint constant MAX_SESSION_TTL = 30 days;
-uint constant MAX_SESSION_BYTES = 1024;
+uint constant MAX_SESSION_BYTES = 4096;
 bytes32 constant WALLET_SIGNATURE_TAG = keccak256("puppet.wallet-signature");
 uint constant SESSION_REVOKE_DELAY = 10 minutes;
+uint constant ESCROW_RETURN_DELAY = 1 days;
+bytes32 constant CREDIT_TOTAL_TYPEHASH =
+    keccak256("CreditTotal(address master,uint256 chainId,address token,uint256 total,uint256 feeTotal)");
 
 library AccountLib {
     struct Genesis {
@@ -113,6 +116,19 @@ library AccountLib {
         address _parent
     ) internal pure returns (bytes32) {
         return chainlessDigest(_module, keccak256(abi.encode(GENESIS_TYPEHASH, _account, _parent)));
+    }
+
+    function creditDigest(
+        address _owner,
+        address _master,
+        uint _chainId,
+        address _token,
+        uint _total,
+        uint _feeTotal
+    ) internal pure returns (bytes32) {
+        return chainlessDigest(
+            _owner, keccak256(abi.encode(CREDIT_TOTAL_TYPEHASH, _master, _chainId, _token, _total, _feeTotal))
+        );
     }
 
     function sessionDigest(

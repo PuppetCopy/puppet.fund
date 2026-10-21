@@ -11,9 +11,9 @@ import {FundAccount} from "src/core/FundAccount.sol";
 import {FundStore, isOpen} from "src/core/FundStore.sol";
 import {Redeem} from "src/core/Redeem.sol";
 import {GRID_BYTES, ShareToken} from "src/core/ShareToken.sol";
+import {UserAccount} from "src/core/UserAccount.sol";
 import {Error} from "src/utils/Error.sol";
-import {AccountLib} from "src/utils/AccountLib.sol";
-import {RETURN_ESCROW_TYPEHASH} from "src/utils/LiquidityGate.sol";
+import {AccountLib, ESCROW_RETURN_DELAY, SESSION_REVOKE_DELAY} from "src/utils/AccountLib.sol";
 import {MandateLib} from "src/utils/MandateLib.sol";
 import {HotPathTest} from "./HotPath.t.sol";
 
@@ -34,7 +34,13 @@ contract ScenariosTest is HotPathTest {
         uint weth;
         uint basis;
         uint entries;
-        bool mandated;
+        bytes32 commitment;
+        uint epoch;
+        uint prevEpoch;
+        uint revokedAt;
+        uint sessionEpoch;
+        uint walletUsdc;
+        uint walletWeth;
     }
 
     struct LfRound {
@@ -42,6 +48,7 @@ contract ScenariosTest is HotPathTest {
         uint supply;
         uint nav;
         uint masterShares;
+        uint existing;
         uint contributed;
         uint masterBilled;
         uint minted;
@@ -80,6 +87,7 @@ contract ScenariosTest is HotPathTest {
 
     uint lfN;
     uint lfStep;
+    uint lfStart;
     string lfTrace;
     address[NMAX] lfUsers;
     uint[NMAX] lfKeys;
@@ -98,6 +106,8 @@ contract ScenariosTest is HotPathTest {
     uint lfOwnerUsdc;
     uint lfOwnerWeth;
     uint lfEscrowUsdc;
+    uint lfCreditTotal;
+    uint lfCreditFeeTotal;
     uint lfNav;
     uint lfBase;
     uint lfExo;
@@ -147,32 +157,21 @@ contract ScenariosTest is HotPathTest {
 
     function _mandateIntent(
         address _user,
-        uint _key,
         MandateLib.Mandate memory _m
-    ) internal returns (HubGate.MandateIntent memory i_, bytes memory sig_) {
+    ) internal view returns (HubGate.MandateIntent memory i_, bytes32 digest_) {
         address _acct = accountModule.predictUserAccount(_user);
         MandateLib.Mandate[] memory _list = new MandateLib.Mandate[](1);
         _list[0] = _m;
-        bytes[] memory _sigs = new bytes[](1);
-        _sigs[0] = _mandateSig(_key, _acct, _m);
         i_ = HubGate.MandateIntent({
             header: _header(_acct, _user, _nonceOf(_acct)),
-            mandateList: _list,
-            signatureList: _sigs
+            epoch: _acct.code.length == 0 ? 0 : UserAccount(payable(_acct)).epoch(),
+            mandateList: _list
         });
-        sig_ = _pair(
-            _key,
-            _typed(
-                _acct,
-                i_.header.deadline,
-                keccak256(
-                    abi.encode(
-                        MANDATE_INTENT_TYPEHASH,
-                        _hashHeader(i_.header),
-                        keccak256(abi.encode(_list))
-                    )
-                )
-            )
+        i_.header.deadline = vm.getBlockTimestamp() + 300;
+        digest_ = _typed(
+            _acct,
+            i_.header.deadline,
+            keccak256(abi.encode(MANDATE_INTENT_TYPEHASH, _hashHeader(i_.header), i_.epoch, keccak256(abi.encode(_list))))
         );
     }
 
@@ -181,17 +180,17 @@ contract ScenariosTest is HotPathTest {
         uint _key,
         MandateLib.Mandate memory _m
     ) internal {
-        (HubGate.MandateIntent memory _i, bytes memory _sig) = _mandateIntent(_user, _key, _m);
-        hub.mandate(_i, _sig);
+        (HubGate.MandateIntent memory _i, bytes32 _d) = _mandateIntent(_user, _m);
+        hub.mandate(_i, _pair(_key, _d));
+        mandateLog[_i.header.account][_m.master] = _m;
     }
 
     function _one(
         address _puppet,
-        MandateLib.Mandate memory _m,
         uint _amount
     ) internal view returns (Fund.Allocation[] memory rows_) {
         rows_ = new Fund.Allocation[](1);
-        rows_[0] = _row(_puppet, _m, _amount);
+        rows_[0] = _row(_puppet, _amount);
     }
 
     function _spot() internal pure returns (Fund.Price memory) {
@@ -257,17 +256,16 @@ contract ScenariosTest is HotPathTest {
         assertEq(usdc.balanceOf(_account(master)), 2000e6, "leaving the owner's account alone");
 
         address _owner = _account(master);
-        uint _deadline = block.timestamp + 300;
-        bytes memory _returnSig = _coSig(
-            attestorKey,
-            AccountLib.typedDigest(
-                block.chainid,
-                _owner,
-                keccak256(abi.encode(RETURN_ESCROW_TYPEHASH, address(hubEscrowStore), address(usdc), 0, 100e6, _deadline))
-            )
-        );
-        hub.returnEscrow(_owner, address(usdc), 0, 100e6, _deadline, _returnSig);
-        assertEq(usdc.balanceOf(master), 100e6, "the unused escrow returns to the owner's wallet");
+        uint _returnAt = vm.getBlockTimestamp() + ESCROW_RETURN_DELAY;
+        vm.prank(master);
+        hub.requestReturn(address(usdc));
+        vm.prank(master);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, _returnAt));
+        hub.returnEscrow(address(usdc));
+        vm.warp(_returnAt);
+        vm.prank(master);
+        hub.returnEscrow(address(usdc));
+        assertEq(usdc.balanceOf(master), 100e6, "a day after the wallet asks, the unused escrow returns to it");
         assertEq(usdc.balanceOf(_owner), 2000e6, "not to its account");
         assertEq(usdc.balanceOf(address(hubEscrowStore)), 0, "and the hub escrow holds nothing more");
     }
@@ -276,14 +274,14 @@ contract ScenariosTest is HotPathTest {
         _openFund("AR");
         (address _g, uint _gKey) = makeAddrAndKey("ar-griefer");
         _fundWallet(_g, 40e6);
-        (HubGate.MandateIntent memory _mi, bytes memory _ms) = _mandateIntent(_g, _gKey, _terms(MAX_SKIN + 1));
+        (HubGate.MandateIntent memory _mi, bytes32 _md) = _mandateIntent(_g, _terms(MAX_SKIN + 1));
+        bytes memory _ms = _pair(_gKey, _md);
         vm.expectRevert(abi.encodeWithSelector(Error.Mandate__InvalidSkin.selector, MAX_SKIN + 1));
         hub.mandate(_mi, _ms);
 
-        MandateLib.Mandate memory _half = _terms(5000);
-        _signMandate(_g, _gKey, _half);
+        _signMandate(_g, _gKey, _terms(5000));
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_g), _half, 15e6));
+            _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_g), 15e6));
         hub.allocate(_i, _sig, _ownerCoSig(_i));
         assertEq(shareToken.balanceOf(_account(_g)), 14e18, "the dust backer is minted");
         assertEq(
@@ -292,12 +290,12 @@ contract ScenariosTest is HotPathTest {
 
         (address _a, uint _aKey) = makeAddrAndKey("ar-normal");
         _fundWallet(_a, 1000e6);
-        _signMandate(_a, _aKey, _half);
-        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_a), _half, 251e6));
+        _signMandate(_a, _aKey, _terms(5000));
+        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_a), 251e6));
         bytes memory _ownerSig = _ownerCoSig(_i);
         vm.expectRevert(Error.Balance__ZeroAmount.selector);
         hub.allocate(_i, _sig, _ownerSig);
-        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_a), _half, 250e6));
+        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_a), 250e6));
         hub.allocate(_i, _sig, _ownerCoSig(_i));
         assertEq(shareToken.balanceOf(_account(_a)), 249e18, "a backer fills half of the master's own shares");
         assertEq(shareToken.balanceOf(body), 499e18, "the master's shares are untouched");
@@ -310,51 +308,63 @@ contract ScenariosTest is HotPathTest {
 
         (address _z, uint _zKey) = makeAddrAndKey("ar-skinless");
         _fundWallet(_z, 2000e6);
-        MandateLib.Mandate memory _bare = _terms(0);
-        _signMandate(_z, _zKey, _bare);
-        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_z), _bare, 900e6));
+        _signMandate(_z, _zKey, _terms(0));
+        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_account(_z), 900e6));
         hub.allocate(_i, _sig, _ownerCoSig(_i));
         assertEq(shareToken.balanceOf(_account(_z)), 899e18, "a skin of zero asks no master stake of the round");
         assertGt(shareToken.balanceOf(_account(_z)), shareToken.balanceOf(body), "so its backer may outgrow the master");
     }
 
-    function test_revoking_one_mandate_keeps_the_other_and_a_revoked_row_skips() public {
+    function test_ending_one_mandate_keeps_the_other_and_after_a_revoke_a_row_skips_until_the_backer_mandates_again() public {
         _openFund("RV");
         (address _a, uint _aKey) = makeAddrAndKey("ar-revoke");
         _fundWallet(_a, 1000e6);
-        address _acct = _account(_a);
+        UserAccount _acct = UserAccount(payable(_account(_a)));
         MandateLib.Mandate memory _ma = _terms(MAX_SKIN);
         _signMandate(_a, _aKey, _ma);
-        assertEq(mandateStore.mandateMap(_acct, body), this.digestOf(_acct, _ma), "the mandate digest is stored");
+        assertEq(
+            mandateStore.mandateMap(address(_acct), body),
+            keccak256(abi.encode(_ma, uint(0))),
+            "the hub commits the mandate the account signed at the account's epoch"
+        );
 
         MandateLib.Mandate memory _other = MandateLib.Mandate({
             master: address(0xBEEF), skin: 0, allocationRate: 5000, exitCap: 10_000, cooldownPeriod: 0, expiry: block.timestamp + 1 days
         });
         _signMandate(_a, _aKey, _other);
-        assertEq(mandateStore.mandateMap(_acct, address(0xBEEF)), this.digestOf(_acct, _other), "a second fund is mandated");
+        assertEq(
+            mandateStore.mandateMap(address(_acct), address(0xBEEF)),
+            keccak256(abi.encode(_other, uint(0))),
+            "a second fund is mandated"
+        );
         _other.expiry = 0;
         _signMandate(_a, _aKey, _other);
-        assertEq(mandateStore.mandateMap(_acct, address(0xBEEF)), bytes32(0), "an expiry of zero is a revoke");
-        assertEq(mandateStore.mandateMap(_acct, body), this.digestOf(_acct, _ma), "the other fund's mandate stands");
+        assertEq(mandateStore.mandateMap(address(_acct), address(0xBEEF)), bytes32(0), "an expiry of zero deletes the mandate");
+        assertEq(
+            mandateStore.mandateMap(address(_acct), body), keccak256(abi.encode(_ma, uint(0))), "the other fund's mandate stands"
+        );
 
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(_acct, _ma, 400e6));
+            _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(address(_acct), 400e6));
         hub.allocate(_i, _sig, _ownerCoSig(_i));
-        assertEq(shareToken.balanceOf(_acct), 399e18, "the standing mandate allocates");
+        assertEq(shareToken.balanceOf(address(_acct)), 399e18, "the standing mandate allocates");
 
-        Fund.Allocation[] memory _rows = _one(_acct, _ma, 100e6);
-        _signMandate(
-            _a,
-            _aKey,
-            MandateLib.Mandate({
-                master: body, skin: 0, allocationRate: 5000, exitCap: 10_000, cooldownPeriod: 0, expiry: 0
-            })
-        );
-        assertEq(mandateStore.mandateMap(_acct, body), bytes32(0), "the backer revokes the fund");
-        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _rows);
+        vm.prank(_a);
+        _acct.revokeSessions();
+        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(address(_acct), 100e6));
         bytes memory _ownerSig = _ownerCoSig(_i);
         vm.expectRevert(Error.Balance__ZeroAmount.selector);
         hub.allocate(_i, _sig, _ownerSig);
+
+        _signMandate(_a, _aKey, _ma);
+        assertEq(
+            mandateStore.mandateMap(address(_acct), body),
+            keccak256(abi.encode(_ma, _acct.epoch())),
+            "a mandate signed after the revoke commits the same terms at the new epoch"
+        );
+        (_i, _sig) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _one(address(_acct), 100e6));
+        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        assertEq(shareToken.balanceOf(address(_acct)), 498e18, "and the fund pulls from the backer again");
     }
 
     function _queueRedeemAt(
@@ -366,7 +376,7 @@ contract ScenariosTest is HotPathTest {
             _held[_k] = wnt.balanceOf(_holderList[_k]);
         }
         uint[4] memory _b =
-            [wnt.balanceOf(body), wnt.balanceOf(feeReceiver), wnt.balanceOf(master), wnt.balanceOf(protocolReceiver)];
+            [wnt.balanceOf(body), wnt.balanceOf(feeReceiver), wnt.balanceOf(_ownerAccount()), wnt.balanceOf(protocolReceiver)];
         uint _pot = Math.mulDiv(
             fundStore.getRedemption(body).queued, _value + VIRTUAL_VALUE, shareToken.totalSupply() + VIRTUAL_SHARES
         );
@@ -378,11 +388,12 @@ contract ScenariosTest is HotPathTest {
         assertEq(_b[0] - wnt.balanceOf(body), _pot, "the body pays exactly the queue's value in WETH");
         assertEq(
             _pot,
-            paid_ + wnt.balanceOf(feeReceiver) - _b[1] + wnt.balanceOf(master) - _b[2] + wnt.balanceOf(protocolReceiver)
+            paid_ + wnt.balanceOf(feeReceiver) - _b[1] + wnt.balanceOf(_ownerAccount()) - _b[2] + wnt.balanceOf(protocolReceiver)
                 - _b[3],
             "every wei reaches a seller, the fee receiver, the master's share of a fee or the protocol's cut"
         );
         assertEq(wnt.balanceOf(address(fundStore)), 0, "and nothing stays ring-fenced once every seller is listed");
+        assertEq(fundStore.bookedMap(body, address(wnt)), 0, "nor booked to the fund");
     }
 
     function _redeemAt(
@@ -401,9 +412,8 @@ contract ScenariosTest is HotPathTest {
         (user_, key_) = makeAddrAndKey(_tag);
         _fundWallet(user_, 1000e6);
         acct_ = _account(user_);
-        MandateLib.Mandate memory _m = _terms(MAX_SKIN);
-        _signMandate(user_, key_, _m);
-        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(_nonceOf(body), _nav(), _one(acct_, _m, _amount));
+        _signMandate(user_, key_, _terms(MAX_SKIN));
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(_nonceOf(body), _nav(), _one(acct_, _amount));
         hub.allocate(_i, _sig, _ownerCoSig(_i));
     }
 
@@ -422,8 +432,7 @@ contract ScenariosTest is HotPathTest {
         _signMandate(_b, _bKey, _m);
         _signMandate(_c, _cKey, _m);
 
-        (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), _nav(), _one(_account(_a), _m, 400e6));
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(_nonceOf(body), _nav(), _one(_account(_a), 400e6));
         hub.allocate(_i, _sig, _ownerCoSig(_i));
         uint _sharesA = shareToken.balanceOf(_account(_a));
         assertEq(_sharesA, 399e18, "a USDC row mints its value net of its relay slice at one share unit per wei");
@@ -436,7 +445,7 @@ contract ScenariosTest is HotPathTest {
         vm.expectRevert(abi.encodeWithSelector(Error.Fund__CreditTokenMismatch.selector, address(usdc), address(wnt)));
         hub.allocate(_i, _sig, _ownerSig);
 
-        uint _sharesB = _wethRound(_account(_b), _account(_c), _m);
+        uint _sharesB = _wethRound(_account(_b), _account(_c));
         _sell(_a, _aKey, _sharesA);
         _sell(_b, _bKey, _sharesB);
         assertEq(_queuedOf(_account(_a)), _sharesA, "a sell queues its shares");
@@ -445,15 +454,14 @@ contract ScenariosTest is HotPathTest {
 
     function _wethRound(
         address _bAcct,
-        address _cAcct,
-        MandateLib.Mandate memory _m
+        address _cAcct
     ) internal returns (uint sharesB_) {
         uint _slice = FEE * USD / 2;
         uint _feeWeth = wnt.balanceOf(feeReceiver);
         Fund.Allocation[] memory _rows = new Fund.Allocation[](2);
         bool _bFirst = uint160(_bAcct) < uint160(_cAcct);
-        _rows[0] = _row(_bFirst ? _bAcct : _cAcct, _m, _bFirst ? 600e18 : 1800e18);
-        _rows[1] = _row(_bFirst ? _cAcct : _bAcct, _m, _bFirst ? 1800e18 : 600e18);
+        _rows[0] = _row(_bFirst ? _bAcct : _cAcct, _bFirst ? 600e18 : 1800e18);
+        _rows[1] = _row(_bFirst ? _cAcct : _bAcct, _bFirst ? 1800e18 : 600e18);
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
             _allocateIntent(_nonceOf(body), _nav(), address(wnt), _spot(), _credit(0, address(0), 0), _rows);
         hub.allocate(_i, _sig, _ownerCoSig(_i));
@@ -475,10 +483,10 @@ contract ScenariosTest is HotPathTest {
         uint _sharesB
     ) internal {
         _toWethAll();
-        uint _owner = wnt.balanceOf(master);
+        uint _owner = wnt.balanceOf(_ownerAccount());
         uint _net = _queueRedeemAt(_bodyValue(), _list(_aAcct, _bAcct));
         assertEq(fundStore.getRedemption(body).price, PRICE_PRECISION, "the fund exits at the price both holders paid");
-        assertEq(wnt.balanceOf(master), _owner, "so neither pays a fee and the master earns nothing");
+        assertEq(wnt.balanceOf(_ownerAccount()), _owner, "so neither pays a fee and the master earns nothing");
         assertApproxEqAbs(
             wnt.balanceOf(_aAcct) + BILLED,
             Math.mulDiv(_net + 2 * BILLED, _sharesA, _sharesA + _sharesB),
@@ -493,13 +501,13 @@ contract ScenariosTest is HotPathTest {
         );
         assertEq(fundStore.getRedemption(body).queued, 0, "the queue is drained");
 
-        uint[2] memory _before = [wnt.balanceOf(master), wnt.balanceOf(body)];
+        uint[2] memory _before = [wnt.balanceOf(_ownerAccount()), wnt.balanceOf(body)];
         Fund.Valuation memory _v = _valuation(0);
         _v.assetList[0].value = _before[1];
         _redeem(10_000, 0, _v, new address[](0));
         assertEq(shareToken.totalSupply(), 0, "with every backer paid out, the master closes the fund");
         assertEq(wnt.balanceOf(body), 0, "paying out its whole WETH balance");
-        assertEq(wnt.balanceOf(master) - _before[0], _before[1] - BILLED, "to the owner's wallet net of the relay fee");
+        assertEq(wnt.balanceOf(_ownerAccount()) - _before[0], _before[1] - BILLED, "to the owner's account net of the relay fee");
     }
 
     function test_steady_sells_redeem_one_round_at_a_time_forever() public {
@@ -509,13 +517,13 @@ contract ScenariosTest is HotPathTest {
         for (uint _k; _k < 40; ++_k) {
             _sell(_a, _aKey, 8e18);
             uint _paid = wnt.balanceOf(_acct);
-            uint _owner = wnt.balanceOf(master);
+            uint _owner = wnt.balanceOf(_ownerAccount());
             _redeemAt(_bodyValue(), _list(_acct));
             assertEq(fundStore.getRedemption(body).queued, 0, "every redemption empties the queue");
             assertEq(
                 wnt.balanceOf(_acct) - _paid, 8e18 - BILLED, "and pays the seller its shares at the unchanged price, with no fee on no gain"
             );
-            assertEq(wnt.balanceOf(master), _owner, "so the master is paid nothing");
+            assertEq(wnt.balanceOf(_ownerAccount()), _owner, "so the master is paid nothing");
             assertFalse(isOpen(fundStore.getRedemption(body)), "in the one transaction that opened it");
         }
         assertEq(fundStore.getRedemption(body).id, 40, "one redemption per sale, however long the fund runs");
@@ -532,7 +540,7 @@ contract ScenariosTest is HotPathTest {
         uint _value = _bodyValue();
         uint _owedValue = Math.mulDiv(399e18, _value + VIRTUAL_VALUE, shareToken.totalSupply() + VIRTUAL_SHARES);
         assertLt(_owedValue, 399e18, "the fund lost value since the backer joined");
-        uint[3] memory _before = [wnt.balanceOf(feeReceiver), wnt.balanceOf(protocolReceiver), wnt.balanceOf(master)];
+        uint[3] memory _before = [wnt.balanceOf(feeReceiver), wnt.balanceOf(protocolReceiver), wnt.balanceOf(_ownerAccount())];
         _queueRedeemAt(_value, _list(_acct));
         assertEq(wnt.balanceOf(_acct), _owedValue - BILLED, "the backer is paid its shares at the lower price, less one fee");
         assertGt(
@@ -540,7 +548,7 @@ contract ScenariosTest is HotPathTest {
         );
         assertEq(wnt.balanceOf(feeReceiver) - _before[0], BILLED, "so the fee receiver takes the relay fee");
         assertEq(wnt.balanceOf(protocolReceiver), _before[1], "the protocol receiver takes no cut");
-        assertEq(wnt.balanceOf(master), _before[2], "and the master earns nothing on a loss");
+        assertEq(wnt.balanceOf(_ownerAccount()), _before[2], "and the master earns nothing on a loss");
         assertEq(shareToken.balanceOf(_acct), 0, "nothing of it stays in the fund");
         assertEq(_queuedOf(_acct), 0);
     }
@@ -553,8 +561,7 @@ contract ScenariosTest is HotPathTest {
         (_user[0], _key[0], _all[0]) = _backer("eq-early", 400e6);
         (_user[1], _key[1], _all[1]) = _backer("eq-twice", 200e6);
         usdc.mint(body, shareToken.totalSupply() / 2 / USD);
-        (Fund.AllocateIntent memory _i, bytes memory _sig) =
-            _allocateIntent(_nonceOf(body), _nav(), _one(_all[1], _terms(MAX_SKIN), 300e6));
+        (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(_nonceOf(body), _nav(), _one(_all[1], 300e6));
         hub.allocate(_i, _sig, _ownerCoSig(_i));
         (_user[2], _key[2], _all[2]) = _backer("eq-late", 301e6);
         uint[3] memory _cost;
@@ -588,7 +595,7 @@ contract ScenariosTest is HotPathTest {
             wnt.balanceOf(_all[0]),
             wnt.balanceOf(_all[1]),
             wnt.balanceOf(_all[2]),
-            wnt.balanceOf(master),
+            wnt.balanceOf(_ownerAccount()),
             wnt.balanceOf(feeReceiver),
             wnt.balanceOf(protocolReceiver)
         ];
@@ -599,7 +606,7 @@ contract ScenariosTest is HotPathTest {
             wnt.balanceOf(_all[2]) - _before[2], _payout[2] - BILLED, "a holder at a loss is paid its claim less only the relay fee"
         );
         assertTrue(isOpen(fundStore.getRedemption(body)), "the others are still owed");
-        assertEq(wnt.balanceOf(master), _before[3], "so nothing reaches the master yet");
+        assertEq(wnt.balanceOf(_ownerAccount()), _before[3], "so nothing reaches the master yet");
 
         hub.redeemCohort(shareToken, _all);
         uint[2] memory _paid = [uint(399e18), 498e18];
@@ -621,9 +628,9 @@ contract ScenariosTest is HotPathTest {
             _cuts += _cut;
         }
         assertEq(
-            wnt.balanceOf(master) - _before[3],
+            wnt.balanceOf(_ownerAccount()) - _before[3],
             _masterPay - BILLED,
-            "the master's part of both fees reaches the owner's wallet at the close, less one relay fee"
+            "the master's part of both fees reaches the owner's account at the close, less one relay fee"
         );
         assertEq(wnt.balanceOf(feeReceiver) - _before[4], 4 * BILLED, "the fee receiver collects four relay fees alone");
         assertEq(
@@ -632,12 +639,12 @@ contract ScenariosTest is HotPathTest {
         assertFalse(isOpen(fundStore.getRedemption(body)), "the overlapping cohort settles the rest and closes");
         assertEq(wnt.balanceOf(address(fundStore)), 0, "leaving nothing in the store");
 
-        uint[2] memory _close = [wnt.balanceOf(master), wnt.balanceOf(body)];
+        uint[2] memory _close = [wnt.balanceOf(_ownerAccount()), wnt.balanceOf(body)];
         Fund.Valuation memory _v = _valuation(0);
         _v.assetList[0].value = _close[1];
         _redeem(10_000, 0, _v, new address[](0));
         assertEq(
-            wnt.balanceOf(master) - _close[0], _close[1] - BILLED, "the master's own shares exit at the fund's cash with no fee"
+            wnt.balanceOf(_ownerAccount()) - _close[0], _close[1] - BILLED, "the master's own shares exit at the fund's cash with no fee"
         );
         assertEq(shareToken.totalSupply(), 0, "and the fund closes");
     }
@@ -678,6 +685,33 @@ contract ScenariosTest is HotPathTest {
         address _acct
     ) internal view returns (uint j_) {
         while (lfAccts[j_] != _acct) ++j_;
+    }
+
+    function _lfSessionLive(
+        LfHolder storage _h
+    ) internal view returns (bool) {
+        return _h.sessionEpoch == _h.epoch
+            || (_h.sessionEpoch == _h.prevEpoch && vm.getBlockTimestamp() < _h.revokedAt + SESSION_REVOKE_DELAY);
+    }
+
+    function _lfSigned(
+        uint _j,
+        bool _session,
+        bytes32 _digest
+    ) internal view returns (bytes memory) {
+        if (!_session) return _pair(lfKeys[_j], _digest);
+        uint _sessionKey = lfKeys[_j] + 1;
+        address _signer = vm.addr(_sessionKey);
+        uint _epoch = lfHolder[_j].sessionEpoch;
+        bytes32 _grant = AccountLib.sessionDigest(
+            address(accountModule), lfUsers[_j], _signer, lfStart, lfStart + 30 days, _epoch, address(0)
+        );
+        return bytes.concat(
+            abi.encode(
+                _signer, lfStart, lfStart + 30 days, _epoch, address(0), _coSig(lfKeys[_j], _grant), _coSig(_sessionKey, _digest)
+            ),
+            _coSig(attestorKey, _digest)
+        );
     }
 
     function _lfBodyValue() internal view returns (uint) {
@@ -724,6 +758,7 @@ contract ScenariosTest is HotPathTest {
         FundStore.Redemption memory _r = fundStore.getRedemption(body);
         lfOtherFenced = wnt.balanceOf(address(fundStore));
         assertEq(lfOtherFenced, _r.potLeft, "the other fund leaves its seller's pot ring-fenced in the shared store");
+        assertEq(fundStore.bookedMap(body, address(wnt)), lfOtherFenced, "booked to that fund alone");
         assertGt(lfOtherFenced, 0);
         lfOtherPrice = _r.price;
         lfOtherCost = fundStore.getHolding(body, _acct).cost;
@@ -738,6 +773,7 @@ contract ScenariosTest is HotPathTest {
         bool _extended
     ) internal {
         lfN = _n;
+        lfStart = vm.getBlockTimestamp();
         if (_extended) _lfOtherFund();
         _openFund("LF");
         uint[5] memory _skins = [MAX_SKIN, 20_000, 1000, 5000, 0];
@@ -751,17 +787,19 @@ contract ScenariosTest is HotPathTest {
                 allocationRate: 9000,
                 exitCap: 10_000,
                 cooldownPeriod: 0,
-                expiry: block.timestamp + 365 days
+                expiry: lfStart + 365 days
             });
             _signMandate(lfUsers[_j], lfKeys[_j], lfMandates[_j]);
             lfHolder[_j].usdc = 20_000e6 - FEE;
-            lfHolder[_j].mandated = true;
+            lfHolder[_j].commitment = keccak256(abi.encode(lfMandates[_j], uint(0)));
             lfTracked.push(lfAccts[_j]);
             lfTracked.push(lfUsers[_j]);
         }
         lfSupply = 499e18;
         lfMasterShares = 499e18;
         lfBodyUsdc = 499e6;
+        lfCreditTotal = 500e6;
+        lfCreditFeeTotal = Math.mulDiv(BILLED, 1e6, 1e6 * USD);
         lfFeeUsdc = usdc.balanceOf(feeReceiver);
         lfFeeWeth = wnt.balanceOf(feeReceiver);
         lfProtocolWeth = wnt.balanceOf(protocolReceiver);
@@ -817,7 +855,7 @@ contract ScenariosTest is HotPathTest {
                 _rows[_k] = _rows[_k - 1];
                 --_k;
             }
-            _rows[_k] = _row(_list[_n], lfMandates[_lfIndex(_list[_n])], 5e6 + _rand() % 3000e6);
+            _rows[_k] = _row(_list[_n], 5e6 + _rand() % 3000e6);
         }
         uint _credited = _rand() % 3 == 0 ? 10e6 + _rand() % 2000e6 : 0;
         if (_credited > 0) {
@@ -836,14 +874,18 @@ contract ScenariosTest is HotPathTest {
             _credited > 0 ? _credit(block.chainid, address(usdc), _credited) : _credit(0, address(0), 0),
             _rows
         );
+        if (_credited > 0) {
+            _lfEq(_i.credit.total, lfCreditTotal + _credited, "the owner signs the model's running credit total");
+            _lfEq(_i.credit.feeTotal, lfCreditFeeTotal + _m.masterBilled, "beside its fee total grown by the master's billed slice");
+        }
         bytes memory _ownerSig = _ownerCoSig(_i);
         if (isOpen(lfRedemption)) {
             vm.expectRevert(abi.encodeWithSelector(Error.Redeem__Open.selector, lfRedemption.id));
-        } else if (_m.minted == 0) {
+        } else if (_m.minted == _m.existing) {
             vm.expectRevert(Error.Balance__ZeroAmount.selector);
         }
         hub.allocate(_i, _sig, _ownerSig);
-        if (!isOpen(lfRedemption) && _m.minted > 0) _lfMinted(_rows, _m, _credited);
+        if (!isOpen(lfRedemption) && _m.minted > _m.existing) _lfMinted(_rows, _m, _credited);
     }
 
     function _lfMinted(
@@ -851,12 +893,16 @@ contract ScenariosTest is HotPathTest {
         LfRound memory _m,
         uint _credited
     ) internal {
+        lfMasterShares += _m.existing;
+        lfSupply += _m.existing;
         if (_credited > 0) {
             lfEscrowUsdc -= _credited;
             lfFeeUsdc += _m.masterBilled;
             lfBodyUsdc += _credited - _m.masterBilled;
             lfMasterShares += _m.contributed;
             lfSupply += _m.contributed;
+            lfCreditTotal += _credited;
+            lfCreditFeeTotal += _m.masterBilled;
         }
         for (uint _r; _r < _rows.length; ++_r) {
             uint _shares = _m.shares[_r];
@@ -865,7 +911,7 @@ contract ScenariosTest is HotPathTest {
             uint _net = _rows[_r].amount * USD - _m.slice;
             _h.cost = (_h.cost * _h.shares + _net * PRICE_PRECISION) / (_h.shares + _shares);
             _h.basis += _net * BASIS;
-            _h.allocatedAt = block.timestamp;
+            _h.allocatedAt = vm.getBlockTimestamp();
             ++_h.entries;
             _h.shares += _shares;
             _h.usdc -= _rows[_r].amount;
@@ -885,11 +931,13 @@ contract ScenariosTest is HotPathTest {
         m_.slice = BILLED / (_rows.length + (_credited > 0 ? 1 : 0));
         m_.supply = lfSupply + VIRTUAL_SHARES;
         m_.nav = _valuation + VIRTUAL_VALUE;
-        m_.masterShares = lfMasterShares;
+        m_.existing = lfSupply == 0 ? Math.mulDiv(_valuation, VIRTUAL_SHARES, VIRTUAL_VALUE) : 0;
+        m_.masterShares = lfMasterShares + m_.existing;
+        m_.minted = m_.existing;
         m_.shares = new uint[](_rows.length);
         if (_credited > 0) {
-            m_.masterBilled = Math.mulDiv(m_.slice, 1e6, 1e6 * USD, Math.Rounding.Ceil);
-            m_.contributed = Math.mulDiv(_credited * USD - m_.slice, m_.supply, m_.nav);
+            m_.masterBilled = Math.mulDiv(m_.slice, 1e6, 1e6 * USD);
+            m_.contributed = Math.mulDiv(_credited * USD - m_.slice, m_.supply + m_.existing, m_.nav);
             m_.masterShares += m_.contributed;
             m_.minted += m_.contributed;
         }
@@ -908,25 +956,90 @@ contract ScenariosTest is HotPathTest {
         uint _exiting
     ) internal view returns (uint shares_) {
         LfHolder storage _h = lfHolder[_lfIndex(_row.puppet)];
+        MandateLib.Mandate memory _mandate = _row.mandate;
         uint _value = _row.amount * USD;
-        if (_m.slice * 1e4 >= _value * 1000 || !_h.mandated) return 0;
-        uint _open = _row.mandate.exitCap > _exiting ? _row.mandate.exitCap - _exiting : 0;
-        if (_open == 0 || _value * 1e4 * _row.mandate.exitCap > _h.usdc * USD * _row.mandate.allocationRate * _open) return 0;
-        shares_ = Math.mulDiv(_value - _m.slice, _m.supply, _m.nav);
-        if (_row.mandate.skin == 0) return shares_;
-        uint _skinRoom = _m.masterShares * _row.mandate.skin;
+        if (
+            _m.slice * 1e4 >= _value * 1000 || _h.commitment != keccak256(abi.encode(_mandate, _h.epoch))
+                || _mandate.expiry <= vm.getBlockTimestamp()
+        ) return 0;
+        uint _open = _mandate.exitCap > _exiting ? _mandate.exitCap - _exiting : 0;
+        if (_open == 0 || _value * 1e4 * _mandate.exitCap > _h.usdc * USD * _mandate.allocationRate * _open) return 0;
+        shares_ = Math.mulDiv(_value - _m.slice, _m.supply + _m.existing, _m.nav);
+        if (_mandate.skin == 0) return shares_;
+        uint _skinRoom = _m.masterShares * _mandate.skin;
         uint _held = _h.shares * 1e4;
-        if (_skinRoom < _held || shares_ * 1e4 * _row.mandate.exitCap > (_skinRoom - _held) * _open) return 0;
+        if (_skinRoom < _held || shares_ * 1e4 * _mandate.exitCap > (_skinRoom - _held) * _open) return 0;
     }
 
     function _lfRemandate() internal {
         uint _j = _rand() % lfN;
         _lfTopUp(_j);
-        _signMandate(lfUsers[_j], lfKeys[_j], lfMandates[_j]);
-        lfHolder[_j].usdc -= FEE;
-        lfHolder[_j].mandated = true;
+        LfHolder storage _h = lfHolder[_j];
+        uint _mode = _rand() % 4;
+        MandateLib.Mandate memory _next = lfMandates[_j];
+        uint[5] memory _skins = [MAX_SKIN, 20_000, 1000, 5000, 0];
+        if (_mode == 1) _next.skin = _skins[_rand() % 5];
+        _next.expiry = _mode == 0 ? 0 : lfStart + 365 days;
+        bool _session = _rand() % 2 == 0;
+        (HubGate.MandateIntent memory _i, bytes32 _d) = _mandateIntent(lfUsers[_j], _next);
+        bytes memory _sig = _lfSigned(_j, _session, _d);
+        _lfLog(string.concat(_mode == 0 ? "end " : "remandate ", vm.toString(_j), _session ? " session" : ""));
+        if (_session && !_lfSessionLive(_h)) {
+            vm.expectRevert(Error.Account__InvalidSignature.selector);
+            hub.mandate(_i, _sig);
+            _h.sessionEpoch = _h.epoch;
+            return;
+        }
+        hub.mandate(_i, _sig);
+        lfMandates[_j] = _next;
+        mandateLog[lfAccts[_j]][body] = _next;
+        _h.commitment = _mode == 0 ? bytes32(0) : keccak256(abi.encode(_next, _h.epoch));
+        _h.usdc -= FEE;
         lfFeeUsdc += FEE;
-        _lfLog(string.concat("remandate ", vm.toString(_j)));
+    }
+
+    function _lfRevoke() internal {
+        uint _j = _rand() % lfN;
+        LfHolder storage _h = lfHolder[_j];
+        _lfLog(string.concat("revoke ", vm.toString(_j)));
+        vm.prank(lfUsers[_j]);
+        UserAccount(payable(lfAccts[_j])).revokeSessions();
+        _h.prevEpoch = _h.epoch;
+        _h.epoch = _epochAfterRevoke(_h.prevEpoch);
+        _h.revokedAt = vm.getBlockTimestamp();
+    }
+
+    function _lfWithdraw() internal {
+        uint _j = _rand() % lfN;
+        LfHolder storage _h = lfHolder[_j];
+        bool _inUsdc = _rand() % 2 == 0;
+        uint _held = _inUsdc ? _h.usdc : _h.weth;
+        uint _amount = _held == 0 || _rand() % 4 == 0 ? _held : 1 + _rand() % _held;
+        _lfLog(string.concat("withdraw ", vm.toString(_j), " ", vm.toString(_amount)));
+        uint _now = vm.getBlockTimestamp();
+        bytes memory _want;
+        if (_now < _h.revokedAt + SESSION_REVOKE_DELAY || _now >= _h.revokedAt + 2 * SESSION_REVOKE_DELAY) {
+            _want = abi.encodeWithSelector(Error.Account__WithdrawClosed.selector, _h.revokedAt);
+        } else if (_amount == 0) {
+            _want = abi.encodeWithSelector(Error.Balance__NothingToWithdraw.selector);
+        }
+        if (_want.length > 0) vm.expectRevert(_want);
+        vm.prank(lfUsers[_j]);
+        UserAccount(payable(lfAccts[_j])).withdraw(_inUsdc ? address(usdc) : address(wnt), _amount);
+        if (_want.length > 0) return;
+        if (_inUsdc) {
+            _h.usdc -= _amount;
+            _h.walletUsdc += _amount;
+        } else {
+            _h.weth -= _amount;
+            _h.walletWeth += _amount;
+        }
+    }
+
+    function _lfTime() internal {
+        uint _delta = _rand() % (2 * SESSION_REVOKE_DELAY);
+        vm.warp(vm.getBlockTimestamp() + _delta);
+        _lfLog(string.concat("time +", vm.toString(_delta)));
     }
 
     function _lfMarket(
@@ -988,6 +1101,13 @@ contract ScenariosTest is HotPathTest {
         uint _payout = Math.mulDiv(_r.potLeft, _claim, _r.owedLeft);
         uint _profitFee =
             _h.cost < _r.price ? Math.mulDiv(_payout, PERFORMANCE_FEE * (_r.price - _h.cost), _r.price * 1e4) : 0;
+        if (_cohort && _payout - _profitFee <= _r.fee) {
+            _r.potLeft -= uint96(_payout);
+            _r.owedLeft -= uint128(_claim);
+            _h.redeemedAt = _r.id;
+            lfBodyWeth += _payout;
+            return 0;
+        }
         uint _cut = Math.mulDiv(_profitFee, PROTOCOL_FEE_SHARE, 1e4);
         if (_claim > 0) _lfIndependent(_h, _claim, _payout, _profitFee, _exit);
         _h.shares -= _exit;
@@ -1003,12 +1123,8 @@ contract ScenariosTest is HotPathTest {
             _h.weth += _payout - _profitFee;
             return 0;
         }
-        if (_payout - _profitFee > _r.fee) {
-            fees_ = _r.fee;
-            _h.weth += _payout - _profitFee - _r.fee;
-        } else {
-            fees_ = _payout - _profitFee;
-        }
+        fees_ = _r.fee;
+        _h.weth += _payout - _profitFee - _r.fee;
     }
 
     function _lfIndependent(
@@ -1035,6 +1151,7 @@ contract ScenariosTest is HotPathTest {
         address[] memory _list
     ) internal {
         FundStore.Redemption storage _r = lfRedemption;
+        uint _owed = _r.owedLeft;
         uint _fees;
         for (uint _k; _k < _list.length && _r.potLeft > _r.fee; ++_k) {
             uint _j = _lfIndex(_list[_k]);
@@ -1042,14 +1159,12 @@ contract ScenariosTest is HotPathTest {
             if (_h.redeemedAt == _r.id || _h.queued * 1e4 + (_h.shares - _h.queued) * _r.fraction == 0) continue;
             _fees += _lfSettle(_j, true);
         }
-        bool _cutting = _r.owedLeft > 0 && _r.potLeft <= _r.fee;
-        if (_cutting) {
-            _lfTrue(_r.potLeft <= _r.fee, "only a cut tail of at most one fee comes back to the fund");
+        if (_r.owedLeft > 0 && _r.potLeft <= _r.fee) {
             lfBodyWeth += _r.potLeft;
             _r.owedLeft = 0;
             _r.potLeft = 0;
         }
-        if (_cutting || (_r.owedLeft == 0 && _r.masterPay > 0)) {
+        if (_r.owedLeft == 0 && (_owed > 0 || _r.masterPay > 0)) {
             uint _masterFee = Math.min(_r.masterPay, _r.fee);
             _fees += _masterFee;
             lfOwnerWeth += _r.masterPay - _masterFee;
@@ -1068,12 +1183,15 @@ contract ScenariosTest is HotPathTest {
             ? _left + 1
             : 1 + _rand() % (_rand() % 3 == 0 ? Math.min(_left, 2e18) : _left);
         _lfTopUp(_j);
-        _lfLog(string.concat("sell ", vm.toString(_j), " ", vm.toString(_shares)));
+        bool _session = _rand() % 2 == 0;
+        _lfLog(string.concat("sell ", vm.toString(_j), " ", vm.toString(_shares), _session ? " session" : ""));
         address _acct = lfAccts[_j];
         Redeem.SellIntent memory _i =
             Redeem.SellIntent({header: _header(_acct, lfUsers[_j], _nonceOf(_acct)), shareToken: shareToken, shares: _shares});
-        bytes memory _sig = _pair(
-            lfKeys[_j],
+        _i.header.deadline = vm.getBlockTimestamp() + 300;
+        bytes memory _sig = _lfSigned(
+            _j,
+            _session,
             _typed(
                 _acct,
                 _i.header.deadline,
@@ -1085,12 +1203,18 @@ contract ScenariosTest is HotPathTest {
             hub.sell(_i, _sig);
             return;
         }
+        if (_session && !_lfSessionLive(_h)) {
+            vm.expectRevert(Error.Account__InvalidSignature.selector);
+            hub.sell(_i, _sig);
+            _h.sessionEpoch = _h.epoch;
+            return;
+        }
         hub.sell(_i, _sig);
         if (_settles) _lfSettle(_j, false);
         _h.queued += _shares;
         lfRedemption.queued += uint128(_shares);
         _h.usdc -= FEE;
-        _h.mandated = false;
+        _h.commitment = bytes32(0);
         lfFeeUsdc += FEE;
     }
 
@@ -1132,6 +1256,8 @@ contract ScenariosTest is HotPathTest {
             _want = abi.encodeWithSelector(Error.Balance__InsufficientFund.selector, address(wnt), _o.cash, _o.pot + _o.masterPay);
         } else if (_o.pot + _o.masterPay < BILLED) {
             _want = abi.encodeWithSelector(Error.Redeem__Dust.selector, _o.pot + _o.masterPay, BILLED);
+        } else if (!_o.full && _o.masterPart > 0 && _o.owed > 0 && _o.pot <= BILLED) {
+            _want = abi.encodeWithSelector(Error.Redeem__Dust.selector, _o.pot, BILLED);
         }
 
         Fund.Valuation memory _v = _valuation(0);
@@ -1188,6 +1314,36 @@ contract ScenariosTest is HotPathTest {
         _lfCohortModel(_list);
     }
 
+    function _lfOtherClose() internal {
+        _lfLog("other close");
+        uint _booked = uint(lfRedemption.potLeft) + lfRedemption.masterPay;
+        vm.prank(address(redeemModule));
+        vm.expectRevert(
+            abi.encodeWithSelector(Error.FundStore__Unbooked.selector, body, address(wnt), _booked, _booked + 1)
+        );
+        fundStore.pay(body, address(wnt), SINK, _booked + 1, 200_000);
+        uint _fee = Math.mulDiv(lfOtherFenced, PERFORMANCE_FEE * (lfOtherPrice - lfOtherCost), lfOtherPrice * 1e4);
+        uint _cut = Math.mulDiv(_fee, PROTOCOL_FEE_SHARE, 1e4);
+        uint _masterFee = Math.min(_fee - _cut, BILLED);
+        address _otherOwner = accountModule.predictUserAccount(lfOtherMaster);
+        uint[2] memory _before = [wnt.balanceOf(lfOtherAcct), wnt.balanceOf(_otherOwner)];
+        hub.redeemCohort(lfOtherShare, _list(lfOtherAcct));
+        _lfEq(
+            wnt.balanceOf(lfOtherAcct) - _before[0],
+            lfOtherFenced - _fee - BILLED,
+            "the other fund's seller is paid its whole pot out of the shared store, less its own fee"
+        );
+        _lfEq(
+            wnt.balanceOf(_otherOwner) - _before[1],
+            _fee - _cut - _masterFee,
+            "and that fund's master collects its part of the fee at the close"
+        );
+        _lfTrue(!isOpen(fundStore.getRedemption(lfOtherBody)), "which closes the other fund's redemption");
+        lfFeeWeth += BILLED + _masterFee;
+        lfProtocolWeth += _cut;
+        lfOtherFenced = 0;
+    }
+
     function _lfCheck() internal view {
         FundStore.Redemption memory _r = fundStore.getRedemption(body);
         FundStore.Redemption memory _m = lfRedemption;
@@ -1220,15 +1376,38 @@ contract ScenariosTest is HotPathTest {
             uint(_r.potLeft) + _r.masterPay + lfOtherFenced,
             "the store holds exactly both funds' ring-fenced pay"
         );
+        _lfEq(
+            fundStore.bookedMap(body, address(wnt)),
+            uint(_m.potLeft) + _m.masterPay,
+            "the fund's booking is exactly its pot left and its master's pay"
+        );
+        _lfEq(
+            fundStore.bookedMap(lfOtherBody, address(wnt)), lfOtherFenced, "the other fund's booking is exactly its fenced pot"
+        );
+        _lfEq(
+            fundStore.heldMap(address(wnt)),
+            uint(_m.potLeft) + _m.masterPay + lfOtherFenced,
+            "the store holds no more than the two bookings"
+        );
         _lfEq(usdc.balanceOf(body), lfBodyUsdc, "the fund's USDC follows the model");
         _lfEq(wnt.balanceOf(body), lfBodyWeth, "the fund's WETH follows the model");
         _lfEq(body.balance, lfBodyNative, "the fund's native balance follows the model");
         _lfEq(usdc.balanceOf(feeReceiver), lfFeeUsdc, "the fee receiver's USDC follows the model");
         _lfEq(wnt.balanceOf(feeReceiver), lfFeeWeth, "the fee receiver's WETH, relay fees alone, follows the model");
         _lfEq(wnt.balanceOf(protocolReceiver), lfProtocolWeth, "the protocol receiver's WETH, every protocol cut, follows the model");
-        _lfEq(wnt.balanceOf(master), lfOwnerWeth, "the master's wallet is paid exactly the model's master pay");
+        _lfEq(wnt.balanceOf(_ownerAccount()), lfOwnerWeth, "the owner's account is paid exactly the model's master pay");
         _lfEq(usdc.balanceOf(master), lfOwnerUsdc, "the master's wallet USDC follows the model");
         _lfEq(usdc.balanceOf(address(hubEscrowStore)), lfEscrowUsdc, "the hub escrow holds exactly the unreleased credits");
+        _lfEq(
+            hubEscrowStore.fulfilledMap(_ownerAccount(), body, address(usdc)),
+            lfCreditTotal,
+            "the escrow has released exactly the model's running credit total"
+        );
+        _lfEq(
+            hubEscrowStore.feePaidMap(_ownerAccount(), body, address(usdc)),
+            lfCreditFeeTotal,
+            "and billed exactly the model's fee total"
+        );
         _lfEq(
             _lfLedger(),
             lfExo,
@@ -1252,29 +1431,29 @@ contract ScenariosTest is HotPathTest {
         _lfEq(_c.redeemedAt, _h.redeemedAt, "each holder's last settlement follows the model");
         _lfEq(wnt.balanceOf(_acct), _h.weth, "each holder is paid exactly what the model pays it");
         _lfEq(usdc.balanceOf(_acct), _h.usdc, "each holder spends exactly what the model spends");
-        _lfTrue((mandateStore.mandateMap(_acct, body) != bytes32(0)) == _h.mandated, "each holder's mandate follows the model");
+        _lfEq(usdc.balanceOf(lfUsers[_j]), _h.walletUsdc, "each holder's wallet holds exactly the USDC it withdrew");
+        _lfEq(wnt.balanceOf(lfUsers[_j]), _h.walletWeth, "and exactly the WETH it withdrew");
+        _lfEq(UserAccount(payable(_acct)).epoch(), _h.epoch, "each holder's session epoch follows the model");
+        _lfTrue(
+            mandateStore.mandateMap(_acct, body) == _h.commitment,
+            "each holder's commitment on the hub, its terms at the epoch they were registered in, follows the model"
+        );
         _lfTrue(balance_ >= queued_, "a holder's queue never exceeds its shares");
         if (_r.owedLeft > 0 && _c.redeemedAt != _r.id) claim_ = queued_ * 1e4 + (balance_ - queued_) * _r.fraction;
     }
 
     function _lfReturnEscrow() internal {
         address _owner = _account(master);
-        uint _returned = hubEscrowStore.returnedMap(_owner, address(usdc));
-        uint _open = hubEscrowStore.escrowedMap(_owner, address(usdc)) - hubEscrowStore.releasedMap(_owner, address(usdc)) - _returned;
+        uint _open = hubEscrowStore.escrowedMap(_owner, address(usdc)) - hubEscrowStore.releasedMap(_owner, address(usdc))
+            - hubEscrowStore.returnedMap(_owner, address(usdc));
         _lfEq(_open, lfEscrowUsdc, "the hub escrow holds exactly the credits no round released");
         if (_open == 0) return;
-        uint _deadline = vm.getBlockTimestamp() + 300;
-        bytes memory _sig = _coSig(
-            attestorKey,
-            AccountLib.typedDigest(
-                block.chainid,
-                _owner,
-                keccak256(
-                    abi.encode(RETURN_ESCROW_TYPEHASH, address(hubEscrowStore), address(usdc), _returned, _returned + _open, _deadline)
-                )
-            )
-        );
-        hub.returnEscrow(_owner, address(usdc), _returned, _returned + _open, _deadline, _sig);
+        uint _returnAt = vm.getBlockTimestamp() + ESCROW_RETURN_DELAY;
+        vm.prank(master);
+        hub.requestReturn(address(usdc));
+        vm.warp(_returnAt);
+        vm.prank(master);
+        hub.returnEscrow(address(usdc));
         lfOwnerUsdc += _open;
         lfEscrowUsdc = 0;
     }
@@ -1287,30 +1466,11 @@ contract ScenariosTest is HotPathTest {
         }
         _lfTrue(!isOpen(fundStore.getRedemption(body)), "one cohort of every holder closes any redemption");
         _lfCheck();
-        if (lfOtherFenced > 0) {
-            uint _fee = Math.mulDiv(lfOtherFenced, PERFORMANCE_FEE * (lfOtherPrice - lfOtherCost), lfOtherPrice * 1e4);
-            uint _cut = Math.mulDiv(_fee, PROTOCOL_FEE_SHARE, 1e4);
-            uint _masterFee = Math.min(_fee - _cut, BILLED);
-            uint[2] memory _before = [wnt.balanceOf(lfOtherAcct), wnt.balanceOf(lfOtherMaster)];
-            hub.redeemCohort(lfOtherShare, _list(lfOtherAcct));
-            _lfEq(
-                wnt.balanceOf(lfOtherAcct) - _before[0],
-                lfOtherFenced - _fee - BILLED,
-                "the other fund's seller is paid its whole pot out of the shared store, less its own fee"
-            );
-            _lfEq(
-                wnt.balanceOf(lfOtherMaster) - _before[1],
-                _fee - _cut - _masterFee,
-                "and that fund's master collects its part of the fee at the close"
-            );
-            _lfTrue(!isOpen(fundStore.getRedemption(lfOtherBody)), "which closes the other fund's redemption");
-            lfFeeWeth += BILLED + _masterFee;
-            lfProtocolWeth += _cut;
-            lfOtherFenced = 0;
-        }
+        if (lfOtherFenced > 0) _lfOtherClose();
         _lfReturnEscrow();
         _lfCheck();
         assertEq(wnt.balanceOf(address(fundStore)), 0, "the shared store ends empty");
+        assertEq(fundStore.heldMap(address(wnt)), 0, "with nothing booked to either fund");
         assertEq(usdc.balanceOf(address(hubEscrowStore)), 0, "and the hub escrow returns every credit no round used");
         uint _ends = _lfValueOf(master) + _lfValueOf(feeReceiver) + _lfValueOf(protocolReceiver) + _lfValueOf(body)
             + _lfValueOf(_account(master));
@@ -1348,13 +1508,18 @@ contract ScenariosTest is HotPathTest {
         _lfMarket(1);
         _lfCheck();
         for (lfStep = 0; lfStep < _steps; ++lfStep) {
-            uint _op = _rand() % 12;
+            uint _op = _rand() % 18;
             if (_op < 3) _lfAllocate(false);
             else if (_op < 5) _lfSell();
             else if (_op < 7) _lfOpen();
             else if (_op < 9) _lfCohort();
-            else if (_op == 9) _lfRemandate();
-            else _lfMarket(_rand() % 6);
+            else if (_op < 11) _lfRemandate();
+            else if (_op < 13) _lfMarket(_rand() % 6);
+            else if (_op < 15) _lfWithdraw();
+            else if (_op == 15) _lfTime();
+            else if (_op == 16) _lfRevoke();
+            else if (lfOtherFenced > 0 && isOpen(lfRedemption) && _rand() % 2 == 0) _lfOtherClose();
+            else _lfTime();
             _lfCheck();
         }
         _lfEnd();
@@ -1421,7 +1586,7 @@ contract ScenariosTest is HotPathTest {
                 _rows[_k] = _rows[_k - 1];
                 --_k;
             }
-            _rows[_k] = _row(_list[_n], dfTerms, 200e6 + _rand() % 1800e6);
+            _rows[_k] = _row(_list[_n], 200e6 + _rand() % 1800e6);
         }
         uint[] memory _held = new uint[](_len);
         for (uint _n; _n < _len; ++_n) {
@@ -1468,7 +1633,7 @@ contract ScenariosTest is HotPathTest {
             _x.claim[_k] = _queued * 1e4 + (_x.shares[_k] - _queued) * _fraction;
             _x.weth[_k] = wnt.balanceOf(_acct);
         }
-        _x.owner = wnt.balanceOf(master);
+        _x.owner = wnt.balanceOf(_ownerAccount());
         _x.fees = wnt.balanceOf(feeReceiver);
         _x.cuts = wnt.balanceOf(protocolReceiver);
         Fund.Valuation memory _v = _valuation(0);
@@ -1518,10 +1683,10 @@ contract ScenariosTest is HotPathTest {
         }
         uint _masterFee = Math.min(_masterTotal, BILLED);
         assertApproxEqAbs(
-            wnt.balanceOf(master) - _x.owner,
+            wnt.balanceOf(_ownerAccount()) - _x.owner,
             _masterTotal - _masterFee,
             _tolerance + 2,
-            "the master's wallet collects its own exit beside every holder's fee net of the protocol cut"
+            "the owner's account collects its own exit beside every holder's fee net of the protocol cut"
         );
         assertApproxEqAbs(
             wnt.balanceOf(feeReceiver) - _x.fees,

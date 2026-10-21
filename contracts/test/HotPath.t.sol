@@ -6,21 +6,28 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Test} from "forge-std/src/Test.sol";
 
-import {HubGate, ALLOCATE_INTENT_TYPEHASH, ASSET_TYPEHASH, CREDIT_TYPEHASH, MANDATE_INTENT_TYPEHASH, MAX_SKIN, POSITION_TYPEHASH, PRICE_TYPEHASH, REDEEM_INTENT_TYPEHASH, SELL_INTENT_TYPEHASH, VALUATION_TYPEHASH} from "src/HubGate.sol";
 import {
-    CALL_TYPEHASH,
-    FULFIL_TYPEHASH,
-    OPERATE_INTENT_TYPEHASH,
-    SpokeGate
-} from "src/SpokeGate.sol";
+    HubGate,
+    ALLOCATE_INTENT_TYPEHASH,
+    ASSET_TYPEHASH,
+    CREDIT_TYPEHASH,
+    MANDATE_INTENT_TYPEHASH,
+    MAX_SKIN,
+    POSITION_TYPEHASH,
+    PRICE_TYPEHASH,
+    REDEEM_INTENT_TYPEHASH,
+    SELL_INTENT_TYPEHASH,
+    VALUATION_TYPEHASH
+} from "src/HubGate.sol";
+import {CALL_TYPEHASH, OPERATE_INTENT_TYPEHASH, SpokeGate} from "src/SpokeGate.sol";
 import {AccountModule} from "src/core/AccountModule.sol";
 import {Deposit} from "src/core/Deposit.sol";
 import {EscrowStore} from "src/core/EscrowStore.sol";
 import {EvmChain} from "src/core/EvmChain.sol";
-import {Dictate} from "src/core/Dictate.sol";
 import {Fund, PRICE_PRECISION} from "src/core/Fund.sol";
 import {FundAccount} from "src/core/FundAccount.sol";
 import {FundStore, isOpen} from "src/core/FundStore.sol";
+import {GovernorAccount} from "src/core/GovernorAccount.sol";
 import {MandateStore} from "src/core/MandateStore.sol";
 import {Redeem} from "src/core/Redeem.sol";
 import {GRID_BYTES, ShareToken} from "src/core/ShareToken.sol";
@@ -30,6 +37,8 @@ import {AccountLib} from "src/utils/AccountLib.sol";
 import {MandateLib} from "src/utils/MandateLib.sol";
 import {LiquidityGate, RETIRE_ESCROW_INTENT_TYPEHASH} from "src/utils/LiquidityGate.sol";
 import {IAccount} from "src/utils/interfaces/IAccount.sol";
+import {RouterProxy} from "src/utils/RouterProxy.sol";
+import {FULL_ACCESS} from "src/utils/auth/Access.sol";
 import {IWNT} from "src/utils/interfaces/IWNT.sol";
 import {NATIVE_TOKEN} from "src/utils/Native.sol";
 
@@ -51,14 +60,15 @@ contract HotPathTest is Test {
     uint constant HUB_CHAIN = 10;
     uint constant FEE = 1e6;
     uint constant USD = 1e12;
-    bytes32 constant WEBSITE_RELEASE = keccak256("the website release governance approved");
     string constant ATTESTOR_ENDPOINT = "https://puppet.fund/api";
-    uint constant FOREIGN_CHAIN_ID = 42161;
+    uint constant FOREIGN_CHAIN_ID = 42_161;
     uint constant ETH_USD = 1e6;
     uint constant PERFORMANCE_FEE = 1000;
     uint constant PROTOCOL_FEE_SHARE = 1000;
+    bytes32 constant WEBSITE_RELEASE = keccak256("the website release governance approved");
 
     address owner = makeAddr("owner");
+    address governor = makeAddr("governor");
     address feeReceiver = makeAddr("feeReceiver");
     address protocolReceiver = makeAddr("protocolReceiver");
     address attestor;
@@ -66,11 +76,11 @@ contract HotPathTest is Test {
 
     MockERC20 usdc;
     MockWNT wnt;
-    Dictate dictate;
+    GovernorAccount governorAccount;
     AccountModule accountModule;
     Deposit depositModule;
-    MandateStore mandateStore;
     FundStore fundStore;
+    MandateStore mandateStore;
     EscrowStore hubEscrowStore;
     EscrowStore spokeEscrowStore;
     Fund fundModule;
@@ -83,11 +93,11 @@ contract HotPathTest is Test {
     address master;
     uint masterKey;
     address body;
+    mapping(address puppet => mapping(address master => MandateLib.Mandate)) mandateLog;
     uint bodyKey;
     address backer;
     uint backerKey;
     ShareToken shareToken;
-    mapping(bytes32 digest => bytes signature) internal mandateSigOf;
 
     function setUp() public {
         vm.chainId(HUB_CHAIN);
@@ -99,114 +109,98 @@ contract HotPathTest is Test {
         vm.startPrank(owner);
         usdc = new MockERC20("USDC", "USDC", 6);
         wnt = new MockWNT();
-        dictate = new Dictate(owner);
-        fundStore = new FundStore(address(dictate));
+        governorAccount = new GovernorAccount(governor);
+        fundStore = new FundStore(address(governorAccount));
+        mandateStore = new MandateStore(address(governorAccount));
         accountModule = new AccountModule(
-            address(dictate), new EvmChain(), address(new UserAccount()), address(new FundAccount())
+            address(governorAccount), new EvmChain(), address(new UserAccount()), address(new FundAccount())
         );
-        depositModule = Deposit(
-            payable(
-                dictate.setGate(
-                    bytes32("Deposit"),
-                    address(new Deposit(address(dictate), accountModule, IWNT(address(wnt))))
-                )
-            )
-        );
-        mandateStore = new MandateStore(address(dictate));
-        hubEscrowStore = new EscrowStore(address(dictate), accountModule, feeReceiver, 1000);
-        spokeEscrowStore = new EscrowStore(address(dictate), accountModule, feeReceiver, 1000);
-
-        address _fundProxy = dictate.setGate(bytes32("Fund"), address(fundStore));
-        address _shareImpl = address(new ShareToken());
-        dictate.setGate(
-            bytes32("Fund"),
-            address(
-                new Fund(
-                    address(dictate),
-                    accountModule,
-                    mandateStore,
-                    fundStore,
-                    hubEscrowStore,
-                    _shareImpl,
-                    address(wnt)
-                )
-            )
-        );
-        fundModule = Fund(_fundProxy);
-        redeemModule = Redeem(
-            dictate.setGate(
-                bytes32("Redeem"),
-                address(
-                    new Redeem(
-                        address(dictate), accountModule, fundStore, address(wnt), PROTOCOL_FEE_SHARE, protocolReceiver
-                    )
-                )
-            )
-        );
-
-        address _gate = dictate.setGate(
-            bytes32("HubGate"),
-            address(
-                new HubGate(
-                    accountModule,
-                    depositModule,
-                    hubEscrowStore,
-                    mandateStore,
-                    fundModule,
-                    redeemModule,
-                    GateConfig({
-                        attestor: attestor,
-                        feeReceiver: feeReceiver,
-                        transferGasLimit: 200_000,
-                        maxIntentTtl: 600,
-                        maxRelayFeeBps: 1000
-                    }),
-                    _endpoints(ATTESTOR_ENDPOINT),
-                    _list(address(usdc), address(wnt)),
-                    100,
-                    PERFORMANCE_FEE,
-                    WEBSITE_RELEASE
-                )
-            )
-        );
-        hub = HubGate(_gate);
-
-        address _spokeGate = dictate.setGate(
-            bytes32("SpokeGate"),
-            address(
-                new SpokeGate(
-                    accountModule,
-                    depositModule,
-                    spokeEscrowStore,
-                    GateConfig({
-                        attestor: attestor,
-                        feeReceiver: feeReceiver,
-                        transferGasLimit: 200_000,
-                        maxIntentTtl: 600,
-                        maxRelayFeeBps: 1000
-                    })
-                )
-            )
-        );
-        spoke = SpokeGate(_spokeGate);
-
+        hubEscrowStore = new EscrowStore(address(governorAccount), accountModule, 1000);
+        spokeEscrowStore = new EscrowStore(address(governorAccount), accountModule, 1000);
         outToken = new MockERC20("OUT", "OUT", 18);
         swapProvider = new MockSwapProvider();
-        dictate.setAccess(accountModule, address(depositModule));
-        dictate.setAccess(accountModule, _gate);
-        dictate.setAccess(accountModule, _fundProxy);
-        dictate.setAccess(depositModule, _gate);
-        dictate.setAccess(mandateStore, _gate);
-        dictate.setAccess(hubEscrowStore, _gate);
-        dictate.setAccess(hubEscrowStore, _fundProxy);
-        dictate.setAccess(fundStore, _fundProxy);
-        dictate.setAccess(accountModule, address(redeemModule));
-        dictate.setAccess(fundStore, address(redeemModule));
-        dictate.setAccess(redeemModule, _gate);
-        dictate.setAccess(fundModule, _gate);
-        dictate.setAccess(accountModule, _spokeGate);
-        dictate.setAccess(depositModule, _spokeGate);
-        dictate.setAccess(spokeEscrowStore, _spokeGate);
+        depositModule = Deposit(payable(address(new RouterProxy(address(governorAccount)))));
+        fundModule = Fund(address(new RouterProxy(address(governorAccount))));
+        redeemModule = Redeem(address(new RouterProxy(address(governorAccount))));
+        hub = HubGate(address(new RouterProxy(address(governorAccount))));
+        spoke = SpokeGate(address(new RouterProxy(address(governorAccount))));
+        vm.stopPrank();
+
+        vm.startPrank(address(governorAccount));
+        RouterProxy(payable(address(depositModule)))
+            .upgrade(address(new Deposit(address(governorAccount), accountModule, IWNT(address(wnt)))));
+        RouterProxy(payable(address(fundModule)))
+            .upgrade(
+                address(
+                    new Fund(
+                        address(governorAccount),
+                        accountModule,
+                        mandateStore,
+                        fundStore,
+                        hubEscrowStore,
+                        address(new ShareToken(address(redeemModule))),
+                        address(wnt)
+                    )
+                )
+            );
+        RouterProxy(payable(address(redeemModule)))
+            .upgrade(
+                address(
+                    new Redeem(
+                        address(governorAccount),
+                        accountModule,
+                        fundStore,
+                        address(wnt),
+                        PROTOCOL_FEE_SHARE,
+                        protocolReceiver
+                    )
+                )
+            );
+
+        GateConfig memory _config = GateConfig({
+            attestor: attestor,
+            feeReceiver: feeReceiver,
+            transferGasLimit: 200_000,
+            maxIntentTtl: 600,
+            maxRelayFeeBps: 1000,
+            maxSwapRelayFeeBps: 3333
+        });
+        RouterProxy(payable(address(hub)))
+            .upgrade(
+                address(
+                    new HubGate(
+                        accountModule,
+                        depositModule,
+                        hubEscrowStore,
+                        fundModule,
+                        redeemModule,
+                        _config,
+                        _endpoints(ATTESTOR_ENDPOINT),
+                        _list(address(usdc), address(wnt)),
+                        100,
+                        PERFORMANCE_FEE,
+                        WEBSITE_RELEASE
+                    )
+                )
+            );
+        RouterProxy(payable(address(spoke)))
+            .upgrade(address(new SpokeGate(accountModule, depositModule, spokeEscrowStore, _config)));
+
+        accountModule.setAccess(address(hub), FULL_ACCESS);
+        depositModule.setAccess(address(hub), FULL_ACCESS);
+        hubEscrowStore.setAccess(address(hub), FULL_ACCESS);
+        mandateStore.setAccess(address(hub), MandateStore.setMandate.selector);
+        fundModule.setAccess(address(hub), Fund.allocate.selector);
+        redeemModule.setAccess(address(hub), FULL_ACCESS);
+        accountModule.setAccess(address(spoke), FULL_ACCESS);
+        depositModule.setAccess(address(spoke), FULL_ACCESS);
+        spokeEscrowStore.setAccess(address(spoke), FULL_ACCESS);
+        accountModule.setAccess(address(depositModule), AccountModule.dispatch.selector);
+        accountModule.setAccess(address(fundModule), FULL_ACCESS);
+        fundStore.setAccess(address(fundModule), FULL_ACCESS);
+        hubEscrowStore.setAccess(address(fundModule), EscrowStore.release.selector);
+        accountModule.setAccess(address(redeemModule), FULL_ACCESS);
+        fundStore.setAccess(address(redeemModule), FULL_ACCESS);
         vm.stopPrank();
 
         outToken.mint(address(swapProvider), 1_000_000e18);
@@ -216,8 +210,12 @@ contract HotPathTest is Test {
 
     function _account(
         address _user
-    ) internal returns (address) {
-        return accountModule.createUserAccount(_user);
+    ) internal returns (address account_) {
+        account_ = accountModule.predictUserAccount(_user);
+        if (account_.code.length == 0) {
+            vm.prank(_user);
+            accountModule.createUserAccount(_user);
+        }
     }
 
     function _fundWallet(
@@ -273,10 +271,22 @@ contract HotPathTest is Test {
         list_[1] = _b;
     }
 
+    function _ownerAccount() internal view returns (address) {
+        return accountModule.predictUserAccount(master);
+    }
+
     function _nonceOf(
         address _acct
     ) internal view returns (uint) {
         return UserAccount(payable(_acct)).nonce();
+    }
+
+    function _epochAfterRevoke(
+        uint _epoch
+    ) internal view returns (uint) {
+        return uint(
+            keccak256(abi.encode(_epoch, blockhash(vm.getBlockNumber() - 1), block.prevrandao, vm.getBlockTimestamp()))
+        );
     }
 
     function _header(
@@ -341,9 +351,8 @@ contract HotPathTest is Test {
         uint _deadline,
         bytes32 _structHash
     ) internal view returns (bytes32) {
-        return AccountLib.intentDigest(
-            _acct, _acct.code.length == 0 ? 0 : IAccount(_acct).nonce(), _deadline, _structHash
-        );
+        return
+            AccountLib.intentDigest(_acct, _acct.code.length == 0 ? 0 : IAccount(_acct).nonce(), _deadline, _structHash);
     }
 
     function _valuation(
@@ -351,14 +360,15 @@ contract HotPathTest is Test {
     ) internal view returns (Fund.Valuation memory valuation_) {
         uint _total = _value * USD;
         valuation_.assetList = new Fund.Asset[](2);
-        valuation_.assetList[0] = _usdcAsset(10, 1_200e6);
+        valuation_.assetList[0] = _usdcAsset(10, 1200e6);
         valuation_.assetList[0].value = _total / 2;
-        valuation_.assetList[1] = _usdcAsset(42161, 800e6);
+        valuation_.assetList[1] = _usdcAsset(42_161, 800e6);
         valuation_.positionList = new Fund.Position[](2);
-        valuation_.positionList[0] =
-            Fund.Position({chainId: 42161, venue: bytes32("GMX"), id: keccak256("position-a"), value: _total - _total / 2});
+        valuation_.positionList[0] = Fund.Position({
+            chainId: 42_161, venue: bytes32("GMX"), id: keccak256("position-a"), value: _total - _total / 2
+        });
         valuation_.positionList[1] =
-            Fund.Position({chainId: 42161, venue: bytes32("GMX"), id: keccak256("position-b"), value: 0});
+            Fund.Position({chainId: 42_161, venue: bytes32("GMX"), id: keccak256("position-b"), value: 0});
     }
 
     function _valueOf(
@@ -394,7 +404,9 @@ contract HotPathTest is Test {
         }
         return keccak256(
             abi.encode(
-                VALUATION_TYPEHASH, keccak256(abi.encodePacked(_assetHashList)), keccak256(abi.encodePacked(_positionHashList))
+                VALUATION_TYPEHASH,
+                keccak256(abi.encodePacked(_assetHashList)),
+                keccak256(abi.encodePacked(_positionHashList))
             )
         );
     }
@@ -404,7 +416,8 @@ contract HotPathTest is Test {
         uint _value,
         Fund.Allocation[] memory _rows
     ) internal view returns (Fund.AllocateIntent memory intent_, bytes memory coSig_) {
-        return _allocateIntent(_nonce, _value, Fund.Credit({chainId: 0, token: address(0), amount: 0}), _rows);
+        return
+            _allocateIntent(_nonce, _value, Fund.Credit({chainId: 0, token: address(0), total: 0, feeTotal: 0}), _rows);
     }
 
     function _credit(
@@ -412,7 +425,7 @@ contract HotPathTest is Test {
         address _token,
         uint _amount
     ) internal pure returns (Fund.Credit memory) {
-        return Fund.Credit({chainId: _chainId, token: _token, amount: _amount});
+        return Fund.Credit({chainId: _chainId, token: _token, total: _amount, feeTotal: 0});
     }
 
     function _allocateIntent(
@@ -421,9 +434,8 @@ contract HotPathTest is Test {
         Fund.Credit memory _credits,
         Fund.Allocation[] memory _rows
     ) internal view returns (Fund.AllocateIntent memory intent_, bytes memory coSig_) {
-        return _allocateIntent(
-            _nonce, _value, address(usdc), Fund.Price({amount: 1e6, value: 1e6 * USD}), _credits, _rows
-        );
+        return
+            _allocateIntent(_nonce, _value, address(usdc), Fund.Price({amount: 1e6, value: 1e6 * USD}), _credits, _rows);
     }
 
     function _allocateIntent(
@@ -439,6 +451,18 @@ contract HotPathTest is Test {
         intent_.valuation = _valuation(_value);
         intent_.token = _token;
         intent_.price = _price;
+        if (_credits.total > 0) {
+            address _owner = accountModule.predictUserAccount(master);
+            FundStore.Credit memory _prev = _credits.chainId == block.chainid
+                ? FundStore.Credit({
+                    total: hubEscrowStore.fulfilledMap(_owner, body, _credits.token),
+                    feeTotal: hubEscrowStore.feePaidMap(_owner, body, _credits.token)
+                })
+                : fundStore.getCredit(body, _credits.chainId, _credits.token);
+            uint _slice = intent_.header.fee / (_rows.length + 1);
+            _credits.total = _prev.total + _credits.total;
+            _credits.feeTotal = _prev.feeTotal + Math.mulDiv(_slice, _price.amount, _price.value);
+        }
         intent_.credit = _credits;
         intent_.allocationList = _rows;
         coSig_ = _pair(masterKey, _allocateDigest(intent_));
@@ -454,7 +478,9 @@ contract HotPathTest is Test {
         Fund.AllocateIntent memory _i
     ) internal pure returns (bytes32) {
         bytes32 _listHash = keccak256(abi.encode(_i.allocationList));
-        bytes32 _creditHash = keccak256(abi.encode(CREDIT_TYPEHASH, _i.credit.chainId, _i.credit.token, _i.credit.amount));
+        bytes32 _creditHash = keccak256(
+            abi.encode(CREDIT_TYPEHASH, _i.credit.chainId, _i.credit.token, _i.credit.total, _i.credit.feeTotal)
+        );
         bytes32 _valuationDigest = _valuationHash(_i.valuation);
         return keccak256(
             abi.encode(
@@ -478,7 +504,11 @@ contract HotPathTest is Test {
         assertEq(usdc.balanceOf(_masterAccount), 2000e6, "and lands in it");
         _fundWallet(backer, 1000e6);
         _escrowOnHub(address(usdc), 600e6);
-        assertEq(hubEscrowStore.escrowedMap(_masterAccount, address(usdc)), 600e6, "the wallet escrows on the hub in one call");
+        assertEq(
+            hubEscrowStore.escrowedMap(_masterAccount, address(usdc)),
+            600e6,
+            "the wallet escrows on the hub in one call"
+        );
 
         bytes32 _symbol = bytes32("PUP");
         bytes memory _pixels = new bytes(GRID_BYTES);
@@ -494,7 +524,11 @@ contract HotPathTest is Test {
                                 bytes1(0xff),
                                 address(hub),
                                 bytes32(uint(uint160(body))),
-                                keccak256(_cloneCode(fundModule.shareImpl(), abi.encodePacked(body, _symbol, _pixels, uint16(1000))))
+                                keccak256(
+                                    _cloneCode(
+                                        fundModule.shareImpl(), abi.encodePacked(body, _symbol, _pixels, uint16(1000))
+                                    )
+                                )
                             )
                         )
                     )
@@ -504,12 +538,15 @@ contract HotPathTest is Test {
 
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
             _allocateIntent(0, 0, _credit(block.chainid, address(usdc), 500e6), new Fund.Allocation[](0));
-        bytes32 _genesis =
-            AccountLib.genesisDigest(address(accountModule), body, _account(master));
-        hub.createFund(_symbol, _pixels, _coSig(bodyKey, _genesis), _fundApproval(masterKey, body), _i, _sig, _ownerCoSig(_i));
+        bytes32 _genesis = AccountLib.genesisDigest(address(accountModule), body, _account(master));
+        hub.createFund(
+            _symbol, _pixels, _coSig(bodyKey, _genesis), _fundApproval(masterKey, body), _i, _sig, _ownerCoSig(_i)
+        );
         assertEq(usdc.balanceOf(_masterAccount), 2000e6, "the opening round leaves the owner's account alone");
         assertEq(
-            hubEscrowStore.releasedMap(_masterAccount, address(usdc)), 500e6, "it releases the master capital from the hub escrow"
+            hubEscrowStore.releasedMap(_masterAccount, address(usdc)),
+            500e6,
+            "it releases the master capital from the hub escrow"
         );
 
         bytes memory _ownerSig = _ownerCoSig(_i);
@@ -536,9 +573,8 @@ contract HotPathTest is Test {
         _one[0] = _m;
         _mandate(backer, backerKey, _one);
         Fund.Allocation[] memory _rows = new Fund.Allocation[](1);
-        _rows[0] = _row(_account(backer), _m, 400e6);
-        (Fund.AllocateIntent memory _i2, bytes memory _sig2) =
-            _allocateIntent(_nonceOf(body), _nav(), _rows);
+        _rows[0] = _row(_account(backer), 400e6);
+        (Fund.AllocateIntent memory _i2, bytes memory _sig2) = _allocateIntent(_nonceOf(body), _nav(), _rows);
         hub.allocate(_i2, _sig2, _ownerCoSig(_i2));
         uint _backerShares = shareToken.balanceOf(_account(backer));
         assertGt(_backerShares, 0, "the backer holds shares after the round");
@@ -583,6 +619,34 @@ contract HotPathTest is Test {
         _gridRendersItsOwnColours();
         _swapRound(LiquidityGate(address(hub)), "hub");
         _swapRound(LiquidityGate(address(spoke)), "spoke");
+        _fundSwapKeepsItsShares();
+    }
+
+    function _fundSwapKeepsItsShares() internal {
+        Fund _logic = new Fund(
+            address(governorAccount),
+            accountModule,
+            mandateStore,
+            fundStore,
+            hubEscrowStore,
+            address(new ShareToken(address(redeemModule))),
+            address(wnt)
+        );
+        vm.prank(address(governorAccount));
+        RouterProxy(payable(address(fundModule))).upgrade(address(_logic));
+        assertTrue(
+            fundModule.shareImpl() != LibClone.implementationOf(address(shareToken)),
+            "the swapped Fund logic clones a new share implementation"
+        );
+        (address _seller, uint _sellerKey) = makeAddrAndKey("cohort-2");
+        address _acct = _account(_seller);
+        uint _shares = shareToken.balanceOf(_acct) / 2;
+        _sell(_seller, _sellerKey, _shares);
+        assertEq(_queuedOf(_acct), _shares, "a share cloned before the swap still sells");
+        uint _before = wnt.balanceOf(_acct);
+        _wethTo(body, 3000 ether);
+        _redeem(0, 0, _list(_acct));
+        assertGt(wnt.balanceOf(_acct), _before, "and still redeems");
     }
 
     function _cohortExits() internal {
@@ -611,7 +675,7 @@ contract HotPathTest is Test {
         uint _masterShares = shareToken.balanceOf(body);
         uint _heldShares = shareToken.balanceOf(_held);
         _wethTo(body, 3000 ether);
-        uint _masterPaid = wnt.balanceOf(master);
+        uint _masterPaid = wnt.balanceOf(_ownerAccount());
         uint _heldPaid = wnt.balanceOf(_held);
         uint[] memory _paid = new uint[](3);
         for (uint _j; _j < 3; ++_j) {
@@ -628,14 +692,12 @@ contract HotPathTest is Test {
             uint _cost = fundStore.getHolding(body, _holders[_j]).cost;
             assertLt(_cost, _price, "the fund gained since every backer joined");
             uint _net = wnt.balanceOf(_holders[_j]) - _paid[_j] + FEE * USD;
-            uint _gross = Math.mulDiv(
-                _net, _price * 10_000, _price * 10_000 - PERFORMANCE_FEE * (_price - _cost)
-            );
+            uint _gross = Math.mulDiv(_net, _price * 10_000, _price * 10_000 - PERFORMANCE_FEE * (_price - _cost));
             uint _profitFee = _gross - _net;
             _masterFees += _profitFee - _profitFee * PROTOCOL_FEE_SHARE / 10_000;
             if (_holders[_j] == _held) _heldGross = _gross;
         }
-        _masterPaid = wnt.balanceOf(master) - _masterPaid + FEE * USD;
+        _masterPaid = wnt.balanceOf(_ownerAccount()) - _masterPaid + FEE * USD;
         assertGt(_masterPaid, _masterFees, "the owner's wallet is paid its retired quarter beside the fees");
         assertApproxEqRel(
             _heldGross * (_masterShares / 4),
@@ -665,24 +727,31 @@ contract HotPathTest is Test {
         }
         Fund.Allocation[] memory _rows = new Fund.Allocation[](3);
         for (uint _i; _i < 3; ++_i) {
-            _rows[_i] = _row(_sorted[_i], _one[0], 100e6);
+            _rows[_i] = _row(_sorted[_i], 100e6);
         }
         uint _staleHeld = shareToken.balanceOf(_stale);
         uint _ownerHeld = shareToken.balanceOf(_owner);
         (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(_nonceOf(body), _nav(), _rows);
         hub.allocate(_i, _sig, _ownerCoSig(_i));
-        assertEq(shareToken.balanceOf(_stale), _staleHeld, "a seller's mandate ended with its sell, so the round skips it");
+        assertEq(
+            shareToken.balanceOf(_stale), _staleHeld, "a seller's mandate ended with its sell, so the round skips it"
+        );
         assertEq(shareToken.balanceOf(_owner), _ownerHeld, "the owner's own account is skipped");
         assertGt(shareToken.balanceOf(_fresh), 0, "and the round still mints the rest");
     }
 
     function _wethCreditFromTheOwnerAccount() internal {
         vm.deal(master, 3000 ether);
+        uint _held = wnt.balanceOf(_account(master));
         vm.prank(master);
         hub.deposit{value: 3000 ether}(address(wnt), 3000 ether);
-        assertEq(wnt.balanceOf(_account(master)), 3000 ether, "native attached to a WETH deposit lands wrapped in the account");
+        assertEq(
+            wnt.balanceOf(_account(master)) - _held,
+            3000 ether,
+            "native attached to a WETH deposit lands wrapped in the account"
+        );
         _retireEscrow(LiquidityGate(address(hub)), hubEscrowStore, address(wnt), 3000 ether);
-        assertEq(wnt.balanceOf(_account(master)), 0, "the owner moves it from its account into the hub escrow");
+        assertEq(wnt.balanceOf(_account(master)), _held, "the owner moves it from its account into the hub escrow");
 
         uint _bodyBefore = wnt.balanceOf(body);
         uint _feeBefore = wnt.balanceOf(feeReceiver);
@@ -696,9 +765,13 @@ contract HotPathTest is Test {
             new Fund.Allocation[](0)
         );
         hub.allocate(_i, _sig, _ownerCoSig(_i));
-        assertGt(shareToken.balanceOf(body), _sharesBefore, "a round in another canonical token credits it at its signed value");
+        assertGt(
+            shareToken.balanceOf(body),
+            _sharesBefore,
+            "a round in another canonical token credits it at its signed value"
+        );
         _feeBefore = wnt.balanceOf(feeReceiver) - _feeBefore;
-        assertEq(_feeBefore, (FEE * 1 ether + ETH_USD - 1) / ETH_USD, "the master slice is paid in the round token");
+        assertEq(_feeBefore, FEE * 1 ether / ETH_USD, "the master slice is paid in the round token");
         assertEq(wnt.balanceOf(body), _bodyBefore + 3000 ether - _feeBefore, "and the rest lands in the body");
         assertEq(hubEscrowStore.releasedMap(_account(master), address(wnt)), 3000 ether, "released from the hub escrow");
     }
@@ -729,10 +802,12 @@ contract HotPathTest is Test {
         _b[2] = 0x00;
 
         address _impl = fundModule.shareImpl();
-        ShareToken _shareA =
-            ShareToken(LibClone.cloneDeterministic(_impl, abi.encodePacked(body, bytes32("AAA"), _a), bytes32(uint(901))));
-        ShareToken _shareB =
-            ShareToken(LibClone.cloneDeterministic(_impl, abi.encodePacked(body, bytes32("AAA"), _b), bytes32(uint(902))));
+        ShareToken _shareA = ShareToken(
+            LibClone.cloneDeterministic(_impl, abi.encodePacked(body, bytes32("AAA"), _a), bytes32(uint(901)))
+        );
+        ShareToken _shareB = ShareToken(
+            LibClone.cloneDeterministic(_impl, abi.encodePacked(body, bytes32("AAA"), _b), bytes32(uint(902)))
+        );
 
         assertEq(_shareA.pixels(), _a, "the clone returns exactly the grid it was created with");
         assertTrue(
@@ -775,6 +850,20 @@ contract HotPathTest is Test {
         uint _userBefore = outToken.balanceOf(_user);
         _withdrawSwap(_gate, _user, _key, _acct, 1000e6);
         assertGt(outToken.balanceOf(_user), _userBefore, "withdraw with a provider delivered the output");
+
+        Deposit.SwapIntent memory _short = Deposit.SwapIntent({
+            header: _header(_acct, _user, _nonceOf(_acct)),
+            swap: _swapParams(_user, 1000e6),
+            destinationChainId: block.chainid
+        });
+        _short.swap.providerCallData =
+            abi.encodeCall(MockSwapProvider.swap, (address(usdc), 1000e6 - FEE - 1, address(outToken), 1e18, _user));
+        bytes memory _shortSig = _swapSig(WITHDRAW_INTENT_TYPEHASH, _key, _acct, _short);
+        uint _held = usdc.balanceOf(_acct);
+        vm.expectRevert(
+            abi.encodeWithSelector(Error.Balance__SwapInputNotSpent.selector, address(usdc), _held, _held - 1000e6 + 1)
+        );
+        _gate.withdraw(_short, _shortSig);
 
         uint _plainBefore = usdc.balanceOf(_user);
         _withdrawPlain(_gate, _user, _key, _acct, 500e6);
@@ -824,9 +913,7 @@ contract HotPathTest is Test {
             _typed(
                 _acct,
                 _i.header.deadline,
-                keccak256(
-                    abi.encode(_typehash, _hashHeader(_i.header), _i.destinationChainId, _hashSwap(_i.swap))
-                )
+                keccak256(abi.encode(_typehash, _hashHeader(_i.header), _i.destinationChainId, _hashSwap(_i.swap)))
             )
         );
     }
@@ -843,9 +930,7 @@ contract HotPathTest is Test {
             swap: _swapParams(_acct, _amount),
             destinationChainId: block.chainid
         });
-        _gate.depositAcross(
-            _i,
-            _swapSig(DEPOSIT_ACROSS_INTENT_TYPEHASH, _key, _acct, _i));
+        _gate.depositAcross(_i, _swapSig(DEPOSIT_ACROSS_INTENT_TYPEHASH, _key, _acct, _i));
     }
 
     function _fundSwapCall(
@@ -879,9 +964,7 @@ contract HotPathTest is Test {
             swap: _swapParams(_user, _amount),
             destinationChainId: block.chainid
         });
-        _gate.withdraw(
-            _i,
-            _swapSig(WITHDRAW_INTENT_TYPEHASH, _key, _acct, _i));
+        _gate.withdraw(_i, _swapSig(WITHDRAW_INTENT_TYPEHASH, _key, _acct, _i));
     }
 
     function _withdrawPlain(
@@ -903,15 +986,15 @@ contract HotPathTest is Test {
             }),
             destinationChainId: block.chainid
         });
-        _gate.withdraw(
-            _i,
-            _swapSig(WITHDRAW_INTENT_TYPEHASH, _key, _acct, _i));
+        _gate.withdraw(_i, _swapSig(WITHDRAW_INTENT_TYPEHASH, _key, _acct, _i));
     }
 
     function _spokeRound() internal {
         address _parent = _account(master);
         _depositEscrow(address(usdc), 200e6);
-        assertEq(spokeEscrowStore.escrowedMap(_parent, address(usdc)), 200e6, "the wallet escrows on the spoke in one call");
+        assertEq(
+            spokeEscrowStore.escrowedMap(_parent, address(usdc)), 200e6, "the wallet escrows on the spoke in one call"
+        );
 
         uint _bodyBefore = usdc.balanceOf(body);
         uint _feeBefore = usdc.balanceOf(feeReceiver);
@@ -919,29 +1002,43 @@ contract HotPathTest is Test {
         (Fund.AllocateIntent memory _i, bytes memory _sig) = _allocateIntent(
             _nonceOf(body), _nav(), _credit(FOREIGN_CHAIN_ID, address(usdc), 200e6), new Fund.Allocation[](0)
         );
-        bytes32 _round = _allocateDigest(_i);
         hub.allocate(_i, _sig, _ownerCoSig(_i));
         assertGt(shareToken.balanceOf(body), _sharesBefore, "the hub round credits escrow that sits on another chain");
         assertEq(usdc.balanceOf(body), _bodyBefore, "nothing of the fund moves on the hub");
         assertEq(usdc.balanceOf(feeReceiver), _feeBefore, "and the hub bills no fee the fund could not pay there");
+        assertEq(
+            fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total, 200e6, "the hub keeps the signed total"
+        );
 
-        bytes memory _over = _fulfilSignature(address(usdc), _round, 0, 201e6, FEE);
+        bytes memory _over = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 201e6, FEE);
+        vm.chainId(FOREIGN_CHAIN_ID);
         vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 200e6, 201e6));
-        spoke.fulfil(body, address(usdc), _round, 0, 201e6, FEE, _over, _noGenesis());
+        spoke.fulfil(body, address(usdc), 201e6, FEE, _over, _noGenesis());
+        bytes memory _forged =
+            _coSig(backerKey, AccountLib.creditDigest(_parent, body, FOREIGN_CHAIN_ID, address(usdc), 200e6, FEE));
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(body, address(usdc), 200e6, FEE, _forged, _noGenesis());
+        vm.chainId(HUB_CHAIN);
 
-        _fulfil(address(usdc), _round, 200e6, FEE);
-        assertEq(spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)), 200e6, "the fulfil total meets the credited total of the round it names");
+        _fulfil(address(usdc), 200e6, FEE);
+        assertEq(
+            spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)),
+            200e6,
+            "anyone settles the owner's signed total"
+        );
         assertEq(usdc.balanceOf(feeReceiver), _feeBefore + FEE, "the round fee is billed where the capital sits");
         assertEq(usdc.balanceOf(body), _bodyBefore + 200e6 - FEE, "the escrow lands in the body net of that fee");
 
-        bytes memory _replay = _fulfilSignature(address(usdc), _round, 0, 200e6, FEE);
-        spoke.fulfil(body, address(usdc), _round, 0, 200e6, FEE, _replay, _noGenesis());
-        assertEq(spokeEscrowStore.fulfilledMap(_parent, body, address(usdc)), 200e6, "a replayed fulfil lands nothing");
-        assertEq(usdc.balanceOf(body), _bodyBefore + 200e6 - FEE, "releases nothing");
-        assertEq(usdc.balanceOf(feeReceiver), _feeBefore + FEE, "and bills nothing");
+        bytes memory _replay = _creditSignature(FOREIGN_CHAIN_ID, address(usdc), 200e6, FEE);
+        vm.chainId(FOREIGN_CHAIN_ID);
+        vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidFulfil.selector, 200e6, 200e6));
+        spoke.fulfil(body, address(usdc), 200e6, FEE, _replay, _noGenesis());
+        vm.chainId(HUB_CHAIN);
 
         _depositEscrow(address(usdc), 100e6);
-        assertEq(spokeEscrowStore.escrowedMap(_parent, address(usdc)), 300e6, "a second escrow adds to the same owner ledger");
+        assertEq(
+            spokeEscrowStore.escrowedMap(_parent, address(usdc)), 300e6, "a second escrow adds to the same owner ledger"
+        );
         assertEq(spokeEscrowStore.releasedMap(_parent, address(usdc)), 200e6, "beside what was already released");
 
         address _venue = makeAddr("venue");
@@ -1027,40 +1124,31 @@ contract HotPathTest is Test {
     function _ownerCoSig(
         Fund.AllocateIntent memory _i
     ) internal view returns (bytes memory) {
-        return _pair(
-            masterKey,
-            _typed(accountModule.predictUserAccount(_i.header.user), _i.header.deadline, _allocateStructHash(_i))
-        );
+        if (_i.credit.total == 0) return "";
+        return _creditSignature(_i.credit.chainId, _i.credit.token, _i.credit.total, _i.credit.feeTotal);
     }
 
-    function _fulfilSignature(
+    function _creditSignature(
+        uint _chainId,
         address _token,
-        bytes32 _round,
-        uint _from,
         uint _total,
-        uint _fee
+        uint _feeTotal
     ) internal view returns (bytes memory) {
         return _coSig(
-            attestorKey,
-            AccountLib.typedDigest(
-                block.chainid,
-                body,
-                keccak256(abi.encode(FULFIL_TYPEHASH, address(spokeEscrowStore), _token, _round, _from, _total, _fee))
-            )
+            masterKey,
+            AccountLib.creditDigest(accountModule.predictUserAccount(master), body, _chainId, _token, _total, _feeTotal)
         );
     }
 
     function _fulfil(
         address _token,
-        bytes32 _round,
         uint _total,
-        uint _fee
+        uint _feeTotal
     ) internal {
-        address _parent = _account(master);
-        uint _from = spokeEscrowStore.fulfilledMap(_parent, body, _token);
-        spoke.fulfil(
-            body, _token, _round, _from, _total, _fee, _fulfilSignature(_token, _round, _from, _total, _fee), _noGenesis()
-        );
+        bytes memory _signature = _creditSignature(FOREIGN_CHAIN_ID, _token, _total, _feeTotal);
+        vm.chainId(FOREIGN_CHAIN_ID);
+        spoke.fulfil(body, _token, _total, _feeTotal, _signature, _noGenesis());
+        vm.chainId(HUB_CHAIN);
     }
 
     function _operate(
@@ -1096,7 +1184,13 @@ contract HotPathTest is Test {
         bytes32[] memory _hashList = new bytes32[](_callList.length);
         for (uint _k; _k < _callList.length; ++_k) {
             _hashList[_k] = keccak256(
-                abi.encode(CALL_TYPEHASH, _callList[_k].target, _callList[_k].value, _callList[_k].gasLimit, keccak256(_callList[_k].callData))
+                abi.encode(
+                    CALL_TYPEHASH,
+                    _callList[_k].target,
+                    _callList[_k].value,
+                    _callList[_k].gasLimit,
+                    keccak256(_callList[_k].callData)
+                )
             );
         }
         return keccak256(abi.encodePacked(_hashList));
@@ -1120,31 +1214,11 @@ contract HotPathTest is Test {
         );
     }
 
-    function digestOf(
-        address _puppet,
-        MandateLib.Mandate calldata _m
-    ) external view returns (bytes32) {
-        return MandateLib.digest(_puppet, _m);
-    }
-
-    function _mandateSig(
-        uint _key,
-        address _puppet,
-        MandateLib.Mandate memory _m
-    ) internal returns (bytes memory sig_) {
-        bytes32 _digest = this.digestOf(_puppet, _m);
-        sig_ = _coSig(_key, _digest);
-        mandateSigOf[_digest] = sig_;
-    }
-
     function _row(
         address _puppet,
-        MandateLib.Mandate memory _m,
         uint _amount
     ) internal view returns (Fund.Allocation memory) {
-        return Fund.Allocation({
-            puppet: _puppet, mandate: _m, signature: mandateSigOf[this.digestOf(_puppet, _m)], amount: _amount
-        });
+        return Fund.Allocation({puppet: _puppet, mandate: mandateLog[_puppet][body], amount: _amount});
     }
 
     function _cohortRound(
@@ -1164,8 +1238,8 @@ contract HotPathTest is Test {
                 _rows[_k] = _rows[_k - 1];
                 --_k;
             }
-            uint _stake = _j < _oversizedFrom ? 100e6 : 5_000e6;
-            _rows[_k] = _row(_acct, _one[0], _stake);
+            uint _stake = _j < _oversizedFrom ? 100e6 : 5000e6;
+            _rows[_k] = _row(_acct, _stake);
         }
         uint[] memory _held = new uint[](_count);
         for (uint _j; _j < _count; ++_j) {
@@ -1177,7 +1251,11 @@ contract HotPathTest is Test {
             if (_rows[_j].amount == 100e6) {
                 assertGt(shareToken.balanceOf(_rows[_j].puppet), _held[_j], "a row inside its cap is minted");
             } else {
-                assertEq(shareToken.balanceOf(_rows[_j].puppet), _held[_j], "a row over its cap is skipped, the round survives");
+                assertEq(
+                    shareToken.balanceOf(_rows[_j].puppet),
+                    _held[_j],
+                    "a row over its cap is skipped, the round survives"
+                );
             }
         }
     }
@@ -1205,14 +1283,10 @@ contract HotPathTest is Test {
         MandateLib.Mandate[] memory _list
     ) internal {
         address _acct = _account(_user);
-        bytes[] memory _sigs = new bytes[](_list.length);
-        for (uint _j; _j < _list.length; ++_j) {
-            _sigs[_j] = _mandateSig(_key, _acct, _list[_j]);
-        }
         HubGate.MandateIntent memory _i = HubGate.MandateIntent({
             header: _header(_acct, _user, _nonceOf(_acct)),
-            mandateList: _list,
-            signatureList: _sigs
+            epoch: UserAccount(payable(_acct)).epoch(),
+            mandateList: _list
         });
         hub.mandate(
             _i,
@@ -1223,14 +1297,15 @@ contract HotPathTest is Test {
                     _i.header.deadline,
                     keccak256(
                         abi.encode(
-                            MANDATE_INTENT_TYPEHASH,
-                            _hashHeader(_i.header),
-                            keccak256(abi.encode(_list))
+                            MANDATE_INTENT_TYPEHASH, _hashHeader(_i.header), _i.epoch, keccak256(abi.encode(_list))
                         )
                     )
                 )
             )
         );
+        for (uint _j; _j < _list.length; ++_j) {
+            mandateLog[_acct][_list[_j].master] = _list[_j];
+        }
     }
 
     function _sell(
@@ -1239,8 +1314,9 @@ contract HotPathTest is Test {
         uint _shares
     ) internal {
         address _acct = _account(_user);
-        Redeem.SellIntent memory _i =
-            Redeem.SellIntent({header: _header(_acct, _user, _nonceOf(_acct)), shareToken: shareToken, shares: _shares});
+        Redeem.SellIntent memory _i = Redeem.SellIntent({
+            header: _header(_acct, _user, _nonceOf(_acct)), shareToken: shareToken, shares: _shares
+        });
         hub.sell(
             _i,
             _pair(
@@ -1315,7 +1391,12 @@ contract HotPathTest is Test {
         bytes memory _args
     ) internal pure returns (bytes memory) {
         return abi.encodePacked(
-            hex"61", uint16(_args.length + 0x2d), hex"3d81600a3d39f3363d3d373d3d3d363d73", _impl, hex"5af43d82803e903d91602b57fd5bf3", _args
+            hex"61",
+            uint16(_args.length + 0x2d),
+            hex"3d81600a3d39f3363d3d373d3d3d363d73",
+            _impl,
+            hex"5af43d82803e903d91602b57fd5bf3",
+            _args
         );
     }
 }

@@ -26,7 +26,7 @@ uint constant MAX_SKIN = 100 * RATE_PRECISION;
 
 bytes32 constant PRICE_TYPEHASH = keccak256("Price(uint256 amount,uint256 value)");
 
-bytes32 constant CREDIT_TYPEHASH = keccak256("Credit(uint256 chainId,address token,uint256 amount)");
+bytes32 constant CREDIT_TYPEHASH = keccak256("Credit(uint256 chainId,address token,uint256 total,uint256 feeTotal)");
 
 bytes32 constant ASSET_TYPEHASH = keccak256("Asset(uint256 chainId,address token,uint256 id,uint256 amount,uint256 value)");
 
@@ -37,11 +37,11 @@ bytes32 constant VALUATION_TYPEHASH = keccak256(
 );
 
 bytes32 constant MANDATE_INTENT_TYPEHASH = keccak256(
-    "MandateIntent(IntentHeader header,bytes32 mandateListHash)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)"
+    "MandateIntent(IntentHeader header,uint256 epoch,bytes32 mandateListHash)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)"
 );
 
 bytes32 constant ALLOCATE_INTENT_TYPEHASH = keccak256(
-    "AllocateIntent(IntentHeader header,address shareToken,Valuation valuation,address token,Price price,Credit credit,bytes32 allocationListHash)Asset(uint256 chainId,address token,uint256 id,uint256 amount,uint256 value)Credit(uint256 chainId,address token,uint256 amount)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)Position(uint256 chainId,bytes32 venue,bytes32 id,uint256 value)Price(uint256 amount,uint256 value)Valuation(Asset[] assetList,Position[] positionList)"
+    "AllocateIntent(IntentHeader header,address shareToken,Valuation valuation,address token,Price price,Credit credit,bytes32 allocationListHash)Asset(uint256 chainId,address token,uint256 id,uint256 amount,uint256 value)Credit(uint256 chainId,address token,uint256 total,uint256 feeTotal)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)Position(uint256 chainId,bytes32 venue,bytes32 id,uint256 value)Price(uint256 amount,uint256 value)Valuation(Asset[] assetList,Position[] positionList)"
 );
 
 bytes32 constant SELL_INTENT_TYPEHASH = keccak256(
@@ -55,12 +55,11 @@ bytes32 constant REDEEM_INTENT_TYPEHASH = keccak256(
 contract HubGate is LiquidityGate {
     struct MandateIntent {
         AccountLib.IntentHeader header;
+        uint epoch;
         MandateLib.Mandate[] mandateList;
-        bytes[] signatureList;
     }
 
     address private immutable impl;
-    MandateStore public immutable mandateStore;
     Fund public immutable fundModule;
     Redeem public immutable redeemModule;
     uint public immutable maxCohortSize;
@@ -73,7 +72,6 @@ contract HubGate is LiquidityGate {
         AccountModule _accountModule,
         Deposit _depositModule,
         EscrowStore _escrowStore,
-        MandateStore _mandateStore,
         Fund _fundModule,
         Redeem _redeemModule,
         GateConfig memory _config,
@@ -83,11 +81,7 @@ contract HubGate is LiquidityGate {
         uint _performanceFee,
         bytes32 _websiteRelease
     ) LiquidityGate(_accountModule, _depositModule, _escrowStore, _config) {
-        if (
-            address(_mandateStore) == address(0) || address(_fundModule) == address(0) || address(_redeemModule) == address(0)
-        ) {
-            revert Error.Gate__InvalidModule();
-        }
+        if (address(_fundModule) == address(0) || address(_redeemModule) == address(0)) revert Error.Gate__InvalidModule();
         if (_maxCohortSize == 0) revert Error.Gate__InvalidCohortCap();
         if (_performanceFee >= RATE_PRECISION) revert Error.Gate__InvalidPerformanceFee(_performanceFee);
         if (_attestorEndpointList.length == 0) revert Error.Gate__NoAttestorEndpoint();
@@ -101,7 +95,6 @@ contract HubGate is LiquidityGate {
             canonicalTokenMap[_token] = true;
         }
         impl = address(this);
-        mandateStore = _mandateStore;
         fundModule = _fundModule;
         redeemModule = _redeemModule;
         maxCohortSize = _maxCohortSize;
@@ -114,37 +107,35 @@ contract HubGate is LiquidityGate {
         bytes calldata _coSig
     ) external {
         address _account = _intent.header.account;
-        if (accountModule.createUserAccount(_intent.header.user) != _account) {
-            revert Error.Account__HeaderMismatch(_account);
-        }
+        _verifyUser(_account, _intent.header.user);
         bytes32 _structHash = keccak256(
             abi.encode(
                 MANDATE_INTENT_TYPEHASH,
                 AccountLib.hashHeader(_intent.header),
+                _intent.epoch,
                 keccak256(abi.encode(_intent.mandateList))
             )
         );
         _authorize(_intent.header);
+        uint _epoch = UserAccount(payable(_account)).epoch();
+        if (_intent.epoch != _epoch) revert Error.Mandate__StaleEpoch(_intent.epoch, _epoch);
 
         uint _len = _intent.mandateList.length;
-        if (_len != _intent.signatureList.length) {
-            revert Error.Mandate__ListLengthMismatch(_len, _intent.signatureList.length);
-        }
+        IAccount.Call[] memory _legs = new IAccount.Call[](1);
+        MandateStore _mandateStore = fundModule.mandateStore();
         for (uint _i; _i < _len; ++_i) {
             MandateLib.Mandate calldata _m = _intent.mandateList[_i];
-            bytes32 _mandateDigest = MandateLib.digest(_account, _m);
-            if (!UserAccount(payable(_account)).approves(_mandateDigest, _intent.signatureList[_i])) {
-                revert Error.Account__InvalidSignature();
-            }
             if (_i > 0 && uint160(_m.master) <= uint160(_intent.mandateList[_i - 1].master)) {
                 revert Error.Mandate__ListNotSorted(_intent.mandateList[_i - 1].master, _m.master);
             }
-            if (_m.allocationRate >= RATE_PRECISION) revert Error.Mandate__InvalidAllocationRate(_m.allocationRate);
+            bool _live = _m.expiry > block.timestamp;
+            if (_m.allocationRate >= RATE_PRECISION || (_live && _m.allocationRate == 0)) {
+                revert Error.Mandate__InvalidAllocationRate(_m.allocationRate);
+            }
             if (_m.skin > MAX_SKIN) revert Error.Mandate__InvalidSkin(_m.skin);
-            if (_m.exitCap > RATE_PRECISION) revert Error.Mandate__InvalidExitCap(_m.exitCap);
-            mandateStore.setMandate(_account, _m.master, _m.expiry > block.timestamp ? _mandateDigest : bytes32(0));
+            if (_m.exitCap > RATE_PRECISION || (_live && _m.exitCap == 0)) revert Error.Mandate__InvalidExitCap(_m.exitCap);
+            _mandateStore.setMandate(_account, _m.master, _live ? keccak256(abi.encode(_m, _epoch)) : bytes32(0));
         }
-        IAccount.Call[] memory _legs = new IAccount.Call[](1);
         _legs[0] = CallLib.pay(_intent.header.feeToken, feeReceiver, _intent.header.fee, transferGasLimit);
         accountModule.dispatch(
             IAccount(_account),
@@ -152,13 +143,7 @@ contract HubGate is LiquidityGate {
             _structHash,
             _intent.header.deadline,
             _coSig,
-            abi.encode(
-                msg.sig,
-                _intent.mandateList,
-                _intent.signatureList,
-                _intent.header.feeToken,
-                _intent.header.fee
-            ),
+            abi.encode(msg.sig, _epoch, _intent.mandateList, _intent.header.feeToken, _intent.header.fee),
             _legs,
             BalanceLib.list(_intent.header.feeToken)
         );
@@ -171,7 +156,7 @@ contract HubGate is LiquidityGate {
         bytes calldata _approval,
         Fund.AllocateIntent calldata _intent,
         bytes calldata _coSig,
-        bytes calldata _ownerCoSig
+        bytes calldata _ownerSignature
     ) external {
         address _account = _intent.header.account;
         uint _len;
@@ -200,17 +185,17 @@ contract HubGate is LiquidityGate {
             abi.encode(msg.sig, _clone, _symbol, _pixels, performanceFee),
             new address[](0)
         );
-        _allocate(_intent, _coSig, _ownerCoSig);
+        _allocate(_intent, _coSig, _ownerSignature);
     }
 
     function allocate(
         Fund.AllocateIntent calldata _intent,
         bytes calldata _coSig,
-        bytes calldata _ownerCoSig
+        bytes calldata _ownerSignature
     ) external {
         _verifyBody(_intent.header.account, _intent.header.user);
         verifyShare(_intent.header.account, _intent.shareToken);
-        _allocate(_intent, _coSig, _ownerCoSig);
+        _allocate(_intent, _coSig, _ownerSignature);
     }
 
     function sell(
@@ -226,8 +211,8 @@ contract HubGate is LiquidityGate {
         _authorize(_intent.header);
         address _master = _intent.shareToken.master();
         verifyShare(_master, _intent.shareToken);
+        fundModule.mandateStore().setMandate(_intent.header.account, _master, bytes32(0));
         redeemModule.sell(_master, _intent, _structHash, _coSig, getConfig());
-        mandateStore.setMandate(_intent.header.account, _master, bytes32(0));
     }
 
     function redeem(
@@ -303,7 +288,7 @@ contract HubGate is LiquidityGate {
         }
         if (
             LibClone.predictDeterministicAddress(
-                fundModule.shareImpl(),
+                LibClone.implementationOf(address(_shareToken)),
                 LibClone.argsOnClone(address(_shareToken)),
                 bytes32(uint(uint160(_master))),
                 address(this)
@@ -314,7 +299,7 @@ contract HubGate is LiquidityGate {
     function _allocate(
         Fund.AllocateIntent calldata _intent,
         bytes calldata _coSig,
-        bytes calldata _ownerCoSig
+        bytes calldata _ownerSignature
     ) internal {
         if (_intent.allocationList.length > maxCohortSize) {
             revert Error.Gate__ListTooLong(_intent.allocationList.length, maxCohortSize);
@@ -342,7 +327,13 @@ contract HubGate is LiquidityGate {
                 _intent.token,
                 keccak256(abi.encode(PRICE_TYPEHASH, _intent.price.amount, _intent.price.value)),
                 keccak256(
-                    abi.encode(CREDIT_TYPEHASH, _intent.credit.chainId, _intent.credit.token, _intent.credit.amount)
+                    abi.encode(
+                        CREDIT_TYPEHASH,
+                        _intent.credit.chainId,
+                        _intent.credit.token,
+                        _intent.credit.total,
+                        _intent.credit.feeTotal
+                    )
                 ),
                 keccak256(abi.encode(_intent.allocationList))
             )
@@ -350,7 +341,7 @@ contract HubGate is LiquidityGate {
         _authorize(_intent.header);
         if (_intent.price.amount == 0 || _intent.price.value == 0) revert Error.Balance__ZeroAmount();
         if (!isCanonical(_intent.token)) revert Error.Fund__TokenNotCanonical(_intent.token);
-        fundModule.allocate(_intent, _structHash, _valuation, _coSig, _ownerCoSig, getConfig());
+        fundModule.allocate(_intent, _structHash, _valuation, _coSig, _ownerSignature, getConfig());
     }
 
     function _deriveBody(

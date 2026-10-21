@@ -22,6 +22,37 @@ contract FundAccount is IAccount, IERC1271 {
         SLOT = keccak256(abi.encode("puppet.fund", address(this)));
     }
 
+    receive() external payable {}
+
+    function onERC721Received(
+        address,
+        address,
+        uint,
+        bytes calldata
+    ) external pure returns (bytes4) {
+        return this.onERC721Received.selector;
+    }
+
+    function onERC1155Received(
+        address,
+        address,
+        uint,
+        uint,
+        bytes calldata
+    ) external pure returns (bytes4) {
+        return this.onERC1155Received.selector;
+    }
+
+    function onERC1155BatchReceived(
+        address,
+        address,
+        uint[] calldata,
+        uint[] calldata,
+        bytes calldata
+    ) external pure returns (bytes4) {
+        return this.onERC1155BatchReceived.selector;
+    }
+
     function parent() public view returns (address) {
         return _bound().parent;
     }
@@ -84,6 +115,4 @@ contract FundAccount is IAccount, IERC1271 {
             b_.slot := _slot
         }
     }
-
-    receive() external payable {}
 }

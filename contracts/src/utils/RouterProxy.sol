@@ -25,8 +25,4 @@ contract RouterProxy is Proxy {
     function _implementation() internal view override returns (address) {
         return ERC1967Utils.getImplementation();
     }
-
-    receive() external payable {
-        revert Error.Balance__ValueMismatch(msg.value, 0);
-    }
 }

@@ -15,19 +15,19 @@ library TransferUtils {
     ) internal {
         if (_amount == 0) revert Error.Balance__ZeroAmount();
         if (_to == address(0)) revert Error.TransferUtils__InvalidReceiver();
-        if (_gasLimit == 0) revert Error.TransferUtils__EmptyTokenTransferGasLimit(IERC20(_token));
+        if (_gasLimit == 0) revert Error.TransferUtils__EmptyTokenTransferGasLimit(_token);
         if (_token == NATIVE_TOKEN) {
             (bool _ok,) = _to.call{value: _amount, gas: _gasLimit}("");
             if (!_ok) revert Error.TransferUtils__NativeTransferError(_to, _amount);
             return;
         }
-        if (!_callOptionalReturnBool(IERC20(_token), abi.encodeCall(IERC20.transfer, (_to, _amount)), _gasLimit)) {
-            revert Error.TransferUtils__TokenTransferError(IERC20(_token), _to, _amount);
+        if (!_callOptionalReturnBool(_token, abi.encodeCall(IERC20.transfer, (_to, _amount)), _gasLimit)) {
+            revert Error.TransferUtils__TokenTransferError(_token, _to, _amount);
         }
     }
 
     function transferStrictlyFrom(
-        IERC20 _token,
+        address _token,
         address _from,
         address _to,
         uint _amount,
@@ -36,13 +36,13 @@ library TransferUtils {
         if (_amount == 0) revert Error.Balance__ZeroAmount();
         if (_to == address(0)) revert Error.TransferUtils__InvalidReceiver();
         if (_gasLimit == 0) revert Error.TransferUtils__EmptyTokenTransferGasLimit(_token);
-        if (!_callOptionalReturnBool(_token, abi.encodeCall(_token.transferFrom, (_from, _to, _amount)), _gasLimit)) {
+        if (!_callOptionalReturnBool(_token, abi.encodeCall(IERC20.transferFrom, (_from, _to, _amount)), _gasLimit)) {
             revert Error.TransferUtils__TokenTransferFromError(_token, _from, _to, _amount);
         }
     }
 
     function _callOptionalReturnBool(
-        IERC20 _token,
+        address _token,
         bytes memory _data,
         uint _gasLimit
     ) private returns (bool) {
@@ -54,6 +54,6 @@ library TransferUtils {
             _returnSize := returndatasize()
             _returnValue := mload(0)
         }
-        return _success && (_returnSize == 0 ? address(_token).code.length > 0 : _returnSize == 32 && _returnValue == 1);
+        return _success && (_returnSize == 0 ? _token.code.length > 0 : _returnSize == 32 && _returnValue == 1);
     }
 }

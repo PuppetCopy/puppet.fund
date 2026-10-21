@@ -7,4 +7,5 @@ struct GateConfig {
     uint transferGasLimit;
     uint maxIntentTtl;
     uint maxRelayFeeBps;
+    uint maxSwapRelayFeeBps;
 }

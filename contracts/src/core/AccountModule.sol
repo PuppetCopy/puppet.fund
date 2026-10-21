@@ -7,7 +7,7 @@ import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
 
 import {FundAccount} from "./FundAccount.sol";
 import {UserAccount} from "./UserAccount.sol";
-import {Access} from "../utils/auth/Access.sol";
+import {Access, FULL_ACCESS} from "../utils/auth/Access.sol";
 import {Error} from "../utils/Error.sol";
 import {AccountLib} from "../utils/AccountLib.sol";
 import {IChain} from "../utils/interfaces/IChain.sol";
@@ -67,6 +67,10 @@ contract AccountModule is Access {
         address _user
     ) public returns (address account_) {
         if (_user == address(0)) revert Error.Account__InvalidUser();
+        bytes4 _granted = authMap[msg.sender];
+        if (msg.sender != _user && _granted != msg.sig && _granted != FULL_ACCESS) {
+            revert Error.Account__UnauthorizedCaller();
+        }
         account_ = predictUserAccount(_user);
         if (account_.code.length == 0) {
             LibClone.cloneDeterministic(userImpl, abi.encodePacked(address(this), _user), bytes32(0));

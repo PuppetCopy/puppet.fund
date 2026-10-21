@@ -2,17 +2,21 @@
 pragma solidity ^0.8.36;
 
 import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
+import {IERC1155Errors, IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import {SignatureChecker} from "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Vm} from "forge-std/src/Vm.sol";
 import {ECDSA} from "solady/utils/ECDSA.sol";
 
 import {HubGate, MANDATE_INTENT_TYPEHASH, MAX_SKIN, SELL_INTENT_TYPEHASH} from "src/HubGate.sol";
-import {FULFIL_TYPEHASH, OPERATE_INTENT_TYPEHASH, SpokeGate} from "src/SpokeGate.sol";
+import {OPERATE_INTENT_TYPEHASH, SpokeGate} from "src/SpokeGate.sol";
 import {AccountModule} from "src/core/AccountModule.sol";
 import {Deposit} from "src/core/Deposit.sol";
+import {MockSwapProvider} from "./mock/MockSwapProvider.t.sol";
 import {EscrowStore} from "src/core/EscrowStore.sol";
 import {Fund, PRICE_PRECISION, VIRTUAL_SHARES, VIRTUAL_VALUE} from "src/core/Fund.sol";
 import {Redeem} from "src/core/Redeem.sol";
@@ -20,16 +24,23 @@ import {FundAccount} from "src/core/FundAccount.sol";
 import {isOpen} from "src/core/FundStore.sol";
 import {GRID_BYTES, ShareToken} from "src/core/ShareToken.sol";
 import {UserAccount} from "src/core/UserAccount.sol";
-import {AccountLib, MAX_SESSION_BYTES, MAX_SESSION_TTL, SESSION_REVOKE_DELAY} from "src/utils/AccountLib.sol";
+import {
+    AccountLib,
+    ESCROW_RETURN_DELAY,
+    MAX_SESSION_BYTES,
+    MAX_SESSION_TTL,
+    SESSION_REVOKE_DELAY,
+    WALLET_SIGNATURE_TAG
+} from "src/utils/AccountLib.sol";
 import {MandateLib} from "src/utils/MandateLib.sol";
 import {BalanceLib} from "src/utils/BalanceLib.sol";
 import {CallLib} from "src/utils/CallLib.sol";
 import {Error} from "src/utils/Error.sol";
+import {GateConfig} from "src/utils/GateConfig.sol";
 import {
     DEPOSIT_ACROSS_INTENT_TYPEHASH,
     FUND_SWAP_INTENT_TYPEHASH,
     RETIRE_ESCROW_INTENT_TYPEHASH,
-    RETURN_ESCROW_TYPEHASH,
     WITHDRAW_INTENT_TYPEHASH,
     LiquidityGate
 } from "src/utils/LiquidityGate.sol";
@@ -38,7 +49,7 @@ import {IAccount} from "src/utils/interfaces/IAccount.sol";
 
 import {HotPathTest} from "./HotPath.t.sol";
 
-contract AccountKindsTestFakeBody {
+contract AccountKindsTestFakeBody is IAccount {
     address internal immutable module;
     address internal immutable parent;
 
@@ -54,6 +65,10 @@ contract AccountKindsTestFakeBody {
         return (module, parent);
     }
 
+    function user() external view returns (address) {
+        return IAccount(parent).user();
+    }
+
     function nonce() external pure returns (uint) {
         return 0;
     }
@@ -61,10 +76,11 @@ contract AccountKindsTestFakeBody {
     function execute(
         address,
         bytes32,
+        uint,
         bytes calldata,
         IAccount.Call[] calldata
-    ) external pure returns (bytes[] memory) {
-        return new bytes[](0);
+    ) external pure returns (bytes32, bytes[] memory) {
+        return (bytes32(0), new bytes[](0));
     }
 }
 
@@ -120,6 +136,53 @@ contract AccountKindsTestSmartWallet is IERC1271 {
     }
 }
 
+contract AccountKindsTestCouncilWallet is IERC1271 {
+    address[] internal memberList;
+
+    constructor(
+        address[] memory _memberList
+    ) {
+        memberList = _memberList;
+    }
+
+    function isValidSignature(
+        bytes32 _digest,
+        bytes calldata _signature
+    ) external view returns (bytes4) {
+        uint _count = memberList.length;
+        if (_signature.length != _count * 65) return bytes4(0xffffffff);
+        for (uint _i; _i < _count; ++_i) {
+            if (ECDSA.tryRecoverCalldata(_digest, _signature[_i * 65:(_i + 1) * 65]) != memberList[_i]) {
+                return bytes4(0xffffffff);
+            }
+        }
+        return IERC1271.isValidSignature.selector;
+    }
+}
+
+contract AccountKindsTestCollectible is ERC721 {
+    constructor() ERC721("Venue Position", "VPOS") {}
+
+    function mint(
+        address _to,
+        uint _id
+    ) external {
+        _mint(_to, _id);
+    }
+}
+
+contract AccountKindsTestEdition is ERC1155 {
+    constructor() ERC1155("") {}
+
+    function mint(
+        address _to,
+        uint _id,
+        uint _amount
+    ) external {
+        _mint(_to, _id, _amount, "");
+    }
+}
+
 contract AccountKindsTest is HotPathTest {
     function _openFund() internal {
         _fundWallet(master, 1500e6);
@@ -162,6 +225,17 @@ contract AccountKindsTest is HotPathTest {
             destinationChainId: _destinationChainId,
             swap: _swapParams(_recipient, _amount)
         });
+    }
+
+    function _swapWithFee(
+        address _acct,
+        address _recipient,
+        uint _fee
+    ) internal view returns (Deposit.SwapIntent memory intent_) {
+        intent_ = _swapIntent(_acct, _nonceOf(_acct), _recipient, 30e6, block.chainid);
+        intent_.header.fee = _fee;
+        intent_.swap.providerCallData =
+            abi.encodeCall(MockSwapProvider.swap, (address(usdc), 30e6 - _fee, address(outToken), 1e18, _recipient));
     }
 
     function _operateIntent(
@@ -232,8 +306,9 @@ contract AccountKindsTest is HotPathTest {
         body = _body;
     }
 
-    function _hubRecord(
-        address _acct
+    function _record(
+        address _acct,
+        address _source
     )
         internal
         returns (bytes32 digest_, bytes memory signature_, bytes memory executionData_, BalanceLib.Balance[] memory balanceList_)
@@ -241,17 +316,17 @@ contract AccountKindsTest is HotPathTest {
         Vm.Log[] memory _logs = vm.getRecordedLogs();
         uint _records;
         for (uint _j; _j < _logs.length; ++_j) {
-            if (_logs[_j].emitter != address(accountModule) || _logs[_j].topics[0] != AccountModule.AccountCall.selector) {
-                continue;
-            }
-            assertEq(_logs[_j].topics[1], bytes32(uint(uint160(_acct))), "the record is the account's own");
-            assertEq(_logs[_j].topics[2], bytes32(uint(uint160(address(hub)))), "written by the hub entry itself");
+            if (
+                _logs[_j].emitter != address(accountModule) || _logs[_j].topics[0] != AccountModule.AccountCall.selector
+                    || _logs[_j].topics[1] != bytes32(uint(uint160(_acct)))
+            ) continue;
+            assertEq(_logs[_j].topics[2], bytes32(uint(uint160(_source))), "written by the entry itself");
             (,,, digest_, signature_, executionData_,,, balanceList_) = abi.decode(
                 _logs[_j].data, (uint, uint, uint, bytes32, bytes, bytes, IAccount.Call[], bytes[], BalanceLib.Balance[])
             );
             ++_records;
         }
-        assertEq(_records, 1, "one call writes one record");
+        assertEq(_records, 1, "one call writes one record on the account");
     }
 
     function _sessionBlob(
@@ -347,7 +422,7 @@ contract AccountKindsTest is HotPathTest {
         assertEq(usdc.balanceOf(master), 2 * (100e6 - FEE), "the user account withdraws on hub and spoke");
         assertEq(usdc.balanceOf(_parent), 1500e6 - 200e6);
         assertEq(usdc.balanceOf(feeReceiver), _relayed + 2 * FEE);
-        assertEq(_nonceOf(_parent), 3);
+        assertEq(_nonceOf(_parent), 2);
     }
 
     function test_depositAcross_admits_only_a_user_account_on_hub_and_spoke() public {
@@ -370,7 +445,81 @@ contract AccountKindsTest is HotPathTest {
         assertEq(outToken.balanceOf(_parent), 2e18, "the user account deposits across on hub and spoke");
         assertEq(usdc.balanceOf(_parent), 1500e6 - 800e6);
         assertEq(usdc.balanceOf(address(swapProvider)), 2 * (400e6 - FEE));
-        assertEq(_nonceOf(_parent), 3);
+        assertEq(_nonceOf(_parent), 2);
+    }
+
+    function test_a_swap_entry_takes_a_relay_fee_up_to_a_third_of_its_input_and_a_plain_withdraw_a_tenth() public {
+        _openFund();
+        address _parent = _account(master);
+        uint _cap = 30e6 * 3333 / 10_000;
+        bytes memory _over = abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, _cap + 1, 30e6, 3333);
+        LiquidityGate[2] memory _gates = [LiquidityGate(address(hub)), LiquidityGate(address(spoke))];
+        for (uint _g; _g < 2; ++_g) {
+            LiquidityGate _gate = _gates[_g];
+            assertEq(_gate.getConfig().maxSwapRelayFeeBps, 3333, "each gate carries a swap cap beside its plain one");
+            uint _fees = usdc.balanceOf(feeReceiver);
+
+            Deposit.SwapIntent memory _i = _swapWithFee(_parent, _parent, _cap + 1);
+            bytes memory _sig = _swapSig(DEPOSIT_ACROSS_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(_over);
+            _gate.depositAcross(_i, _sig);
+            _i = _swapWithFee(_parent, _parent, _cap);
+            _gate.depositAcross(_i, _swapSig(DEPOSIT_ACROSS_INTENT_TYPEHASH, masterKey, _parent, _i));
+
+            _i = _swapWithFee(body, body, _cap + 1);
+            _sig = _swapSig(FUND_SWAP_INTENT_TYPEHASH, masterKey, body, _i);
+            vm.expectRevert(_over);
+            _gate.fundSwap(_i, _sig, _noGenesis());
+            _i = _swapWithFee(body, body, _cap);
+            _gate.fundSwap(_i, _swapSig(FUND_SWAP_INTENT_TYPEHASH, masterKey, body, _i), _noGenesis());
+
+            _i = _swapWithFee(_parent, master, _cap + 1);
+            _sig = _swapSig(WITHDRAW_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(_over);
+            _gate.withdraw(_i, _sig);
+            _i = _swapWithFee(_parent, master, _cap);
+            _gate.withdraw(_i, _swapSig(WITHDRAW_INTENT_TYPEHASH, masterKey, _parent, _i));
+            assertEq(
+                usdc.balanceOf(feeReceiver) - _fees,
+                3 * _cap,
+                "depositAcross, fundSwap and a provider withdraw each paid a third of their input, and not a unit more"
+            );
+
+            _i = _swapIntent(_parent, _nonceOf(_parent), master, 30e6, block.chainid);
+            _i.swap = SwapLib.SwapParams({
+                inputToken: address(usdc),
+                inputAmount: 30e6,
+                outputToken: address(usdc),
+                outputAmount: 30e6 - _cap,
+                provider: address(0),
+                providerCallData: ""
+            });
+            _i.header.fee = _cap;
+            _sig = _swapSig(WITHDRAW_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, _cap, 30e6, 1000));
+            _gate.withdraw(_i, _sig);
+            _i.header.fee = 3e6 + 1;
+            _i.swap.outputAmount = 30e6 - 3e6 - 1;
+            _sig = _swapSig(WITHDRAW_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(abi.encodeWithSelector(Error.Intent__RelayFeeRatioExceeded.selector, 3e6 + 1, 30e6, 1000));
+            _gate.withdraw(_i, _sig);
+            _i.header.fee = 3e6;
+            _i.swap.outputAmount = 27e6;
+            uint _held = usdc.balanceOf(master);
+            _gate.withdraw(_i, _swapSig(WITHDRAW_INTENT_TYPEHASH, masterKey, _parent, _i));
+            assertEq(usdc.balanceOf(master) - _held, 27e6, "while a plain withdraw still pays at most a tenth in fees");
+        }
+
+        GateConfig memory _config = spoke.getConfig();
+        _config.maxSwapRelayFeeBps = 10_000;
+        vm.expectRevert(abi.encodeWithSelector(Error.Gate__InvalidRelayFeeBps.selector, 10_000));
+        new SpokeGate(accountModule, depositModule, spokeEscrowStore, _config);
+        _config.maxSwapRelayFeeBps = 9999;
+        assertEq(
+            new SpokeGate(accountModule, depositModule, spokeEscrowStore, _config).getConfig().maxSwapRelayFeeBps,
+            9999,
+            "a gate takes any swap cap short of the whole input"
+        );
     }
 
     function test_depositEscrow_locks_under_the_callers_own_account_on_hub_and_spoke() public {
@@ -409,25 +558,18 @@ contract AccountKindsTest is HotPathTest {
         address _parent = _account(master);
         uint _nonce = _nonceOf(body);
         (LiquidityGate.RetireEscrowIntent memory _i, bytes memory _sig) = _retireIntent(body, master, masterKey, 400e6);
-        uint _deadline = block.timestamp + 300;
         LiquidityGate[2] memory _gates = [LiquidityGate(address(hub)), LiquidityGate(address(spoke))];
         EscrowStore[2] memory _stores = [hubEscrowStore, spokeEscrowStore];
         for (uint _g; _g < 2; ++_g) {
             vm.expectRevert(abi.encodeWithSelector(Error.Account__HeaderMismatch.selector, body));
             _gates[_g].retireEscrow(_i, _sig);
-            bytes memory _return = _coSig(
-                attestorKey,
-                AccountLib.typedDigest(
-                    block.chainid,
-                    body,
-                    keccak256(
-                        abi.encode(RETURN_ESCROW_TYPEHASH, address(_stores[_g]), address(usdc), uint(0), uint(400e6), _deadline)
-                    )
-                )
-            );
-            vm.expectRevert(abi.encodeWithSelector(Error.Balance__InsufficientBalance.selector, 0, 400e6));
-            _gates[_g].returnEscrow(body, address(usdc), 0, 400e6, _deadline, _return);
-            assertEq(_stores[_g].escrowedMap(body, address(usdc)), 0, "a body holds no escrow on either gate");
+            vm.expectRevert(Error.Account__InvalidUser.selector);
+            vm.prank(body);
+            _gates[_g].requestReturn(address(usdc));
+            vm.expectRevert(Error.Account__InvalidUser.selector);
+            vm.prank(body);
+            _gates[_g].returnEscrow(address(usdc));
+            assertEq(_stores[_g].escrowedMap(body, address(usdc)), 0, "a body holds no escrow on either gate, nor any return to ask for");
         }
         assertEq(usdc.balanceOf(body), 499e6, "its capital stays in it");
         assertEq(_nonceOf(body), _nonce, "and the refused intent spent no nonce");
@@ -448,7 +590,8 @@ contract AccountKindsTest is HotPathTest {
         assertEq(usdc.balanceOf(body), 0, "the body trades its capital into WETH through a venue");
 
         (Redeem.RedeemIntent memory _close, bytes memory _closeSig) = _redeemFor(body, 499e18);
-        uint _wallet = wnt.balanceOf(master);
+        uint _ownerHeld = wnt.balanceOf(_ownerAccount());
+        uint _walletHeld = wnt.balanceOf(master);
         uint _relayed = wnt.balanceOf(feeReceiver);
         (bool _ok, bytes memory _ret) =
             address(spoke).call(abi.encodeCall(HubGate.redeem, (_close, _closeSig, new address[](0))));
@@ -456,13 +599,13 @@ contract AccountKindsTest is HotPathTest {
         assertEq(_ret.length, 0);
         hub.redeem(_close, _closeSig, new address[](0));
         assertEq(
-            wnt.balanceOf(master) - _wallet,
+            wnt.balanceOf(_ownerAccount()) - _ownerHeld,
             3000 ether - FEE * USD,
-            "the hub redemption pays the owner's wallet the body's whole cash, net of its relay fee"
+            "the hub redemption pays the owner's account the body's whole cash, net of its relay fee"
         );
         assertEq(wnt.balanceOf(feeReceiver) - _relayed, FEE * USD);
         assertEq(wnt.balanceOf(body), 0, "and leaves the body empty");
-        assertEq(wnt.balanceOf(_parent), 0, "the user account is never the payee");
+        assertEq(wnt.balanceOf(master), _walletHeld, "and nothing reaches the owner's wallet");
         assertEq(shareToken.totalSupply(), 0, "the full close burns every share");
         assertFalse(isOpen(fundStore.getRedemption(body)));
     }
@@ -473,12 +616,13 @@ contract AccountKindsTest is HotPathTest {
         (, uint _strangerKey) = makeAddrAndKey("escrow-stranger");
         address[2] memory _wallets = [_eoa, address(new AccountKindsTestSmartWallet(_signer))];
         uint[2] memory _keys = [_eoaKey, _signerKey];
+        uint _stored = usdc.balanceOf(address(hubEscrowStore));
+        uint _returnAt = vm.getBlockTimestamp() + ESCROW_RETURN_DELAY;
         for (uint _k; _k < 2; ++_k) {
             address _wallet = _wallets[_k];
             _fundWallet(_wallet, 300e6);
             address _acct = _account(_wallet);
             assertEq(UserAccount(payable(_acct)).user(), _wallet, "the account belongs to the wallet, contract or not");
-            uint _stored = usdc.balanceOf(address(hubEscrowStore));
 
             usdc.mint(_wallet, 200e6);
             vm.startPrank(_wallet);
@@ -487,7 +631,7 @@ contract AccountKindsTest is HotPathTest {
             hub.depositEscrow(address(usdc), 200e6);
             vm.stopPrank();
             (bytes32 _digest, bytes memory _signature, bytes memory _executionData, BalanceLib.Balance[] memory _balanceList) =
-                _hubRecord(_acct);
+                _record(_acct, address(hub));
             assertEq(
                 _executionData,
                 abi.encode(LiquidityGate.depositEscrow.selector, address(usdc), uint(200e6), uint(0), uint(200e6)),
@@ -503,7 +647,7 @@ contract AccountKindsTest is HotPathTest {
             hub.retireEscrow(_i, _forged);
             vm.recordLogs();
             hub.retireEscrow(_i, _sig);
-            (, _signature, _executionData, _balanceList) = _hubRecord(_acct);
+            (, _signature, _executionData, _balanceList) = _record(_acct, address(hub));
             assertEq(_signature, _sig, "the wallet's own co-signature retires the account balance into the hub escrow");
             assertEq(
                 _executionData,
@@ -516,95 +660,115 @@ contract AccountKindsTest is HotPathTest {
             assertEq(hubEscrowStore.escrowedMap(_acct, address(usdc)), 300e6);
             assertEq(_nonceOf(_acct), 1);
 
-            uint _deadline = block.timestamp + 300;
-            bytes32 _first = AccountLib.typedDigest(
-                block.chainid,
-                _acct,
-                keccak256(abi.encode(RETURN_ESCROW_TYPEHASH, address(hubEscrowStore), address(usdc), uint(0), uint(120e6), _deadline))
-            );
-            bytes memory _firstSig = _coSig(attestorKey, _first);
-            bytes memory _restSig = _coSig(
-                attestorKey,
-                AccountLib.typedDigest(
-                    block.chainid,
-                    _acct,
-                    keccak256(
-                        abi.encode(RETURN_ESCROW_TYPEHASH, address(hubEscrowStore), address(usdc), uint(120e6), uint(300e6), _deadline)
-                    )
-                )
-            );
-            uint _paid = usdc.balanceOf(_wallet);
-            uint _kept = usdc.balanceOf(_acct);
             vm.recordLogs();
-            hub.returnEscrow(_acct, address(usdc), 0, 120e6, _deadline, _firstSig);
-            (_digest, _signature, _executionData, _balanceList) = _hubRecord(_acct);
-            assertEq(_digest, _first, "the return record carries the attestor's digest");
+            vm.prank(_wallet);
+            hub.requestReturn(address(usdc));
+            (_digest, _signature, _executionData, _balanceList) = _record(_acct, address(hub));
+            assertEq(_digest, bytes32(0), "the wallet asks for its escrow back in its own call, signing nothing");
             assertEq(_signature.length, 0);
             assertEq(
                 _executionData,
-                abi.encode(LiquidityGate.returnEscrow.selector, address(usdc), uint(0), uint(120e6)),
-                "and the returned total"
+                abi.encode(LiquidityGate.requestReturn.selector, address(usdc), _returnAt),
+                "the request records when the return opens"
+            );
+            vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, _returnAt));
+            vm.prank(_wallet);
+            hub.returnEscrow(address(usdc));
+        }
+
+        vm.warp(_returnAt);
+        for (uint _k; _k < 2; ++_k) {
+            address _wallet = _wallets[_k];
+            address _acct = accountModule.predictUserAccount(_wallet);
+            uint _paid = usdc.balanceOf(_wallet);
+            uint _kept = usdc.balanceOf(_acct);
+            vm.recordLogs();
+            vm.prank(_wallet);
+            hub.returnEscrow(address(usdc));
+            (,, bytes memory _executionData, BalanceLib.Balance[] memory _balanceList) = _record(_acct, address(hub));
+            assertEq(
+                _executionData,
+                abi.encode(LiquidityGate.returnEscrow.selector, address(usdc), uint(300e6)),
+                "the return records the returned total"
             );
             assertEq(_balanceList.length, 0);
-            assertEq(usdc.balanceOf(_wallet) - _paid, 120e6, "a return pays the wallet");
-            vm.expectRevert(abi.encodeWithSelector(Error.Escrow__InvalidReturn.selector, 120e6, 120e6));
-            hub.returnEscrow(_acct, address(usdc), 0, 120e6, _deadline, _firstSig);
-            hub.returnEscrow(_acct, address(usdc), 120e6, 300e6, _deadline, _restSig);
             assertEq(usdc.balanceOf(_wallet) - _paid, 300e6, "the whole escrow returns to the wallet, whichever source funded it");
             assertEq(usdc.balanceOf(_acct), _kept, "never to the account");
             assertEq(hubEscrowStore.returnedMap(_acct, address(usdc)), 300e6);
-            assertEq(usdc.balanceOf(address(hubEscrowStore)), _stored, "and the store keeps nothing for the owner");
+            vm.expectRevert(abi.encodeWithSelector(Error.Escrow__ReturnNotReady.selector, 0));
+            vm.prank(_wallet);
+            hub.returnEscrow(address(usdc));
         }
+        assertEq(usdc.balanceOf(address(hubEscrowStore)), _stored, "and the store keeps nothing for either owner");
     }
 
-    function test_a_mandate_dispatch_pays_only_its_master_once_per_call() public {
+    function test_a_pull_is_one_value_free_transfer_wherever_fund_sends_it_and_the_hub_ends_the_mandate_at_expiry() public {
         _openFund();
         _fundWallet(backer, 100e6);
         address _puppet = _account(backer);
-        MandateLib.Mandate memory _m = MandateLib.Mandate({
+        MandateLib.Mandate[] memory _one = new MandateLib.Mandate[](1);
+        _one[0] = MandateLib.Mandate({
             master: body, skin: MAX_SKIN, allocationRate: 5000, exitCap: 10_000, cooldownPeriod: 0, expiry: block.timestamp + 1 days
         });
-        bytes memory _consent = bytes.concat(abi.encode(_m), _mandateSig(backerKey, _puppet, _m));
+        _mandate(backer, backerKey, _one);
         uint _deadline = block.timestamp + 2 days;
         uint _nonce = _nonceOf(_puppet);
+        address _elsewhere = makeAddr("elsewhere");
 
         IAccount.Call[] memory _pay = new IAccount.Call[](1);
-        _pay[0] = CallLib.pay(address(usdc), makeAddr("elsewhere"), 1e6, 200_000);
+        _pay[0] = CallLib.pay(address(usdc), _elsewhere, 1e6, 200_000);
         vm.prank(address(fundModule));
-        vm.expectRevert(Error.Mandate__ForbiddenCall.selector);
-        accountModule.dispatch(IAccount(_puppet), address(0), bytes32(0), _deadline, _consent, "", _pay, new address[](0));
+        accountModule.dispatch(IAccount(_puppet), address(0), bytes32(0), _deadline, "", "", _pay, new address[](0));
+        assertEq(usdc.balanceOf(_elsewhere), 1e6, "the account bounds a pull's shape only; Fund names where it goes");
 
-        IAccount.Call[] memory _twice = new IAccount.Call[](2);
-        _twice[0] = CallLib.pay(address(usdc), body, 1e6, 200_000);
-        _twice[1] = _twice[0];
-        vm.prank(address(fundModule));
-        vm.expectRevert(Error.Mandate__ForbiddenCall.selector);
-        accountModule.dispatch(IAccount(_puppet), address(0), bytes32(0), _deadline, _consent, "", _twice, new address[](0));
+        IAccount.Call[][3] memory _forbidden;
+        _forbidden[0] = new IAccount.Call[](2);
+        _forbidden[0][0] = CallLib.pay(address(usdc), body, 1e6, 200_000);
+        _forbidden[0][1] = CallLib.pay(address(usdc), body, 1e6, 200_000);
+        _forbidden[1] = new IAccount.Call[](1);
+        _forbidden[1][0] = IAccount.Call({
+            target: address(usdc), value: 1, gasLimit: 200_000, callData: abi.encodeCall(IERC20.transfer, (body, 1e6))
+        });
+        _forbidden[2] = new IAccount.Call[](1);
+        _forbidden[2][0] = IAccount.Call({
+            target: address(usdc), value: 0, gasLimit: 200_000, callData: abi.encodeCall(IERC20.approve, (body, 1e6))
+        });
+        for (uint _k; _k < _forbidden.length; ++_k) {
+            vm.prank(address(fundModule));
+            vm.expectRevert(Error.Account__ForbiddenPull.selector);
+            accountModule.dispatch(IAccount(_puppet), address(0), bytes32(0), _deadline, "", "", _forbidden[_k], new address[](0));
+        }
 
         _pay[0] = CallLib.pay(address(usdc), body, 1e6, 200_000);
-        vm.prank(address(fundModule));
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        accountModule.dispatch(
-            IAccount(_puppet),
-            address(0),
-            bytes32(0),
-            _deadline,
-            bytes.concat(abi.encode(_m), _coSig(backerKey, keccak256("stale"))),
-            "",
-            _pay,
-            new address[](0)
-        );
-
         uint _bodyBefore = usdc.balanceOf(body);
         vm.prank(address(fundModule));
-        accountModule.dispatch(IAccount(_puppet), address(0), bytes32(0), _deadline, _consent, "", _pay, new address[](0));
-        assertEq(usdc.balanceOf(body) - _bodyBefore, 1e6, "the named master is paid");
-        assertEq(_nonceOf(_puppet), _nonce, "a mandate spends no intent nonce");
+        accountModule.dispatch(IAccount(_puppet), address(0), bytes32(0), _deadline, "", "", _pay, new address[](0));
+        assertEq(usdc.balanceOf(body) - _bodyBefore, 1e6, "one plain transfer lands");
+        assertEq(_nonceOf(_puppet), _nonce, "a pull spends no intent nonce");
 
-        vm.warp(_m.expiry);
+        Fund.Allocation[] memory _rows = new Fund.Allocation[](1);
+        _rows[0] = _row(_puppet, 20e6);
+        vm.warp(_one[0].expiry - 1);
+        (Fund.AllocateIntent memory _i,) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _rows);
+        _i.header.deadline = vm.getBlockTimestamp() + 300;
+        hub.allocate(_i, _pair(masterKey, _allocateDigest(_i)), "");
+        uint _shares = shareToken.balanceOf(_puppet);
+        assertGt(_shares, 0, "a round lands the row until the mandate's last second");
+
+        vm.warp(_one[0].expiry);
+        _bodyBefore = usdc.balanceOf(body);
         vm.prank(address(fundModule));
-        vm.expectRevert(abi.encodeWithSelector(Error.Mandate__Expired.selector, _m.expiry));
-        accountModule.dispatch(IAccount(_puppet), address(0), bytes32(0), _deadline, _consent, "", _pay, new address[](0));
+        accountModule.dispatch(IAccount(_puppet), address(0), bytes32(0), _deadline, "", "", _pay, new address[](0));
+        assertEq(usdc.balanceOf(body) - _bodyBefore, 1e6, "the account checks no expiry: the terms are Fund's");
+
+        (_i,) = _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _rows);
+        _i.header.deadline = vm.getBlockTimestamp() + 300;
+        bytes memory _sig = _pair(masterKey, _allocateDigest(_i));
+        uint _cash = usdc.balanceOf(_puppet);
+        vm.expectRevert(Error.Balance__ZeroAmount.selector);
+        hub.allocate(_i, _sig, "");
+        assertEq(usdc.balanceOf(_puppet), _cash, "while the hub ends the mandate at its expiry: the round skips the row and pulls nothing");
+        assertEq(shareToken.balanceOf(_puppet), _shares, "and mints nothing");
     }
 
     function test_mandate_admits_only_a_user_account() public {
@@ -618,36 +782,30 @@ contract AccountKindsTest is HotPathTest {
             cooldownPeriod: 0,
             expiry: block.timestamp + 365 days
         });
-        bytes[] memory _sigs = new bytes[](1);
-        _sigs[0] = _mandateSig(masterKey, body, _one[0]);
-        HubGate.MandateIntent memory _i = HubGate.MandateIntent({
-            header: _header(body, master, _nonceOf(body)),
-            mandateList: _one,
-            signatureList: _sigs
-        });
+        uint _nonce = _nonceOf(body);
+        HubGate.MandateIntent memory _i = HubGate.MandateIntent({header: _header(body, master, _nonce), epoch: 0, mandateList: _one});
         bytes memory _sig = _pair(
             masterKey,
             _typed(
                 body,
                 _i.header.deadline,
-                keccak256(
-                    abi.encode(
-                        MANDATE_INTENT_TYPEHASH,
-                        _hashHeader(_i.header),
-                        keccak256(abi.encode(_one))
-                    )
-                )
+                keccak256(abi.encode(MANDATE_INTENT_TYPEHASH, _hashHeader(_i.header), _i.epoch, keccak256(abi.encode(_one))))
             )
         );
         vm.expectRevert(abi.encodeWithSelector(Error.Account__HeaderMismatch.selector, body));
         hub.mandate(_i, _sig);
-        assertEq(mandateStore.mandateMap(body, _one[0].master), bytes32(0), "a body cannot become a puppet");
+        assertEq(_nonceOf(body), _nonce, "a body cannot become a puppet");
+        assertEq(mandateStore.mandateMap(body, _one[0].master), bytes32(0), "the hub keeps no mandate for it");
 
         _fundWallet(backer, 10e6);
         address _puppet = _account(backer);
         _one[0].master = body;
         _mandate(backer, backerKey, _one);
-        assertEq(mandateStore.mandateMap(_puppet, body), this.digestOf(_puppet, _one[0]), "the user account mandates");
+        assertEq(
+            mandateStore.mandateMap(_puppet, body),
+            keccak256(abi.encode(_one[0], UserAccount(payable(_puppet)).epoch())),
+            "the user account mandates, and the hub keeps the terms under its epoch"
+        );
         assertEq(_nonceOf(_puppet), 1);
     }
 
@@ -661,7 +819,7 @@ contract AccountKindsTest is HotPathTest {
         _mandate(backer, backerKey, _one);
         address _puppet = _account(backer);
         Fund.Allocation[] memory _rows = new Fund.Allocation[](1);
-        _rows[0] = _row(_puppet, _one[0], 400e6);
+        _rows[0] = _row(_puppet, 400e6);
         (Fund.AllocateIntent memory _round, bytes memory _roundSig) =
             _allocateIntent(_nonceOf(body), usdc.balanceOf(body), _rows);
         hub.allocate(_round, _roundSig, _ownerCoSig(_round));
@@ -713,6 +871,115 @@ contract AccountKindsTest is HotPathTest {
         assertEq(_nonceOf(body), 3);
     }
 
+    function test_swap_paths_refuse_unbacked_and_malformed_swaps_on_hub_and_spoke() public {
+        _openFund();
+        address _parent = _account(master);
+        uint _nonce = _nonceOf(_parent);
+        uint _bodyNonce = _nonceOf(body);
+        uint _parentUsdc = usdc.balanceOf(_parent);
+        uint _bodyUsdc = usdc.balanceOf(body);
+        AccountLib.Genesis memory _none = AccountLib.Genesis({parent: address(0), key: "", approval: ""});
+        LiquidityGate[2] memory _gates = [LiquidityGate(address(hub)), LiquidityGate(address(spoke))];
+        for (uint _g; _g < 2; ++_g) {
+            LiquidityGate _gate = _gates[_g];
+
+            Deposit.SwapIntent memory _i = _swapIntent(_parent, _nonce, _parent, 100e6, block.chainid);
+            _i.swap.providerCallData =
+                abi.encodeCall(MockSwapProvider.swap, (address(usdc), 100e6 - FEE, address(outToken), 1e18 - 1, _parent));
+            bytes memory _sig = _swapSig(DEPOSIT_ACROSS_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(abi.encodeWithSelector(Error.Balance__DepositNotReceived.selector, address(outToken), 1e18 - 1, 1e18));
+            _gate.depositAcross(_i, _sig);
+
+            _i.swap.providerCallData =
+                abi.encodeCall(MockSwapProvider.swap, (address(usdc), 100e6 - FEE - 1, address(outToken), 1e18, _parent));
+            _sig = _swapSig(DEPOSIT_ACROSS_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(
+                abi.encodeWithSelector(Error.Balance__SwapInputNotSpent.selector, address(usdc), _parentUsdc, _parentUsdc - 100e6 + 1)
+            );
+            _gate.depositAcross(_i, _sig);
+
+            _i = _swapIntent(_parent, _nonce, _parent, 100e6, block.chainid);
+            _i.header.feeToken = address(wnt);
+            _sig = _swapSig(DEPOSIT_ACROSS_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(abi.encodeWithSelector(Error.Intent__FeeTokenMismatch.selector, address(wnt), address(usdc)));
+            _gate.depositAcross(_i, _sig);
+
+            _i = _swapIntent(_parent, _nonce, _parent, 100e6, block.chainid);
+            _i.swap.inputAmount = 0;
+            _sig = _swapSig(DEPOSIT_ACROSS_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(Error.Balance__NothingToSwap.selector);
+            _gate.depositAcross(_i, _sig);
+
+            _i = _swapIntent(_parent, _nonce, _parent, 100e6, block.chainid);
+            _i.swap.outputAmount = 0;
+            _sig = _swapSig(DEPOSIT_ACROSS_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(Error.Balance__ZeroSwapOutput.selector);
+            _gate.depositAcross(_i, _sig);
+
+            _i = _swapIntent(_parent, _nonce, _parent, 100e6, block.chainid);
+            _i.swap.provider = address(0);
+            _sig = _swapSig(DEPOSIT_ACROSS_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(Error.Intent__InvalidProvider.selector);
+            _gate.depositAcross(_i, _sig);
+
+            _i = _swapIntent(body, _bodyNonce, body, 100e6, block.chainid);
+            _i.swap.providerCallData =
+                abi.encodeCall(MockSwapProvider.swap, (address(usdc), 100e6 - FEE, address(outToken), 1e18 - 1, body));
+            _sig = _swapSig(FUND_SWAP_INTENT_TYPEHASH, masterKey, body, _i);
+            vm.expectRevert(abi.encodeWithSelector(Error.Balance__SwapOutputNotReceived.selector, address(outToken), 1e18 - 1, 1e18));
+            _gate.fundSwap(_i, _sig, _none);
+
+            _i.swap.providerCallData =
+                abi.encodeCall(MockSwapProvider.swap, (address(usdc), 100e6 - FEE - 1, address(outToken), 1e18, body));
+            _sig = _swapSig(FUND_SWAP_INTENT_TYPEHASH, masterKey, body, _i);
+            vm.expectRevert(
+                abi.encodeWithSelector(Error.Balance__SwapInputNotSpent.selector, address(usdc), _bodyUsdc, _bodyUsdc - 100e6 + 1)
+            );
+            _gate.fundSwap(_i, _sig, _none);
+
+            _i = _swapIntent(body, _bodyNonce, body, 100e6, block.chainid);
+            _i.swap.outputToken = address(usdc);
+            _sig = _swapSig(FUND_SWAP_INTENT_TYPEHASH, masterKey, body, _i);
+            vm.expectRevert(Error.Balance__InvalidSwap.selector);
+            _gate.fundSwap(_i, _sig, _none);
+
+            _i = _swapIntent(_parent, _nonce, master, 100e6, block.chainid);
+            _i.swap.providerCallData =
+                abi.encodeCall(MockSwapProvider.swap, (address(usdc), 100e6 - FEE, address(outToken), 1e18 - 1, master));
+            _sig = _swapSig(WITHDRAW_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(abi.encodeWithSelector(Error.Balance__SwapOutputNotReceived.selector, address(outToken), 1e18 - 1, 1e18));
+            _gate.withdraw(_i, _sig);
+
+            _i = _swapIntent(_parent, _nonce, master, 100e6, block.chainid);
+            _i.swap = SwapLib.SwapParams({
+                inputToken: address(usdc),
+                inputAmount: 100e6,
+                outputToken: address(usdc),
+                outputAmount: 100e6 - FEE - 1,
+                provider: address(0),
+                providerCallData: ""
+            });
+            _sig = _swapSig(WITHDRAW_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(Error.Balance__InvalidWithdraw.selector);
+            _gate.withdraw(_i, _sig);
+
+            _i.swap.inputAmount = 0;
+            _sig = _swapSig(WITHDRAW_INTENT_TYPEHASH, masterKey, _parent, _i);
+            vm.expectRevert(Error.Balance__NothingToWithdraw.selector);
+            _gate.withdraw(_i, _sig);
+        }
+        vm.deal(master, 1);
+        vm.prank(master);
+        vm.expectRevert(abi.encodeWithSelector(Error.Balance__ValueMismatch.selector, 1, 0));
+        hub.deposit{value: 1}(address(usdc), 100e6);
+
+        assertEq(usdc.balanceOf(_parent), _parentUsdc, "no refused swap moved the account's balance");
+        assertEq(usdc.balanceOf(body), _bodyUsdc, "nor the body's");
+        assertEq(outToken.balanceOf(master), 0, "and nothing reached the wallet");
+        assertEq(_nonceOf(_parent), _nonce, "while every refused intent left the nonces unspent");
+        assertEq(_nonceOf(body), _bodyNonce);
+    }
+
     function test_operate_admits_only_a_body() public {
         _openFund();
         address _parent = _account(master);
@@ -737,6 +1004,44 @@ contract AccountKindsTest is HotPathTest {
         assertEq(usdc.balanceOf(_venue), 50e6, "the body operates");
         assertEq(usdc.balanceOf(body), 499e6 - 50e6 - FEE);
         assertEq(_nonceOf(body), 2);
+    }
+
+    function test_a_fund_body_takes_safe_nft_transfers_that_a_user_account_refuses() public {
+        address _holder = makeAddr("nft-holder");
+        address _ua = _account(master);
+        AccountKindsTestCollectible _collectible = new AccountKindsTestCollectible();
+        AccountKindsTestEdition _edition = new AccountKindsTestEdition();
+        _collectible.mint(_holder, 1);
+        _collectible.mint(_holder, 2);
+        _edition.mint(_holder, 7, 20);
+        _edition.mint(_holder, 8, 20);
+        _edition.mint(_holder, 9, 20);
+        uint[] memory _ids = new uint[](2);
+        _ids[0] = 8;
+        _ids[1] = 9;
+        uint[] memory _amounts = new uint[](2);
+        _amounts[0] = 5;
+        _amounts[1] = 6;
+        assertEq(body.codehash, accountModule.bodyHash(), "the receiver is a wallet delegated to the fund body");
+
+        vm.startPrank(_holder);
+        _collectible.safeTransferFrom(_holder, body, 1);
+        _edition.safeTransferFrom(_holder, body, 7, 4, "");
+        _edition.safeBatchTransferFrom(_holder, body, _ids, _amounts, "");
+        vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721InvalidReceiver.selector, _ua));
+        _collectible.safeTransferFrom(_holder, _ua, 2);
+        vm.expectRevert(abi.encodeWithSelector(IERC1155Errors.ERC1155InvalidReceiver.selector, _ua));
+        _edition.safeTransferFrom(_holder, _ua, 7, 1, "");
+        vm.expectRevert(abi.encodeWithSelector(IERC1155Errors.ERC1155InvalidReceiver.selector, _ua));
+        _edition.safeBatchTransferFrom(_holder, _ua, _ids, _amounts, "");
+        vm.stopPrank();
+
+        assertEq(_collectible.ownerOf(1), body, "the body takes a position NFT by safe transfer");
+        assertEq(_edition.balanceOf(body, 7), 4, "and a multi-token position");
+        assertEq(_edition.balanceOf(body, 8), 5, "one by one or in a batch");
+        assertEq(_edition.balanceOf(body, 9), 6);
+        assertEq(_collectible.ownerOf(2), _holder, "while a user account, which holds no venue position, refuses them");
+        assertEq(_edition.balanceOf(_ua, 7) + _edition.balanceOf(_ua, 8) + _edition.balanceOf(_ua, 9), 0);
     }
 
     function test_the_hub_binds_a_body_only_by_opening_its_fund() public {
@@ -795,14 +1100,24 @@ contract AccountKindsTest is HotPathTest {
         (_i, _sig) = _allocateIntent(
             _nonceOf(body), usdc.balanceOf(body), _credit(block.chainid, address(usdc), 100e6), new Fund.Allocation[](0)
         );
-        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        _ownerSig = _ownerCoSig(_i);
+        vm.recordLogs();
+        hub.allocate(_i, _sig, _ownerSig);
+        (bytes32 _digest, bytes memory _signature, bytes memory _executionData,) = _record(_parent, address(fundModule));
         assertEq(shareToken.balanceOf(body), 598e18, "the body allocates");
         assertEq(usdc.balanceOf(body), 598e6);
         assertEq(
             hubEscrowStore.releasedMap(_parent, address(usdc)), 600e6, "the owner contribution is released from its hub escrow"
         );
         assertEq(usdc.balanceOf(_parent), _held, "the round itself leaves the owner account alone");
-        assertEq(_nonceOf(_parent), _ownerNonce + 1, "while the owner's co-signature still dispatches as its consent");
+        assertEq(_nonceOf(_parent), _ownerNonce, "and spends none of its nonces");
+        assertEq(
+            _digest,
+            AccountLib.creditDigest(_parent, body, block.chainid, address(usdc), _i.credit.total, _i.credit.feeTotal),
+            "the owner's consent is its signed running total, recorded on its own account"
+        );
+        assertEq(_signature.length, 0);
+        assertEq(_executionData, abi.encode(Fund.allocate.selector, body, _i.credit), "naming the fund and its signed totals");
     }
 
     function test_redeem_admits_only_a_body() public {
@@ -815,7 +1130,7 @@ contract AccountKindsTest is HotPathTest {
 
         _wethTo(body, 3000 ether);
         uint _relayed = wnt.balanceOf(feeReceiver);
-        uint _wallet = wnt.balanceOf(master);
+        uint _ownerHeld = wnt.balanceOf(_ownerAccount());
         uint _halfInWeth = _nav() * 1e18 / ETH_USD / 2;
         (_i, _sig) = _redeemFor(body, 249.5e18);
         hub.redeem(_i, _sig, new address[](0));
@@ -825,15 +1140,15 @@ contract AccountKindsTest is HotPathTest {
         assertEq(usdc.balanceOf(_parent), 1500e6, "the owner account is untouched");
         assertGt(wnt.balanceOf(feeReceiver), _relayed, "the relay fee is billed in WETH");
         assertApproxEqRel(
-            wnt.balanceOf(master) - _wallet + wnt.balanceOf(feeReceiver) - _relayed,
+            wnt.balanceOf(_ownerAccount()) - _ownerHeld + wnt.balanceOf(feeReceiver) - _relayed,
             _halfInWeth,
             1e12,
-            "the owner's wallet is paid half the fund in WETH, net of the relay fee"
+            "the owner's account is paid half the fund in WETH, net of the relay fee"
         );
         uint _signed = _valueOf(_i.valuation) + VIRTUAL_VALUE;
         uint _base = 499e18 + VIRTUAL_SHARES;
         assertEq(
-            wnt.balanceOf(master) - _wallet + wnt.balanceOf(feeReceiver) - _relayed,
+            wnt.balanceOf(_ownerAccount()) - _ownerHeld + wnt.balanceOf(feeReceiver) - _relayed,
             Math.mulDiv(249.5e18, _signed, _base),
             "exactly the master's part at the open's price"
         );
@@ -857,6 +1172,7 @@ contract AccountKindsTest is HotPathTest {
             (address _module, address _parent) = FundAccount(payable(_posers[_k])).bound();
             assertEq(_module, address(accountModule), "the poser claims the real module");
             assertEq(_parent, _victim, "and the victim as its parent");
+            assertEq(IAccount(_posers[_k]).user(), master, "answering for the victim's wallet");
             assertTrue(_posers[_k].codehash != accountModule.bodyHash(), "but is not the body designator");
         }
         (address _strayModule, address _strayParent) = FundAccount(payable(_stray)).bound();
@@ -864,7 +1180,6 @@ contract AccountKindsTest is HotPathTest {
         assertEq(_strayModule, address(_fake), "bound by another module");
         assertEq(_strayParent, _victim, "to the victim, without the victim's approval");
 
-        bytes32 _round = keccak256("posed-round");
         vm.recordLogs();
         for (uint _k; _k < 3; ++_k) {
             address _poser = _posers[_k];
@@ -876,16 +1191,8 @@ contract AccountKindsTest is HotPathTest {
             (Fund.AllocateIntent memory _alloc, bytes memory _allocSig) =
                 _allocateFor(_poser, _credit(block.chainid, address(usdc), 100e6));
             (Redeem.RedeemIntent memory _red, bytes memory _redSig) = _redeemFor(_poser, 1e6);
-            bytes memory _fulfilSig = _coSig(
-                attestorKey,
-                AccountLib.typedDigest(
-                    block.chainid,
-                    _poser,
-                    keccak256(
-                        abi.encode(FULFIL_TYPEHASH, address(spokeEscrowStore), address(usdc), _round, uint(0), uint(100e6), FEE)
-                    )
-                )
-            );
+            bytes memory _fulfilSig =
+                _coSig(masterKey, AccountLib.creditDigest(_victim, _poser, block.chainid, address(usdc), 100e6, FEE));
             bytes memory _refused = _k < 2
                 ? abi.encodeWithSelector(Error.Account__NotDelegated.selector, _poser)
                 : abi.encodeWithSelector(Error.Account__HeaderMismatch.selector, _poser);
@@ -896,7 +1203,7 @@ contract AccountKindsTest is HotPathTest {
             vm.expectRevert(_refused);
             spoke.operate(_op, _opSig, _genesis);
             vm.expectRevert(_refused);
-            spoke.fulfil(_poser, address(usdc), _round, 0, 100e6, FEE, _fulfilSig, _genesis);
+            spoke.fulfil(_poser, address(usdc), 100e6, FEE, _fulfilSig, _genesis);
             bytes memory _ownerSig = _ownerCoSig(_alloc);
             vm.expectRevert(_refused);
             hub.allocate(_alloc, _allocSig, _ownerSig);
@@ -1135,6 +1442,56 @@ contract AccountKindsTest is HotPathTest {
         assertEq(_token.balanceOf(master), 0);
     }
 
+    function test_a_contract_wallet_cosigns_with_a_signature_past_1024_bytes_under_the_4096_byte_cap() public {
+        address[] memory _members = new address[](20);
+        uint[] memory _keys = new uint[](20);
+        for (uint _j; _j < 20; ++_j) {
+            (_members[_j], _keys[_j]) = makeAddrAndKey(string.concat("council-", vm.toString(_j)));
+        }
+        (, uint _strangerKey) = makeAddrAndKey("council-stranger");
+        address _wallet = address(new AccountKindsTestCouncilWallet(_members));
+        _fundWallet(_wallet, 100e6);
+        address _acct = _account(_wallet);
+        Deposit.SwapIntent memory _i = Deposit.SwapIntent({
+            header: _header(_acct, _wallet, _nonceOf(_acct)),
+            destinationChainId: block.chainid,
+            swap: SwapLib.SwapParams({
+                inputToken: address(usdc),
+                inputAmount: 40e6,
+                outputToken: address(usdc),
+                outputAmount: 40e6 - FEE,
+                provider: address(0),
+                providerCallData: ""
+            })
+        });
+        bytes32 _digest = _typed(
+            _acct,
+            _i.header.deadline,
+            keccak256(abi.encode(WITHDRAW_INTENT_TYPEHASH, _hashHeader(_i.header), _i.destinationChainId, _hashSwap(_i.swap)))
+        );
+        bytes memory _council;
+        bytes memory _forged;
+        for (uint _j; _j < 20; ++_j) {
+            _council = bytes.concat(_council, _coSig(_keys[_j], _digest));
+            _forged = bytes.concat(_forged, _coSig(_j == 19 ? _strangerKey : _keys[_j], _digest));
+        }
+        bytes memory _tagged = bytes.concat(WALLET_SIGNATURE_TAG, _council);
+        assertGt(_tagged.length, 1024, "twenty members sign past the old 1024-byte cap");
+        assertLe(_tagged.length, MAX_SESSION_BYTES, "and inside the new one");
+        assertTrue(UserAccount(payable(_acct)).approves(_digest, _tagged), "the account hands the whole signature to the wallet");
+        assertFalse(
+            UserAccount(payable(_acct)).approves(_digest, bytes.concat(WALLET_SIGNATURE_TAG, _forged)),
+            "while the wallet's own rule refuses a stranger in one member's place"
+        );
+
+        bytes memory _attested = _coSig(attestorKey, _digest);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        hub.withdraw(_i, bytes.concat(WALLET_SIGNATURE_TAG, _forged, _attested));
+        hub.withdraw(_i, bytes.concat(_tagged, _attested));
+        assertEq(usdc.balanceOf(_wallet), 40e6 - FEE, "the council's long signature co-signs a withdraw");
+        assertEq(_nonceOf(_acct), 1);
+    }
+
     function test_approves_refuses_a_grant_to_signer_zero_and_an_envelope_past_the_cap() public {
         UserAccount _ua = UserAccount(payable(_account(master)));
         bytes32 _digest = keccak256("puppet intent");
@@ -1210,14 +1567,15 @@ contract AccountKindsTest is HotPathTest {
         _ua.revokeSessions();
         vm.prank(master);
         _ua.revokeSessions();
-        assertEq(_ua.epoch(), 1);
+        assertEq(_ua.epoch(), _epochAfterRevoke(0));
+        assertTrue(_ua.epoch() != 0, "the revoke moves the account off the epoch its live grant names");
         assertTrue(_ua.approves(_digest, _live), "a retired grant still lands in-flight intents");
         vm.warp(_now + SESSION_REVOKE_DELAY - 1);
         assertTrue(_ua.approves(_digest, _live), "up to the last second of the revoke delay");
         vm.warp(_now + SESSION_REVOKE_DELAY);
         assertFalse(_ua.approves(_digest, _live), "and is refused once it has passed");
         assertTrue(
-            _ua.approves(_digest, _sessionBlob(masterKey, _signerKey, _now, _now + 1 days, 1, _digest)),
+            _ua.approves(_digest, _sessionBlob(masterKey, _signerKey, _now, _now + 1 days, _ua.epoch(), _digest)),
             "a grant at the new epoch approves"
         );
         assertTrue(_ua.approves(_digest, _coSig(masterKey, _digest)), "the wallet outlives revocation");

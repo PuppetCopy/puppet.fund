@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.36;
 
-import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
-
 import {RATE_PRECISION} from "./IntentLib.sol";
 import {Error} from "./Error.sol";
 
@@ -14,8 +12,10 @@ import {SwapLib} from "./SwapLib.sol";
 import {AccountModule} from "../core/AccountModule.sol";
 import {EscrowStore} from "../core/EscrowStore.sol";
 import {FundAccount} from "../core/FundAccount.sol";
+import {UserAccount} from "../core/UserAccount.sol";
 import {Deposit} from "../core/Deposit.sol";
 import {IAccount} from "./interfaces/IAccount.sol";
+import {IWNT} from "./interfaces/IWNT.sol";
 import {GateConfig} from "./GateConfig.sol";
 
 bytes32 constant DEPOSIT_ACROSS_INTENT_TYPEHASH = keccak256(
@@ -25,9 +25,6 @@ bytes32 constant DEPOSIT_ACROSS_INTENT_TYPEHASH = keccak256(
 bytes32 constant FUND_SWAP_INTENT_TYPEHASH = keccak256(
     "FundSwapIntent(IntentHeader header,uint256 destinationChainId,SwapParams swap)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)SwapParams(address inputToken,uint256 inputAmount,address outputToken,uint256 outputAmount,address provider,bytes providerCallData)"
 );
-
-bytes32 constant RETURN_ESCROW_TYPEHASH =
-    keccak256("ReturnEscrow(address store,address token,uint256 fromTotal,uint256 returnedTotal,uint256 deadline)");
 
 bytes32 constant RETIRE_ESCROW_INTENT_TYPEHASH = keccak256(
     "RetireEscrowIntent(IntentHeader header,address token,uint256 amount)IntentHeader(address account,address user,uint256 nonce,uint256 deadline,address feeToken,uint256 fee)"
@@ -53,6 +50,7 @@ abstract contract LiquidityGate {
     uint internal immutable transferGasLimit;
     uint internal immutable maxIntentTtl;
     uint internal immutable maxRelayFeeBps;
+    uint internal immutable maxSwapRelayFeeBps;
 
     constructor(
         AccountModule _accountModule,
@@ -70,6 +68,9 @@ abstract contract LiquidityGate {
         if (_config.maxRelayFeeBps >= RATE_PRECISION) {
             revert Error.Gate__InvalidRelayFeeBps(_config.maxRelayFeeBps);
         }
+        if (_config.maxSwapRelayFeeBps >= RATE_PRECISION) {
+            revert Error.Gate__InvalidRelayFeeBps(_config.maxSwapRelayFeeBps);
+        }
         accountModule = _accountModule;
         depositModule = _depositModule;
         escrowStore = _escrowStore;
@@ -78,6 +79,7 @@ abstract contract LiquidityGate {
         transferGasLimit = _config.transferGasLimit;
         maxIntentTtl = _config.maxIntentTtl;
         maxRelayFeeBps = _config.maxRelayFeeBps;
+        maxSwapRelayFeeBps = _config.maxSwapRelayFeeBps;
     }
 
     function getConfig() public view returns (GateConfig memory) {
@@ -86,7 +88,8 @@ abstract contract LiquidityGate {
             feeReceiver: feeReceiver,
             transferGasLimit: transferGasLimit,
             maxIntentTtl: maxIntentTtl,
-            maxRelayFeeBps: maxRelayFeeBps
+            maxRelayFeeBps: maxRelayFeeBps,
+            maxSwapRelayFeeBps: maxSwapRelayFeeBps
         });
     }
 
@@ -154,7 +157,7 @@ abstract contract LiquidityGate {
         address _token,
         uint _amount
     ) external payable {
-        if (_token == NATIVE_TOKEN && msg.value != _amount) revert Error.Balance__ValueMismatch(msg.value, _amount);
+        if (_token == NATIVE_TOKEN) revert Error.Balance__InvalidDeposit();
         address _account = accountModule.createUserAccount(msg.sender);
         depositModule.deposit{value: msg.value}(msg.sender, address(escrowStore), _token, _amount, getConfig());
         uint _escrowed = escrowStore.escrow(_account, _token, _amount);
@@ -174,47 +177,46 @@ abstract contract LiquidityGate {
         );
         _authorize(_intent.header);
         if (_intent.amount == 0) revert Error.Balance__ZeroAmount();
-        IAccount.Call[] memory _legs = new IAccount.Call[](2);
-        _legs[0] = CallLib.pay(_intent.token, address(escrowStore), _intent.amount, transferGasLimit);
-        _legs[1] = CallLib.pay(_intent.header.feeToken, feeReceiver, _intent.header.fee, transferGasLimit);
-        uint _escrowed = escrowStore.escrowedMap(_account, _intent.token) + _intent.amount;
+        address _token = _intent.token == NATIVE_TOKEN ? address(depositModule.wnt()) : _intent.token;
+        IAccount.Call[] memory _legs = new IAccount.Call[](_token == _intent.token ? 2 : 3);
+        uint _n;
+        if (_token != _intent.token) {
+            _legs[_n++] = IAccount.Call({
+                target: _token, value: _intent.amount, gasLimit: 0, callData: abi.encodeCall(IWNT.deposit, ())
+            });
+        }
+        _legs[_n++] = CallLib.pay(_token, address(escrowStore), _intent.amount, transferGasLimit);
+        _legs[_n] = CallLib.pay(_intent.header.feeToken, feeReceiver, _intent.header.fee, transferGasLimit);
+        uint _escrowed = escrowStore.escrowedMap(_account, _token) + _intent.amount;
         accountModule.dispatch(
             IAccount(_account),
             attestor,
             _structHash,
             _intent.header.deadline,
             _coSig,
-            abi.encode(msg.sig, _intent.token, _intent.amount, _escrowed, _intent.header.feeToken, _intent.header.fee),
+            abi.encode(msg.sig, _token, _intent.amount, _escrowed, _intent.header.feeToken, _intent.header.fee),
             _legs,
             BalanceLib.list(_intent.token, _intent.header.feeToken)
         );
-        escrowStore.escrow(_account, _intent.token, _intent.amount);
+        escrowStore.escrow(_account, _token, _intent.amount);
+    }
+
+    function requestReturn(
+        address _token
+    ) external {
+        address _account = accountModule.predictUserAccount(msg.sender);
+        if (_account.code.length == 0) revert Error.Account__InvalidUser();
+        uint _returnAt = escrowStore.requestReturn(_account, _token);
+        accountModule.record(_account, bytes32(0), abi.encode(msg.sig, _token, _returnAt), new address[](0));
     }
 
     function returnEscrow(
-        address _owner,
-        address _token,
-        uint _fromTotal,
-        uint _returnedTotal,
-        uint _deadline,
-        bytes calldata _attestorSignature
+        address _token
     ) external {
-        bytes32 _digest = AccountLib.typedDigest(
-            block.chainid,
-            _owner,
-            keccak256(abi.encode(RETURN_ESCROW_TYPEHASH, address(escrowStore), _token, _fromTotal, _returnedTotal, _deadline))
-        );
-        if (!SignatureCheckerLib.isValidSignatureNowCalldata(attestor, _digest, _attestorSignature)) {
-            revert Error.Account__InvalidSignature();
-        }
-        if (block.timestamp > _deadline) revert Error.Intent__ExpiredDeadline(_deadline, block.timestamp);
-        if (_deadline > block.timestamp + maxIntentTtl) {
-            revert Error.Intent__DeadlineTooFar(_deadline, block.timestamp, maxIntentTtl);
-        }
-        uint _returned = escrowStore.returnedMap(_owner, _token);
-        if (_returned != _fromTotal) revert Error.Escrow__InvalidReturn(_returned, _returnedTotal);
-        escrowStore.refund(_owner, _token, _returnedTotal, transferGasLimit);
-        accountModule.record(_owner, _digest, abi.encode(msg.sig, _token, _fromTotal, _returnedTotal), new address[](0));
+        address _account = accountModule.predictUserAccount(msg.sender);
+        if (_account.code.length == 0) revert Error.Account__InvalidUser();
+        uint _returned = escrowStore.refund(_account, _token, transferGasLimit);
+        accountModule.record(_account, bytes32(0), abi.encode(msg.sig, _token, _returned), new address[](0));
     }
 
     function depositAcross(

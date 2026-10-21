@@ -5,12 +5,14 @@ import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 
 import {Error} from "./../../utils/Error.sol";
 
+bytes4 constant FULL_ACCESS = 0xffffffff;
+
 abstract contract Access {
     bytes32 private constant REENTRANCY_GUARD_SLOT = 0x9b779b17422d0df92223018b32b4d1fa46e071723d6817e2486d003becc55f00;
 
     address public immutable authority;
 
-    mapping(address user => bool) internal authMap;
+    mapping(address user => bytes4 selector) public authMap;
 
     constructor(
         address _authority
@@ -27,7 +29,10 @@ abstract contract Access {
 
     function _authEnter() internal {
         if (TransientSlot.tload(TransientSlot.asBoolean(REENTRANCY_GUARD_SLOT))) revert Error.Access__Reentrant();
-        if (!authMap[msg.sender]) revert Error.Access__Unauthorized();
+        bytes4 _granted = authMap[msg.sender];
+        if (_granted == bytes4(0) || (_granted != msg.sig && _granted != FULL_ACCESS)) {
+            revert Error.Access__Unauthorized();
+        }
         TransientSlot.tstore(TransientSlot.asBoolean(REENTRANCY_GUARD_SLOT), true);
     }
 
@@ -37,9 +42,9 @@ abstract contract Access {
 
     function setAccess(
         address _user,
-        bool _enabled
+        bytes4 _selector
     ) external {
         if (msg.sender != authority) revert Error.Access__CallerNotAuthority();
-        authMap[_user] = _enabled;
+        authMap[_user] = _selector;
     }
 }

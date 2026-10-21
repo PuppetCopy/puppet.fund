@@ -7,13 +7,13 @@ import {EIP712} from "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
 import {Error} from "../utils/Error.sol";
 
-contract PuppetToken is ERC20, EIP712, ERC20Votes {
+contract Token is ERC20, EIP712, ERC20Votes {
     uint public constant SUPPLY = 100_000_000e18;
 
     constructor(
         address _receiver
     ) ERC20("Puppet", "PUPPET") EIP712("Puppet", "1") {
-        if (_receiver == address(0)) revert Error.PuppetToken__InvalidReceiver();
+        if (_receiver == address(0)) revert Error.Token__InvalidReceiver();
         _mint(_receiver, SUPPLY);
     }
 
