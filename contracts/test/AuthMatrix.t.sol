@@ -2124,7 +2124,7 @@ contract AuthMatrixTest is HotPathTest {
         _forged[0] = _coSig(attestorKey, _bodyDigest);
         _forged[1] = _coSig(backerKey, _bodyDigest);
         _forged[2] = _coSig(bodyKey, _bodyDigest);
-        _forged[3] = _sessionSig;
+        _forged[3] = _session(backerKey, _sessionKey, _now, _now + 1 days, 0, _bodyDigest);
         _forged[4] = _coSig(masterKey, AccountLib.creditDigest(_owner, body, HUB_CHAIN, _usdc, 100e6, FEE));
         _forged[5] =
             _coSig(masterKey, AccountLib.creditDigest(_owner, body, FOREIGN_CHAIN_ID, address(wnt), 100e6, FEE));
@@ -2141,12 +2141,12 @@ contract AuthMatrixTest is HotPathTest {
         address _relayer = makeAddr("fulfil-relayer");
         vm.recordLogs();
         vm.prank(_relayer);
-        spoke.fulfil(body, _usdc, 100e6, FEE, _bodySig, _noGenesis());
+        spoke.fulfil(body, _usdc, 100e6, FEE, _sessionSig, _noGenesis());
         Vm.Log[] memory _calls = _accountCalls(vm.getRecordedLogs());
         assertEq(
             usdc.balanceOf(body),
             _bodyCash + 100e6 - FEE,
-            "any relayer settles the owner's signed total into the body it names"
+            "any relayer settles the total the owner's session signed into the body it names"
         );
         assertEq(usdc.balanceOf(_twin), 50e6 - FEE, "in no other body of the same owner");
         assertEq(usdc.balanceOf(_relayer), 0, "nor in the relayer");

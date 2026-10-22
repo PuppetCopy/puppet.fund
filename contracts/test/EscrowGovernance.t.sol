@@ -2,6 +2,7 @@
 pragma solidity ^0.8.36;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {stdError} from "forge-std/src/StdError.sol";
 import {Vm} from "forge-std/src/Vm.sol";
 import {Base64} from "solady/utils/Base64.sol";
@@ -12,7 +13,7 @@ import {HubGate} from "src/HubGate.sol";
 import {SpokeGate} from "src/SpokeGate.sol";
 import {AccountModule} from "src/core/AccountModule.sol";
 import {EscrowStore} from "src/core/EscrowStore.sol";
-import {Fund} from "src/core/Fund.sol";
+import {Fund, VIRTUAL_VALUE} from "src/core/Fund.sol";
 import {FundAccount} from "src/core/FundAccount.sol";
 import {GRID_BYTES, GRID_SIDE, PALETTE_BYTES, ShareToken} from "src/core/ShareToken.sol";
 import {UserAccount} from "src/core/UserAccount.sol";
@@ -381,7 +382,7 @@ contract EscrowGovernanceTest is HotPathTest {
         );
     }
 
-    function test_an_abroad_credit_takes_only_the_owner_wallets_raw_signature_the_spoke_settles() public {
+    function test_an_abroad_credit_takes_any_consent_the_owners_account_approves_once_its_spoke_settled_it() public {
         _openFund();
         address _owner = _account(master);
         _walletEscrow(spoke, master, 300e6);
@@ -398,29 +399,38 @@ contract EscrowGovernanceTest is HotPathTest {
             AccountLib.creditDigest(_owner, body, FOREIGN_CHAIN_ID, address(usdc), _i.credit.total, _i.credit.feeTotal);
         bytes memory _session =
             abi.encode(_signer, _now, _now + 7 days, uint(0), body, _grant, _coSig(masterKey + 1, _digest));
+        bytes memory _ungranted =
+            abi.encode(_signer, _now, _now + 7 days, uint(0), body, _grant, _coSig(masterKey + 2, _digest));
         assertTrue(
             UserAccount(payable(_owner)).approves(_digest, _session),
             "the owner's account takes its session's signature as consent"
         );
+        assertFalse(
+            UserAccount(payable(_owner)).approves(_digest, _ungranted),
+            "but not a signature from a key its grant never named"
+        );
 
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        hub.allocate(_i, _sig, _session);
         vm.chainId(FOREIGN_CHAIN_ID);
         vm.expectRevert(Error.Account__InvalidSignature.selector);
+        spoke.fulfil(body, address(usdc), _i.credit.total, _i.credit.feeTotal, _ungranted, _noGenesis());
         spoke.fulfil(body, address(usdc), _i.credit.total, _i.credit.feeTotal, _session, _noGenesis());
         vm.chainId(HUB_CHAIN);
         assertEq(
-            fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total,
-            0,
-            "so the hub credits nothing abroad that the spoke would refuse to settle"
+            spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)),
+            100e6,
+            "the spoke settles the total the owner's session signed, before the hub credits anything"
         );
 
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        hub.allocate(_i, _sig, _ungranted);
         uint _shares = shareToken.balanceOf(body);
-        hub.allocate(_i, _sig, _ownerCoSig(_i));
-        assertGt(shareToken.balanceOf(body), _shares, "the wallet's own signature over the same total mints");
-        assertEq(fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total, 100e6, "and the hub keeps the total");
-        _fulfil(address(usdc), _i.credit.total, _i.credit.feeTotal);
-        assertEq(spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)), 100e6, "which the spoke settles");
+        hub.allocate(_i, _sig, _session);
+        assertGt(shareToken.balanceOf(body), _shares, "then the same session's consent mints for the settled total");
+        assertEq(
+            fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total,
+            100e6,
+            "and the hub keeps the total its spoke already settled"
+        );
 
         (Fund.AllocateIntent memory _local, bytes memory _localSig) =
             _allocateIntent(_nonceOf(body), _nav(), _credit(HUB_CHAIN, address(usdc), 100e6), new Fund.Allocation[](0));
@@ -435,11 +445,11 @@ contract EscrowGovernanceTest is HotPathTest {
         assertEq(
             hubEscrowStore.fulfilledMap(_owner, body, address(usdc)),
             600e6,
-            "a local credit takes any consent the account accepts, since the hub releases it at once"
+            "a local credit takes the same consent, since the hub releases it at once"
         );
     }
 
-    function test_a_contract_wallet_owner_credits_locally_but_never_abroad() public {
+    function test_a_contract_wallet_owner_credits_locally_and_abroad_by_its_own_verdict() public {
         MockWallet1271 _wallet = new MockWallet1271();
         master = address(_wallet);
         (body, bodyKey) = makeAddrAndKey("wallet-owned-body");
@@ -461,20 +471,33 @@ contract EscrowGovernanceTest is HotPathTest {
         );
         assertTrue(UserAccount(payable(_owner)).approves(_digest, _tagged), "plain or tagged");
 
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        hub.allocate(_i, _sig, _plain);
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        hub.allocate(_i, _sig, _tagged);
+        _wallet.set(1, fundStore, body, _owner);
         vm.chainId(FOREIGN_CHAIN_ID);
-        vm.expectRevert(Error.Account__InvalidSignature.selector);
-        spoke.fulfil(body, address(usdc), _i.credit.total, _i.credit.feeTotal, _plain, _noGenesis());
         vm.expectRevert(Error.Account__InvalidSignature.selector);
         spoke.fulfil(body, address(usdc), _i.credit.total, _i.credit.feeTotal, _tagged, _noGenesis());
         vm.chainId(HUB_CHAIN);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        hub.allocate(_i, _sig, _plain);
+        assertEq(
+            spokeEscrowStore.releasedMap(_owner, address(usdc)),
+            0,
+            "while the wallet refuses its own signature, nothing settles and nothing credits"
+        );
+
+        _wallet.set(0, fundStore, body, _owner);
+        vm.chainId(FOREIGN_CHAIN_ID);
+        spoke.fulfil(body, address(usdc), _i.credit.total, _i.credit.feeTotal, _tagged, _noGenesis());
+        vm.chainId(HUB_CHAIN);
+        assertEq(
+            spokeEscrowStore.fulfilledMap(_owner, body, address(usdc)),
+            100e6,
+            "once the wallet accepts, its spoke settles the total under the tagged signature"
+        );
+        hub.allocate(_i, _sig, _plain);
         assertEq(
             fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total,
-            0,
-            "the hub never credits escrow abroad that only a wallet's verdict could release"
+            100e6,
+            "and the hub credits that settled total under the plain one"
         );
 
         (Fund.AllocateIntent memory _local, bytes memory _localSig) =
@@ -483,11 +506,125 @@ contract EscrowGovernanceTest is HotPathTest {
         assertEq(
             hubEscrowStore.fulfilledMap(_owner, body, address(usdc)),
             600e6,
-            "while the hub releases a wallet-signed local credit at once"
+            "a wallet-signed local credit releases on the hub at once"
         );
         assertEq(
-            spokeEscrowStore.releasedMap(_owner, address(usdc)), 0, "and the spoke escrow stays the wallet's to return"
+            spokeEscrowStore.releasedMap(_owner, address(usdc)),
+            100e6,
+            "while the spoke escrow is drawn only by the abroad credit it settled"
         );
+    }
+
+    function test_an_abroad_credit_bills_the_fee_its_release_paid_and_mints_on_what_reached_the_fund() public {
+        _openFund();
+        address _owner = _account(master);
+        _walletEscrow(spoke, master, 300e6);
+        uint _extra = 3 * FEE;
+        uint _snapshot = vm.snapshotState();
+        vm.recordLogs();
+        uint _atSlice = _settleThenCredit(0);
+        (, bytes memory _sliceRecord) = _lastRecordOf(vm.getRecordedLogs(), body);
+        vm.revertToState(_snapshot);
+
+        uint _fees = usdc.balanceOf(feeReceiver);
+        uint _held = usdc.balanceOf(body);
+        vm.recordLogs();
+        uint _aboveSlice = _settleThenCredit(_extra);
+        (, bytes memory _record) = _lastRecordOf(vm.getRecordedLogs(), body);
+        assertEq(
+            usdc.balanceOf(feeReceiver),
+            _fees + FEE + _extra,
+            "the release paid the master's slice and the extra out of the escrow"
+        );
+        assertEq(
+            usdc.balanceOf(body), _held + 100e6 - FEE - _extra, "so the fund received the credit net of that whole fee"
+        );
+        assertEq(
+            spokeEscrowStore.feePaidMap(_owner, body, address(usdc)),
+            FEE + _extra,
+            "and the spoke's fee total names all of it"
+        );
+
+        (
+            ,
+            uint _valuation,
+            uint _supply,,
+            Fund.Price memory _price,
+            Fund.Credit memory _c,,
+            uint _minted,
+            uint _slice,,
+            uint _masterBilled
+        ) = abi.decode(_record, (bytes4, uint, uint, address, Fund.Price, Fund.Credit, bytes, uint, uint, uint, uint));
+        assertEq(_c.feeTotal, FEE + _extra, "the round credits the fee total its release paid");
+        assertEq(_masterBilled, FEE + _extra, "and bills the master the whole increment");
+        uint _nav = _valuation + VIRTUAL_VALUE;
+        uint _value = Math.mulDiv(100e6, _price.value, _price.amount);
+        assertEq(
+            _atSlice,
+            Math.mulDiv(_value - _slice, _supply, _nav),
+            "at exactly the slice, the master's shares price the credit less its slice"
+        );
+        assertEq(
+            _aboveSlice,
+            Math.mulDiv(_value - _slice - Math.mulDiv(_extra, _price.value, _price.amount), _supply, _nav),
+            "above it, they price only what reached the fund"
+        );
+        assertEq(_minted, _aboveSlice, "as the round recorded");
+        assertLt(_aboveSlice, _atSlice, "so a fee above the slice mints the master less, never the other holders");
+        (,,,,,,,,,, uint _sliceBilled) = abi.decode(
+            _sliceRecord, (bytes4, uint, uint, address, Fund.Price, Fund.Credit, bytes, uint, uint, uint, uint)
+        );
+        assertEq(_sliceBilled, FEE, "while the run at the slice billed only the slice");
+    }
+
+    function test_an_abroad_fee_total_bills_at_least_the_masters_slice_while_a_local_one_bills_exactly_it() public {
+        _openFund();
+        address _owner = _account(master);
+        _walletEscrow(spoke, master, 300e6);
+        _walletEscrow(hub, master, 100e6);
+        (Fund.AllocateIntent memory _i,) = _allocateIntent(
+            _nonceOf(body), _nav(), _credit(FOREIGN_CHAIN_ID, address(usdc), 100e6), new Fund.Allocation[](0)
+        );
+        uint _sliceTotal = _i.credit.feeTotal;
+        _i.credit.feeTotal = _sliceTotal - 1;
+        bytes memory _sig = _pair(masterKey, _allocateDigest(_i));
+        bytes memory _ownerSig = _ownerCoSig(_i);
+        vm.expectRevert(abi.encodeWithSelector(Error.Fund__CreditFeeMismatch.selector, _sliceTotal - 1, _sliceTotal));
+        hub.allocate(_i, _sig, _ownerSig);
+
+        (Fund.AllocateIntent memory _l,) =
+            _allocateIntent(_nonceOf(body), _nav(), _credit(HUB_CHAIN, address(usdc), 100e6), new Fund.Allocation[](0));
+        uint _localSlice = _l.credit.feeTotal;
+        _l.credit.feeTotal = _localSlice + 1;
+        _sig = _pair(masterKey, _allocateDigest(_l));
+        _ownerSig = _ownerCoSig(_l);
+        vm.expectRevert(abi.encodeWithSelector(Error.Fund__CreditFeeMismatch.selector, _localSlice + 1, _localSlice));
+        hub.allocate(_l, _sig, _ownerSig);
+        _l.credit.feeTotal = _localSlice;
+        _sig = _pair(masterKey, _allocateDigest(_l));
+        _ownerSig = _ownerCoSig(_l);
+        hub.allocate(_l, _sig, _ownerSig);
+        assertEq(
+            hubEscrowStore.feePaidMap(_owner, body, address(usdc)),
+            _localSlice,
+            "a local credit bills exactly the master's slice, since the hub releases it in the same round"
+        );
+    }
+
+    function _settleThenCredit(
+        uint _extra
+    ) internal returns (uint minted_) {
+        (Fund.AllocateIntent memory _i,) = _allocateIntent(
+            _nonceOf(body), _nav(), _credit(FOREIGN_CHAIN_ID, address(usdc), 100e6), new Fund.Allocation[](0)
+        );
+        _i.credit.feeTotal += _extra;
+        bytes memory _ownerSig = _ownerCoSig(_i);
+        vm.chainId(FOREIGN_CHAIN_ID);
+        spoke.fulfil(body, address(usdc), _i.credit.total, _i.credit.feeTotal, _ownerSig, _noGenesis());
+        vm.chainId(HUB_CHAIN);
+        uint _before = shareToken.balanceOf(body);
+        hub.allocate(_i, _pair(masterKey, _allocateDigest(_i)), _ownerSig);
+        minted_ = shareToken.balanceOf(body) - _before;
     }
 
     function test_anyone_settles_the_total_the_hub_published_but_only_under_the_chain_id_it_names() public {

@@ -7,7 +7,6 @@ import {CallLib} from "./utils/CallLib.sol";
 import {BalanceLib} from "./utils/BalanceLib.sol";
 import {Error} from "./utils/Error.sol";
 import {AccountLib} from "./utils/AccountLib.sol";
-import {ECDSA} from "solady/utils/ECDSA.sol";
 
 import {AccountModule} from "./core/AccountModule.sol";
 import {EscrowStore} from "./core/EscrowStore.sol";
@@ -52,9 +51,7 @@ contract SpokeGate is LiquidityGate {
         }
         if (_module != address(accountModule)) revert Error.Account__HeaderMismatch(_body);
         bytes32 _digest = AccountLib.creditDigest(_owner, _body, block.chainid, _token, _total, _feeTotal);
-        if (ECDSA.tryRecoverCalldata(_digest, _ownerSignature) != UserAccount(payable(_owner)).user()) {
-            revert Error.Account__InvalidSignature();
-        }
+        if (!UserAccount(payable(_owner)).approves(_digest, _ownerSignature)) revert Error.Account__InvalidSignature();
         escrowStore.release(_owner, _body, _token, _total, _feeTotal, feeReceiver, transferGasLimit);
         accountModule.record(_body, _digest, abi.encode(msg.sig, _token, _total, _feeTotal), BalanceLib.list(_token));
     }

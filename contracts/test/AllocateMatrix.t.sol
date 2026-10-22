@@ -2227,7 +2227,9 @@ contract AllocateMatrixTest is HotPathTest {
         hub.allocate(_i, _sig, _ownerSig);
     }
 
-    function test_a_session_signs_a_local_credit_while_an_abroad_credit_needs_the_owners_own_key() public {
+    function test_a_session_the_owner_granted_signs_local_and_abroad_credits_and_a_strangers_session_signs_neither()
+        public
+    {
         _openFund();
         address _owner = _account(master);
         _escrowOnHub(address(usdc), 100e6);
@@ -2235,6 +2237,9 @@ contract AllocateMatrixTest is HotPathTest {
 
         (Fund.AllocateIntent memory _i, bytes memory _sig) =
             _round(_usdcPrice(), _credit(block.chainid, address(usdc), 100e6), new Fund.Allocation[](0));
+        bytes memory _stranger = _strangerSessionCredit(_issuedAt, _i);
+        vm.expectRevert(Error.Account__InvalidSignature.selector);
+        hub.allocate(_i, _sig, _stranger);
         hub.allocate(_i, _sig, _sessionCredit(0, _issuedAt, _i));
         assertEq(
             hubEscrowStore.fulfilledMap(_owner, body, address(usdc)),
@@ -2243,14 +2248,14 @@ contract AllocateMatrixTest is HotPathTest {
         );
 
         (_i, _sig) = _round(_usdcPrice(), _credit(FOREIGN_CHAIN_ID, address(usdc), 100e6), new Fund.Allocation[](0));
-        bytes memory _session = _sessionCredit(0, _issuedAt, _i);
+        _stranger = _strangerSessionCredit(_issuedAt, _i);
         vm.expectRevert(Error.Account__InvalidSignature.selector);
-        hub.allocate(_i, _sig, _session);
-        hub.allocate(_i, _sig, _ownerCoSig(_i));
+        hub.allocate(_i, _sig, _stranger);
+        hub.allocate(_i, _sig, _sessionCredit(0, _issuedAt, _i));
         assertEq(
             fundStore.getCredit(body, FOREIGN_CHAIN_ID, address(usdc)).total,
             100e6,
-            "an abroad credit lands only under the owner's own key, the one the spoke checks"
+            "an abroad credit lands under the same session, since its spoke settles it before the hub credits it"
         );
     }
 
@@ -2315,6 +2320,32 @@ contract AllocateMatrixTest is HotPathTest {
         MandateLib.Mandate[] calldata _list
     ) external view returns (bytes memory) {
         return abi.encode(HubGate.mandate.selector, uint(0), _list, address(usdc), FEE);
+    }
+
+    function _strangerSessionCredit(
+        uint _issuedAt,
+        Fund.AllocateIntent memory _i
+    ) internal view returns (bytes memory) {
+        address _signer = vm.addr(backerKey + 1);
+        return abi.encode(
+            _signer,
+            _issuedAt,
+            _issuedAt + 1 days,
+            uint(0),
+            body,
+            _coSig(
+                backerKey,
+                AccountLib.sessionDigest(
+                    address(accountModule), backer, _signer, _issuedAt, _issuedAt + 1 days, 0, body
+                )
+            ),
+            _coSig(
+                backerKey + 1,
+                AccountLib.creditDigest(
+                    _ownerAccount(), body, _i.credit.chainId, _i.credit.token, _i.credit.total, _i.credit.feeTotal
+                )
+            )
+        );
     }
 
     function _sessionCredit(

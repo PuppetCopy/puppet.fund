@@ -3,7 +3,6 @@ pragma solidity ^0.8.36;
 
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
-import {ECDSA} from "solady/utils/ECDSA.sol";
 
 import {Access} from "../utils/auth/Access.sol";
 import {AccountLib} from "../utils/AccountLib.sol";
@@ -152,19 +151,18 @@ contract Fund is Access {
                 : fundStore.getCredit(_master, _credit.chainId, _credit.token);
             if (_credit.total <= _credited.total) revert Error.Fund__CreditNotIncreasing(_credited.total, _credit.total);
             uint _amount = _credit.total - _credited.total;
-            _masterBilled = Math.mulDiv(_slice, _price.amount, _price.value);
-            if (_credit.feeTotal != _credited.feeTotal + _masterBilled) {
-                revert Error.Fund__CreditFeeMismatch(_credit.feeTotal, _credited.feeTotal + _masterBilled);
-            }
+            uint _masterSlice = Math.mulDiv(_slice, _price.amount, _price.value);
+            if (
+                _local
+                    ? _credit.feeTotal != _credited.feeTotal + _masterSlice
+                    : _credit.feeTotal < _credited.feeTotal + _masterSlice
+            ) revert Error.Fund__CreditFeeMismatch(_credit.feeTotal, _credited.feeTotal + _masterSlice);
+            _masterBilled = _credit.feeTotal - _credited.feeTotal;
             IntentLib.verifyRelayFeeRatio(_masterBilled, _amount, _config.maxRelayFeeBps);
             bytes32 _digest = AccountLib.creditDigest(
                 _owner, _master, _credit.chainId, _credit.token, _credit.total, _credit.feeTotal
             );
-            if (
-                _local
-                    ? !UserAccount(payable(_owner)).approves(_digest, _ownerSignature)
-                    : ECDSA.tryRecoverCalldata(_digest, _ownerSignature) != UserAccount(payable(_owner)).user()
-            ) revert Error.Account__InvalidSignature();
+            if (!UserAccount(payable(_owner)).approves(_digest, _ownerSignature)) revert Error.Account__InvalidSignature();
             accountModule.record(_owner, _digest, abi.encode(msg.sig, _master, _credit), new address[](0));
             if (_local) {
                 escrowStore.release(
@@ -181,7 +179,12 @@ contract Fund is Access {
                     _master, _credit.chainId, _credit.token, FundStore.Credit({total: _credit.total, feeTotal: _credit.feeTotal})
                 );
             }
-            _minted += Math.mulDiv(Math.mulDiv(_amount, _price.value, _price.amount) - _slice, _supply + _existing, _nav);
+            _minted += Math.mulDiv(
+                Math.mulDiv(_amount, _price.value, _price.amount) - _slice
+                    - Math.mulDiv(_masterBilled - _masterSlice, _price.value, _price.amount),
+                _supply + _existing,
+                _nav
+            );
         }
         if (_minted > 0) {
             _legs[_n++] = IAccount.Call({
