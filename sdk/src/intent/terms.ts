@@ -1,38 +1,72 @@
-import { accountmoduleAbi, escrowstoreAbi, fundaccountAbi, fundstoreAbi, mandatestoreAbi, shareAbi, useraccountAbi } from '@puppet/contracts/abi'
-import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
+import { accountmoduleAbi, escrowstoreAbi, fundaccountAbi, fundstoreAbi, hubgateAbi, mandatestoreAbi, sharetokenAbi, useraccountAbi } from '@puppet/contracts/abi'
+import { HUB_CANONICAL_TOKEN, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
 import type {
-  IAccountLib__Mandate,
   IFund__Allocation,
   IFund__Asset,
   IFund__Position,
+  IFund__Price,
   IFund__Valuation,
+  IFundStore__Credit,
   IFundStore__Holding,
-  IFundStore__Position,
-  IFundStore__Queue
+  IFundStore__Redemption,
+  IMandateLib__Mandate
 } from '@puppet/contracts/types'
-import { type Address, erc20Abi, getAddress, type Hex, isAddressEqual, keccak256, type PublicClient, parseAbi, parseAbiItem, toHex, } from 'viem'
-import { accountModuleAddress } from '../account/createAccount.js'
-import { composeAllocation } from '../allocation/index.js'
+import {
+  type Address,
+  decodeFunctionData,
+  erc20Abi,
+  getAddress,
+  type Hex,
+  isAddressEqual,
+  keccak256,
+  type PublicClient,
+  parseAbi,
+  parseAbiItem,
+  type SignedAuthorization,
+  toHex
+} from 'viem'
+import { accountModuleAddress, predictUserAccount } from '../account/createAccount.js'
+import { composeAllocation, cooledDown } from '../allocation/index.js'
 import { CompactError, formatThrownError } from '../compact/error.js'
-import { CHAIN_ID_LIST, type ChainId, deploymentAddress } from '../const/index.js'
+import { PRECISION } from '../const/common.js'
+import { CHAIN_ID_LIST, type ChainId, deploymentAddress, TOKEN_META } from '../const/index.js'
 import type { IDigestClient } from '../datastore/index.js'
-import { evaluateFundAt, type IGetRate, type IRate, VALUE_KEY } from '../evaluate/index.js'
-import { cashFor, floorOf, unitsFor } from '../pool/index.js'
-import { accountTable, type IMandateRow, type ITransitRow, mandateTable, transitTable } from '../schema/index.js'
-import { bondTokenOf, type ITokenRegistryMap, registeredTokenAddresses, symbolOf, symbolOfKey } from '../state/tokenRegistry.js'
+import { evaluateFundAt, type IGetRate, type IRate } from '../evaluate/index.js'
+import { exitingOf, sharesFor, valueFor } from '../pool/index.js'
+import {
+  accountTable,
+  allowanceTable,
+  balanceTable,
+  creditTable,
+  fulfilTable,
+  fundTable,
+  holdingTable,
+  type IAccountRow,
+  type ICreditRow,
+  type IFulfilRow,
+  type IFundRow,
+  type IHoldingRow,
+  type IMandateRow,
+  type IRedemptionRow,
+  type ITransitRow,
+  mandateTable,
+  ownerCreditTable,
+  redemptionTable,
+  transitTable,
+  venueTable
+} from '../schema/index.js'
+import { feeConverter, RELAY_RATE_MAX_STALE_MS, relayFeeOf } from '../state/fee.js'
+import { chainTokenOfKey, listedTokensOf, symbolOf, tokenKeyOf } from '../state/tokenRegistry.js'
 import { VENUES } from '../venue/venues.js'
 import { acrossSpokePoolOf } from './route/acrossDeposit.js'
 import { mandateDigest, mandateOfRow } from './shared.js'
-
-const COHORT_MIN_STAKE = 1_000_000n
+import { assetKey, positionKey } from './valuation.js'
 
 const HUB = HUB_CHAIN_ID as ChainId
-const VALUE_SYMBOL = symbolOfKey(VALUE_KEY)
 const ACROSS_VENUE = keccak256(toHex('across'))
-const VENUE_BOOK_DUST = 10_000n
-const ACROSS_FILLED = 2n
+export const ACROSS_FILLED = 2n
 const REFUND_LOG_WINDOW = 5_000n
-const SPOKE_POOL_ABI = parseAbi([
+export const SPOKE_POOL_ABI = parseAbi([
   'function fillStatuses(bytes32 relayHash) view returns (uint256)',
   'function getRelayerRefund(address l2TokenAddress, address refundAddress) view returns (uint256)'
 ])
@@ -44,7 +78,6 @@ export interface ITermsDeps {
   chronicle: IDigestClient
   clients: Readonly<Record<number, PublicClient>>
   getRate: IGetRate
-  getTokenRegistry: () => Promise<ITokenRegistryMap>
 }
 
 const fromChronicle = <T>(what: string, read: Promise<T>): Promise<T> =>
@@ -63,49 +96,174 @@ export function clientOf(deps: Pick<ITermsDeps, 'clients'>, chainId: ChainId): P
   return client
 }
 
-const mandateOf = (row: IMandateRow): IAccountLib__Mandate => ({ ...mandateOfRow(row), master: getAddress(row.master) })
+const mandateOf = (row: IMandateRow): IMandateLib__Mandate => ({ ...mandateOfRow(row), master: getAddress(row.master) })
 
-async function readMandates(chronicle: IDigestClient, master: Address): Promise<Map<Address, IMandateRow>> {
-  const rows = await fromChronicle(`mandates naming ${master}`, chronicle.select(mandateTable, { where: { master } }))
-  return new Map(rows.map(r => [getAddress(r.puppet), r]))
+export interface IFundBook {
+  master: Address
+  mandates: IMandateRow[]
+  epochs: ReadonlyMap<Address, bigint>
+  holdings: IHoldingRow[]
+  redemption: IRedemptionRow | undefined
+}
+
+export async function readFundBook(deps: Pick<ITermsDeps, 'chronicle'>, master: Address): Promise<IFundBook> {
+  const [mandates, holdings, [redemption]] = await Promise.all([
+    fromChronicle(`mandates naming ${master}`, deps.chronicle.select(mandateTable, { where: { master } })),
+    fromChronicle(`the holders of ${master}`, deps.chronicle.select(holdingTable, { where: { master }, orderBy: { col: 'shares', dir: 'desc' } })),
+    fromChronicle(`the redemption of ${master}`, deps.chronicle.select(redemptionTable, { where: { master } }))
+  ])
+  const puppets = [...new Set(mandates.map(row => getAddress(row.puppet)))]
+  const accounts = puppets.length === 0 ? [] : await fromChronicle(`the accounts mandating ${master}`, deps.chronicle.select(accountTable, { where: { account: { in: puppets } } }))
+  const epochs = new Map(accounts.filter(row => Number(row.chainId) === HUB).map(row => [getAddress(row.account), row.epoch] as const))
+  return { master: getAddress(master), mandates, epochs, holdings, redemption }
+}
+
+export const exitingSharesOf = (book: { holdings: readonly Pick<IHoldingRow, 'holder' | 'queued'>[] }, holder: Address): bigint => {
+  const holding = book.holdings.find(row => isAddressEqual(row.holder, holder))
+  return holding === undefined ? 0n : holding.queued
+}
+
+export type IMandateStanding = { kind: 'open' } | { kind: 'revoked' } | { kind: 'expired'; at: bigint } | { kind: 'cooldown'; until: bigint }
+
+export function mandateStandingOf(
+  row: Pick<IMandated, 'mandate'> & Pick<IMandateRow, 'epoch'>,
+  epoch: bigint,
+  holding: Pick<IHoldingRow, 'allocatedAt'> | undefined,
+  at: bigint
+): IMandateStanding {
+  if (row.epoch !== epoch) return { kind: 'revoked' }
+  if (row.mandate.expiry <= at) return { kind: 'expired', at: row.mandate.expiry }
+  if (holding === undefined) return { kind: 'open' }
+  if (!cooledDown(holding.allocatedAt, row.mandate.cooldownPeriod, at)) return { kind: 'cooldown', until: holding.allocatedAt + row.mandate.cooldownPeriod }
+  return { kind: 'open' }
+}
+
+export async function readMandateWindow(
+  deps: ITermsDeps,
+  { master, mandates, epochs, holdings, redemption }: Pick<IFundBook, 'master' | 'mandates' | 'epochs' | 'holdings' | 'redemption'>,
+  tokens: readonly Address[],
+  block: { number: bigint; timestamp: bigint }
+): Promise<IMandated[][]> {
+  const holdingOf = new Map(holdings.map(row => [getAddress(row.holder), row]))
+  const open = mandates
+    .filter(row => {
+      const puppet = getAddress(row.puppet)
+      const epoch = epochs.get(puppet)
+      if (epoch === undefined) {
+        throw new CompactError('ACCOUNT_UNRECORDED', `the chronicle holds a mandate from ${puppet} to ${master} but not ${puppet}'s hub account`, 'soft')
+      }
+      return mandateStandingOf({ mandate: mandateOf(row), epoch: row.epoch }, epoch, holdingOf.get(puppet), block.timestamp).kind === 'open'
+    })
+    .map(row => ({ puppet: getAddress(row.puppet), mandate: mandateOf(row) }))
+  if (open.length <= Number(PROTOCOL.maxCohortSize)) return tokens.map(() => open)
+  const masterHolding = holdingOf.get(getAddress(master))
+  const masterShares = masterHolding === undefined ? 0n : masterHolding.shares
+  const exiting = exitingOf(redemption === undefined ? 0n : redemption.queued, holdings.reduce((total, row) => total + row.shares, 0n))
+  return Promise.all(
+    tokens.map(async token => {
+      const balances = await fromChain(
+        `the ${token} balances of the puppets mandating ${master} at block ${block.number}`,
+        HUB,
+        clientOf(deps, HUB).multicall({
+          allowFailure: false,
+          blockNumber: block.number,
+          contracts: open.map(row => ({ address: token, abi: erc20Abi, functionName: 'balanceOf' as const, args: [row.puppet] as const }))
+        })
+      )
+      return open
+        .map((row, i) => {
+          const holding = holdingOf.get(row.puppet)
+          const capped =
+            row.mandate.exitCap <= exiting || (row.mandate.skin > 0n && masterShares * row.mandate.skin <= (holding === undefined ? 0n : holding.shares) * PRECISION.basisPoints)
+          return { row, capped, room: balances[i]! * row.mandate.allocationRate }
+        })
+        .sort((a, b) =>
+          a.capped !== b.capped
+            ? a.capped
+              ? 1
+              : -1
+            : a.room > b.room
+              ? -1
+              : a.room < b.room
+                ? 1
+                : BigInt(a.row.puppet) < BigInt(b.row.puppet)
+                  ? -1
+                  : 1
+        )
+        .slice(0, Number(PROTOCOL.maxCohortSize))
+        .map(ranked => ranked.row)
+    })
+  )
 }
 
 export interface IFundState {
-  skin: bigint
-  queue: IFundStore__Queue
-  share: Address
+  shareToken: Address
+  performanceFee: bigint
+  owner: Address
   supply: bigint
-  queued: bigint
-  masterUnits: bigint
+  masterShares: bigint
+  redemption: IFundStore__Redemption
 }
 
-export async function readFundState(deps: Pick<ITermsDeps, 'clients'>, master: Address, share: Address): Promise<IFundState> {
-  const address = deploymentAddress('FundStore', HUB)
+export async function readFundState(
+  deps: Pick<ITermsDeps, 'clients'>,
+  fund: Pick<IFundRow, 'master' | 'shareToken' | 'performanceFee'>,
+  blockNumber: bigint
+): Promise<IFundState> {
+  const master = getAddress(fund.master)
+  const shareToken = getAddress(fund.shareToken)
+  const [supply, masterShares, redemption, owner] = await fromChain(
+    `the fund of ${master} at block ${blockNumber}`,
+    HUB,
+    clientOf(deps, HUB).multicall({
+      allowFailure: false,
+      blockNumber,
+      contracts: [
+        { address: shareToken, abi: sharetokenAbi, functionName: 'totalSupply' },
+        { address: shareToken, abi: sharetokenAbi, functionName: 'balanceOf', args: [master] },
+        { address: deploymentAddress('FundStore', HUB), abi: fundstoreAbi, functionName: 'getRedemption', args: [master] },
+        { address: master, abi: fundaccountAbi, functionName: 'parent' }
+      ]
+    })
+  )
+  return { shareToken, performanceFee: fund.performanceFee, owner: getAddress(owner), supply, masterShares, redemption }
+}
+
+export interface IHolderState {
+  balance: bigint
+  holding: IFundStore__Holding
+}
+
+export async function readHolderStates(
+  deps: Pick<ITermsDeps, 'clients'>,
+  master: Address,
+  shareToken: Address,
+  holders: readonly Address[],
+  blockNumber: bigint
+): Promise<Map<Address, IHolderState>> {
   const client = clientOf(deps, HUB)
-  const [skin, queue] = await fromChain(
-    `the fund of ${master}`,
+  const [balances, holdings] = await fromChain(
+    `the holders of ${master} at block ${blockNumber}`,
     HUB,
-    client.multicall({
-      allowFailure: false,
-      contracts: [
-        { address, abi: fundstoreAbi, functionName: 'skinMap', args: [master] },
-        { address, abi: fundstoreAbi, functionName: 'getQueue', args: [master] }
-      ]
-    })
+    Promise.all([
+      client.multicall({
+        allowFailure: false,
+        blockNumber,
+        contracts: holders.map(holder => ({ address: shareToken, abi: sharetokenAbi, functionName: 'balanceOf' as const, args: [holder] as const }))
+      }),
+      client.multicall({
+        allowFailure: false,
+        blockNumber,
+        contracts: holders.map(holder => ({
+          address: deploymentAddress('FundStore', HUB),
+          abi: fundstoreAbi,
+          functionName: 'getHolding' as const,
+          args: [master, holder] as const
+        }))
+      })
+    ])
   )
-  const [supply, queued, masterUnits] = await fromChain(
-    `the units of ${master}`,
-    HUB,
-    client.multicall({
-      allowFailure: false,
-      contracts: [
-        { address: share, abi: shareAbi, functionName: 'totalSupply' },
-        { address: share, abi: shareAbi, functionName: 'balanceOf', args: [address] },
-        { address: share, abi: shareAbi, functionName: 'balanceOf', args: [master] }
-      ]
-    })
-  )
-  return { skin, queue, share, supply, queued, masterUnits }
+  return new Map(holders.map((holder, i) => [getAddress(holder), { balance: balances[i]!, holding: holdings[i]! }] as const))
 }
 
 export async function readBoundParent(deps: Pick<ITermsDeps, 'clients'>, chainId: ChainId, master: Address): Promise<Address | null> {
@@ -120,78 +278,125 @@ export async function readBoundParent(deps: Pick<ITermsDeps, 'clients'>, chainId
   return isAddressEqual(module, accountModuleAddress()) ? getAddress(parent) : null
 }
 
-export interface IEscrowCredit {
-  escrowed: bigint
-  credited: bigint
-  fulfilled: bigint
-  hubShutdown: boolean
-  chainShutdown: boolean
+export async function readOpening(
+  deps: Pick<ITermsDeps, 'clients'>,
+  master: Address,
+  opening: Hex
+): Promise<{ user: Address; key: Hex; approval: Hex; authorizationList: readonly SignedAuthorization[] }> {
+  const tx = await fromChain(`the opening of ${master}`, HUB, clientOf(deps, HUB).getTransaction({ hash: opening }))
+  const { functionName, args } = decodeFunctionData({ abi: hubgateAbi, data: tx.input })
+  if (functionName !== 'createFund') throw new CompactError('FUND_UNRECORDED', `${master} opened in ${opening}, which is not a createFund`, 'server')
+  return { user: getAddress(args[4].header.user), key: args[2], approval: args[3], authorizationList: tx.authorizationList ?? [] }
 }
 
-export const creditableOf = (credit: IEscrowCredit): bigint =>
-  credit.escrowed - (credit.credited > credit.fulfilled ? credit.credited : credit.fulfilled)
+export async function requireFolded(deps: Pick<ITermsDeps, 'clients' | 'chronicle'>, chainId: ChainId, account: Address): Promise<void> {
+  await requireFoldedOn(deps, account, await fromChronicle(`the account of ${account}`, deps.chronicle.select(accountTable, { where: { account } })), [chainId])
+}
+
+export async function requireFoldedOn(
+  deps: Pick<ITermsDeps, 'clients'>,
+  account: Address,
+  rows: readonly Pick<IAccountRow, 'chainId' | 'lastBlock'>[],
+  chainIds: readonly ChainId[]
+): Promise<void> {
+  await Promise.all(
+    chainIds.map(async chainId => {
+      const [tip] = await fromChain(
+        `the last call block of ${account}`,
+        chainId,
+        clientOf(deps, chainId).readContract({ address: deploymentAddress('AccountModule', chainId), abi: accountmoduleAbi, functionName: 'accountTipMap', args: [account] })
+      )
+      const folded = rows.find(row => Number(row.chainId) === chainId)
+      if ((folded === undefined ? 0n : BigInt(folded.lastBlock)) < tip) {
+        throw new CompactError(
+          'CHRONICLE_BEHIND',
+          `the chronicle folded ${account} on chain ${chainId} up to block ${folded?.lastBlock ?? 0} while the AccountModule records a call at block ${tip}; retry once it catches up`,
+          'soft'
+        )
+      }
+    })
+  )
+}
+
+export interface IEscrowCredit {
+  escrowed: bigint
+  released: bigint
+  returned: bigint
+  returnAt: bigint
+  ownerCredited: bigint
+}
+
+export const openEscrowOf = (credit: Pick<IEscrowCredit, 'escrowed' | 'released' | 'returned'>): bigint => credit.escrowed - credit.released - credit.returned
+
+export const creditableOf = (credit: Pick<IEscrowCredit, 'escrowed' | 'released' | 'returned' | 'ownerCredited'>): bigint => {
+  const held = credit.escrowed - credit.returned
+  const committed = credit.ownerCredited > credit.released ? credit.ownerCredited : credit.released
+  return held > committed ? held - committed : 0n
+}
+
+export const uncreditedOf = (
+  fulfils: readonly Pick<IFulfilRow, 'owner' | 'master' | 'chainId' | 'token' | 'fulfilled' | 'feeBilled'>[],
+  credits: readonly Pick<ICreditRow, 'creditChainId' | 'token' | 'credited' | 'feeOwed'>[]
+): { chainId: ChainId; token: Address; amount: bigint }[] =>
+  fulfils.flatMap(fulfil => {
+    if (Number(fulfil.chainId) === HUB || isAddressEqual(fulfil.owner, fulfil.master)) return []
+    const credit = credits.find(row => row.creditChainId === fulfil.chainId && isAddressEqual(row.token, fulfil.token))
+    const amount = fulfil.fulfilled - fulfil.feeBilled - (credit === undefined ? 0n : credit.credited - credit.feeOwed)
+    return amount > 0n ? [{ chainId: Number(fulfil.chainId) as ChainId, token: getAddress(fulfil.token), amount }] : []
+  })
 
 export async function readEscrowCredit(
-  deps: Pick<ITermsDeps, 'clients'>,
-  parent: Address,
-  master: Address,
+  deps: Pick<ITermsDeps, 'clients' | 'chronicle'>,
+  owner: Address,
   chainId: ChainId,
   token: Address
 ): Promise<IEscrowCredit> {
   const store = deploymentAddress('EscrowStore', chainId)
-  const [[escrowed, fulfilled, chainShutdown], [credited, hubShutdown]] = await Promise.all([
+  await requireFolded(deps, HUB, owner)
+  const [[escrowed, released, returned, returnAt], credits] = await Promise.all([
     fromChain(
-      `the ${token} escrow of ${master}`,
+      `the ${token} escrow of ${owner}`,
       chainId,
       clientOf(deps, chainId).multicall({
         allowFailure: false,
         contracts: [
-          { address: store, abi: escrowstoreAbi, functionName: 'escrowedMap', args: [parent, master, token] },
-          { address: store, abi: escrowstoreAbi, functionName: 'fulfilledMap', args: [parent, master, token] },
-          { address: store, abi: escrowstoreAbi, functionName: 'shutdown' }
+          { address: store, abi: escrowstoreAbi, functionName: 'escrowedMap', args: [owner, token] },
+          { address: store, abi: escrowstoreAbi, functionName: 'releasedMap', args: [owner, token] },
+          { address: store, abi: escrowstoreAbi, functionName: 'returnedMap', args: [owner, token] },
+          { address: store, abi: escrowstoreAbi, functionName: 'returnAtMap', args: [owner, token] }
         ]
       })
     ),
-    fromChain(
-      `the credit of ${master} on chain ${chainId}`,
-      HUB,
-      clientOf(deps, HUB).multicall({
-        allowFailure: false,
-        contracts: [
-          { address: deploymentAddress('FundStore', HUB), abi: fundstoreAbi, functionName: 'creditedMap', args: [master, BigInt(chainId), token] },
-          { address: deploymentAddress('EscrowStore', HUB), abi: escrowstoreAbi, functionName: 'shutdown' }
-        ]
-      })
-    )
+    fromChronicle(`the credits ${owner} signed`, deps.chronicle.select(ownerCreditTable, { where: { owner: getAddress(owner) } }))
   ])
-  return { escrowed, credited, fulfilled, hubShutdown, chainShutdown }
+  const signed = credits.find(row => Number(row.chainId) === chainId && isAddressEqual(row.token, token))
+  return { escrowed, released, returned, returnAt, ownerCredited: signed === undefined ? 0n : signed.credited }
 }
 
-export async function readPoolPosition(
-  deps: Pick<ITermsDeps, 'clients'>,
-  master: Address,
-  holder: Address
-): Promise<{ holding: IFundStore__Holding; position: IFundStore__Position; queue: IFundStore__Queue; closedAccrued: bigint }> {
-  const address = deploymentAddress('FundStore', HUB)
-  const client = clientOf(deps, HUB)
-  const [holding, position, queue] = await fromChain(
-    `the holding of ${holder} in the fund of ${master}`,
-    HUB,
-    client.multicall({
+export function readCreditBook(deps: Pick<ITermsDeps, 'clients'>, owner: Address, master: Address, chainId: ChainId, token: Address): Promise<IFundStore__Credit> {
+  if (chainId !== HUB) {
+    return fromChain(
+      `the ${token} credit of ${master} on chain ${chainId}`,
+      HUB,
+      clientOf(deps, HUB).readContract({ address: deploymentAddress('FundStore', HUB), abi: fundstoreAbi, functionName: 'getCredit', args: [master, BigInt(chainId), token] })
+    )
+  }
+  return readReleased(deps, owner, master, HUB, token)
+}
+
+export function readReleased(deps: Pick<ITermsDeps, 'clients'>, owner: Address, master: Address, chainId: ChainId, token: Address): Promise<IFundStore__Credit> {
+  const store = deploymentAddress('EscrowStore', chainId)
+  return fromChain(
+    `the ${token} ${owner} released to ${master} on chain ${chainId}`,
+    chainId,
+    clientOf(deps, chainId).multicall({
       allowFailure: false,
       contracts: [
-        { address, abi: fundstoreAbi, functionName: 'getHolding', args: [master, holder] },
-        { address, abi: fundstoreAbi, functionName: 'getPosition', args: [master, holder] },
-        { address, abi: fundstoreAbi, functionName: 'getQueue', args: [master] }
+        { address: store, abi: escrowstoreAbi, functionName: 'fulfilledMap', args: [owner, master, token] },
+        { address: store, abi: escrowstoreAbi, functionName: 'feePaidMap', args: [owner, master, token] }
       ]
     })
-  )
-  const closedAccrued = await fromChain(
-    `closed accrual of ${master} epoch ${position.epoch}`,
-    HUB,
-    client.readContract({ address, abi: fundstoreAbi, functionName: 'closedAccruedMap', args: [master, position.epoch] })
-  )
-  return { holding, position, queue, closedAccrued }
+  ).then(([total, feeTotal]) => ({ total, feeTotal }))
 }
 
 type IPinnedBlocks = ReadonlyMap<ChainId, { number: bigint; timestamp: bigint }>
@@ -213,7 +418,11 @@ const pinnedOf = (blocks: IPinnedBlocks, chainId: number | bigint): { number: bi
   return block
 }
 
-export async function readTransits(deps: Pick<ITermsDeps, 'clients' | 'chronicle'>, master: Address, blocks: IPinnedBlocks): Promise<ITransit[]> {
+export async function readTransits(
+  deps: Pick<ITermsDeps, 'clients' | 'chronicle'>,
+  master: Address,
+  blocks: IPinnedBlocks
+): Promise<{ reached: ReadonlySet<ChainId>; transits: ITransit[] }> {
   const account = getAddress(master)
   const [heads, folded, rows] = await Promise.all([
     Promise.all(
@@ -224,11 +433,11 @@ export async function readTransits(deps: Pick<ITermsDeps, 'clients' | 'chronicle
           clientOf(deps, chainId).readContract({
             address: deploymentAddress('AccountModule', chainId),
             abi: accountmoduleAbi,
-            functionName: 'accountBlockMap',
+            functionName: 'accountTipMap',
             args: [account],
             blockNumber: block.number
           })
-        ).then(head => [chainId, head] as const)
+        ).then(([head]) => [chainId, head] as const)
       )
     ),
     fromChronicle(`bodies of ${account}`, deps.chronicle.select(accountTable, { where: { account } })),
@@ -255,13 +464,14 @@ export async function readTransits(deps: Pick<ITermsDeps, 'clients' | 'chronicle
       )
     }
   }
+  const reached = new Set<ChainId>([...heads.filter(([, head]) => head > 0n).map(([chainId]) => chainId), ...rows.map(row => Number(row.destinationChainId) as ChainId)])
   const latest = new Map<bigint, ITransitRow>()
   for (const row of rows) {
     if (BigInt(row.block) > pinnedOf(blocks, row.chainId).number) continue
     const held = latest.get(row.chainId)
     if (held === undefined || row.block > held.block || (row.block === held.block && row.logIndex > held.logIndex)) latest.set(row.chainId, row)
   }
-  return Promise.all(
+  const transits = await Promise.all(
     [...latest.values()].map(async (row): Promise<ITransit> => {
       const originChainId = Number(row.chainId) as ChainId
       const destinationChainId = Number(row.destinationChainId) as ChainId
@@ -306,6 +516,19 @@ export async function readTransits(deps: Pick<ITermsDeps, 'clients' | 'chronicle
       return { row, kind: 'expired', fillStatus, refunded, deferred, owed }
     })
   )
+  return { reached, transits }
+}
+
+export async function assertNoOpenTransit(deps: Pick<ITermsDeps, 'clients' | 'chronicle'>, account: Address): Promise<void> {
+  const { transits } = await readTransits(deps, account, await pinBlocks(deps))
+  const open = transits.filter(transit => transit.kind === 'fillable' || (transit.kind === 'expired' && transit.owed > 0n))
+  if (open.length > 0) {
+    throw new CompactError(
+      'TRANSIT_OPEN',
+      `a bridge from fund ${account} is still settling (${open.map(transit => transit.kind).join(', ')}); a new bridge waits until it fills or is refunded`,
+      'soft'
+    )
+  }
 }
 
 interface IValuationRates {
@@ -313,11 +536,12 @@ interface IValuationRates {
   rates: readonly { chainId: ChainId; token: Address; rate: IRate }[]
 }
 
-export async function valuationRatesOf(getRate: IGetRate, tokens: readonly { chainId: ChainId; token: Address }[]): Promise<IValuationRates> {
+export async function valuationRatesOf(getRate: IGetRate, tokens: readonly { chainId: ChainId; token: Address }[], freshness: number): Promise<IValuationRates> {
   const rates = await Promise.all(
     tokens.map(async ({ chainId, token }) => {
       const symbol = symbolOf(chainId, token)
-      const rate = symbol === VALUE_SYMBOL ? { token0: 1n, token1: 1n, time: 0 } : await getRate(symbol, VALUE_SYMBOL)
+      const rate: IRate =
+        symbol === TOKEN_META.WETH.symbol ? { token0: 1n, token1: 1n, time: Math.floor(Date.now() / 1000) } : await getRate(symbol, TOKEN_META.WETH.symbol, freshness)
       return { chainId, token: getAddress(token), rate }
     })
   )
@@ -331,128 +555,205 @@ export async function valuationRatesOf(getRate: IGetRate, tokens: readonly { cha
   }
 }
 
-export async function composeValuation(deps: ITermsDeps, master: Address): Promise<IFund__Valuation> {
-  const registry = await deps.getTokenRegistry()
-  const used: { symbol0: string; symbol1: string; rate: IRate }[] = []
-  const getRate: IGetRate = async (asset0, asset1, freshness) => {
-    const rate = await deps.getRate(asset0, asset1, freshness)
-    used.push({ symbol0: asset0, symbol1: asset1, rate })
-    return rate
+export async function markPrice(getRate: IGetRate, chainId: ChainId, token: Address, amount: bigint, freshness: number): Promise<IFund__Price> {
+  const priced = await valuationRatesOf(getRate, [{ chainId, token }], freshness)
+  return { amount, value: priced.toValue(chainId, token, amount) }
+}
+
+export async function composeValuation(deps: ITermsDeps, master: Address, freshness: number): Promise<IFund__Valuation> {
+  const rates = new Map<string, Promise<IRate>>()
+  const getRate: IGetRate = (asset0, asset1, freshness) => {
+    const key = `${asset0}/${asset1}/${freshness}`
+    const held = rates.get(key) ?? deps.getRate(asset0, asset1, freshness)
+    rates.set(key, held)
+    return held
   }
   const assetList: IFund__Asset[] = []
   const positionList: IFund__Position[] = []
-  let value = 0n
   const blocks = await pinBlocks(deps)
-  const transits = await readTransits(deps, master, blocks)
-  for (const chainId of CHAIN_ID_LIST) {
-    const client = clientOf(deps, chainId)
-    const tokens = registeredTokenAddresses(registry, chainId)
-    const block = pinnedOf(blocks, chainId)
-    const result = await fromChain(
-      `the fund of ${master}`,
-      chainId,
-      evaluateFundAt({
-        client,
+  const account = getAddress(master)
+  const [{ reached, transits }, recorded, funds, venues, allowances, credits, fulfils] = await Promise.all([
+    readTransits(deps, master, blocks),
+    fromChronicle(`the recorded holdings of ${master}`, deps.chronicle.select(balanceTable, { where: { account } })),
+    fromChronicle(`the fund of ${master}`, deps.chronicle.select(fundTable, { where: { master: account } })),
+    fromChronicle(`the venues of ${master}`, deps.chronicle.select(venueTable, { where: { account } })),
+    fromChronicle(`the standing allowances of ${master}`, deps.chronicle.select(allowanceTable, { where: { account } })),
+    fromChronicle(`the foreign credits of ${account}`, deps.chronicle.select(creditTable, { where: { master: account } })),
+    fromChronicle(`the releases to ${account}`, deps.chronicle.select(fulfilTable, { where: { master: account } }))
+  ])
+  const valued = await Promise.all(
+    CHAIN_ID_LIST.filter(chainId => chainId === HUB || reached.has(chainId)).map(async chainId => {
+      const listedTokenList = listedTokensOf(chainId)
+      const unlistedTokenList = recorded
+        .filter(
+          row =>
+            Number(row.chainId) === chainId &&
+            !listedTokenList.some(token => isAddressEqual(token, row.token)) &&
+            !funds.some(fund => isAddressEqual(fund.shareToken, row.token))
+        )
+        .map(row => getAddress(row.token))
+      const block = pinnedOf(blocks, chainId)
+      const standing = allowances.filter(row => Number(row.chainId) === chainId && row.implied > 0n)
+      const live = await fromChain(
+        `the standing allowances of ${master}`,
         chainId,
-        account: master,
-        holdingTokens: tokens,
-        blockNumber: block.number,
-        blockTimestamp: Number(block.timestamp),
-        kind: 'redeem',
-        signerGain: null,
-        getRate
-      })
-    )
+        Promise.all(
+          standing.map(row =>
+            clientOf(deps, chainId).readContract({ address: row.token, abi: erc20Abi, functionName: 'allowance', args: [master, row.spender], blockNumber: block.number })
+          )
+        )
+      )
+      const pulled = standing.filter((row, i) => live[i]! < row.implied).map(row => row.venue)
+      const result = await fromChain(
+        `the fund of ${master}`,
+        chainId,
+        evaluateFundAt({
+          clients: deps.clients,
+          chainId,
+          account: master,
+          listedTokenList,
+          unlistedTokenList,
+          blockNumber: block.number,
+          blockTimestamp: Number(block.timestamp),
+          venueIdList: [
+            ...new Set([
+              ...venues.filter(row => Number(row.chainId) === chainId).map(row => row.venue),
+              ...pulled,
+              ...VENUES.filter(venue => venues.some(row => row.venue === venue.venueId)).flatMap(venue => venue.exitsInto ?? [])
+            ])
+          ],
+          getRate,
+          freshness
+        })
+      )
+      return { chainId, result }
+    })
+  )
+  const isCash = (asset: IFund__Asset): boolean =>
+    Number(asset.chainId) === HUB &&
+    (isAddressEqual(asset.token, PROTOCOL.nativeToken) || Object.values(HUB_CANONICAL_TOKEN).some(canonical => isAddressEqual(asset.token, canonical)))
+  const held: IFund__Asset[] = []
+  for (const { chainId, result } of valued) {
     if (!result.ok) throw new CompactError('POOL_UNVALUABLE', result.reasons.map(r => r.detail).join('; '), 'soft')
-    value += result.navMark
-    for (const leg of result.breakdown.perChain) {
-      if (leg.balance > 0n) assetList.push({ chainId: BigInt(chainId), token: bondTokenOf(chainId), amount: leg.balance })
-    }
-    for (const h of result.breakdown.holdings) {
-      assetList.push({ chainId: BigInt(chainId), token: getAddress(h.token), amount: h.balance })
-    }
-    const books = new Map<string, { platform: string; net: bigint }>()
-    for (const p of result.breakdown.positions) {
-      if (p.facets?.kind === 'unpriced') continue
-      const book = p.facets?.book
-      if (book === undefined) {
-        if (p.netBase < 0n) throw new CompactError('POOL_UNVALUABLE', `${p.platform} position ${p.positionKey} is worth ${p.netBase}`, 'soft')
-        positionList.push({ chainId: BigInt(chainId), venue: keccak256(toHex(p.platform)), id: p.positionKey, valueInUsd: p.netBase })
-        continue
-      }
-      const key = `${p.platform}:${master}:${String(book)}`
-      const sum = books.get(key)
-      books.set(key, { platform: p.platform, net: (sum?.net ?? 0n) + p.netBase })
-    }
-    for (const [key, { platform, net }] of books) {
-      if (net < 0n) throw new CompactError('POOL_UNVALUABLE', `${key} margin book is worth ${net}`, 'soft')
-      if (net < VENUE_BOOK_DUST) continue
-      positionList.push({ chainId: BigInt(chainId), venue: keccak256(toHex(platform)), id: keccak256(toHex(key)), valueInUsd: net })
+    for (const h of result.holdings) held.push({ chainId: BigInt(chainId), token: getAddress(h.token), id: 0n, amount: h.balance, value: h.mark.value })
+    for (const p of result.positions) {
+      if (p.value < 0n) throw new CompactError('POOL_UNVALUABLE', `${p.venue} position ${p.id} is worth ${p.value}`, 'soft')
+      positionList.push({ chainId: BigInt(chainId), venue: keccak256(toHex(p.venue)), id: p.id, value: p.value })
     }
   }
+  const exitCosts = new Map(
+    await Promise.all(
+      [...new Set(held.filter(asset => !isCash(asset)).map(asset => Number(asset.chainId) as ChainId))].map(async chainId => {
+        const convert = await feeConverter(getRate, chainId, chainTokenOfKey(chainId, tokenKeyOf(HUB, HUB_CANONICAL_TOKEN.WETH)), RELAY_RATE_MAX_STALE_MS)
+        return [chainId, relayFeeOf(convert, chainId, 'fundSwap', false, 0n, 0n, 0n)] as const
+      })
+    )
+  )
+  const recoverable = (asset: IFund__Asset): boolean => {
+    if (isCash(asset)) return true
+    const exitCost = exitCosts.get(Number(asset.chainId) as ChainId)
+    if (exitCost === undefined) throw new Error(`the exit cost of chain ${asset.chainId} was not read`)
+    return asset.value * PROTOCOL.maxRelayFeeBps >= exitCost * PRECISION.basisPoints
+  }
+  for (const release of uncreditedOf(fulfils, credits)) {
+    const at = held.findIndex(asset => Number(asset.chainId) === release.chainId && isAddressEqual(asset.token, release.token))
+    const line = held[at]
+    if (line === undefined || line.amount < release.amount) {
+      throw new CompactError(
+        'CREDIT_NOT_HELD',
+        `${master} holds ${line === undefined ? 0n : line.amount} of ${release.token} on chain ${release.chainId}, less than the ${release.amount} its owner released into it and the hub has not credited yet; that release stays the owner's until a round credits it`,
+        'soft'
+      )
+    }
+    held[at] = { ...line, amount: line.amount - release.amount, value: line.value - (line.value * release.amount) / line.amount }
+  }
+  assetList.push(...held.filter(asset => asset.amount > 0n).filter(recoverable))
   const priced = await valuationRatesOf(
     getRate,
     transits.flatMap(transit => {
       const sent = { chainId: Number(transit.row.chainId) as ChainId, token: transit.row.inputToken }
       if (transit.kind === 'fillable') return [sent, { chainId: Number(transit.row.destinationChainId) as ChainId, token: transit.row.outputToken }]
       return transit.kind === 'expired' && transit.owed > 0n ? [sent] : []
-    })
+    }),
+    freshness
   )
   for (const transit of transits) {
     const originChainId = Number(transit.row.chainId) as ChainId
     if (transit.kind === 'fillable') {
       const delivered = priced.toValue(Number(transit.row.destinationChainId) as ChainId, transit.row.outputToken, transit.row.outputAmount)
       const sent = priced.toValue(originChainId, transit.row.inputToken, transit.row.inputAmount)
-      const worth = delivered < sent ? delivered : sent
-      value += worth
-      positionList.push({ chainId: transit.row.destinationChainId, venue: ACROSS_VENUE, id: transit.row.relayHash, valueInUsd: worth })
+      positionList.push({ chainId: transit.row.destinationChainId, venue: ACROSS_VENUE, id: transit.row.relayHash, value: delivered < sent ? delivered : sent })
     } else if (transit.kind === 'expired' && transit.owed > 0n) {
-      const worth = priced.toValue(originChainId, transit.row.inputToken, transit.owed)
-      value += worth
-      positionList.push({ chainId: transit.row.chainId, venue: ACROSS_VENUE, id: transit.row.relayHash, valueInUsd: worth })
+      positionList.push({
+        chainId: transit.row.chainId,
+        venue: ACROSS_VENUE,
+        id: transit.row.relayHash,
+        value: priced.toValue(originChainId, transit.row.inputToken, transit.owed)
+      })
     }
   }
+  const merged = new Map<string, IFund__Asset>()
+  for (const asset of assetList) {
+    const key = assetKey(asset)
+    const held = merged.get(key)
+    merged.set(key, held === undefined ? asset : { ...held, amount: held.amount + asset.amount, value: held.value + asset.value })
+  }
   return {
-    value,
-    assetList,
-    positionList,
+    assetList: [...merged]
+      .filter(([, asset]) => asset.amount > 0n && asset.value > 0n)
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([, asset]) => asset),
+    positionList: positionList.filter(position => position.value > 0n).sort((a, b) => (positionKey(a) < positionKey(b) ? -1 : 1))
   }
 }
 
-export interface IAllocationCandidate {
+export interface IMandated {
   puppet: Address
-  delegated: boolean
-  withdrawRequestedAt: bigint
-  mandate: IAccountLib__Mandate
+  mandate: IMandateLib__Mandate
+}
+
+export interface IAllocationCandidate extends IMandated {
+  user: Address | null
+  epoch: bigint | null
   registered: Hex
   available: bigint
-  basis: bigint
+  held: bigint
+  cost: bigint
   allocatedAt: bigint
 }
 
 interface IAllocationTermsContext extends IFundState {
+  kind: 'allocate' | 'createFund'
   master: Address
-  nowSec: bigint
+  now: bigint
+  deadline: bigint
   value: bigint
-  blocked: string | null
+  price: IFund__Price
   feeReserve: bigint
   feeCeiling: bigint
   candidates: readonly IAllocationCandidate[]
 }
 
-export async function readAllocationCandidates(deps: ITermsDeps, master: Address): Promise<IAllocationCandidate[]> {
-  const rows = await readMandates(deps.chronicle, master)
-  const puppets = [...rows.keys()]
-  if (puppets.length === 0) return []
+export async function readAllocationCandidates(
+  deps: ITermsDeps,
+  master: Address,
+  shareToken: Address | null,
+  tokens: readonly Address[],
+  blockNumber: bigint,
+  rows: readonly (readonly IMandated[])[]
+): Promise<IAllocationCandidate[][]> {
+  const byPuppet = new Map<Address, IMandated>()
+  for (const list of rows) for (const row of list) byPuppet.set(getAddress(row.puppet), row)
+  const puppets = [...byPuppet.keys()]
+  if (puppets.length === 0) return tokens.map(() => [])
   const client = clientOf(deps, HUB)
-  const bond = bondTokenOf(HUB)
-  const [codes, digests, holdings, balances, arms] = await fromChain(
-    `the mandated puppets of ${master}`,
+  const [digests, holdings, balances, users, epochs, shares] = await fromChain(
+    `the mandated puppets of ${master} at block ${blockNumber}`,
     HUB,
     Promise.all([
-      Promise.all(puppets.map(puppet => client.getCode({ address: puppet }))),
       client.multicall({
         allowFailure: false,
+        blockNumber,
         contracts: puppets.map(puppet => ({
           address: deploymentAddress('MandateStore', HUB),
           abi: mandatestoreAbi,
@@ -462,6 +763,7 @@ export async function readAllocationCandidates(deps: ITermsDeps, master: Address
       }),
       client.multicall({
         allowFailure: false,
+        blockNumber,
         contracts: puppets.map(puppet => ({
           address: deploymentAddress('FundStore', HUB),
           abi: fundstoreAbi,
@@ -469,63 +771,84 @@ export async function readAllocationCandidates(deps: ITermsDeps, master: Address
           args: [master, puppet] as const
         }))
       }),
+      Promise.all(
+        tokens.map(token =>
+          client.multicall({
+            allowFailure: false,
+            blockNumber,
+            contracts: puppets.map(puppet => ({ address: token, abi: erc20Abi, functionName: 'balanceOf' as const, args: [puppet] as const }))
+          })
+        )
+      ),
       client.multicall({
-        allowFailure: false,
-        contracts: puppets.map(puppet => ({ address: bond, abi: erc20Abi, functionName: 'balanceOf' as const, args: [puppet] as const }))
+        allowFailure: true,
+        blockNumber,
+        contracts: puppets.map(puppet => ({ address: puppet, abi: useraccountAbi, functionName: 'user' as const }))
       }),
       client.multicall({
         allowFailure: true,
-        contracts: puppets.map(puppet => ({ address: puppet, abi: useraccountAbi, functionName: 'withdrawRequestedAt' as const }))
-      })
+        blockNumber,
+        contracts: puppets.map(puppet => ({ address: puppet, abi: useraccountAbi, functionName: 'epoch' as const }))
+      }),
+      shareToken === null
+        ? puppets.map(() => 0n)
+        : client.multicall({
+            allowFailure: false,
+            blockNumber,
+            contracts: puppets.map(puppet => ({ address: shareToken, abi: sharetokenAbi, functionName: 'balanceOf' as const, args: [puppet] as const }))
+          })
     ])
   )
-  return puppets.map((puppet, i) => {
-    const delegated = codes[i] !== undefined && codes[i] !== '0x'
-    const arm = arms[i]!
-    if (delegated && arm.status !== 'success') {
-      throw new CompactError('CHAIN_UNREACHABLE', `the withdrawal arm of ${puppet} could not be read; nothing can be signed against it`, 'server')
-    }
-    return {
-      puppet,
-      delegated,
-      withdrawRequestedAt: arm.status === 'success' ? arm.result : 0n,
-      mandate: mandateOf(rows.get(puppet)!),
-      registered: digests[i]!,
-      available: balances[i]!,
-      basis: holdings[i]!.basis,
-      allocatedAt: holdings[i]!.allocatedAt
-    }
-  })
-}
-
-export async function readAllocationBlock(deps: Pick<ITermsDeps, 'clients'>, master: Address): Promise<string | null> {
-  const reasons = await Promise.all(
-    VENUES.filter(venue => venue.blocksAllocation !== undefined).map(venue =>
-      fromChain(`${venue.name} standing on ${master}`, venue.chains[0]!, venue.blocksAllocation!({ account: getAddress(master), clients: deps.clients }))
-    )
+  const indexOf = new Map(puppets.map((puppet, i) => [puppet, i]))
+  return rows.map((list, t) =>
+    list.map(row => {
+      const puppet = getAddress(row.puppet)
+      const i = indexOf.get(puppet)!
+      const user = users[i]!
+      const epoch = epochs[i]!
+      return {
+        puppet,
+        mandate: row.mandate,
+        user: user.status === 'success' ? getAddress(user.result) : null,
+        epoch: epoch.status === 'success' ? epoch.result : null,
+        registered: digests[i]!,
+        available: balances[t]![i]!,
+        held: shares[i]!,
+        cost: holdings[i]!.cost,
+        allocatedAt: BigInt(holdings[i]!.allocatedAt)
+      }
+    })
   )
-  return reasons.find(reason => reason !== null) ?? null
 }
 
 export function allocationTermsOf(ctx: IAllocationTermsContext, contribution: bigint): IFund__Allocation[] {
-  if (ctx.blocked !== null) return []
-  const { skin, supply, queued, value } = ctx
-  const contributed = contribution > ctx.feeCeiling ? unitsFor(contribution - ctx.feeCeiling, supply, value) : 0n
-  const masterUnits = ctx.masterUnits + contributed
-  const active = supply - queued + contributed
-  const roomAt = (floor: bigint): bigint | null => {
-    if (floor === 0n) return null
-    const bound = (masterUnits * PRECISION.basisPoints) / floor
-    return bound > active ? cashFor(bound - active, supply, value) : 0n
-  }
+  const { value, price, supply } = ctx
+  const contributionValue = valueFor(contribution, price)
+  const contributed = contributionValue > ctx.feeCeiling ? sharesFor(contributionValue - ctx.feeCeiling, supply, value) : 0n
+  const masterLeg = contribution > 0n ? 1 : 0
   return composeAllocation({
+    kind: ctx.kind,
     master: ctx.master,
-    nowSec: ctx.nowSec,
-    minStake: COHORT_MIN_STAKE,
-    baseFloor: floorOf(skin, supply - queued, ctx.masterUnits),
-    roomAt,
+    now: ctx.now,
+    deadline: ctx.deadline,
+    supply,
+    value,
+    owner: ctx.owner,
+    masterShares: ctx.masterShares + contributed,
+    exiting: exitingOf(ctx.redemption.queued, supply),
+    sliceAt: rows => ctx.feeCeiling / BigInt(rows + masterLeg),
     candidates: ctx.candidates
-      .filter(c => c.delegated && c.withdrawRequestedAt === 0n && c.registered === mandateDigest(c.puppet, c.mandate))
-      .map(c => ({ puppet: c.puppet, mandate: c.mandate, available: c.available > ctx.feeReserve ? c.available - ctx.feeReserve : 0n, basis: c.basis, allocatedAt: c.allocatedAt }))
-  }).map(row => ({ puppet: row.puppet, stake: row.stake, mandate: row.mandate }))
+      .filter(
+        c => c.user !== null && isAddressEqual(predictUserAccount(c.user), c.puppet) && c.epoch !== null && c.registered === mandateDigest(c.mandate, c.epoch)
+      )
+      .map(c => ({
+        puppet: c.puppet,
+        mandate: c.mandate,
+        available: valueFor(c.available > ctx.feeReserve ? c.available - ctx.feeReserve : 0n, price),
+        held: c.held,
+        allocatedAt: c.allocatedAt
+      }))
+  })
+    .map(row => ({ puppet: row.puppet, mandate: row.mandate, amount: (row.stake * price.amount) / price.value }))
+    .filter(row => row.amount > 0n)
 }

@@ -1,8 +1,7 @@
-import { CHAIN_META, CHAIN_TOKEN_MAP } from '@puppet/contracts/const'
-import { CHAIN_ID_LIST, type ChainId } from '@puppet/sdk/const'
+import { CHAIN_ID_LIST, CHAIN_TOKEN_MAP, type ChainId } from '@puppet/sdk/const'
 import { isNativeToken } from '@puppet/sdk/core'
-import { type ITokenRegistryMap, symbolOf, tokenKeyOf, wrappedNativeAddressOf } from '@puppet/sdk/state'
-import { combine, constant, filter, type IStream, map, merge, op, start, switchLatest, switchMap } from 'aelea/stream'
+import { listedTokensOf, symbolOf, tokenKeyOf, wrappedNativeAddressOf } from '@puppet/sdk/state'
+import { combine, constant, filter, type IStream, just, map, merge, op, start, switchLatest, switchMap } from 'aelea/stream'
 import { type IBehavior, multicast, state } from 'aelea/stream-extended'
 import {
   $node,
@@ -12,14 +11,15 @@ import {
   type INode,
   type INodeCompose,
   nodeEvent,
-  style
+  style,
+  styleBehavior
 } from 'aelea/ui'
-import { $column, $row, spacing } from 'aelea/ui-components'
+import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { type Address, type Hex, isAddressEqual } from 'viem'
 import { $check, $icon, fadeInX, text } from '@/ui-components'
 import { $chainLabel, chainName } from '../../common/$chain.js'
-import { $tokenIcon, $tokenProfile, $tokenProfileStub } from '../../common/$common.js'
+import { $tokenIcon, $tokenProfile, $intermediateTokenProfile } from '../../common/$common.js'
 import {
   $breadcrumbSearchHeader,
   $closeButton,
@@ -39,33 +39,21 @@ export interface ISwapTargetOption {
   symbol: string
 }
 
-export const withdrawTargetOptions = (
-  tokenRegistry: ITokenRegistryMap,
-  sourceChainId: ChainId,
-  token: Address
-): readonly ISwapTargetOption[] => {
+export const withdrawTargetOptions = (sourceChainId: ChainId, token: Address): readonly ISwapTargetOption[] => {
   const tokenKey = tokenKeyOf(sourceChainId, token)
-  const registeredIds = (chainId: ChainId): Hex[] =>
-    [...(tokenRegistry.get(chainId)?.keys() ?? [])].filter(id => {
-      if (chainId === sourceChainId && isAddressEqual(id, token)) return true
-      return (
-        !isAddressEqual(id, wrappedNativeAddressOf(chainId)) ||
-        tokenKeyOf(chainId, id) !== CHAIN_META[sourceChainId].wnt
-      )
-    }) as Hex[]
   const twinOf = (chainId: ChainId): Hex | null => {
     const twin = (CHAIN_TOKEN_MAP[chainId] as Record<string, Address>)[tokenKey]
     return twin === undefined ? null : (twin as Hex)
   }
   const sourceIds: Hex[] = [
     token as Hex,
-    ...registeredIds(sourceChainId).filter(id => !isAddressEqual(id, token))
+    ...(listedTokensOf(sourceChainId) as Hex[]).filter(id => !isAddressEqual(id, token))
   ]
   return [
     ...sourceIds.map(id => ({ chainId: sourceChainId, id, symbol: tokenKeyOf(sourceChainId, id) })),
-    ...CHAIN_ID_LIST.filter(id => id !== sourceChainId && (tokenRegistry.get(id)?.size ?? 0) > 0).flatMap(chainId => {
+    ...CHAIN_ID_LIST.filter(id => id !== sourceChainId).flatMap(chainId => {
       const twin = twinOf(chainId)
-      const ids = registeredIds(chainId)
+      const ids = listedTokensOf(chainId) as Hex[]
       const ordered = twin !== null ? [...ids].sort((a, b) => Number(isAddressEqual(b, twin)) - Number(isAddressEqual(a, twin))) : ids
       return ordered.map(id => ({ chainId, id, symbol: tokenKeyOf(chainId, id) }))
     })
@@ -77,6 +65,7 @@ export interface I$SwapTargetFlow {
   optionList: IStream<readonly ISwapTargetOption[]>
   source: IStream<{ chainId: ChainId; symbol: string } | null>
   $container: INodeCompose
+  $anchor?: INodeCompose
   $inputContent: ($anchor: I$Node) => I$Node
 }
 
@@ -110,7 +99,7 @@ const $availabilityLabel = (g: ITargetGroup): I$Node => {
   return $label($text(`On ${chains.length} chains`))
 }
 
-type IListStep = { step: 'symbols' } | { step: 'chains'; symbol: string }
+type IListStep = { step: 'symbols' } | { step: 'chains'; symbol: string; back: boolean }
 
 export const $SwapTargetFlow = (config: I$SwapTargetFlow) =>
   component(
@@ -130,24 +119,32 @@ export const $SwapTargetFlow = (config: I$SwapTargetFlow) =>
         multicast
       )
 
-      const $listContent = (open: IStream<PointerEvent>): I$Node => {
-        const step: IStream<IListStep> = state(
-          { step: 'symbols' } as IListStep,
-          merge(
-            constant({ step: 'symbols' } as IListStep, open),
-            op(
-              pickGroup,
-              filter(g => g.targets.length > 1),
-              map((g): IListStep => ({ step: 'chains', symbol: g.symbol }))
-            ),
-            constant({ step: 'symbols' } as IListStep, goBack)
-          )
+      const $listContent = (): I$Node => {
+        const step: IStream<IListStep> = op(
+          config.optionList,
+          map(list => groupTargets(list)),
+          switchMap(groups =>
+            groups.length === 1 && groups[0]!.targets.length > 1
+              ? just<IListStep>({ step: 'chains', symbol: groups[0]!.symbol, back: false })
+              : state(
+                  { step: 'symbols' } as IListStep,
+                  merge(
+                    op(
+                      pickGroup,
+                      filter(g => g.targets.length > 1),
+                      map((g): IListStep => ({ step: 'chains', symbol: g.symbol, back: true }))
+                    ),
+                    constant({ step: 'symbols' } as IListStep, goBack)
+                  )
+                )
+          ),
+          state()
         )
         const query: IStream<string> = state('', merge(searchInput, constant('', step)))
         return switchMap(m => {
           const chains = m.step === 'chains'
           const $header = $breadcrumbSearchHeader(
-            chains ? [{ label: m.symbol, op: goBackTether(nodeEvent('click')) }] : [],
+            chains ? [m.back ? { label: m.symbol, op: goBackTether(nodeEvent('click')) } : { label: m.symbol }] : [],
             $listSearchInput(
               chains ? 'Select destination chain' : 'Select destination token',
               searchInputTether(nodeEvent('input'), map(searchInputValue)),
@@ -230,12 +227,20 @@ export const $SwapTargetFlow = (config: I$SwapTargetFlow) =>
       }
 
       const $view = $InlineSwitchView({
-        $container: config.$container,
+        $container: config.$container(
+          styleBehavior(
+            map(
+              open => (open ? { background: palette.background, padding: isDesktopScreen ? '20px 28px' : '16px', margin: isDesktopScreen ? '0 -28px' : '0 -16px', flex: '1' } : null),
+              state(false, selecting)
+            )
+          )
+        ),
+        $anchor: config.$anchor,
         $inputContent: config.$inputContent,
         $anchorContent: op(
           config.value,
-          map(v => (v === null ? $node(style({ color: palette.foreground }))($text('Select destination')) : $tokenProfile(v.chainId, v.id, 28))),
-          start($tokenProfileStub(28)),
+          map(v => (v === null ? $node(style({ color: palette.foreground }))($text('Select destination')) : $tokenProfile(v.chainId, v.id, 28, true, chainName(v.chainId)))),
+          start($intermediateTokenProfile(28)),
           switchLatest
         ),
         $listContent,

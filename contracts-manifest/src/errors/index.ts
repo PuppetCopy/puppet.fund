@@ -6,22 +6,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Account__WithdrawNotOpen",
-    inputs: [
-      {
-        name: "requestedAt",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "delay",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
     name: "Account__ForbiddenTarget",
     inputs: [
       {
@@ -112,6 +96,22 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
+    name: "Account__WithdrawClosed",
+    inputs: [
+      {
+        name: "revokedAt",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Account__ForbiddenPull",
+    inputs: []
+  },
+  {
+    type: "error",
     name: "Chain__Locked",
     inputs: []
   },
@@ -142,18 +142,41 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Dictate__InvalidOwner",
-    inputs: []
+    name: "GovernorAccount__Forbidden",
+    inputs: [
+      {
+        name: "caller",
+        internalType: "address",
+        type: "address"
+      }
+    ]
   },
   {
     type: "error",
-    name: "Dictate__Unauthorized",
-    inputs: []
+    name: "GovernorAccount__CallFailed",
+    inputs: [
+      {
+        name: "result",
+        internalType: "bytes",
+        type: "bytes"
+      }
+    ]
   },
   {
     type: "error",
-    name: "Register__InvalidToken",
-    inputs: []
+    name: "GovernorAccount__ExpiredDeadline",
+    inputs: [
+      {
+        name: "deadline",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "currentTimestamp",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
   },
   {
     type: "error",
@@ -161,7 +184,7 @@ export const puppetErrorAbi = [
     inputs: [
       {
         name: "token",
-        internalType: "contract IERC20",
+        internalType: "address",
         type: "address"
       },
       {
@@ -182,7 +205,7 @@ export const puppetErrorAbi = [
     inputs: [
       {
         name: "token",
-        internalType: "contract IERC20",
+        internalType: "address",
         type: "address"
       },
       {
@@ -229,7 +252,7 @@ export const puppetErrorAbi = [
     inputs: [
       {
         name: "token",
-        internalType: "contract IERC20",
+        internalType: "address",
         type: "address"
       }
     ]
@@ -252,6 +275,11 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
+    name: "Gate__InvalidCohortCap",
+    inputs: []
+  },
+  {
+    type: "error",
     name: "Gate__InvalidPerformanceFee",
     inputs: [
       {
@@ -263,7 +291,18 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Gate__InvalidCohortCap",
+    name: "Gate__InvalidCanonicalToken",
+    inputs: [
+      {
+        name: "token",
+        internalType: "address",
+        type: "address"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Gate__NoAttestorEndpoint",
     inputs: []
   },
   {
@@ -380,17 +419,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Intent__TokenNotValuable",
-    inputs: [
-      {
-        name: "token",
-        internalType: "address",
-        type: "address"
-      }
-    ]
-  },
-  {
-    type: "error",
     name: "Intent__InvalidProvider",
     inputs: []
   },
@@ -412,22 +440,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Mandate__ListLengthMismatch",
-    inputs: [
-      {
-        name: "mandates",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "signatures",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
     name: "Mandate__InvalidAllocationRate",
     inputs: [
       {
@@ -443,6 +455,33 @@ export const puppetErrorAbi = [
     inputs: [
       {
         name: "skin",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Mandate__InvalidExitCap",
+    inputs: [
+      {
+        name: "exitCap",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Mandate__StaleEpoch",
+    inputs: [
+      {
+        name: "signedEpoch",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "epoch",
         internalType: "uint256",
         type: "uint256"
       }
@@ -487,7 +526,34 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Fund__InsufficientUnits",
+    name: "Fund__TokenNotCanonical",
+    inputs: [
+      {
+        name: "token",
+        internalType: "address",
+        type: "address"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Fund__UnitPriceMismatch",
+    inputs: [
+      {
+        name: "amount",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "value",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Fund__InsufficientShares",
     inputs: [
       {
         name: "held",
@@ -503,38 +569,6 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Fund__DrainExceedsQueue",
-    inputs: [
-      {
-        name: "drain",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "queued",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Fund__DrainLeavesDust",
-    inputs: [
-      {
-        name: "queued",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "floor",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
     name: "Fund__ShareMismatch",
     inputs: [
       {
@@ -543,7 +577,7 @@ export const puppetErrorAbi = [
         type: "address"
       },
       {
-        name: "share",
+        name: "shareToken",
         internalType: "address",
         type: "address"
       }
@@ -551,86 +585,12 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Escrow__InvalidFulfil",
-    inputs: [
-      {
-        name: "fulfilled",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "submitted",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Escrow__RefundClosed",
-    inputs: []
-  },
-  {
-    type: "error",
-    name: "Fund__FeeUnfunded",
-    inputs: [
-      {
-        name: "amount",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "fee",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Fund__ZeroDrain",
-    inputs: []
-  },
-  {
-    type: "error",
-    name: "Fund__NothingToClaim",
+    name: "Fund__NotHolder",
     inputs: [
       {
         name: "holder",
         internalType: "address",
         type: "address"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Fund__SkinBelowFloor",
-    inputs: [
-      {
-        name: "masterUnits",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "exposedUnits",
-        internalType: "uint256",
-        type: "uint256"
-      },
-      {
-        name: "skin",
-        internalType: "uint256",
-        type: "uint256"
-      }
-    ]
-  },
-  {
-    type: "error",
-    name: "Fund__NativeRowsUnsupported",
-    inputs: [
-      {
-        name: "rows",
-        internalType: "uint256",
-        type: "uint256"
       }
     ]
   },
@@ -652,12 +612,236 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Share__NotIssuer",
+    name: "Fund__NotAccount",
+    inputs: [
+      {
+        name: "puppet",
+        internalType: "address",
+        type: "address"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Fund__CreditNotIncreasing",
+    inputs: [
+      {
+        name: "credited",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "total",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Fund__CreditFeeMismatch",
+    inputs: [
+      {
+        name: "signed",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "billed",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Redeem__Open",
+    inputs: [
+      {
+        name: "id",
+        internalType: "uint64",
+        type: "uint64"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Redeem__InvalidMode",
+    inputs: [
+      {
+        name: "fraction",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "join",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Redeem__JoinAboveSymmetry",
+    inputs: [
+      {
+        name: "join",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "cap",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Redeem__Dust",
+    inputs: [
+      {
+        name: "amount",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "fee",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Redeem__TokenUnpriced",
+    inputs: [
+      {
+        name: "token",
+        internalType: "address",
+        type: "address"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Redeem__OutOfGas",
+    inputs: [
+      {
+        name: "left",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "needed",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Escrow__InvalidFulfil",
+    inputs: [
+      {
+        name: "fulfilled",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "submitted",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Escrow__Unfunded",
+    inputs: [
+      {
+        name: "token",
+        internalType: "address",
+        type: "address"
+      },
+      {
+        name: "balance",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "held",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "Escrow__ReturnNotReady",
+    inputs: [
+      {
+        name: "returnAt",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "FundStore__Unfunded",
+    inputs: [
+      {
+        name: "token",
+        internalType: "address",
+        type: "address"
+      },
+      {
+        name: "balance",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "held",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "FundStore__Unbooked",
+    inputs: [
+      {
+        name: "master",
+        internalType: "address",
+        type: "address"
+      },
+      {
+        name: "token",
+        internalType: "address",
+        type: "address"
+      },
+      {
+        name: "booked",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "amount",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
+    name: "ShareToken__Forbidden",
     inputs: []
   },
   {
     type: "error",
-    name: "Share__InvalidSymbol",
+    name: "ShareToken__InvalidSymbol",
     inputs: [
       {
         name: "symbol",
@@ -668,7 +852,7 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Share__InvalidGrid",
+    name: "ShareToken__InvalidGrid",
     inputs: [
       {
         name: "length",
@@ -679,7 +863,7 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
-    name: "Share__InvalidPixel",
+    name: "ShareToken__InvalidPixel",
     inputs: [
       {
         name: "cell",
@@ -768,6 +952,27 @@ export const puppetErrorAbi = [
   },
   {
     type: "error",
+    name: "Balance__SwapInputNotSpent",
+    inputs: [
+      {
+        name: "token",
+        internalType: "address",
+        type: "address"
+      },
+      {
+        name: "balanceBefore",
+        internalType: "uint256",
+        type: "uint256"
+      },
+      {
+        name: "balanceAfter",
+        internalType: "uint256",
+        type: "uint256"
+      }
+    ]
+  },
+  {
+    type: "error",
     name: "Balance__SwapOutputNotReceived",
     inputs: [
       {
@@ -821,6 +1026,11 @@ export const puppetErrorAbi = [
   {
     type: "error",
     name: "Balance__InvalidSwap",
+    inputs: []
+  },
+  {
+    type: "error",
+    name: "Token__InvalidReceiver",
     inputs: []
   }
 ] as const

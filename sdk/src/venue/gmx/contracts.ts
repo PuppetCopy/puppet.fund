@@ -1,24 +1,47 @@
-import { CHAIN_TOKEN_MAP } from '@puppet/contracts/const'
-import type { Address } from 'viem'
+import { encodeAbiParameters, getAddress, keccak256, parseAbi, stringToHex } from 'viem'
 import { GMX_V2_CONTRACT_MAP } from './contractMap.js'
 import { GMX_DECREASE_TYPES, GMX_INCREASE_TYPES, GMX_ORDER_TYPE } from './evaluate.js'
-import { GMX_V2_CHAIN_ID } from './market.js'
 
 export { GMX_DECREASE_TYPES, GMX_INCREASE_TYPES, GMX_ORDER_CUSTODY_TYPES, GMX_ORDER_TYPE } from './evaluate.js'
-export { GMX_V2_CHAIN_ID } from './market.js'
+export { GMX_V2_CHAIN_ID, GMX_WNT } from './market.js'
 
 export const GMX_ROUTER = GMX_V2_CONTRACT_MAP.GmxExchangeRouter.address
 export const GMX_ROUTER_ABI = GMX_V2_CONTRACT_MAP.GmxExchangeRouter.abi
 export const GMX_ORDER_VAULT = GMX_V2_CONTRACT_MAP.GmxOrderVault.address
+export const GMX_EVENT_EMITTER = getAddress('0xC8ee91A54287DB53897056e12D9819156D3822Fb')
+export const GMX_REFERRAL_CODE = stringToHex('PUPPET', { size: 32 })
+export const GMX_REFERRAL_STORAGE = getAddress('0xe6fab3F0c7199b0d34d7FbE83394fc0e0D06e99d')
+export const GMX_REFERRAL_STORAGE_ABI = parseAbi([
+  'function traderReferralCodes(address account) view returns (bytes32)',
+  'function setTraderReferralCodeByUser(bytes32 code)',
+  'function codeOwners(bytes32 code) view returns (address)',
+  'function referrerTiers(address referrer) view returns (uint256)',
+  'function tiers(uint256 tier) view returns (uint256 totalRebate, uint256 discountShare)',
+  'function referrerDiscountShares(address referrer) view returns (uint256)'
+])
 export const GMX_TOKEN_SPENDER = GMX_V2_CONTRACT_MAP.GmxRouter.address
 export const GMX_UI_FEE_RECEIVER = '0xff00000000000000000000000000000000000001'
 export const GMX_MAX_SWAP_PATH_LENGTH = 3
-export const GMX_WNT = CHAIN_TOKEN_MAP[GMX_V2_CHAIN_ID].WETH as Address
-export const GMX_CHAIN_TOKENS = Object.values(CHAIN_TOKEN_MAP[GMX_V2_CHAIN_ID]) as Address[]
-export const GMX_SUBACCOUNT_RELAY_ROUTER: Address = '0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f'
-export const GMX_RELAY_DOMAIN = { name: 'GmxBaseGelatoRelayRouter', version: '1' } as const
-export const GMX_SUBACCOUNT_REMOVAL_TYPE = 'RemoveSubaccount'
 export const GMX_ONE_CLICK_MESSAGE = 'Generate a GMX 1CT (One-Click Trading) session. Only sign this message on a trusted website.'
+export const GMX_RELAY_DOMAIN_NAME = 'GmxBaseGelatoRelayRouter'
+export const GMX_RELAY_ROUTER = getAddress('0x5503b99308dB6923758F9A22d118207D633c4e87')
+export const GMX_SUBACCOUNT_RELAY_ROUTER = getAddress('0xfD0596f708d9D950E0eF7b5d191e5F8e55b8a67f')
+export const GMX_SUBACCOUNT_ORDER_ACTION = keccak256(encodeAbiParameters([{ type: 'string' }], ['SUBACCOUNT_ORDER_ACTION']))
+export const GMX_ONE_CLICK_EXPIRY_SEC = 7n * 86_400n
+export const GMX_ONE_CLICK_MAX_COUNT = 90n
+export const GMX_SUBACCOUNT_APPROVAL_TYPES = {
+  SubaccountApproval: [
+    { name: 'subaccount', type: 'address' },
+    { name: 'shouldAdd', type: 'bool' },
+    { name: 'expiresAt', type: 'uint256' },
+    { name: 'maxAllowedCount', type: 'uint256' },
+    { name: 'actionType', type: 'bytes32' },
+    { name: 'nonce', type: 'uint256' },
+    { name: 'desChainId', type: 'uint256' },
+    { name: 'deadline', type: 'uint256' },
+    { name: 'integrationId', type: 'bytes32' }
+  ]
+} as const
 
 export const GMX_DECREASE_SWAP_TYPE = {
   NoSwap: 0,

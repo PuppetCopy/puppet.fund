@@ -1,7 +1,7 @@
 import { $node, $text, attr, type I$Node, style } from 'aelea/ui'
 import { $column } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
-import { $alertIcon, $alertNegativeContainer, $anchor, $icon, text } from '@/ui-components'
+import { $alertIcon, $alertNegativeContainer, $anchor, $externalMark, $icon, text } from '@/ui-components'
 
 export const $betaAgreement = (): I$Node =>
   $alertNegativeContainer(style({ alignItems: 'flex-start', borderRadius: '12px' }))(
@@ -16,7 +16,7 @@ export const $betaAgreement = (): I$Node =>
       $node($text('Expect rough edges, and deposit only what you can afford to lose.')),
       $anchor(
         attr({ href: 'https://t.me/+ooS1qp3Ar7xlYWNk', target: '_blank' }),
-        style({ fontSize: text.xs, display: 'inline-block', fontWeight: '600', textDecoration: 'underline' })
-      )($text('Report an issue on Telegram'))
+        style({ fontSize: text.xs, display: 'inline-flex', fontWeight: '600' })
+      )($text('Report an issue on Telegram'), $externalMark())
     )
   )

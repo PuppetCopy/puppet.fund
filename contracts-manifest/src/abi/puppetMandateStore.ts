@@ -12,6 +12,25 @@ export default [
   },
   {
     "type": "function",
+    "name": "authMap",
+    "inputs": [
+      {
+        "name": "user",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "authority",
     "inputs": [],
     "outputs": [
@@ -57,9 +76,9 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_enabled",
-        "type": "bool",
-        "internalType": "bool"
+        "name": "_selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "outputs": [],

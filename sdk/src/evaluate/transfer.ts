@@ -1,6 +1,6 @@
-import type { Address } from 'viem'
+import type { Address, PublicClient } from 'viem'
 import { CompactError } from '../compact/error.js'
-import type { ChainId } from '../const/index.js'
+import { type ChainId, TOKEN_META } from '../const/index.js'
 import { symbolOf } from '../state/tokenRegistry.js'
 import {
   DEFAULT_EVALUATION_CONFIG,
@@ -9,59 +9,13 @@ import {
   type INavGate,
   type INavGateReason
 } from './types.js'
+import { wethValueOf } from './unlisted.js'
 import { assertNavSignable } from './verify.js'
-
-interface IVenueValueLeg {
-  chainId: ChainId
-  token: Address
-  amount: bigint
-}
-
-interface IEvaluateSwapParams {
-  input: IVenueValueLeg
-  output: IVenueValueLeg
-  nowSec: number
-  config?: Partial<IEvaluationConfig>
-  getRate: IGetRate
-}
 
 interface IEvaluateCrossChainSwapParams {
   inputAmount: bigint
   outputAmount: bigint
   config?: Partial<IEvaluationConfig>
-}
-
-async function evaluateSwapValue(params: IEvaluateSwapParams): Promise<INavGate> {
-  const config = { ...DEFAULT_EVALUATION_CONFIG, ...params.config }
-  const reasons: INavGateReason[] = []
-  const { input, output } = params
-  const rate = await params
-    .getRate(symbolOf(input.chainId, input.token), symbolOf(output.chainId, output.token), config.maxPriceAgeSec * 1000)
-    .catch((e: unknown) => {
-      reasons.push({
-        code: 'VENUE_PRICE_UNUSABLE',
-        detail: `swap ${input.token} -> ${output.token} has no usable direct rate: ${e instanceof Error ? e.message : String(e)}`
-      })
-      return null
-    })
-  if (rate) {
-    if (params.nowSec - rate.time > config.maxPriceAgeSec) {
-      reasons.push({
-        code: 'VENUE_PRICE_STALE',
-        detail: `swap rate ${params.nowSec - rate.time}s old (max ${config.maxPriceAgeSec}s)`
-      })
-    } else {
-      const expectedOutput = (input.amount * rate.token0) / rate.token1
-      const floor = (expectedOutput * (10_000n - config.swapMaxSlippageBps)) / 10_000n
-      if (output.amount < floor) {
-        reasons.push({
-          code: 'VENUE_EXCESS_SLIPPAGE',
-          detail: `swap output ${output.amount} below floor ${floor} (expected ${expectedOutput}, ${config.swapMaxSlippageBps}bps)`
-        })
-      }
-    }
-  }
-  return reasons.length === 0 ? { ok: true } : { ok: false, reasons }
 }
 
 function evaluateCrossChainSwapValue(params: IEvaluateCrossChainSwapParams): INavGate {
@@ -85,6 +39,9 @@ function evaluateCrossChainSwapValue(params: IEvaluateCrossChainSwapParams): INa
 }
 
 export async function screenSwapValue(
+  getRate: IGetRate,
+  clients: Readonly<Record<number, PublicClient>>,
+  blockNumber: bigint,
   swap: {
     routeKind: 'swap' | 'across' | 'acrossSwap'
     chainId: number
@@ -94,8 +51,7 @@ export async function screenSwapValue(
     inputAmount: bigint
     outputAmount: bigint
     relayFee: bigint
-  },
-  getRate: IGetRate
+  }
 ): Promise<void> {
   if (swap.routeKind === 'across') {
     if (
@@ -116,16 +72,34 @@ export async function screenSwapValue(
     )
     return
   }
-  assertNavSignable(
-    await evaluateSwapValue({
-      input: { chainId: swap.chainId as ChainId, token: swap.inputToken, amount: swap.inputAmount - swap.relayFee },
-      output: {
-        chainId: swap.destinationChainId as ChainId,
-        token: swap.outputToken,
-        amount: swap.outputAmount
-      },
-      nowSec: Math.floor(Date.now() / 1000),
-      getRate
+  const client = clients[swap.chainId]
+  if (client === undefined) throw new CompactError('CHAIN_UNAVAILABLE', `no client for chain ${swap.chainId} to value this swap`, 'server')
+  const config = DEFAULT_EVALUATION_CONFIG
+  const destination = swap.destinationChainId as ChainId
+  const [spent, delivered] = await Promise.all([
+    wethValueOf(getRate, client, swap.chainId as ChainId, blockNumber, swap.inputToken, swap.inputAmount - swap.relayFee),
+    destination === swap.chainId
+      ? wethValueOf(getRate, client, destination, blockNumber, swap.outputToken, swap.outputAmount)
+      : getRate(symbolOf(destination, swap.outputToken), TOKEN_META.WETH.symbol, config.maxPriceAgeSec * 1000).then(rate => ({
+          value: (swap.outputAmount * rate.token0) / rate.token1,
+          time: rate.time
+        }))
+  ])
+  if (spent === null || delivered === null) {
+    throw new CompactError(
+      'ASSET_NOT_PRICEABLE',
+      `${spent === null ? swap.inputToken : swap.outputToken} on chain ${spent === null ? swap.chainId : swap.destinationChainId} has no oracle feed and no Uniswap v3 pool that takes this amount with a 30-minute price history, so the swap cannot be valued`,
+      'hard'
+    )
+  }
+  const ageSec = Math.floor(Date.now() / 1000) - Math.min(spent.time, delivered.time)
+  const reasons: INavGateReason[] = []
+  if (ageSec > config.maxPriceAgeSec) reasons.push({ code: 'VENUE_PRICE_STALE', detail: `swap valued on a rate ${ageSec}s old (max ${config.maxPriceAgeSec}s)` })
+  else if (delivered.value * 10_000n < spent.value * (10_000n - config.swapMaxSlippageBps)) {
+    reasons.push({
+      code: 'VENUE_EXCESS_SLIPPAGE',
+      detail: `swap guarantees ${delivered.value} wei of WETH value for ${spent.value} spent, past the ${config.swapMaxSlippageBps} bps any swap may lose`
     })
-  )
+  }
+  assertNavSignable(reasons.length === 0 ? { ok: true } : { ok: false, reasons })
 }

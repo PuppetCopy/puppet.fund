@@ -1,106 +1,38 @@
-import { TOKEN_META } from '@puppet/contracts/const'
-import DEPLOYMENTS from '@puppet/contracts/deployments'
-import type { ChainId } from '@puppet/sdk/const'
-import type { IGetRate, IPriceSource, IRate } from '@puppet/sdk/evaluate'
+import { createGetRate } from '@puppet/sdk/client'
+import { type ChainId, USD_DECIMALS, USD_SYMBOL } from '@puppet/sdk/const'
+import type { IGetRate, IPriceSource } from '@puppet/sdk/evaluate'
 import { usdPriceFromRate } from '@puppet/sdk/evaluate'
-import {
-  cachedTokenRegistry,
-  candidateTokens,
-  createSdkContext,
-  fetchChainLiveness,
-  type ITokenRegistry,
-  symbolOf,
-  TOKEN_REGISTRY_TTL_MS,
-  ttlCached
-} from '@puppet/sdk/state'
-import { type Address, getAddress } from 'viem'
+import { createSdkContext, fetchChainLiveness, symbolOf, ttlCached } from '@puppet/sdk/state'
+import type { Address } from 'viem'
+import { ENDPOINTS } from '../app/endpoints.js'
 import { publicClientMap } from '../wallet/wallet.js'
-import { viewCall } from './onchain/viewRead.js'
+import { uiStorage } from '@/ui-storage'
+import { notLocal } from './datastore/reads.js'
 
 const chainIds = Object.keys(publicClientMap).map(Number) as ChainId[]
-const USD_PROXY = TOKEN_META.USDC.symbol
-const rateCache = new Map<string, IRate>()
-const rateInflight = new Map<string, Promise<IRate>>()
-export const getRate: IGetRate = async (asset0, asset1, freshness = 10000) => {
-  const key = `${asset0}-${asset1}`
-  const cached = rateCache.get(key)
-  if (cached && Date.now() - cached.time * 1000 < freshness) return cached
-  const inflight = rateInflight.get(key)
-  if (inflight) return inflight
+const rates = createGetRate(ENDPOINTS.oracle, {
+  read: async pair => (await uiStorage.device.read<unknown>(`rate:${pair}`))?.value ?? null,
+  write: (pair, data) => void uiStorage.device.write(`rate:${pair}`, data)
+})
+export const getRate = rates.getRate
 
-  const pending = (async (): Promise<IRate> => {
-    try {
-      const res = await fetch(`/api/oracle/rate?token0=${asset0}&token1=${asset1}&freshness=${freshness}`)
-      if (!res.ok) {
-        const reason = res.headers.get('content-type')?.startsWith('text/plain') ? await res.text() : ''
-        console.error(`[rate] ${asset0}/${asset1} refused (${res.status}) at freshness ${freshness}ms${reason ? `: ${reason}` : ''}`)
-        throw new Error(`no rate for ${asset0}/${asset1} (${res.status})${reason ? `: ${reason}` : ''}`)
-      }
-      const data = (await res.json()) as { token0?: string | number; token1?: string | number; time?: number } | null
-      if (!data?.token0 || !data?.token1 || !data.time) throw new Error(`no rate for ${asset0}/${asset1}`)
-      const rate: IRate = { token0: BigInt(data.token0), token1: BigInt(data.token1), time: data.time }
-      rateCache.set(key, rate)
-      return rate
-    } finally {
-      rateInflight.delete(key)
-    }
-  })()
-  rateInflight.set(key, pending)
-  return pending
+export const PRICE_FRESHNESS_MS = 10_000
+
+export const getPrice = async (chainId: ChainId, token: Address): Promise<IPriceSource> => {
+  const rate = await getRate(symbolOf(chainId, token), USD_SYMBOL, PRICE_FRESHNESS_MS)
+  return { price: usdPriceFromRate(rate, USD_DECIMALS), time: rate.time }
 }
 
-export const getPrice = async (chainId: ChainId, token: Address, freshness = 10000): Promise<IPriceSource> => {
-  const rate = await getRate(symbolOf(chainId, token), USD_PROXY, freshness)
-  return { price: usdPriceFromRate(rate, TOKEN_META.USDC.decimals), time: rate.time }
-}
+export const localGetRate: IGetRate = (asset0, asset1) => rates.cachedRate(asset0, asset1).then(rate => rate ?? notLocal)
+
+export const localPrice = (chainId: ChainId, token: Address): Promise<IPriceSource> =>
+  rates.cachedRate(symbolOf(chainId, token), USD_SYMBOL).then(rate => (rate === null ? notLocal : { price: usdPriceFromRate(rate, USD_DECIMALS), time: rate.time }))
 
 const context = createSdkContext(
   publicClientMap,
 
   {
     getRate,
-    getTokenRegistry: cachedTokenRegistry(async () => {
-      const rows: ITokenRegistry[] = []
-      await Promise.all(
-        [...candidateTokens()].map(async ([chainId, candidates]) => {
-          const register = DEPLOYMENTS[`Register:${chainId}`]
-          if (!register || Number(register.block) === 0) return
-          await Promise.all(
-            candidates.map(async candidate => {
-              const [registeredCap, tokenId] = await Promise.all([
-                viewCall({
-                  chainId: chainId,
-                  address: register.address,
-                  abi: register.abi,
-                  functionName: 'capMap',
-                  args: [candidate],
-                  global: true,
-                  maxAge: TOKEN_REGISTRY_TTL_MS
-                }),
-                viewCall({
-                  chainId: chainId,
-                  address: register.address,
-                  abi: register.abi,
-                  functionName: 'tokenIdMap',
-                  args: [candidate],
-                  global: true,
-                  maxAge: TOKEN_REGISTRY_TTL_MS
-                })
-              ])
-              if (registeredCap === 0n) return
-              rows.push({
-                id: `${chainId}:${candidate}`,
-                chainId: BigInt(chainId),
-                token: getAddress(candidate),
-                registeredCap,
-                tokenId
-              })
-            })
-          )
-        })
-      )
-      return rows
-    }),
     getChainLiveness: ttlCached(async () => {
       const health = await fetchChainLiveness({
         chainIds,

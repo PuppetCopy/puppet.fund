@@ -1,13 +1,14 @@
+import { formatThrownError } from '../compact/error.js'
 import type { ChainId } from '../const/index.js'
 
 interface IChainLivenessEntry {
-  block: { number: bigint; timestamp: number }
+  block: { number: bigint }
 }
 
 export interface IChainLiveness {
   reachable: boolean
   chains: { [chainId: number]: IChainLivenessEntry }
-  fetchedAtSec: number
+  failed: { [chainId: number]: string }
 }
 
 interface IChainLivenessDeps {
@@ -16,16 +17,19 @@ interface IChainLivenessDeps {
 }
 
 export async function fetchChainLiveness(deps: IChainLivenessDeps): Promise<IChainLiveness> {
-  const fetchedAtSec = Math.floor(Date.now() / 1000)
   const chains: IChainLiveness['chains'] = {}
-  let reachable = false
+  const failed: IChainLiveness['failed'] = {}
   await Promise.all(
-    deps.chainIds.map(async chainId => {
-      const head = await deps.chainHead(chainId).catch(() => null)
-      if (head === null) return
-      reachable = true
-      chains[chainId] = { block: { number: head, timestamp: fetchedAtSec } }
-    })
+    deps.chainIds.map(chainId =>
+      deps.chainHead(chainId).then(
+        number => {
+          chains[chainId] = { block: { number } }
+        },
+        (err: unknown) => {
+          failed[chainId] = formatThrownError(err)
+        }
+      )
+    )
   )
-  return { reachable, chains, fetchedAtSec }
+  return { reachable: Object.keys(chains).length > 0, chains, failed }
 }

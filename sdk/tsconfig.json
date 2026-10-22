@@ -3,21 +3,11 @@
   "include": [
     "src"
   ],
-  "exclude": [
-    "src/**/*.test.ts"
-  ],
   "compilerOptions": {
-    "outDir": "dist/esm",
-    "rootDir": "./src",
-    "declarationDir": "dist/types",
-    "tsBuildInfoFile": "dist/tsconfig.tsbuildinfo",
     "lib": [
       "DOM",
       "ESNext"
     ],
     "types": ["@types/bun"]
-  },
-  "references": [
-    { "path": "../contracts-manifest" }
-  ]
+  }
 }

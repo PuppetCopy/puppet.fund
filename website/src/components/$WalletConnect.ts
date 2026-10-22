@@ -1,28 +1,39 @@
-import type { Connector } from '@wagmi/core'
-import { empty, type IStream, just, map, switchMap } from 'aelea/stream'
-import { type IBehavior, multicast, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
-import { $element, $text, attr, attrBehavior, component, style } from 'aelea/ui'
+import { combine, empty, filter, type IStream, just, map, nowWith, op, start, switchLatest, switchMap } from 'aelea/stream'
+import { fromCallback, type IBehavior, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
+import { $element, $node, $text, attr, attrBehavior, component, effectProp, type I$Node, style } from 'aelea/ui'
 import { $column, $defaultButtonContainer, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $alertNegativeContainer, $ButtonSecondary, $icon, text } from '@/ui-components'
+import { $alertNegativeContainer, $ButtonSecondary, $icon, $intermediateBorder, $spinner, INTERMEDIATE_FILL, text } from '@/ui-components'
+import { renderSVG } from 'uqr'
 import { $walletConnectLogo } from '../common/$icons.js'
-import { connectors, connectWallet, WALLETCONNECT_PROJECT_ID } from '../wallet/index.js'
+import { connectErrorText, INJECTED_ID, type IWalletControl, type IWalletEntry, type IWalletIntent, WALLET_CONNECT_ID } from '../wallet/connect.js'
 
-const $walletIcon = (connector: Connector) => {
-  const iconUrl =
-    connector.icon ||
-    (connector.id && connector.id !== 'default' && connector.id !== 'walletConnect'
-      ? `https://explorer-api.walletconnect.com/v3/logo/md/${WALLETCONNECT_PROJECT_ID}/${connector.id}`
-      : null)
+const $walletIconBox = $row(
+  style({
+    width: '32px',
+    height: '32px',
+    borderRadius: '8px',
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colorShade(palette.foreground, 8),
+    color: palette.message,
+    fontWeight: 'bold',
+    flexShrink: '0'
+  })
+)
+
+const $walletIcon = (entry: IWalletEntry) => {
+  const iconUrl = entry.icon
   const $wcLogo =
-    connector.id === 'walletConnect'
+    entry.id === WALLET_CONNECT_ID
       ? $icon({
           $content: $walletConnectLogo,
           viewBox: '0 0 32 32',
           size: '20px'
         })
       : null
-  const fallbackLabel = (connector.name || connector.id || '?').slice(0, 1).toUpperCase()
+  const fallbackLabel = entry.name.slice(0, 1).toUpperCase()
 
   const $content = $wcLogo
     ? $wcLogo
@@ -30,7 +41,7 @@ const $walletIcon = (connector: Connector) => {
       ? $element('img')(
           attr({
             src: iconUrl,
-            alt: `${connector.name || connector.id} icon`,
+            alt: `${entry.name} icon`,
             loading: 'lazy'
           }),
           style({
@@ -41,70 +52,85 @@ const $walletIcon = (connector: Connector) => {
         )()
       : $text(fallbackLabel)
 
-  return $row(
-    style({
-      width: '32px',
-      height: '32px',
-      borderRadius: '8px',
-      overflow: 'hidden',
-      alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: colorShade(palette.foreground, 8),
-      color: palette.message,
-      fontWeight: 'bold',
-      flexShrink: '0'
-    })
-  )($content)
+  return $walletIconBox($content)
 }
 
-const friendlyConnectError = (err: unknown): string => {
-  const name = err && typeof err === 'object' && 'name' in err ? String((err as { name?: unknown }).name ?? '') : ''
-  const causeName =
-    err && typeof err === 'object' && 'cause' in err
-      ? String((err as { cause?: { name?: unknown } }).cause?.name ?? '')
-      : ''
-  const message =
-    err && typeof err === 'object' && 'message' in err
-      ? String((err as { message?: unknown }).message ?? '')
-      : typeof err === 'string'
-        ? err
-        : ''
+const WALLET_APPS = [
+  { name: 'MetaMask', link: (page: URL): string => `https://metamask.app.link/dapp/${page.host}${page.pathname}${page.search}` },
+  { name: 'Coinbase Wallet', link: (page: URL): string => `https://go.cb-w.com/dapp?cb_url=${encodeURIComponent(page.href)}` },
+  { name: 'Trust Wallet', link: (page: URL): string => `https://link.trustwallet.com/open_url?coin_id=60&url=${encodeURIComponent(page.href)}` }
+]
 
-  if (name === 'UserRejectedRequestError' || causeName === 'UserRejectedRequestError' || /reject/i.test(message)) {
-    return 'Connection cancelled in your wallet, tap to retry'
-  }
-  if (/No compatible wallet found/i.test(message)) {
-    return 'No compatible wallet found. Please install a supported wallet, then retry.'
-  }
-  if (/already in progress/i.test(message)) {
-    return 'Connection already in progress'
-  }
-  if (/already connected/i.test(message)) {
-    return 'Wallet already connected'
-  }
-  return message || 'Could not connect. Tap to retry.'
+const PILL = {
+  color: palette.message,
+  textDecoration: 'none',
+  border: `1px solid ${colorShade(palette.foreground, 25)}`,
+  borderRadius: '100px',
+  padding: '12px 16px',
+  backgroundColor: palette.background,
+  fontSize: text.sm,
+  fontWeight: '600',
+  whiteSpace: 'nowrap',
+  cursor: 'pointer'
 }
 
-type IAttempt = { id: string; promise: ReturnType<typeof connectWallet> }
-type IConnectorStatus = { kind: 'idle' } | { kind: 'pending' } | { kind: 'error'; message: string }
+const $pairing = (uri: string | null): I$Node =>
+  $column(
+    spacing.small,
+    style({ alignItems: 'center', padding: '12px', borderRadius: '16px', backgroundColor: palette.background, border: `1px solid ${colorShade(palette.foreground, 25)}` })
+  )(
+    uri === null
+      ? $intermediateBorder($node(style({ width: '200px', height: '200px', borderRadius: '8px', boxSizing: 'border-box' })))(
+          $node(style({ position: 'relative', width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }))($spinner)
+        )
+      : $element('img')(
+          attr({ src: `data:image/svg+xml;base64,${btoa(renderSVG(uri, { border: 2 }))}`, alt: 'WalletConnect pairing code' }),
+          style({ width: '200px', height: '200px', borderRadius: '8px', backgroundColor: '#ffffff' })
+        )(),
+    $element('span')(style({ fontSize: text.xs, color: palette.foreground }))($text('Scan with your wallet app')),
+    $row(spacing.small, style({ flexWrap: 'wrap', justifyContent: 'center' }))(
+      ...(uri === null
+        ? ['Open wallet', 'Copy link'].map(label =>
+            $element('span')(style({ ...PILL, color: 'transparent', ...INTERMEDIATE_FILL, borderColor: 'transparent', cursor: 'default' }))($text(label))
+          )
+        : [
+            $element('a')(attr({ href: uri }), style(PILL))($text('Open wallet')),
+            $element('button')(
+              attr({ type: 'button' }),
+              style(PILL),
+              effectProp(
+                'onclick',
+                nowWith(() => () => {
+                  void navigator.clipboard.writeText(uri)
+                })
+              )
+            )($text('Copy link'))
+          ])
+    )
+  )
 
-export const $WalletConnect = () =>
-  component(([attempt, attemptTether]: IBehavior<PointerEvent, IAttempt>) => {
-    const attempts = multicast(attempt)
+type IEntryStatus = { kind: 'idle' } | { kind: 'pending' } | { kind: 'error'; message: string }
 
-    const connectStream = multicast(map(a => a.promise, attempts))
+const rankOf = (entry: IWalletEntry): number => (entry.id === WALLET_CONNECT_ID ? 2 : entry.id === INJECTED_ID ? 1 : 0)
 
-    const statusById: IStream<Record<string, IConnectorStatus>> = state({} as Record<string, IConnectorStatus>)(
+export interface I$WalletConnect {
+  control: IWalletControl
+}
+
+export const $WalletConnect = ({ control }: I$WalletConnect) =>
+  component(([connect, connectTether]: IBehavior<PointerEvent, IWalletIntent>) => {
+    const attempts = control.attempts
+
+    const statusById: IStream<Record<string, IEntryStatus>> = state({} as Record<string, IEntryStatus>)(
       switchMap(
-        ({ id, promise }) =>
+        ({ id, result }) =>
           map(
-            (res): Record<string, IConnectorStatus> => {
+            (res): Record<string, IEntryStatus> => {
               if (res.status === PromiseStatus.PENDING) return { [id]: { kind: 'pending' } }
-              if (res.status === PromiseStatus.ERROR)
-                return { [id]: { kind: 'error', message: friendlyConnectError(res.error) } }
+              if (res.status === PromiseStatus.ERROR) return { [id]: { kind: 'error', message: connectErrorText(res.error) } }
               return {}
             },
-            promiseState(just(promise))
+            promiseState(just(result))
           ),
         attempts
       )
@@ -120,14 +146,10 @@ export const $WalletConnect = () =>
         switchMap(
           list =>
             $column(spacing.small)(
-              ...list
-                .slice()
-                .reverse()
-                .map(connector => {
-                  const connectorStatus: IStream<IConnectorStatus> = map(
-                    byId => byId[connector.id] ?? { kind: 'idle' },
-                    statusById
-                  )
+              ...[...list]
+                .sort((a, b) => rankOf(a) - rankOf(b))
+                .map(entry => {
+                  const entryStatus: IStream<IEntryStatus> = map(byId => byId[entry.id] ?? { kind: 'idle' }, statusById)
 
                   return $column(spacing.small)(
                     $ButtonSecondary({
@@ -145,36 +167,68 @@ export const $WalletConnect = () =>
                         attrBehavior(
                           map(
                             s => ({
-                              'aria-label':
-                                s.kind === 'pending'
-                                  ? `Connecting to ${connector.name || connector.id}`
-                                  : `Connect ${connector.name || connector.id}`,
+                              'aria-label': s.kind === 'pending' ? `Connecting to ${entry.name}` : `Connect ${entry.name}`,
                               'aria-busy': s.kind === 'pending' ? 'true' : 'false'
                             }),
-                            connectorStatus
+                            entryStatus
                           )
                         )
                       ),
-                      $content: $row(spacing.default, style({ alignItems: 'center', width: '100%' }))(
-                        $walletIcon(connector),
-                        $text(connector.name || 'Connect Wallet')
-                      )
+                      $content: $row(spacing.default, style({ alignItems: 'center', width: '100%' }))($walletIcon(entry), $text(entry.name))
                     })({
-                      click: attemptTether(map(() => ({ id: connector.id, promise: connectWallet(connector.id) })))
+                      click: connectTether(map((): IWalletIntent => ({ connect: entry.id })))
                     }),
-                    switchMap(
-                      s =>
-                        s.kind === 'error'
-                          ? $alertNegativeContainer(style({ fontSize: text.sm }))($text(s.message))
-                          : empty,
-                      connectorStatus
-                    )
+                    switchMap(s => (s.kind === 'error' ? $alertNegativeContainer(style({ fontSize: text.sm }))($text(s.message)) : empty), entryStatus),
+                    ...(entry.id === WALLET_CONNECT_ID
+                      ? [
+                          switchLatest(
+                            map(
+                              p => (p.status.kind === 'pending' ? $pairing(p.uri) : empty),
+                              combine({
+                                status: entryStatus,
+                                uri: op(
+                                  attempts,
+                                  filter(next => next.id === entry.id),
+                                  map(() =>
+                                    start(
+                                      null,
+                                      fromCallback<string>(cb => {
+                                        const onUri = (payload: unknown): void => {
+                                          if (typeof payload === 'string') cb(payload)
+                                        }
+                                        entry.provider.on('display_uri', onUri)
+                                        return () => entry.provider.removeListener('display_uri', onUri)
+                                      })
+                                    )
+                                  ),
+                                  switchLatest
+                                )
+                              })
+                            )
+                          )
+                        ]
+                      : [])
                   )
-                })
+                }),
+              ...(list.some(entry => entry.id !== WALLET_CONNECT_ID)
+                ? []
+                : [
+                    $column(spacing.small, style({ alignItems: 'center' }))(
+                      $element('span')(style({ fontSize: text.xs, color: palette.foreground }))($text('Or open in your wallet app')),
+                      $column(spacing.small, style({ width: '100%' }))(
+                        ...WALLET_APPS.map(app =>
+                          $element('a')(
+                            attr({ href: app.link(new URL(location.href)) }),
+                            style({ ...PILL, display: 'flex', alignItems: 'center', width: '100%', boxSizing: 'border-box' })
+                          )($text(app.name))
+                        )
+                      )
+                    )
+                  ])
             ),
-          connectors
+          control.entries
         )
       ),
-      { connect: connectStream }
+      { walletIntent: connect }
     ]
   })

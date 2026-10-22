@@ -1,25 +1,33 @@
+import { PROTOCOL } from '@puppet/contracts/const'
 import type { ISpokeGate__OperateIntent } from '@puppet/contracts/types'
-import { type Address, decodeAbiParameters, getAddress, type Hex, isAddressEqual, size, slice, type TypedDataDefinition } from 'viem'
+import { type Address, getAddress, isAddressEqual, type PublicClient, type TypedDataDefinition } from 'viem'
+import { predictUserAccount } from '../account/createAccount.js'
 import { CompactContractError, CompactError } from '../compact/error.js'
+import { PRECISION } from '../const/common.js'
 import { deploymentAddress } from '../const/deployments.js'
-import type { ChainId } from '../const/index.js'
-import { operateOutflows } from '../venue/screen.js'
-import { venueSpenders } from '../venue/venues.js'
+import { type ChainId, chainNameOf, TOKEN_META } from '../const/index.js'
+import { readableTokenAmountLabel } from '../core/readable.js'
+import { getTokenDescription } from '../core/token.js'
+import { DEFAULT_EVALUATION_CONFIG, type IGetRate } from '../evaluate/types.js'
+import { wethValueOf } from '../evaluate/unlisted.js'
+import { listedTokensOf } from '../state/tokenRegistry.js'
+import { decodeErc20 } from '../venue/erc20.js'
+import { assertOperateSignable, operateExchange, operateOutflows, resolveOperate, screenOperate } from '../venue/screen.js'
+import { leftGrantsOf, mayStand, SAMPLEABLE_ALLOWANCE, VENUES } from '../venue/venues.js'
 import * as IntentLib from './intentLib.js'
 import { type IDraftContext, type IGenesisContext, intentTypedData, verifyHeaderOrGenesis } from './shared.js'
-
-const APPROVE = '0x095ea7b3'
-const INCREASE_ALLOWANCE = '0x39509351'
-const PERMIT = '0xd505accf'
-const DAI_PERMIT = '0x8fcbaf0c'
+import { clientOf } from './terms.js'
 
 interface IOperateAttestContext extends IDraftContext, IGenesisContext {
+  clients: Readonly<Record<number, PublicClient>>
+  blockNumber: bigint
+  getRate: IGetRate
   balances: ReadonlyMap<Address, bigint>
 }
 
-function outflowsOf(callList: ISpokeGate__OperateIntent['callList']): Map<Address, bigint> {
+function outflowsOf(account: Address, callList: ISpokeGate__OperateIntent['callList']): Map<Address, bigint> {
   const totals = new Map<Address, bigint>()
-  for (const outflow of operateOutflows(callList)) {
+  for (const outflow of operateOutflows(account, callList)) {
     const token = getAddress(outflow.token)
     totals.set(token, (totals.get(token) ?? 0n) + outflow.amount)
   }
@@ -33,90 +41,111 @@ function balanceOf(ctx: Pick<IOperateAttestContext, 'balances'>, token: Address)
 }
 
 export async function attestOperateIntent(ctx: IOperateAttestContext, intent: ISpokeGate__OperateIntent): Promise<TypedDataDefinition> {
-  await verifyHeaderOrGenesis(ctx, intent.header, 'operate')
-  IntentLib.verifyRegisteredTokenCap(ctx.tokenRegistry, ctx.chainId, intent.header.feeToken, intent.header.fee)
+  if (isAddressEqual(predictUserAccount(intent.header.user), intent.header.account)) {
+    throw new CompactContractError('Account__NotDelegated', [intent.header.account])
+  }
   const account = getAddress(intent.header.account)
-  const module = deploymentAddress('AccountModule', ctx.chainId)
-  for (const call of intent.callList) {
-    const target = getAddress(call.target)
-    if (isAddressEqual(target, account) || isAddressEqual(target, module)) {
-      throw new CompactContractError('Account__ForbiddenTarget', [target])
+  const registered = listedTokensOf(ctx.chainId)
+  const client = clientOf(ctx, ctx.chainId)
+  if (intent.callList.length > 0) {
+    const facts = await resolveOperate(client, ctx.chainId, intent.callList, ctx.blockNumber)
+    assertOperateSignable(screenOperate({ chainId: ctx.chainId, account, callList: intent.callList, registeredTokens: registered, facts }))
+    const reasons = (await Promise.all(VENUES.flatMap(venue => (venue.attestOperate === undefined ? [] : [venue.attestOperate(ctx.clients, ctx.chainId, account, intent.callList)])))).flat()
+    assertOperateSignable({ ok: reasons.length === 0, reasons })
+  }
+  await verifyHeaderOrGenesis(ctx, intent.header, 'operate')
+  IntentLib.verifyOracleFed(ctx.chainId, intent.header.feeToken)
+  const feeToken = getAddress(intent.header.feeToken)
+  const exchange = operateExchange(ctx.chainId, account, intent.callList)
+  if (exchange.received.size > 0) IntentLib.verifyPricedDeadline(intent.header.deadline, ctx.now)
+  for (const token of intent.tokenList) {
+    if (isAddressEqual(token, feeToken)) throw new CompactContractError('Intent__DuplicateToken', [feeToken])
+  }
+  for (const [token] of exchange.received) {
+    if (!isAddressEqual(token, feeToken) && !intent.tokenList.some(recorded => isAddressEqual(recorded, token))) {
+      throw new CompactError('ACQUIRED_NOT_RECORDED', `the operate delivers ${token} to the account but its tokenList does not record it; every asset an operate acquires is recorded`, 'hard')
     }
   }
-  const outflows = outflowsOf(intent.callList)
-  const feeToken = getAddress(intent.header.feeToken)
-  const spent = outflows.get(feeToken) ?? 0n
-  const fundBalance = balanceOf(ctx, feeToken)
-  if (fundBalance < spent + intent.header.fee) throw new CompactContractError('Balance__InsufficientBalance', [fundBalance, spent + intent.header.fee])
-  verifyStandingAllowance(ctx, ctx.chainId, intent)
+  const valuesOf = (flows: ReadonlyMap<Address, bigint>) =>
+    Promise.all(
+      [...flows].map(async ([token, amount]) => ({
+        token,
+        value: amount === 0n ? 0n : ((await wethValueOf(ctx.getRate, client, ctx.chainId, ctx.blockNumber, token, amount))?.value ?? null)
+      }))
+    )
+  const [sold, bought] = await Promise.all([valuesOf(exchange.spent), valuesOf(exchange.received)])
+  const isPriced = (each: { token: Address; value: bigint | null }): each is { token: Address; value: bigint } => each.value !== null
+  const boughtPriced = bought.filter(isPriced)
+  if (boughtPriced.length < bought.length) {
+    throw new CompactError(
+      'ASSET_NOT_PRICEABLE',
+      `the trade acquires ${bought.filter(each => !isPriced(each)).map(each => each.token).join(', ')}, which no oracle feed or Uniswap v3 pool with a 30-minute price history can value at this amount`,
+      'hard'
+    )
+  }
+  const soldPriced = sold.filter(isPriced)
+  if (soldPriced.length > 0 && soldPriced.length < sold.length) {
+    throw new CompactError(
+      'TRADE_MIXES_EXITLESS',
+      `this operate sells ${sold.filter(each => !isPriced(each)).map(each => each.token).join(', ')}, which no pool can value, together with priced tokens; sell it in an operate of its own`,
+      'hard'
+    )
+  }
+  const spentValue = soldPriced.reduce((total, each) => total + each.value, 0n)
+  const receivedValue = boughtPriced.reduce((total, each) => total + each.value, 0n)
+  const maxLoss = DEFAULT_EVALUATION_CONFIG.swapMaxSlippageBps
+  if (receivedValue * PRECISION.basisPoints < spentValue * (PRECISION.basisPoints - maxLoss)) {
+    throw new CompactError(
+      'TRADE_UNDERPRICED',
+      `This trade can spend up to ${readableTokenAmountLabel(TOKEN_META.WETH, spentValue)} of value but guarantees back only ${readableTokenAmountLabel(TOKEN_META.WETH, receivedValue)}, a loss past the ${Number(maxLoss) / 100}% any swap may take; raise the minimum output`,
+      'hard'
+    )
+  }
+  const module = deploymentAddress('AccountModule', ctx.chainId)
+  for (const call of intent.callList) {
+    if (isAddressEqual(call.target, module)) throw new CompactContractError('Account__ForbiddenTarget', [getAddress(call.target)])
+  }
+  const outgoing = (outflowsOf(account, intent.callList).get(feeToken) ?? 0n) + (exchange.spent.get(feeToken) ?? 0n) + intent.header.fee
+  const covered = balanceOf(ctx, feeToken) + (exchange.received.get(feeToken) ?? 0n)
+  if (covered < outgoing) {
+    const unit = getTokenDescription(ctx.chainId, feeToken)
+    throw new CompactError(
+      'FEE_UNFUNDED',
+      `This needs ${readableTokenAmountLabel(unit, outgoing)} including the ${readableTokenAmountLabel(unit, intent.header.fee)} relay fee, but your fund holds ${readableTokenAmountLabel(unit, covered)} on ${chainNameOf(ctx.chainId) ?? `chain ${ctx.chainId}`}`,
+      'hard'
+    )
+  }
+  verifyAllowances(ctx.chainId, intent.callList)
   return intentTypedData('operate', ctx.chainId, intent)
 }
 
+export function operateTokenList(ctx: IDraftContext, account: Address, feeToken: Address, callList: ISpokeGate__OperateIntent['callList']): Address[] {
+  const registered = listedTokensOf(ctx.chainId)
+  const approved = allowanceTokensOf(callList).filter(token => registered.some(r => isAddressEqual(r, token)))
+  const exchange = operateExchange(ctx.chainId, account, callList)
+  const sent = operateOutflows(account, callList).map(flow => getAddress(flow.token))
+  const native = callList.some(call => call.value > 0n) ? [getAddress(PROTOCOL.nativeToken)] : []
+  return [...new Set([...approved, ...exchange.spent.keys(), ...sent, ...native, ...exchange.received.keys()])].filter(token => !isAddressEqual(token, feeToken))
+}
+
 export function allowanceTokensOf(callList: ISpokeGate__OperateIntent['callList']): Address[] {
-  return [...new Set(callList.filter(call => grantOf(call.callData) !== null).map(call => getAddress(call.target)))]
-}
-
-function grantOf(grant: Hex): { spender: Address; amount: bigint | null } | null {
-  if (size(grant) < 68) return null
-  const selector = slice(grant, 0, 4)
-  if (selector === APPROVE) {
-    const [spender, amount] = decodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], slice(grant, 4, 68))
-    return amount === 0n ? null : { spender: getAddress(spender), amount }
-  }
-  if (selector === INCREASE_ALLOWANCE) {
-    const [spender, amount] = decodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], slice(grant, 4, 68))
-    return amount === 0n ? null : { spender: getAddress(spender), amount: null }
-  }
-  if (selector === PERMIT) {
-    if (size(grant) < 100) return null
-    const [, spender, value] = decodeAbiParameters(
-      [{ type: 'address' }, { type: 'address' }, { type: 'uint256' }],
-      slice(grant, 4, 100)
+  return [
+    ...new Set(
+      callList.flatMap(call => {
+        const dec = decodeErc20(call.callData)
+        return dec?.functionName === 'approve' && dec.args[1] !== 0n ? [getAddress(call.target)] : []
+      })
     )
-    return { spender: getAddress(spender), amount: value }
-  }
-  if (selector === DAI_PERMIT) {
-    const [, spender] = decodeAbiParameters([{ type: 'address' }, { type: 'address' }], slice(grant, 4, 68))
-    return { spender: getAddress(spender), amount: null }
-  }
-  return null
+  ]
 }
 
-function verifyStandingAllowance(
-  ctx: Pick<IOperateAttestContext, 'balances'>,
-  chainId: ChainId,
-  intent: Pick<ISpokeGate__OperateIntent, 'header' | 'callList'>
-): void {
-  const spenders = venueSpenders(chainId)
-  const feeToken = getAddress(intent.header.feeToken)
-  const callList = intent.callList
-  for (let i = 0; i < callList.length; i++) {
-    const grant = grantOf(callList[i]!.callData)
-    if (grant === null) continue
-    const spender = grant.spender
-    const token = getAddress(callList[i]!.target)
-    if (spenders.some(venueSpender => isAddressEqual(venueSpender, spender))) {
-      const fundBalance = balanceOf(ctx, token) - (isAddressEqual(token, feeToken) ? intent.header.fee : 0n)
-      if (grant.amount === null || grant.amount > fundBalance) {
-        throw new CompactError(
-          'STANDING_ALLOWANCE',
-          `${token} grants ${grant.amount === null ? 'an allowance whose result this check cannot bound' : grant.amount} to ${spender} while the fund balance after this operate's relay fee is ${fundBalance}; an allowance is capped at that balance, set with approve`,
-          'hard'
-        )
-      }
-      continue
-    }
-    let reset = false
-    for (let j = i + 1; j < callList.length; j++) {
-      if (!isAddressEqual(callList[j]!.target, token)) continue
-      const later = callList[j]!.callData
-      if (size(later) < 68 || slice(later, 0, 4) !== APPROVE) continue
-      const [target, clears] = decodeAbiParameters([{ type: 'address' }, { type: 'uint256' }], slice(later, 4, 68))
-      if (isAddressEqual(getAddress(target), spender) && clears === 0n) {
-        reset = true
-        break
-      }
-    }
-    if (!reset) throw new CompactError('STANDING_ALLOWANCE', `${token} keeps an allowance for ${spender} after the call list; reset it to zero in the same operate`, 'hard')
+function verifyAllowances(chainId: ChainId, callList: ISpokeGate__OperateIntent['callList']): void {
+  for (const grant of leftGrantsOf(chainId, callList)) {
+    if (mayStand(chainId, grant)) continue
+    throw new CompactError(
+      'ALLOWANCE_STANDING',
+      `${grant.spender} keeps ${grant.amount} of ${grant.token} on ${grant.ledger} after the call list; only a standing venue spender may keep an allowance, at most ${SAMPLEABLE_ALLOWANCE} so every pull shows in it; reset it to zero in the same operate`,
+      'hard'
+    )
   }
 }

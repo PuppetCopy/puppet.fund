@@ -1,11 +1,11 @@
 import { readableAddress } from '@puppet/sdk/core'
 import { Renderer } from '@takumi-rs/core'
 import { renderToImage } from 'aelea/takumi'
-import { getAddress, isAddress } from 'viem'
-import { $brand, $master, $masters, $page, HEIGHT, WIDTH } from './$views.js'
+import { type Address, getAddress, isAddress } from 'viem'
+import { $brand, $master, $masters, $page, $puppet, SIZE } from './$views.js'
 import fontAsset from './assets/InterVariable.woff2' with { type: 'file' }
 import logoAsset from './assets/logo.png' with { type: 'file' }
-import { fetchMasterCard, fetchTopMasters } from './data.js'
+import { fetchLeaderboard, fetchMasterCard, fetchPuppetCard, LEADERBOARD_WINDOW, TICK_MS } from './data.js'
 
 const port = Number(Bun.env.PORT)
 if (!Number.isInteger(port) || port <= 0) throw new Error('PORT is required')
@@ -16,33 +16,152 @@ const renderer = new Renderer()
 await renderer.registerFont({ name: 'Inter', data: fontData })
 const images = [{ src: 'logo', data: logoData }]
 
-const STATIC_CACHE = 'public, max-age=86400, s-maxage=86400'
-const LIST_CACHE = 'public, max-age=3600, s-maxage=3600'
-const MASTER_CACHE = 'public, max-age=300, s-maxage=300'
+const SITE = 'https://puppet.fund'
+const CARD_LIMIT = 512
+const BUILD_SLOTS = 8
+const BUILD_QUEUE = 64
+const STATIC_CACHE = 'public, max-age=86400'
+const CARD_CACHE = `public, max-age=${TICK_MS / 1000}`
 
-const png = async (node: Parameters<typeof renderToImage>[0], cacheControl: string) => {
-  const bytes = await renderToImage(node, { width: WIDTH, height: HEIGHT, format: 'png', renderer, images })
-  return new Response(bytes as BlobPart, { headers: { 'content-type': 'image/png', 'cache-control': cacheControl } })
-}
+const FUNDS_ABOUT = 'Masters run funds, puppets allocate to them.'
+const FUND_ABOUT = 'A fund on Puppet, run by its master, puppets allocate to it.'
+const PUPPET_ABOUT = 'A puppet on Puppet: it allocates to funds under rules it signs once.'
 
-const mastersCard = async () => {
-  try {
-    const rows = await fetchTopMasters(5)
-    if (rows.length > 0) return $masters(rows)
-  } catch (err) {
-    console.error('masters og fetch failed', err)
+const render = (node: Parameters<typeof renderToImage>[0]): Promise<Uint8Array> => renderToImage(node, { width: SIZE, height: SIZE, format: 'png', renderer, images })
+
+const png = (bytes: Uint8Array, cacheControl: string): Response =>
+  new Response(bytes as BlobPart, { headers: { 'content-type': 'image/png', 'cache-control': cacheControl } })
+
+const brand = await render($brand)
+
+type ICard = { title: string; description: string; png: Uint8Array }
+type IEntry = { at: number; card: Promise<ICard>; next: Promise<ICard> | null }
+
+const cards = new Map<string, IEntry>()
+const queued: (() => void)[] = []
+let building = 0
+
+const cardOf = (key: string, build: () => Promise<ICard>): Promise<ICard> => {
+  const now = Date.now()
+  const held = cards.get(key)
+  if (held !== undefined) {
+    cards.delete(key)
+    cards.set(key, held)
+    if (now - held.at < TICK_MS) return held.card
+    if (held.next !== null) return now - held.at < 2 * TICK_MS ? held.card : held.next
   }
-  return $page('Masters', 'Masters trade their own book, puppets back it', '/masters')
+  const next = (async () => {
+    if (building < BUILD_SLOTS) building++
+    else if (queued.length < BUILD_QUEUE) await new Promise<void>(resolve => queued.push(resolve))
+    else throw new Error(`${BUILD_SLOTS} builds running and ${BUILD_QUEUE} queued`)
+    try {
+      return await build()
+    } finally {
+      const turn = queued.shift()
+      if (turn === undefined) building--
+      else turn()
+    }
+  })()
+  if (held !== undefined && now - held.at < 2 * TICK_MS) {
+    held.next = next
+    next.then(
+      () => {
+        if (cards.get(key) === held) cards.set(key, { at: now, card: next, next: null })
+      },
+      (err: unknown) => {
+        console.error(`og card ${key} refresh failed`, err)
+        held.next = null
+      }
+    )
+    return held.card
+  }
+  const entry: IEntry = { at: now, card: next, next: null }
+  cards.set(key, entry)
+  for (const oldest of cards.keys()) {
+    if (cards.size <= CARD_LIMIT) break
+    cards.delete(oldest)
+  }
+  next.then(undefined, (err: unknown) => {
+    console.error(`og card ${key} failed`, err)
+    if (cards.get(key) === entry) cards.delete(key)
+  })
+  return next
 }
 
-const masterCard = async (address: `0x${string}`) => {
-  try {
+const boardCard = (): Promise<ICard> =>
+  cardOf('board', async () => {
+    const rows = await fetchLeaderboard(5)
+    return rows.length === 0
+      ? { title: 'Funds on Puppet', description: FUNDS_ABOUT, png: await render($page('Funds', 'Masters run funds, puppets allocate to them')) }
+      : {
+          title: 'Funds on Puppet',
+          description: `Top PnL · ${LEADERBOARD_WINDOW}: ${rows.slice(0, 3).map(row => `${row.label} ${row.pnl}`).join(' · ')}`,
+          png: await render($masters(rows))
+        }
+  })
+
+const masterCard = (address: Address): Promise<ICard> =>
+  cardOf(`master:${address}`, async () => {
     const card = await fetchMasterCard(address)
-    if (card) return $master(card)
-  } catch (err) {
-    console.error('master og fetch failed', err)
+    return card === null
+      ? { title: `Fund ${readableAddress(address)} on Puppet`, description: FUND_ABOUT, png: await render($page('Fund', readableAddress(address))) }
+      : {
+          title: `${card.label} on Puppet`,
+          description: `Allocated ${card.allocated} · PnL ${card.window} ${card.pnl} · ${card.puppetCount} puppet${card.puppetCount === 1 ? '' : 's'} · Fund ${card.fundValue}`,
+          png: await render($master(card))
+        }
+  })
+
+const puppetCard = (address: Address): Promise<ICard> =>
+  cardOf(`puppet:${address}`, async () => {
+    const card = await fetchPuppetCard(address)
+    return card === null
+      ? { title: `Puppet ${readableAddress(address)} on Puppet`, description: PUPPET_ABOUT, png: await render($page('Puppet', readableAddress(address))) }
+      : {
+          title: `${readableAddress(card.account)} on Puppet`,
+          description: `In funds ${card.inFunds} · allocates to ${card.fundCount} fund${card.fundCount === 1 ? '' : 's'}${card.masterOf === null ? '' : ` · Master of ${card.masterOf}`}`,
+          png: await render($puppet(card))
+        }
+  })
+
+const image = async (card: Promise<ICard>): Promise<Response> => {
+  try {
+    return png((await card).png, CARD_CACHE)
+  } catch {
+    return png(brand, 'no-store')
   }
-  return $page('Master', readableAddress(address), `/masters/${readableAddress(address)}`)
+}
+
+const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, char => `&#${char.charCodeAt(0)};`)
+
+const hourBucket = (): string => new Date().toISOString().slice(0, 13).replace('T', '-')
+
+const preview = (page: { path: string; title: string; description: string; image: string }): Response => {
+  const url = `${SITE}${page.path}`
+  const meta = (key: 'name' | 'property', name: string, content: string): string => `<meta ${key}="${name}" content="${escapeHtml(content)}">`
+  const html = [
+    '<!doctype html>',
+    '<html lang="en"><head><meta charset="utf-8">',
+    `<title>${escapeHtml(page.title)}</title>`,
+    meta('name', 'description', page.description),
+    `<link rel="canonical" href="${escapeHtml(url)}">`,
+    meta('property', 'og:type', 'website'),
+    meta('property', 'og:site_name', 'Puppet'),
+    meta('property', 'og:url', url),
+    meta('property', 'og:title', page.title),
+    meta('property', 'og:description', page.description),
+    meta('property', 'og:image', page.image),
+    meta('property', 'og:image:type', 'image/png'),
+    meta('property', 'og:image:width', String(SIZE)),
+    meta('property', 'og:image:height', String(SIZE)),
+    meta('name', 'twitter:card', 'summary_large_image'),
+    meta('name', 'twitter:site', '@PuppetCopy'),
+    meta('name', 'twitter:title', page.title),
+    meta('name', 'twitter:description', page.description),
+    meta('name', 'twitter:image', page.image),
+    `</head><body><a href="${escapeHtml(url)}">${escapeHtml(page.title)}</a></body></html>`
+  ].join('\n')
+  return new Response(html, { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } })
 }
 
 const server = Bun.serve({
@@ -50,13 +169,53 @@ const server = Bun.serve({
   idleTimeout: 30,
   routes: {
     '/health': new Response('ok'),
-    '/og': await png($brand, STATIC_CACHE),
-    '/og/masters': async () => png(await mastersCard(), LIST_CACHE),
-    '/og/portfolio': await png($page('Portfolio', 'Your account, balances and backing', '/portfolio'), STATIC_CACHE),
-    '/og/masters/:master': async req => {
+    '/og': png(brand, STATIC_CACHE),
+    '/og/portfolio': png(await render($page('Portfolio', 'Your account, balances and allocations')), STATIC_CACHE),
+    '/og/masters': () => image(boardCard()),
+    '/og/masters/:master': req => {
       const { master } = req.params
       if (!isAddress(master)) return new Response('invalid master', { status: 400 })
-      return png(await masterCard(getAddress(master)), MASTER_CACHE)
+      return image(masterCard(getAddress(master)))
+    },
+    '/og/puppets/:account': req => {
+      const { account } = req.params
+      if (!isAddress(account)) return new Response('invalid account', { status: 400 })
+      return image(puppetCard(getAddress(account)))
+    },
+    '/og/html/traders': async () => {
+      const page = { path: '/traders', image: `${SITE}/api/og/masters?d=${hourBucket()}` }
+      try {
+        const { title, description } = await boardCard()
+        return preview({ ...page, title, description })
+      } catch {
+        return preview({ ...page, title: 'Funds on Puppet', description: FUNDS_ABOUT })
+      }
+    },
+    '/og/html/traders/:master': async req => {
+      const { master } = req.params
+      if (!isAddress(master)) return new Response('not a fund page', { status: 404 })
+      const address = getAddress(master)
+      const share = new URL(req.url).searchParams.get('s')
+      const page = { path: `/traders/${address}`, image: `${SITE}/api/og/masters/${address}?${share === null ? `d=${hourBucket()}` : `s=${encodeURIComponent(share)}`}` }
+      try {
+        const { title, description } = await masterCard(address)
+        return preview({ ...page, title, description })
+      } catch {
+        return preview({ ...page, title: `Fund ${readableAddress(address)} on Puppet`, description: FUND_ABOUT })
+      }
+    },
+    '/og/html/puppets/:account': async req => {
+      const { account } = req.params
+      if (!isAddress(account)) return new Response('not a puppet page', { status: 404 })
+      const address = getAddress(account)
+      const share = new URL(req.url).searchParams.get('s')
+      const page = { path: `/puppets/${address}`, image: `${SITE}/api/og/puppets/${address}?${share === null ? `d=${hourBucket()}` : `s=${encodeURIComponent(share)}`}` }
+      try {
+        const { title, description } = await puppetCard(address)
+        return preview({ ...page, title, description })
+      } catch {
+        return preview({ ...page, title: `Puppet ${readableAddress(address)} on Puppet`, description: PUPPET_ABOUT })
+      }
     }
   }
 })

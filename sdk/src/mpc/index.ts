@@ -1,4 +1,4 @@
-export { createMpcClient, type IBindingClaim, type IFundedClaim } from './client.js'
+export { CEREMONY_TTL_MS, createMpcClient, type IBindingClaim, type IFundedClaim, type IKeygenClaim } from './client.js'
 export {
   decodePoint,
   decodeScalar,
@@ -8,8 +8,8 @@ export {
   hashScalar,
   type ISchnorrProof
 } from './core.js'
-export { fundBindingTypedData, fundKeyMaterial, fundKeyTypedData } from './derive.js'
-export { minFundedAmount } from './funding.js'
+export { bobScalar, fundBindingTypedData, fundKeyMaterial, fundKeyTypedData, signerCommitment } from './derive.js'
+export { fundingFloorOf, minFundedAmount } from './funding.js'
 export {
   type IKeygenBobState,
   type IKeygenCommit,

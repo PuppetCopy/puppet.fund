@@ -5,13 +5,11 @@ import { type IAcrossTiming, readAcrossBuffers } from '../intent/route/acrossDep
 
 export type { IAcrossTiming }
 
-import { PROTOCOL } from '@puppet/contracts/const'
 import type { ChainId } from '../const/index.js'
 import type { IGetRate } from '../evaluate/index.js'
 import { ttlCached, ttlCachedByKey } from './cache.js'
-import { type FeeClient, getRelayFeeQuoteSource, tokenPerNativeToken } from './fee.js'
+import { type FeeClient, feeConverter, type IFeeConvert, type IRelayFeeQuote, relayFeeOf } from './fee.js'
 import type { IChainLiveness } from './health.js'
-import type { ITokenRegistryMap } from './tokenRegistry.js'
 
 const ACROSS_BUFFER_TTL_MS = 60 * 60 * 1000
 
@@ -19,11 +17,10 @@ export function createSdkContext(
   publicClients: Record<number, FeeClient>,
   config: {
     getRate: IGetRate
-    getTokenRegistry: () => Promise<ITokenRegistryMap>
     getChainLiveness?: () => Promise<IChainLiveness>
   }
 ) {
-  const { getTokenRegistry, getRate } = config
+  const { getRate } = config
   const getChainLiveness =
     config.getChainLiveness ??
     ((): Promise<IChainLiveness> => {
@@ -45,9 +42,7 @@ export function createSdkContext(
     if (!read) {
       read = ttlCached(
         () =>
-          readAcrossBuffers(clientFor(chainId), chainId).then(
-            (buffers): IAcrossTiming => ({ ...buffers, fillMargin: Number(PROTOCOL.maxIntentTtlSec) })
-          ),
+          readAcrossBuffers(clientFor(chainId), chainId),
         ACROSS_BUFFER_TTL_MS
       )
       acrossTimingByChain.set(chainId, read)
@@ -55,30 +50,25 @@ export function createSdkContext(
     return read()
   }
 
-  const getTokenPerNativeToken = (chainId: ChainId, token: Address, maxStaleMs: number): Promise<bigint> =>
-    tokenPerNativeToken(getRate, chainId, token, maxStaleMs)
+  const getFeeConverter = (chainId: ChainId, token: Address, maxStaleMs: number): Promise<IFeeConvert> =>
+    feeConverter(getRate, chainId, token, maxStaleMs)
 
   const getAccountNonce = (chainId: number, account: Address): Promise<bigint> =>
     accountNonce(clientFor(chainId), account)
 
-  const getRelayFeeQuote = async (chainId: ChainId, token: Address, maxStaleMs: number) => {
-    const [gas, rate] = await Promise.all([
-      getChainGasPrice(chainId, maxStaleMs).catch((e: unknown) => {
-        throw new Error(`relayFee gasPrice(chain ${chainId}): ${e instanceof Error ? e.message : String(e)}`)
-      }),
-      getTokenPerNativeToken(chainId, token, maxStaleMs).catch((e: unknown) => {
-        throw new Error(`relayFee rate(chain ${chainId}, token ${token}): ${e instanceof Error ? e.message : String(e)}`)
-      })
-    ])
-    return getRelayFeeQuoteSource(chainId, gas, rate)
+  const getRelayFeeQuote = async (chainId: ChainId, token: Address, maxStaleMs: number): Promise<IRelayFeeQuote> => {
+    const convert = await getFeeConverter(chainId, token, maxStaleMs).catch((e: unknown) => {
+      throw new Error(`relayFee rate(chain ${chainId}, token ${token}): ${e instanceof Error ? e.message : String(e)}`)
+    })
+    return (kind, carriesGenesis, unitCount, innerGasLimit, calldataByteLength) =>
+      relayFeeOf(convert, chainId, kind, carriesGenesis, unitCount, innerGasLimit, calldataByteLength)
   }
 
   return {
-    getTokenRegistry,
     getRate,
     getAcrossTiming,
     getChainGasPrice,
-    getTokenPerNativeToken,
+    getFeeConverter,
     getRelayFeeQuote,
     getAccountNonce,
     getBlockNumber,

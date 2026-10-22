@@ -1,12 +1,8 @@
 import { CHAIN_NETWORK_MAP } from '@puppet/contracts/const'
-import type { Address } from 'viem'
-import { getAddress } from 'viem'
-import { ADDRESS_ZERO } from '../../const/common.js'
-import { getTokenDescription } from '../../core/token.js'
-import type { IMarketDescription, ITokenDescription } from '../../core/types.js'
-import { getMappedValue, groupList } from '../../core/utils.js'
-import { ARBITRUM_MARKET_LIST } from './marketList.js'
-import { ARBITRUM_TOKEN_LIST } from './tokenList.js'
+import { type Address, getAddress, isAddressEqual, maxUint256, type PublicClient, zeroAddress } from 'viem'
+import { CHAIN_TOKEN_MAP } from '../../const/network.js'
+import type { IVenueMarket } from '../types.js'
+import { GMX_V2_CONTRACT_MAP } from './contractMap.js'
 
 const GMX_NETWORK = 'arbitrum' as const
 type IGmxChainId = {
@@ -15,37 +11,41 @@ type IGmxChainId = {
 export const GMX_V2_CHAIN_ID = Number(
   Object.entries(CHAIN_NETWORK_MAP).find(([, network]) => network === GMX_NETWORK)![0]
 ) as IGmxChainId
+export const GMX_WNT = CHAIN_TOKEN_MAP[GMX_V2_CHAIN_ID].WETH as Address
 
-const SUPPLEMENTAL_ARBITRUM_TOKENS: readonly ITokenDescription[] = [
-  { symbol: 'GMX', name: 'GMX', decimals: 18, address: '0xfc5A1A6EB076a2C7aD06eD22C90d7E710E35ad0a' }
-]
+const READER = GMX_V2_CONTRACT_MAP.GmxReaderV2
+const DATA_STORE = GMX_V2_CONTRACT_MAP.GmxDatastore.address
 
-const TOKEN_ADDRESS_DESCRIPTION_MAP = {
-  ...groupList(ARBITRUM_TOKEN_LIST, 'address'),
-  ...groupList(SUPPLEMENTAL_ARBITRUM_TOKENS, 'address')
-}
-export const MARKET_ADDRESS_DESCRIPTION_MAP = groupList(ARBITRUM_MARKET_LIST, 'marketToken')
+const marketByToken = new Map<Address, IVenueMarket>()
 
-const NATIVE_DESCRIPTION: ITokenDescription = {
-  name: 'Ethereum',
-  symbol: 'ETH',
-  decimals: 18,
-  address: ADDRESS_ZERO
+const remember = (props: { marketToken: Address; indexToken: Address; longToken: Address; shortToken: Address }): void => {
+  if (isAddressEqual(props.marketToken, zeroAddress)) return
+  marketByToken.set(getAddress(props.marketToken), { indexToken: getAddress(props.indexToken), longToken: getAddress(props.longToken), shortToken: getAddress(props.shortToken) })
 }
 
-export function getGmxTokenDescription(token: Address): ITokenDescription {
-  const normalizedToken = getAddress(token)
-  if (normalizedToken === ADDRESS_ZERO) return NATIVE_DESCRIPTION
-  if (normalizedToken in TOKEN_ADDRESS_DESCRIPTION_MAP) {
-    return TOKEN_ADDRESS_DESCRIPTION_MAP[normalizedToken as keyof typeof TOKEN_ADDRESS_DESCRIPTION_MAP]
+const knownOf = (markets: readonly Address[]): Map<Address, IVenueMarket> =>
+  new Map(
+    markets.flatMap(market => {
+      const known = marketByToken.get(getAddress(market))
+      return known === undefined ? [] : [[getAddress(market), known] as const]
+    })
+  )
+
+export async function readGmxMarkets(client: PublicClient, markets: readonly Address[], blockNumber: bigint | undefined): Promise<Map<Address, IVenueMarket>> {
+  const unread = [...new Set(markets.map(market => getAddress(market)))].filter(market => !marketByToken.has(market))
+  if (unread.length > 0) {
+    const props = await client.multicall({
+      allowFailure: false,
+      blockNumber,
+      contracts: unread.map(market => ({ address: READER.address, abi: READER.abi, functionName: 'getMarket' as const, args: [DATA_STORE, market] as const }))
+    })
+    props.forEach(remember)
   }
-  return getTokenDescription(GMX_V2_CHAIN_ID, normalizedToken)
+  return knownOf(markets)
 }
 
-export function getMarketDescription(market: Address): IMarketDescription {
-  const normalizedMarket = getAddress(market)
-  return getMappedValue(
-    MARKET_ADDRESS_DESCRIPTION_MAP,
-    normalizedMarket as keyof typeof MARKET_ADDRESS_DESCRIPTION_MAP
-  ) as IMarketDescription
+export async function readAllGmxMarkets(client: PublicClient, blockNumber: bigint | undefined): Promise<Map<Address, IVenueMarket>> {
+  const props = await client.readContract({ address: READER.address, abi: READER.abi, functionName: 'getMarkets', args: [DATA_STORE, 0n, maxUint256], blockNumber })
+  props.forEach(remember)
+  return knownOf(props.map(p => p.marketToken))
 }

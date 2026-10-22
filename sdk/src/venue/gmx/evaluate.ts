@@ -1,24 +1,23 @@
-import { TOKEN_META } from '@puppet/contracts/const'
-import type { Address, } from 'viem'
+import { type Address, getAddress } from 'viem'
+import { readContract } from 'viem/actions'
+import { USD_DECIMALS, USD_SYMBOL } from '../../const/common.js'
 import type { ChainId } from '../../const/index.js'
+import { readableAddress } from '../../core/format.js'
+import { readableLeverage, readableUsd } from '../../core/readable.js'
 import { max } from '../../core/math.js'
-import { usdPriceFromRate, usdToBase } from '../../evaluate/precision.js'
-import type {
-  INavPosition,
-  IPlatformInFlight,
-  IPlatformValuation,
-  IPriceSource
-} from '../../evaluate/types.js'
+import { readTokenProfiles } from '../../core/token.js'
+import { usdPriceFromRate } from '../../evaluate/precision.js'
+import { valueUnlisted } from '../../evaluate/unlisted.js'
+import type { IPriceSource } from '../../evaluate/types.js'
 import { type ITokenMetaKey, tokenMetaByChainToken, tokenMetaKey } from '../../state/tokenRegistry.js'
-import type { IVenueValueParams } from '../types.js'
-import { MARKET_ADDRESS_DESCRIPTION_MAP } from './market.js'
+import type { IVenueMarket, IVenuePosition, IVenueValueParams } from '../types.js'
+import { GMX_V2_CONTRACT_MAP } from './contractMap.js'
+import { GMX_WNT, readGmxMarkets } from './market.js'
 import { makeOnchainGmxClaimableProvider, makeOnchainGmxOrderProvider, makeOnchainGmxPositionProvider } from './onchainPositions.js'
-import { getLeverageFactor, getPositionPnlUsd } from './position.js'
+import { getPositionPnlUsd } from './position.js'
 import type { IGmxClaimableRow, IGmxOrderRow, IGmxPositionRow } from './rows.js'
 
 export type { IGmxClaimableRow, IGmxOrderRow, IGmxPositionRow } from './rows.js'
-
-const PLATFORM = 'gmx'
 
 export const GMX_ORDER_TYPE = {
   MarketSwap: 0,
@@ -57,30 +56,24 @@ const GMX_ORDER_EXECUTING_TYPES: ReadonlySet<number> = new Set([
   GMX_ORDER_TYPE.MarketDecrease
 ])
 
-const USD_PROXY = TOKEN_META.USDC.symbol
-
-const MARKET_INDEX_MAP = MARKET_ADDRESS_DESCRIPTION_MAP as Record<string, { indexToken?: Address } | undefined>
-
-export function resolveIndexToken(market: Address): Address | undefined {
-  return MARKET_INDEX_MAP[market]?.indexToken
-}
 
 type IGmxPriceMap = Map<ITokenMetaKey, IPriceSource>
 
 function gmxTokensToPrice(
+  markets: ReadonlyMap<Address, IVenueMarket>,
   rows: IGmxPositionRow[],
   orders: IGmxOrderRow[],
-  claimables: IGmxClaimableRow[],
-  baseToken: Address
+  claimables: IGmxClaimableRow[]
 ): Address[] {
-  const tokens = new Set<Address>([baseToken])
+  const tokens = new Set<Address>()
   for (const r of rows) {
-    const indexToken = resolveIndexToken(r.market)
-    if (indexToken) tokens.add(indexToken)
+    const indexToken = markets.get(getAddress(r.market))?.indexToken
+    if (indexToken !== undefined) tokens.add(indexToken)
     tokens.add(r.collateralToken)
   }
   for (const o of orders) {
     if (GMX_ORDER_CUSTODY_TYPES.has(o.orderType)) tokens.add(o.collateralToken)
+    if (o.executionFee > 0n) tokens.add(GMX_WNT)
   }
   for (const c of claimables) tokens.add(c.token)
   return [...tokens]
@@ -92,149 +85,154 @@ function tokenAmountToUsd(priceByToken: IGmxPriceMap, chainId: ChainId, token: A
   return amount * entry.price
 }
 
-function valueGmxPositions(
-  chainId: ChainId,
-  rows: IGmxPositionRow[],
-  orders: IGmxOrderRow[],
-  claimables: IGmxClaimableRow[],
-  priceByToken: IGmxPriceMap,
-  baseToken: Address,
-  nowSec: number
-): IPlatformValuation {
-  if (rows.length === 0 && orders.length === 0 && claimables.length === 0)
-    return { platform: PLATFORM, positions: [], inFlight: [], available: true }
-
-  const baseEntry = priceByToken.get(tokenMetaKey(chainId, baseToken))
-  if (!baseEntry || baseEntry.price === 0n) {
-    return {
-      platform: PLATFORM,
-      positions: [],
-      inFlight: [],
-      available: false,
-      unavailableReason: 'no GMX oracle price for base token'
-    }
-  }
-  const basePrice = baseEntry.price
-  const baseAgeSec = Math.max(0, nowSec - baseEntry.time)
-
-  const positions: INavPosition[] = rows.map(row => {
-    const indexToken = resolveIndexToken(row.market)
-    const indexEntry = indexToken ? priceByToken.get(tokenMetaKey(chainId, indexToken)) : undefined
-    const indexPrice = indexEntry ? indexEntry.price : 0n
-    const indexAgeSec = indexEntry ? nowSec - indexEntry.time : 0
-    const canRevalue = indexEntry !== undefined && indexPrice > 0n && indexToken !== undefined
-    const pnlUsd = canRevalue
-      ? getPositionPnlUsd(row.isLong, row.sizeInUsd, row.sizeInTokens, indexPrice)
-      : row.storedPnlUsd
-    const collateralBase = usdToBase(row.collateralUsd, basePrice)
-    const pnlBase = usdToBase(pnlUsd, basePrice)
-    return {
-      platform: PLATFORM,
-      positionKey: row.positionKey,
-      market: row.market,
-      collateralBase,
-      pnlBase,
-      netBase: max(0n, collateralBase + pnlBase),
-      priceAgeSec: canRevalue ? Math.max(baseAgeSec, indexAgeSec) : undefined,
-      facets: {
-        side: row.isLong ? 'long' : 'short',
-        sizeUsd: row.sizeInUsd,
-        leverageBps: getLeverageFactor(row.sizeInUsd, row.collateralUsd, pnlUsd, 0n, 0n)
-      }
-    }
-  })
-  const inFlight: IPlatformInFlight[] = []
-  for (const o of orders) {
-    if (GMX_ORDER_CUSTODY_TYPES.has(o.orderType) && o.collateralDeltaAmount > 0n) {
-      const custodyUsd = tokenAmountToUsd(priceByToken, chainId, o.collateralToken, o.collateralDeltaAmount)
-      if (custodyUsd === null) {
-        return {
-          platform: PLATFORM,
-          positions: [],
-          inFlight: [],
-          available: false,
-          unavailableReason: `no oracle price for resting order collateral ${o.collateralToken}`
-        }
-      }
-      const collateralBase = usdToBase(custodyUsd, basePrice)
-      positions.push({
-        platform: PLATFORM,
-        positionKey: o.orderKey,
-        market: o.market,
-        collateralBase,
-        pnlBase: 0n,
-        netBase: collateralBase,
-        priceAgeSec: baseAgeSec,
-        facets: { kind: 'resting-order', orderType: o.orderType, side: o.isLong ? 'long' : 'short' }
-      })
-    }
-    if (GMX_ORDER_EXECUTING_TYPES.has(o.orderType)) {
-      inFlight.push({
-        platform: PLATFORM,
-        ref: o.orderKey,
-        detail: `market order type ${o.orderType} pending keeper execution`
-      })
-    }
-  }
-  for (const c of claimables) {
-    if (c.amount === 0n) continue
-    const claimUsd = tokenAmountToUsd(priceByToken, chainId, c.token, c.amount)
-    if (claimUsd === null) {
-      return {
-        platform: PLATFORM,
-        positions: [],
-        inFlight: [],
-        available: false,
-        unavailableReason: `no oracle price for claimable funding token ${c.token}`
-      }
-    }
-    const collateralBase = usdToBase(claimUsd, basePrice)
-    positions.push({
-      platform: PLATFORM,
-      positionKey: `${c.market}${c.token.slice(2)}` as `0x${string}`,
-      market: c.market,
-      collateralBase,
-      pnlBase: 0n,
-      netBase: collateralBase,
-      priceAgeSec: baseAgeSec,
-      facets: { kind: 'claimable-funding', token: c.token }
-    })
-  }
-  return { platform: PLATFORM, positions, inFlight, available: true }
+const GMX_ORDER_NAME: Readonly<Record<number, string>> = {
+  [GMX_ORDER_TYPE.MarketSwap]: 'Market swap',
+  [GMX_ORDER_TYPE.LimitSwap]: 'Limit swap',
+  [GMX_ORDER_TYPE.MarketIncrease]: 'Market increase',
+  [GMX_ORDER_TYPE.LimitIncrease]: 'Limit increase',
+  [GMX_ORDER_TYPE.MarketDecrease]: 'Market decrease',
+  [GMX_ORDER_TYPE.LimitDecrease]: 'Limit decrease',
+  [GMX_ORDER_TYPE.StopLossDecrease]: 'Stop-loss',
+  [GMX_ORDER_TYPE.StopIncrease]: 'Stop increase'
 }
 
-export async function valueGmxAccount({
-  chainId,
-  account,
-  baseToken,
-  blockNumber,
-  nowSec,
-  publicClient,
-  getRate
-}: IVenueValueParams): Promise<IPlatformValuation> {
-  if (publicClient === undefined) {
-    return { platform: PLATFORM, positions: [], inFlight: [], available: false, unavailableReason: 'GMX positions need a chain client' }
-  }
+export async function gmxPositions({ chainId, account, blockNumber, nowSec, clients, getRate, freshness }: IVenueValueParams): Promise<IVenuePosition[]> {
+  const publicClient = clients[chainId]
+  if (publicClient === undefined) throw new Error('GMX positions need a chain client')
   const [positions, orders, claimables] = await Promise.all([
-    makeOnchainGmxPositionProvider(publicClient, getRate, blockNumber)(account),
+    makeOnchainGmxPositionProvider(publicClient, getRate, freshness, blockNumber)(account),
     makeOnchainGmxOrderProvider(publicClient, blockNumber)(account),
     makeOnchainGmxClaimableProvider(publicClient, blockNumber)(account)
   ])
-  {
-    if (positions.length === 0 && orders.length === 0 && claimables.length === 0)
-      return { platform: PLATFORM, positions: [], inFlight: [], available: true }
-
-    const priceByToken: IGmxPriceMap = new Map()
-    await Promise.all(
-      gmxTokensToPrice(positions, orders, claimables, baseToken).map(async token => {
-        const key = tokenMetaKey(chainId, token)
-        const meta = tokenMetaByChainToken.get(key)
-        if (!meta) return
-        const rate = await getRate(meta.symbol, USD_PROXY).catch(() => null)
-        if (rate) priceByToken.set(key, { price: usdPriceFromRate(rate, TOKEN_META.USDC.decimals), time: rate.time })
+  if (positions.length === 0 && orders.length === 0 && claimables.length === 0) return []
+  const markets = await readGmxMarkets(publicClient, [...positions.map(row => row.market), ...orders.map(o => o.market)], blockNumber)
+  const indexOf = (market: Address): Address | undefined => markets.get(getAddress(market))?.indexToken
+  const priceByToken: IGmxPriceMap = new Map()
+  const unlisted = [...new Set([...positions.flatMap(row => [indexOf(row.market), row.collateralToken]), ...orders.map(o => indexOf(o.market))])].filter(
+    (token): token is Address => token !== undefined && !tokenMetaByChainToken.has(tokenMetaKey(chainId, token))
+  )
+  const [profiles] = await Promise.all([
+    readTokenProfiles(req => readContract(publicClient, req), chainId, unlisted),
+    ...gmxTokensToPrice(markets, positions, orders, claimables).map(async token => {
+      const key = tokenMetaKey(chainId, token)
+      const meta = tokenMetaByChainToken.get(key)
+      if (!meta) return
+      const rate = await getRate(meta.symbol, USD_SYMBOL, freshness)
+      priceByToken.set(key, { price: usdPriceFromRate(rate, USD_DECIMALS), time: rate.time })
+    })
+  ])
+  const marked = new Map<Address, string>()
+  await Promise.all(
+    [...new Set(positions.flatMap(row => {
+      const token = indexOf(row.market)
+      return token === undefined ? [] : [getAddress(token)]
+    }))]
+      .filter(token => !tokenMetaByChainToken.has(tokenMetaKey(chainId, token)))
+      .map(async token => {
+        const profile = profiles.get(token)
+        if (profile === undefined) return
+        const whole = 10n ** BigInt(profile.decimals)
+        const priced = await valueUnlisted(publicClient, chainId, token, whole, blockNumber, getRate, USD_SYMBOL, freshness)
+        if (priced === null) return
+        priceByToken.set(tokenMetaKey(chainId, token), { price: priced.value / whole, time: priced.time })
+        marked.set(token, priced.via)
       })
-    )
-
-    return valueGmxPositions(chainId, positions, orders, claimables, priceByToken, baseToken, nowSec)
+  )
+  const symbolOfToken = (token: Address): string =>
+    tokenMetaByChainToken.get(tokenMetaKey(chainId, token))?.symbol ?? profiles.get(getAddress(token))?.symbol ?? readableAddress(token)
+  const decimalsOf = (token: Address): number => {
+    const meta = tokenMetaByChainToken.get(tokenMetaKey(chainId, token))
+    if (meta === undefined) throw new Error(`GMX token ${token} is priced but not registered`)
+    return meta.decimals
   }
+  const rows: IVenuePosition[] = []
+  for (const row of positions) {
+    const indexToken = indexOf(row.market)
+    const indexEntry = indexToken === undefined ? undefined : priceByToken.get(tokenMetaKey(chainId, indexToken))
+    const pnlUsd = indexEntry === undefined ? null : getPositionPnlUsd(row.isLong, row.sizeInUsd, row.sizeInTokens, indexEntry.price)
+    const indexName = indexToken === undefined ? row.market : symbolOfToken(indexToken)
+    const indexDecimals =
+      indexToken === undefined ? undefined : (tokenMetaByChainToken.get(tokenMetaKey(chainId, indexToken))?.decimals ?? profiles.get(getAddress(indexToken))?.decimals)
+    rows.push({
+      holder: account,
+      chainId: BigInt(chainId),
+      contract: GMX_V2_CONTRACT_MAP.GmxDatastore.address,
+      key: row.positionKey,
+      kind: 'perp',
+      label: `${indexName}/USD ${row.isLong ? 'long' : 'short'}`,
+      size: indexDecimals === undefined ? row.sizeInUsd : row.sizeInTokens,
+      unit: indexDecimals === undefined ? 'USD' : indexName,
+      decimals: indexDecimals === undefined ? USD_DECIMALS : indexDecimals,
+      ...(indexDecimals === undefined ? {} : { long: row.isLong, entry: row.sizeInUsd, collateral: row.collateralAmount, collateralUnit: symbolOfToken(row.collateralToken) }),
+      cost: row.collateralUsd,
+      value: pnlUsd === null ? undefined : max(0n, row.collateralUsd + pnlUsd),
+      fieldLabelList: pnlUsd === null ? ['Notional', 'Collateral', 'Priced by'] : ['Notional', 'Leverage', 'Collateral', 'Priced by'],
+      fieldValueList:
+        pnlUsd === null
+          ? [`$${readableUsd(row.sizeInUsd)}`, symbolOfToken(row.collateralToken), `unpriced: no oracle market or Uniswap v3 pool prices ${indexName}`]
+          : [
+              `$${readableUsd(row.sizeInUsd)}`,
+              row.collateralUsd + pnlUsd > 0n ? readableLeverage(row.sizeInUsd, row.collateralUsd + pnlUsd) : 'underwater',
+              symbolOfToken(row.collateralToken),
+              (indexToken === undefined ? undefined : marked.get(getAddress(indexToken))) ?? 'the oracle'
+            ],
+      time: indexEntry === undefined ? nowSec : indexEntry.time
+    })
+  }
+  for (const o of orders) {
+    const custody = GMX_ORDER_CUSTODY_TYPES.has(o.orderType) && o.collateralDeltaAmount > 0n
+    const executing = GMX_ORDER_EXECUTING_TYPES.has(o.orderType)
+    if (!custody && !executing && o.executionFee === 0n) continue
+    const entry = priceByToken.get(tokenMetaKey(chainId, o.collateralToken))
+    if (custody && (entry === undefined || entry.price === 0n)) throw new Error(`no oracle price for resting order collateral ${o.collateralToken}`)
+    const executionFeeUsd = o.executionFee === 0n ? 0n : tokenAmountToUsd(priceByToken, chainId as ChainId, GMX_WNT, o.executionFee)
+    if (executionFeeUsd === null) throw new Error(`no oracle price for the execution fee GMX holds in ${GMX_WNT}`)
+    const value = (custody ? o.collateralDeltaAmount * entry!.price : 0n) + executionFeeUsd
+    const indexToken = indexOf(o.market)
+    const indexDecimals =
+      indexToken === undefined ? undefined : (tokenMetaByChainToken.get(tokenMetaKey(chainId, indexToken))?.decimals ?? profiles.get(getAddress(indexToken))?.decimals)
+    const trigger = o.triggerPrice === 0n || indexDecimals === undefined ? null : `$${readableUsd(o.triggerPrice * 10n ** BigInt(indexDecimals))}`
+    rows.push({
+      holder: account,
+      chainId: BigInt(chainId),
+      contract: GMX_V2_CONTRACT_MAP.GmxOrderVault.address,
+      key: o.orderKey,
+      kind: executing ? 'pending' : 'order',
+      label: `${GMX_ORDER_NAME[o.orderType] ?? `Order type ${o.orderType}`} ${o.isLong ? 'long' : 'short'}`,
+      size: custody ? o.collateralDeltaAmount : o.sizeDeltaUsd,
+      unit: custody ? symbolOfToken(o.collateralToken) : 'USD',
+      decimals: custody ? decimalsOf(o.collateralToken) : USD_DECIMALS,
+      cost: value,
+      value,
+      fieldLabelList: ['Status', ...(trigger === null ? [] : ['Trigger']), ...(executionFeeUsd === 0n ? [] : ['Execution fee'])],
+      fieldValueList: [
+        executing ? 'awaiting keeper execution' : o.isFrozen ? 'frozen' : 'resting',
+        ...(trigger === null ? [] : [trigger]),
+        ...(executionFeeUsd === 0n ? [] : [`$${readableUsd(executionFeeUsd)}`])
+      ],
+      time: entry?.time ?? nowSec
+    })
+  }
+  for (const c of claimables) {
+    if (c.amount === 0n) continue
+    const claimUsd = tokenAmountToUsd(priceByToken, chainId as ChainId, c.token, c.amount)
+    if (claimUsd === null) throw new Error(`no oracle price for claimable funding token ${c.token}`)
+    rows.push({
+      holder: account,
+      chainId: BigInt(chainId),
+      contract: c.market,
+      key: `${c.market}:${c.token}`,
+      kind: 'cash',
+      label: `Claimable funding (${symbolOfToken(c.token)})`,
+      size: c.amount,
+      unit: symbolOfToken(c.token),
+      decimals: decimalsOf(c.token),
+      cost: claimUsd,
+      value: claimUsd,
+      fieldLabelList: [],
+      fieldValueList: [],
+      time: priceByToken.get(tokenMetaKey(chainId, c.token))!.time
+    })
+  }
+  return rows
 }

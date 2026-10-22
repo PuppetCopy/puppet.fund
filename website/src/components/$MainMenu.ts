@@ -1,5 +1,7 @@
 
+import { HUB_CHAIN_ID } from '@puppet/contracts/const'
 import {
+  combine,
   constant,
   empty,
   filter,
@@ -8,10 +10,12 @@ import {
   merge,
   o,
   op,
+  skipRepeats,
+  start,
   switchLatest,
   tap
 } from 'aelea/stream'
-import { type IBehavior, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
+import { type IBehavior, PromiseStatus, state } from 'aelea/stream-extended'
 import {
   $element,
   $node,
@@ -36,7 +40,7 @@ import {
   spacing
 } from 'aelea/ui-components'
 import { colorShade, palette, type Theme, theme } from 'aelea/ui-components-theme'
-import { $defaultAnchor, $Link, locationChange } from 'aelea/ui-router'
+import { $defaultAnchor, $Link, href, isContaining, locationChange } from 'aelea/ui-router'
 import {
   $alertIntermediateSpinnerContainer,
   $anchor,
@@ -45,37 +49,48 @@ import {
   $github,
   $icon,
   $intermediatePromise,
-  $moreDots,
-  $twitter,
+  $intermediateText,
+  intermediateState,
   keyActivate,
+  maskBalance,
+  $moreDots,
   softNavClick,
-  text
+  $intermediateCircle,
+  text,
+  $twitter,
+  $wallet
 } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
 import { $jazzicon } from '../common/$avatar.js'
+import { $fundAvatar } from '../common/$fundAvatar.js'
 import { $puppetLogo } from '../common/$icons.js'
 import { DOCS_URL, GITHUB_REPO_URL } from '../const/links.js'
+import { formatUsdNumber } from '../io/price.js'
 import { $separator2 } from '../pages/common.js'
-import { type IConnectedWallet, type IWalletPair, walletQuery } from '../wallet/index.js'
+import type { IWalletControl, IWalletIntent } from '../wallet/connect.js'
+import type { IConnectedWallet, IWalletPair } from '../wallet/index.js'
 import { $accountLabel } from './$AccountProfile.js'
 import { $ServicesConnectivity } from './$ServicesConnectivity.js'
 import { $ThemePicker } from './$ThemePicker.js'
 import { $WalletConnect } from './$WalletConnect.js'
-import { $WalletLink } from './$WalletLink.js'
 
 export interface I$MainMenu {
+  hideBalances: IStream<boolean>
   walletPair: IStream<IWalletPair>
-  walletValue: IStream<Promise<number | null>>
+  shownPair: IStream<IWalletPair>
+  walletValue: IStream<Promise<number | { note: string } | null>>
+  walletControl: IWalletControl
 }
 
-export const $MainMenu = ({ walletPair, walletValue }: I$MainMenu) =>
+export const $MainMenu =({ hideBalances, walletPair, shownPair, walletValue, walletControl }: I$MainMenu) =>
   component(
     (
       [clickPopoverClaim, clickPopoverClaimTether]: IBehavior<any, any>,
       [changeTheme, changeThemeTether]: IBehavior<ISlottable, Theme>,
       [targetClick, targetClickTether]: IBehavior<INode, PointerEvent>,
-      [extraDismiss, extraDismissTether]: IBehavior<unknown>,
-      [escapeExtra, escapeExtraTether]: IBehavior<INode, KeyboardEvent>
+      [escapeExtra, escapeExtraTether]: IBehavior<INode, KeyboardEvent>,
+      [enableSession, enableSessionTether]: IBehavior<INode, PointerEvent>,
+      [walletIntent, walletIntentTether]: IBehavior<IWalletIntent>
     ) => {
       let extraTriggerEl: HTMLElement | null = null
       const onEscape = (getTrigger: () => HTMLElement | null) =>
@@ -168,7 +183,7 @@ export const $MainMenu = ({ walletPair, walletValue }: I$MainMenu) =>
           viewBox: '0 0 32 32',
           label: 'More options'
         })
-      })({ dismiss: extraDismissTether() })
+      })({})
 
       const $connectCircle = $node(
         style({
@@ -211,132 +226,194 @@ export const $MainMenu = ({ walletPair, walletValue }: I$MainMenu) =>
       )
 
       return [
-        $row(
-          spacing.default,
-          style({
-            transition: 'width .3s ease-in-out',
-            overflow: 'hidden',
-            zIndex: 22,
-            padding: '18px 12px',
-            maxHeight: '100vh',
-            flexShrink: 0,
-            placeContent: 'space-between'
-          })
-        )(
-          $column(
-            spacing.big,
-            style({ flex: 1, alignItems: 'flex-start' })
-          )(
-            $Link({
-              route: routeSchema,
-              $anchor: $defaultAnchor(
-                attr({ 'aria-label': 'Home' }),
-                style({ display: 'inline-flex', cursor: 'pointer' })
-              ),
-              $content: $icon({ $content: $puppetLogo, width: '45px', viewBox: '0 0 32 32' })
-            })({})
-          ),
-
-          $row(spacing.default, style({ flex: 1, alignItems: 'center', placeContent: 'center' }))(
-            $ServicesConnectivity()({}),
-            $intermediatePromise({
-              $loader: $node(style({ position: 'relative', display: 'inline-flex', borderRadius: '50px' }))(
-                style({ position: 'relative' })($target),
-                style({
-                  position: 'absolute',
-                  inset: '0px',
-                  width: '100%',
-                  height: '100%',
-                  pointerEvents: 'none',
-                  zIndex: 0,
-                  borderRadius: '50px'
-                })(
-                  style({ width: '100%', height: '100%', borderRadius: '50px', overflow: 'hidden' })(
-                    $alertIntermediateSpinnerContainer()
-                  )
-                )
-              ),
-              $display: map(async connectionQuery => {
-                const connection: IConnectedWallet | null = await connectionQuery
-
-                if (!connection?.address) {
-                  return $Popover({
-                    $target,
-                    $open: map(() => {
-                      return $WalletConnect()({})
-                    }, targetClick)
-                  })({})
-                }
-
-                const $circle = style({
-                  position: 'relative',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  width: '45px',
-                  height: '45px',
-                  borderRadius: '50%',
-                  flexShrink: '0',
-                  overflow: 'hidden'
-                })
-
-                const $totalUsd = $node(
-                  style({ fontSize: text.xs, fontWeight: '600', color: palette.message, lineHeight: '1.1' })
-                )(
-                  switchLatest(
-                    map(
-                      s =>
-                        s.status === PromiseStatus.ERROR
-                          ? $node(
-                              attr({ title: `Value unavailable: ${s.error instanceof Error ? s.error.message : String(s.error)}` }),
-                              style({ color: palette.negative })
-                            )($text('!'))
-                          : $node(style({ color: s.status === PromiseStatus.DONE && s.value !== null ? palette.message : palette.foreground }))(
-                              $text(s.status === PromiseStatus.DONE && s.value !== null ? `$${s.value.toFixed(2)}` : '-')
-                            ),
-                      op(walletValue, promiseState)
-                    )
-                  )
-                )
-
-                return $element('a')(
-                  attr({ 'aria-label': 'Account', href: '/portfolio' }),
-                  style({
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    borderRadius: '50px',
-                    border: `1px solid ${colorShade(palette.foreground, 40)}`,
-                    padding: '0',
-                    minWidth: '165px',
-                    cursor: 'pointer',
-                    color: palette.message,
-                    textDecoration: 'none'
-                  }),
-                  stylePseudo(':hover', { borderColor: palette.foreground }),
-                  softNavClick('/portfolio')
-                )(
-                  $row(
-                    spacing.small,
-                    style({ alignItems: 'center', alignSelf: 'stretch', pointerEvents: 'none', paddingRight: '16px', flex: 1 })
+        switchLatest(
+          map(
+            inWallet =>
+              inWallet
+                ? empty
+                : $row(
+                    spacing.default,
+                    style({
+                      transition: 'width .3s ease-in-out',
+                      overflow: 'hidden',
+                      zIndex: 22,
+                      padding: '18px 12px',
+                      maxHeight: '100vh',
+                      flexShrink: 0,
+                      placeContent: 'space-between'
+                    })
                   )(
-                    $node($circle)($jazzicon(connection.address)),
-                    $column(spacing.tiny, style({ minWidth: '0', flex: 1 }))(
-                      $accountLabel({ address: connection.address, primarySize: 0.75 }),
-                      $separator2,
-                      $totalUsd
-                    )
-                  )
-                )
-              }, walletQuery)
-            }),
-            $WalletLink({ walletPair })({})
-          ),
+                    $column(
+                      spacing.big,
+                      style({ flex: 1, alignItems: 'flex-start' })
+                    )(
+                      $Link({
+                        route: routeSchema,
+                        $anchor: $defaultAnchor(
+                          attr({ 'aria-label': 'Home' }),
+                          style({ display: 'inline-flex', cursor: 'pointer' })
+                        ),
+                        $content: $icon({ $content: $puppetLogo, width: '45px', viewBox: '0 0 32 32' })
+                      })({})
+                    ),
 
-          $row(spacing.big, style({ flex: 1, placeContent: 'flex-end', alignItems: 'center' }))(
-            $extraMenuPopover,
-            ...(isDesktopScreen ? $socialLinkList : [])
+                    $row(spacing.default, style({ flex: 1, alignItems: 'center', placeContent: 'center' }))(
+                      $ServicesConnectivity()({}),
+                      $intermediatePromise({
+                        $loader: $node(style({ position: 'relative', display: 'inline-flex', borderRadius: '50px' }))(
+                          style({ position: 'relative' })($target),
+                          style({
+                            position: 'absolute',
+                            inset: '0px',
+                            width: '100%',
+                            height: '100%',
+                            pointerEvents: 'none',
+                            zIndex: 0,
+                            borderRadius: '50px'
+                          })(
+                            style({ width: '100%', height: '100%', borderRadius: '50px', overflow: 'hidden' })(
+                              $alertIntermediateSpinnerContainer()
+                            )
+                          )
+                        ),
+                        $display: map(async connectionQuery => {
+                          const connection: IConnectedWallet | null = await connectionQuery
+
+                          if (!connection?.address) {
+                            return $Popover({
+                              $target,
+                              $open: map(() => {
+                                return $WalletConnect({ control: walletControl })({ walletIntent: walletIntentTether() })
+                              }, targetClick)
+                            })({})
+                          }
+
+                          const $circle = style({
+                            position: 'relative',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: '45px',
+                            height: '45px',
+                            borderRadius: '50%',
+                            flexShrink: '0',
+                            overflow: 'hidden'
+                          })
+
+                          const totalState = op(combine({ value: intermediateState(walletValue), pair: walletPair }), state())
+                          const totalSettled = op(
+                            totalState,
+                            filter(p => p.value.status !== PromiseStatus.PENDING),
+                            state()
+                          )
+                          const totalKind = op(
+                            totalSettled,
+                            map(p => (p.value.status === PromiseStatus.DONE && p.value.value === null ? 'none' : p.value.status === PromiseStatus.DONE && typeof p.value.value === 'object' ? 'note' : 'number')),
+                            start('number'),
+                            skipRepeats
+                          )
+                          const $totalUsd = $node(
+                            style({ fontSize: text.xs, fontWeight: '600', color: palette.message, lineHeight: '1.1' })
+                          )(
+                            switchLatest(
+                              map(kind => {
+                                if (kind === 'number') {
+                                  return $intermediateText(maskBalance(map(value => value.then(v => (typeof v === 'number' ? formatUsdNumber(v) : '-')), walletValue), hideBalances))
+                                }
+                                if (kind === 'none') return $node(style({ color: palette.foreground }))($text('-'))
+                                return switchLatest(
+                                  map(p => {
+                                    if (p.value.status !== PromiseStatus.DONE || p.value.value === null || typeof p.value.value === 'number') return empty
+                                    const note = p.value.value.note
+                                    if (p.pair.keys === null || p.pair.keys.sessionOf(connection.address, HUB_CHAIN_ID) !== null) {
+                                      return $node(attr({ title: note }), style({ color: palette.negative }))($text('Value unknown'))
+                                    }
+                                    return $node(
+                                      attr({ role: 'button', title: `Sign a session so your fund's venues can be read: ${note}.` }),
+                                      style({ color: palette.primary, cursor: 'pointer', pointerEvents: 'auto', textDecorationLine: 'underline', textDecorationColor: `color-mix(in srgb, ${palette.foreground} 35%, transparent)`, textUnderlineOffset: '3px' }),
+                                      enableSessionTether(
+                                        nodeEvent('click'),
+                                        tap(event => {
+                                          event.preventDefault()
+                                          event.stopPropagation()
+                                        })
+                                      )
+                                    )($text('Enable session'))
+                                  }, totalSettled)
+                                )
+                              }, totalKind)
+                            )
+                          )
+
+                          return $element('a')(
+                            attr({ 'aria-label': 'Account', href: href(routeSchema.portfolio) }),
+                            style({
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              borderRadius: '50px',
+                              border: `1px solid ${colorShade(palette.foreground, 40)}`,
+                              padding: '0',
+                              minWidth: '165px',
+                              cursor: 'pointer',
+                              color: palette.message,
+                              textDecoration: 'none'
+                            }),
+                            stylePseudo(':hover', { borderColor: palette.foreground }),
+                            softNavClick(href(routeSchema.portfolio))
+                          )(
+                            $row(
+                              spacing.small,
+                              style({ alignItems: 'center', alignSelf: 'stretch', pointerEvents: 'none', paddingRight: '16px', flex: 1 })
+                            )(
+                              $node($circle)($jazzicon(connection.address)),
+                              $column(spacing.tiny, style({ minWidth: '0', flex: 1 }))(
+                                $accountLabel({ address: connection.address, primarySize: 0.75 }),
+                                $separator2,
+                                $totalUsd
+                              )
+                            )
+                          )
+                        }, walletControl.query)
+                      }),
+                      $intermediatePromise({
+                        $loader: $intermediateCircle(32),
+                        $$fail: () => empty,
+                        $display: map(async pair => {
+                          const root = await pair.root
+                          const fund = root === null || root.fund === null || 'unknown' in root.fund ? null : root.fund
+                          const label = fund !== null ? `${fund.symbol} wallet` : root !== null && root.fund === null ? 'Create fund' : 'Wallet'
+                          return $Link({
+                            route: routeSchema.wallet,
+                            $anchor: $defaultAnchor(attr({ 'aria-label': label, title: label }), style({ display: 'inline-flex' })),
+                            $content:
+                              fund === null
+                                ? $node(
+                                    style({
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      width: '32px',
+                                      height: '32px',
+                                      borderRadius: '50%',
+                                      backgroundColor: colorShade(palette.foreground, 25)
+                                    }),
+                                    stylePseudo(':hover', { backgroundColor: colorShade(palette.foreground, 35) })
+                                  )($icon({ $content: $wallet, viewBox: '0 0 32 32', fill: palette.foreground, size: '16px' }))
+                                : $fundAvatar(fund.cells, 32)
+                          })({})
+                        }, shownPair)
+                      })
+                    ),
+
+                    $row(spacing.big, style({ flex: 1, placeContent: 'flex-end', alignItems: 'center' }))(
+                      $extraMenuPopover,
+                      ...(isDesktopScreen ? $socialLinkList : [])
+                    )
+                  ),
+            isContaining(routeSchema.wallet)
           )
-        )
+        ),
+        { enableSession, walletIntent }
       ]
     }
   )

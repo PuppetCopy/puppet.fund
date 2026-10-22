@@ -7,19 +7,11 @@
   "type": "module",
   "sideEffects": false,
   "scripts": {
-    "build": "bun run clean && tsgo -b",
-    "clean": "rm -rf dist",
     "test": "bun test",
-    "tsgo:check": "tsgo --noEmit"
+    "typecheck": "bun check"
   },
-  "files": [
-    "dist"
-  ],
   "exports": {
-    "./*": {
-      "types": "./dist/types/*/index.d.ts",
-      "import": "./dist/esm/*/index.js"
-    }
+    "./*": "./src/*/index.ts"
   },
   "dependencies": {
     "@noble/curves": "2.4.0",
@@ -28,8 +20,7 @@
     "viem": "catalog:"
   },
   "devDependencies": {
-    "@types/bun": "catalog:",
-    "abitype": "catalog:"
+    "@types/bun": "catalog:"
   },
   "keywords": [
     "puppet",

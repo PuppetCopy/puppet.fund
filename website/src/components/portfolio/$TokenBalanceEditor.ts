@@ -1,20 +1,19 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
+import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import { depositArrivalToken, type IDepositDraft, type IEditorDraft, type IWalletWithdrawDraft, type IWithdrawDraft } from '@puppet/sdk/client'
 import type { ChainId } from '@puppet/sdk/const'
 import { getTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
-import type { ITokenRegistryMap } from '@puppet/sdk/state'
-import { combine, constant, type IStream, just, map, merge, op, skipRepeatsWith, switchLatest } from 'aelea/stream'
-import { type IBehavior, multicast } from 'aelea/stream-extended'
-import { $node, $text, component, style, stylePseudo } from 'aelea/ui'
+import { combine, constant, empty, type IStream, just, map, merge, op, sample, sampleMap, skipRepeats, start, switchLatest, switchMap } from 'aelea/stream'
+import { type IBehavior, state } from 'aelea/stream-extended'
+import { $node, $text, component, style, styleBehavior, stylePseudo } from 'aelea/ui'
 import { $column, $Popover, $row, spacing } from 'aelea/ui-components'
 import { interaction, palette } from 'aelea/ui-components-theme'
 import { type Hex, isAddressEqual } from 'viem'
-import { $amountDisplay, $ButtonPrimary, $ButtonSecondary, $defaultMiniButtonPrimary, $defaultMiniButtonSecondary, $popoverCaret } from '@/ui-components'
+import { $amountDisplay, $ButtonPrimary, $ButtonSecondary, $defaultMiniButtonPrimary, $defaultMiniButtonSecondary, $popoverCaret, type IAmountChange, text } from '@/ui-components'
 import { $tokenProfile } from '../../common/$common.js'
-import { formatUsd, priceFor } from '../../io/price.js'
+import { priceFor, usdOf } from '../../io/price.js'
 import type { IConnectedWallet, IRootState } from '../../wallet/index.js'
 import { $AccountSwapEditor } from './$AccountSwapEditor.js'
 import { $WithdrawEditor } from './$WithdrawEditor.js'
-import { depositArrivalToken, type IDepositDraft, type IEditorDraft, type IWithdrawDraft } from './draft.js'
 import { $editorPopoverContentContainer } from './editorUtils.js'
 
 type IBalanceMode = 'withdraw' | 'swap'
@@ -27,106 +26,142 @@ const $transferContainer = $defaultMiniButtonPrimary(
 
 export interface I$TokenBalanceEditor {
   hideBalances: IStream<boolean>
+  viewOnly: IStream<boolean>
   accountState: IStream<IRootState>
   chainId: ChainId
   token: Hex
-  tokenRegistry: ITokenRegistryMap
   walletAccount: IConnectedWallet
   draft: IStream<IEditorDraft | null>
+  exit: IStream<'waiting' | 'open' | 'closed' | null>
 }
 
-export const $TokenBalanceEditor = ({ hideBalances, accountState, chainId, token, tokenRegistry, walletAccount, draft }: I$TokenBalanceEditor) =>
+export const $TokenBalanceEditor = ({ hideBalances, viewOnly, accountState, chainId, token, walletAccount, draft, exit }: I$TokenBalanceEditor) =>
   component(
     (
       [popSwap, popSwapTether]: IBehavior<PointerEvent>,
       [popWithdraw, popWithdrawTether]: IBehavior<PointerEvent>,
-      [changeDraft, changeDraftTether]: IBehavior<IEditorDraft>
+      [changeDraft, changeDraftTether]: IBehavior<IEditorDraft>,
+      [walletWithdraw, walletWithdrawTether]: IBehavior<PointerEvent>
     ) => {
       const opened: IStream<IBalanceMode> = merge(constant('swap', popSwap), constant('withdraw', popWithdraw))
 
-      const chainRow = (s: IRootState) => s.balances.find(r => r.chainId === chainId && isAddressEqual(r.token, token))
-      const $body = op(
+      const tokenDescription = getTokenDescription(chainId, token)
+      const price = priceFor(chainId, token)
+      const liveBalance: IStream<bigint> = op(
         accountState,
-        skipRepeatsWith((a, b) => {
-          const x = chainRow(a)
-          const y = chainRow(b)
-          return a.account === b.account && x?.balance === y?.balance
+        map(s => s.balances.find(r => r.chainId === chainId && isAddressEqual(r.token, token))?.balance ?? 0n),
+        skipRepeats,
+        state()
+      )
+      const shownBalance: IStream<bigint> = op(
+        combine({ d: draft, live: liveBalance }),
+        map(p => (p.d !== null && p.d.kind === 'withdraw' ? p.d.balanceBefore : p.live)),
+        state()
+      )
+      const syncError: IStream<string | null> = op(accountState, map(s => s.syncError), skipRepeats, state())
+      const synced = (value: IStream<Promise<string> | string>): IStream<Promise<string> | string> =>
+        op(
+          combine({ value, syncError }),
+          switchMap(p => (p.syncError === null ? just(p.value) : start(p.value, just(Promise.reject(new Error(p.syncError))))))
+        )
+
+      const pendingAmount: IStream<bigint> = op(
+        draft,
+        map(d => {
+          if (d === null) return 0n
+          if (d.kind === 'withdraw') return -d.inputAmount.amount
+          return Number(d.deposit.destinationChainId) === chainId && isAddressEqual(depositArrivalToken(d), token) ? d.expectedOutput : 0n
         }),
-        map(metric => {
-          const tokenDescription = getTokenDescription(chainId, token)
-          const bookRow = chainRow(metric)
-          const liveBalance = bookRow?.balance ?? 0n
-          const balanceOf = (d: IEditorDraft | null): bigint => (d !== null && d.kind === 'withdraw' ? d.balanceBefore : liveBalance)
-          const usdValue: IStream<string> = map(p => formatUsd(balanceOf(p.d), p.price), combine({ d: draft, price: priceFor(chainId, token) }))
-
-          const pendingAmount: IStream<bigint> = op(
-            draft,
-            map(d => {
-              if (d === null) return 0n
-              if (d.kind === 'withdraw') return -d.inputAmount.amount
-              return Number(d.deposit.destinationChainId) === chainId && isAddressEqual(depositArrivalToken(d), token) ? d.expectedOutput : 0n
-            }),
-            multicast
-          )
-
-          const adjustmentColor = map(amount => (amount > 0n ? palette.positive : amount < 0n ? palette.negative : undefined), pendingAmount)
-
-          const adjustmentChange = map(
-            p =>
-              p.amount === 0n
-                ? null
-                : {
-                    usd: formatUsd(balanceOf(p.d) + p.amount, p.price),
-                    amount: readableTokenAmountLabel(tokenDescription, balanceOf(p.d) + p.amount)
-                  },
-            combine({ amount: pendingAmount, price: priceFor(chainId, token), d: draft })
-          )
-
-          const $balanceDisplay = $amountDisplay({
-            hideBalances,
-            usd: usdValue,
-            amount: map(d => readableTokenAmountLabel(tokenDescription, balanceOf(d)), draft),
-            change: adjustmentChange,
-            color: adjustmentColor,
-            align: 'flex-end'
-          })
-
-          const withdrawDraft: IStream<IWithdrawDraft | null> = map(d => (d?.kind === 'withdraw' ? d : null), draft)
-          const convertDraft: IStream<IDepositDraft | null> = map(d => (d?.kind === 'deposit' && d.deposit.route !== null ? d : null), draft)
-          const noBalance = just(liveBalance === 0n)
-
-          return $Popover({
-            $contentContainer: $editorPopoverContentContainer,
-            $target: $row(spacing.default, style({ borderRadius: '4px', alignItems: 'center', flex: 1, padding: '10px 0' }))(
-              $tokenProfile(chainId, token, 32),
-              $row(spacing.small, style({ alignItems: 'center' }))(
-                $ButtonPrimary({
-                  $container: chainId === HUB_CHAIN_ID ? $defaultMiniButtonPrimary : $transferContainer,
-                  $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text(chainId === HUB_CHAIN_ID ? 'Swap' : 'Transfer to hub'), $popoverCaret()),
-                  disabled: noBalance
-                })({ click: popSwapTether() }),
-                $ButtonSecondary({
-                  $container: $defaultMiniButtonSecondary,
-                  $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Withdraw'), $popoverCaret()),
-                  disabled: noBalance
-                })({ click: popWithdrawTether() })
-              ),
-              $node(style({ flex: 1 }))(),
-              $column(style({ alignItems: 'flex-end' }))($balanceDisplay)
-            ),
-            $open: map(
-              mode =>
-                mode === 'swap'
-                  ? $AccountSwapEditor({ accountState: metric, chainId, token, tokenRegistry, existingDraft: convertDraft })({ changeDraft: changeDraftTether() })
-                  : $WithdrawEditor({ accountState: metric, chainId, token, tokenRegistry, walletAccount, existingDraft: withdrawDraft })({ changeDraft: changeDraftTether() }),
-              opened
-            ),
-            dismiss: changeDraft
-          })({})
-        }),
-        switchLatest
+        state()
       )
 
-      return [$body, { changeDraft }]
+      const adjustmentColor = map(amount => (amount > 0n ? palette.positive : amount < 0n ? palette.negative : undefined), pendingAmount)
+
+      const adjustmentChange = op(
+        combine({ amount: pendingAmount, price, balance: shownBalance, syncError }),
+        switchMap((p): IStream<IAmountChange | null> => {
+          if (p.amount === 0n) return just(null)
+          const projected: IAmountChange = { usd: usdOf(p.balance + p.amount, p.price), amount: readableTokenAmountLabel(tokenDescription, p.balance + p.amount) }
+          return p.syncError === null ? just(projected) : start(projected, just({ ...projected, usd: Promise.reject(new Error(p.syncError)) }))
+        })
+      )
+
+      const $balanceDisplay = $amountDisplay({
+        hideBalances,
+        usd: synced(map(p => usdOf(p.balance, p.price), combine({ balance: shownBalance, price }))),
+        amount: synced(map(balance => readableTokenAmountLabel(tokenDescription, balance), shownBalance)),
+        change: adjustmentChange,
+        color: adjustmentColor,
+        align: 'flex-end'
+      })
+
+      const withdrawDraft: IStream<IWithdrawDraft | null> = map(d => (d?.kind === 'withdraw' ? d : null), draft)
+      const convertDraft: IStream<IDepositDraft | null> = map(d => (d?.kind === 'deposit' && d.deposit.route !== null ? d : null), draft)
+      const exitPhase: IStream<'waiting' | 'open' | 'closed' | null> = op(exit, start(null), skipRepeats, state())
+      const actionDisabled = map(
+        p => p.view || p.balance === 0n || p.phase === 'waiting' || p.phase === 'open',
+        combine({ view: viewOnly, balance: liveBalance, phase: exitPhase })
+      )
+
+      const $body = $Popover({
+        $contentContainer: $editorPopoverContentContainer,
+        $target: $row(spacing.default, style({ borderRadius: '4px', alignItems: 'center', flex: 1, padding: '10px 0' }))(
+          chainId === HUB_CHAIN_ID && isAddressEqual(token, PROTOCOL.nativeToken)
+            ? $column(spacing.tiny, style({ minWidth: '0' }))(
+                $tokenProfile(chainId, token),
+                $node(style({ fontSize: text.xs, color: palette.indeterminate }), styleBehavior(map(balance => (balance > 0n ? null : { display: 'none' }), liveBalance)))(
+                  $text('Withdraw native ETH and deposit WETH to get matched')
+                )
+              )
+            : $tokenProfile(chainId, token),
+          $row(spacing.small, style({ alignItems: 'center' }))(
+            $ButtonPrimary({
+              $container: chainId === HUB_CHAIN_ID ? $defaultMiniButtonSecondary : $transferContainer,
+              $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text(chainId === HUB_CHAIN_ID ? 'Swap' : 'Transfer to hub'), $popoverCaret()),
+              disabled: actionDisabled
+            })({ click: popSwapTether() }),
+            $ButtonSecondary({
+              $container: $defaultMiniButtonSecondary,
+              $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Withdraw'), $popoverCaret()),
+              disabled: actionDisabled
+            })({ click: popWithdrawTether() }),
+            switchLatest(
+              map(
+                phase =>
+                  phase !== 'open'
+                    ? empty
+                    : $ButtonPrimary({
+                        $container: $defaultMiniButtonPrimary,
+                        $content: $text('Withdraw to wallet'),
+                        disabled: map(p => p.view || p.balance === 0n, combine({ view: viewOnly, balance: liveBalance }))
+                      })({ click: walletWithdrawTether() }),
+                exitPhase
+              )
+            )
+          ),
+          $node(style({ flex: 1 }))(),
+          $column(style({ alignItems: 'flex-end' }))($balanceDisplay)
+        ),
+        $open: sampleMap(
+          (metric: IRootState, mode: IBalanceMode) =>
+            mode === 'swap'
+              ? $AccountSwapEditor({ accountState: metric, chainId, token, existingDraft: convertDraft })({ changeDraft: changeDraftTether() })
+              : $WithdrawEditor({ accountState: metric, chainId, token, walletAccount, existingDraft: withdrawDraft })({ changeDraft: changeDraftTether() }),
+          accountState,
+          opened
+        ),
+        dismiss: changeDraft
+      })({})
+
+      return [
+        $body,
+        {
+          changeDraft,
+          walletWithdraw: sample(
+            map((balance): IWalletWithdrawDraft => ({ kind: 'walletWithdraw', id: `walletWithdraw:${chainId}:${token}`, chainId, token, amount: balance }), liveBalance),
+            walletWithdraw
+          )
+        }
+      ]
     }
   )

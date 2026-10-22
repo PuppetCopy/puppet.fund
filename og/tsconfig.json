@@ -4,16 +4,11 @@
     "src"
   ],
   "compilerOptions": {
-    "composite": false,
-    "declaration": false,
-    "declarationMap": false,
-    "noEmit": true,
     "lib": [
       "DOM",
       "ESNext"
     ],
     "allowSyntheticDefaultImports": true,
-    "types": ["@types/bun"],
-    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo"
+    "types": ["@types/bun"]
   }
 }

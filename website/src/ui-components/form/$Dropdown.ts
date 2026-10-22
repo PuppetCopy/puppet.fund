@@ -80,6 +80,7 @@ export interface I$Dropdown<T> {
   $anchor: I$Node
   disabled?: IStream<boolean>
   closeOnSelect?: boolean
+  align?: 'start' | 'end'
   $$option?: IOps<T, I$Slottable>
   $container?: INodeCompose
   $dropListContainer?: INodeCompose
@@ -97,6 +98,7 @@ export function $Dropdown<T>({
   optionList,
   disabled = never,
   closeOnSelect = true,
+  align = 'start',
   $container = $defaultDropdownContainer,
   $dropListContainer = $defaultDropListContainer,
   $$option = map((o: T) => $node($text(String(o)))),
@@ -153,9 +155,10 @@ export function $Dropdown<T>({
                 const cEl = cEntry[0]?.target as HTMLElement | undefined
                 if (!aEl || !cEl) return {}
                 const rect = aEl.getBoundingClientRect()
+                const width = cEl.getBoundingClientRect().width
                 return {
                   top: `${rect.bottom - 1}px`,
-                  left: `${rect.left}px`,
+                  left: `${Math.max(8, Math.min(align === 'end' ? rect.right - width : rect.left, window.innerWidth - width - 8))}px`,
                   minWidth: `${rect.width}px`,
                   maxHeight: `${Math.max(120, window.innerHeight - rect.bottom - 20)}px`,
                   overflowY: 'auto',

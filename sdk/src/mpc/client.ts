@@ -2,6 +2,7 @@ import { randomBytes } from '@noble/hashes/utils.js'
 import { type Hex, hexToBytes, keccak256, toHex } from 'viem'
 import { publicKeyToAddress } from 'viem/utils'
 import { type IBodySignRequest, requestDigest } from '../account/createAccount.js'
+import { CompactError } from '../compact/error.js'
 import { decode, encode } from '../compact/frame.js'
 import { type IKeygenReveal, type IShare, keygenAlice1, keygenAlice2 } from './keygen.js'
 import { type IPresignMessage2, type IPresignMessage4, presignAlice1, presignAlice2, presignAlice3 } from './presign.js'
@@ -17,9 +18,15 @@ export interface IFundedClaim extends IBindingClaim {
   token: Address
 }
 
+export type IKeygenClaim =
+  | (Omit<IFundedClaim, 'binding'> & { account: null } & ({ binding: Hex } | { funding: Hex; request: Hex }))
+  | (IBindingClaim & { account: Address })
+
+export const CEREMONY_TTL_MS = 60_000
+
 interface IMpcClient {
-  keygen(sid: Hex, sk: bigint, claim: IBindingClaim): Promise<IShare>
-  sign(share: IShare, request: IBodySignRequest, funded: IFundedClaim): Promise<Hex>
+  keygen(sid: Hex, sk: bigint, claim: IKeygenClaim): Promise<IShare>
+  sign(share: IShare, request: IBodySignRequest, claim: IBindingClaim, submit: boolean): Promise<Hex>
 }
 
 const randomSid = (): Hex => keccak256(toHex(randomBytes(32)))
@@ -28,6 +35,10 @@ export function createMpcClient(mpcUrl: string): IMpcClient {
   async function post<T>(path: string, body: unknown): Promise<T> {
     const res = await fetch(`${mpcUrl}${path}`, { method: 'POST', body: encode(body), headers: { 'content-type': 'application/json' } })
     const text = await res.text()
+    if (res.status === 409) {
+      const refusal = decode(text) as { code: string; message: string; severity: ConstructorParameters<typeof CompactError>[2] }
+      throw new CompactError(refusal.code, refusal.message, refusal.severity)
+    }
     if (!res.ok) throw new Error(`mpc service ${path} refused: ${text || res.status}`)
     return decode(text) as T
   }
@@ -42,15 +53,15 @@ export function createMpcClient(mpcUrl: string): IMpcClient {
       }
       return a2.share
     },
-    async sign(share, request, funded) {
+    async sign(share, request, claim, submit) {
       const ceremony = { ceremony: randomSid(), sid: share.sid, pk: share.pk }
       const a1 = presignAlice1(share)
-      const m2 = await post<IPresignMessage2>('/mpc/sign/1', { ...ceremony, msg: a1.msg, funded })
+      const m2 = await post<IPresignMessage2>('/mpc/sign/1', { ...ceremony, msg: a1.msg, funded: claim })
       const a2 = presignAlice2(a1.state, m2)
       const m4 = await post<IPresignMessage4>('/mpc/sign/2', { ...ceremony, msg: a2.msg })
       const a3 = presignAlice3(a2.state, m4)
       const partial = signAlice(share, a3.presignature, hexToBytes(requestDigest(request)))
-      const { signature } = await post<{ signature: Hex }>('/mpc/sign/3', { ...ceremony, msg: a3.msg, partial, request })
+      const { signature } = await post<{ signature: Hex }>('/mpc/sign/3', { ...ceremony, msg: a3.msg, partial, request, submit })
       return signature
     }
   }

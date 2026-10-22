@@ -1,15 +1,15 @@
 import { fundaccountAbi } from '@puppet/contracts/abi'
 import { ACCOUNT_CALL_MAP, accountCallEvent } from '@puppet/contracts/events'
-import type { IAccountCallEntry, IIAccount__Call } from '@puppet/contracts/types'
+import type { IAccountCallEntry, IBalanceLib__Balance, IIAccount__Call } from '@puppet/contracts/types'
 import type { AbiParameter, Address, Chain, Client, Hex, TransactionReceipt, Transport } from 'viem'
-import { decodeAbiParameters, decodeEventLog, getAddress, size, slice, toEventSelector } from 'viem'
+import { concat, decodeAbiParameters, decodeEventLog, getAddress, keccak256, size, slice, toEventSelector } from 'viem'
 import { readContract } from 'viem/actions'
 
 export const ACCOUNT_CALL_TOPIC: Hex = toEventSelector(accountCallEvent)
 if (
   ACCOUNT_CALL_TOPIC !==
   toEventSelector(
-    'AccountCall(address,address,bytes32,uint256,uint256,uint256,bytes,bytes,(address,uint256,uint256,bytes)[],bytes[])'
+    'AccountCall(address,address,uint256,uint256,uint256,bytes32,bytes,bytes,(address,uint256,uint256,bytes)[],bytes[],(address,uint256)[])'
   )
 ) {
   throw new Error(
@@ -27,6 +27,17 @@ export function accountNonce(client: AccountClient, account: Address): Promise<b
 }
 
 
+export interface IReceiptLog {
+  address: Address
+  topics: readonly Hex[]
+  data: Hex
+  logIndex: number
+}
+
+export const GENESIS_TIP: Hex = `0x${'00'.repeat(24)}`
+
+export const nextTip = (prev: Hex, source: Address, data: Hex): Hex => slice(keccak256(concat([prev, source, data])), 0, 24)
+
 export interface IReceiptAccountCall {
   chainId: number
   account: Address
@@ -38,11 +49,17 @@ export interface IReceiptAccountCall {
   executionData: Hex
   callList: IIAccount__Call[]
   resultList: Hex[]
+  balanceList: IBalanceLib__Balance[]
+  data: Hex
   blockNumber: bigint
   blockTimestamp: number
   blockHash: Hex
   logIndex: number
   transactionHash: Hex
+}
+
+export interface IStoredAccountCall extends Omit<IReceiptAccountCall, 'chainId' | 'account' | 'blockHash'> {
+  siblingLogs: IReceiptLog[]
 }
 
 export interface IAccountCallLog {
@@ -67,6 +84,8 @@ export function accountCallFromLog(chainId: number, log: IAccountCallLog): IRece
     executionData: args.executionData,
     callList: args.callList.map(c => ({ target: getAddress(c.target), value: c.value, gasLimit: c.gasLimit, callData: c.callData })),
     resultList: [...args.resultList],
+    balanceList: args.balanceList.map(b => ({ token: getAddress(b.token), amount: b.amount })),
+    data: log.data,
     signature: args.signature,
     blockNumber: log.blockNumber,
     blockTimestamp: Number(args.blockTimestamp),
@@ -97,7 +116,6 @@ export function accountCallsFromReceipt(chainId: number, receipt: TransactionRec
 
 type IPayloadSpec = { selector: string; size: number | null; args: readonly AbiParameter[] }
 
-
 const BY_SELECTOR: ReadonlyMap<Hex, readonly IPayloadSpec[]> = (() => {
   const map = new Map<Hex, IPayloadSpec[]>()
   for (const methods of Object.values(ACCOUNT_CALL_MAP)) {
@@ -117,11 +135,10 @@ export function decodeAccountCall(entry: { source: Address; executionData: Hex }
   const selector = slice(data, 0, 4)
   const specs = BY_SELECTOR.get(selector)
   if (!specs) throw new Error(`unknown executionData selector ${selector} from source ${entry.source}`)
-  const spec =
-    specs.length === 1 ? specs[0]! : (specs.find(s => s.size === byteLength) ?? specs.find(s => s.size === null))
+  const spec = specs.find(s => s.size === byteLength) ?? specs.find(s => s.size === null)
   if (!spec) throw new Error(`selector ${selector} has no payload schema for ${byteLength} bytes`)
   const [, ...values] = decodeAbiParameters([{ type: 'bytes4' }, ...spec.args], data)
-  const decoded: Record<string, unknown> = { selector: spec.selector, size: byteLength }
+  const decoded: Record<string, unknown> = { selector: spec.selector, size: spec.size ?? byteLength }
   spec.args.forEach((param, i) => {
     decoded[(param as { name: string }).name] = values[i]
   })

@@ -61,6 +61,7 @@ export interface I$FieldLabeled extends Partial<Input<string>> {
   maxLength?: number
   $input?: INodeCompose<HTMLInputElement>
   $container?: INodeCompose<HTMLLabelElement>
+  $$field?: ($field: I$Node) => I$Node
   labelWidth?: number
 }
 
@@ -73,7 +74,8 @@ export const $FieldLabeled = ({
   maxLength,
   $input = $defaultInputContainer,
   validation,
-  $container = $defaultTextFieldContainer
+  $container = $defaultTextFieldContainer,
+  $$field
 }: I$FieldLabeled) =>
   component(([change, sampleValue]: IBehavior<string, string>) => {
     const validationStream: IStream<string | null> = start(null, validation ?? just(null))
@@ -129,12 +131,30 @@ export const $FieldLabeled = ({
       ...(maxLength === undefined ? [] : [attr({ maxlength: String(maxLength) })])
     )
 
-    const $field = $Input({
+    const $inputField = $Input({
       value: value ?? empty,
       $container: $styledInput
     })({
       change: sampleValue()
     })
+    const $field =
+      $$field === undefined
+        ? $inputField
+        : $node(
+            style({ display: 'flex', flex: 1, minWidth: '0' }),
+            effectRun(el => {
+              const node = el as HTMLElement
+              const keepLabelIdle = (ev: Event): void => {
+                if (!(ev.target instanceof HTMLInputElement)) ev.preventDefault()
+              }
+              node.addEventListener('click', keepLabelIdle, true)
+              return {
+                [Symbol.dispose]() {
+                  node.removeEventListener('click', keepLabelIdle, true)
+                }
+              }
+            })
+          )($$field($inputField))
 
     return [
       $container(

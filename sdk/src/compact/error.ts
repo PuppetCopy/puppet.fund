@@ -1,19 +1,11 @@
 import { puppetErrorAbi } from '@puppet/contracts/errors'
-import type { AbiParametersToPrimitiveTypes, ExtractAbiError, ExtractAbiErrorNames } from 'abitype'
-
-declare module 'abitype' {
-  interface Register {
-    experimental_namedTuples: true
-  }
-}
+import type { ContractErrorArgs, ContractErrorName } from 'viem'
 
 type IErrorAbi = typeof puppetErrorAbi
 
-type ICompactContractErrorName = ExtractAbiErrorNames<IErrorAbi>
+type ICompactContractErrorName = ContractErrorName<IErrorAbi>
 
-type ICompactContractErrorArgs<N extends ICompactContractErrorName> = AbiParametersToPrimitiveTypes<
-  ExtractAbiError<IErrorAbi, N>['inputs']
->
+type ICompactContractErrorArgs<N extends ICompactContractErrorName> = ContractErrorArgs<IErrorAbi, N>
 
 type IStrikeSeverity = 'server' | 'soft' | 'hard'
 

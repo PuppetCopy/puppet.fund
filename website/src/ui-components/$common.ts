@@ -2,7 +2,9 @@ import { type IOps, type IStream, isStream, map, nowWith, o } from 'aelea/stream
 import { $element, $node, $svg, $text, attr, effectProp, type I$Node, type I$Text, type IMutator, type INode, style, styleBehavior, stylePseudo } from 'aelea/ui'
 import { spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
-import { $caretDown } from './$icons.js'
+import { $caretDown, $external } from './$icons.js'
+
+export const SEPARATOR_COLOR = `color-mix(in srgb, ${palette.foreground} 10%, transparent)`
 
 export const $elipsisTextWrapper = $node(
   style({ overflow: 'hidden', minHeight: 0, whiteSpace: 'nowrap', textOverflow: 'ellipsis' })
@@ -67,6 +69,15 @@ export const $popoverCaret = (): I$Node =>
     width: '9px',
     viewBox: '0 0 32 32',
     svgOps: style({ minWidth: '9px', opacity: '0.6' })
+  })
+
+export const $externalMark = (): I$Node =>
+  $icon({
+    $content: $external,
+    width: '0.85em',
+    viewBox: '0 0 24 24',
+    fill: 'currentColor',
+    svgOps: style({ flexShrink: '0', opacity: '0.7' })
   })
 
 export const keyActivate = (extraKeys: readonly string[] = []): IMutator =>

@@ -1,8 +1,7 @@
-import { CELLS, DARKEST, GRID, LIGHTEST, oklabOf, PALETTE, PALETTE_LAB, rgbOf } from '@puppet/sdk/ui-components'
+import { CELLS, GRID, oklabOf, PALETTE, PALETTE_LAB, rgbOf } from '@puppet/sdk/ui-components'
 
-const ACHROMATIC_CHROMA = 0.06
-const SPLIT_FLOOR = 0.35
-const SPLIT_CEILING = 0.65
+const ACHROMATIC_CHROMA = 0.035
+const LIGHTNESS_WEIGHT = 0.2
 const FEATURE_SHARE = 0.2
 const FEATURE_CONTRAST = 0.4
 const FEATURE_CORE = 0.35
@@ -15,43 +14,25 @@ const ENHANCE = [
   { chroma: 4, contrast: 2.2 }
 ]
 
-function paletteIndexOf(lightness: number, a: number, b: number, split: number): number {
-  if (Math.hypot(a, b) < ACHROMATIC_CHROMA) return lightness < split ? DARKEST : LIGHTEST
+const chromaOf = ([, a, b]: readonly [number, number, number]): number => Math.hypot(a, b)
+const NEUTRALS = PALETTE_LAB.map((lab, i) => ({ i, lab })).filter(({ lab }) => chromaOf(lab) < ACHROMATIC_CHROMA).sort((m, n) => m.lab[0] - n.lab[0])
+const SPLITS = NEUTRALS.slice(1).map(({ lab }, k) => (NEUTRALS[k]!.lab[0] + lab[0]) / 2)
+const CHROMA_FLOOR = Math.min(...PALETTE_LAB.map(chromaOf).filter(chroma => chroma >= ACHROMATIC_CHROMA))
+
+function paletteIndexOf(lightness: number, a: number, b: number): number {
+  const chroma = Math.hypot(a, b)
+  if (chroma < ACHROMATIC_CHROMA || lightness < SPLITS[0]!) return NEUTRALS[SPLITS.filter(split => lightness >= split).length]!.i
+  const lift = Math.max(1, CHROMA_FLOOR / chroma)
   let best = 0
   let bestDistance = Number.POSITIVE_INFINITY
   PALETTE_LAB.forEach(([pl, pa, pb], i) => {
-    const distance = (lightness - pl) ** 2 + (a - pa) ** 2 + (b - pb) ** 2
+    const distance = (LIGHTNESS_WEIGHT * (lightness - pl)) ** 2 + (a * lift - pa) ** 2 + (b * lift - pb) ** 2
     if (distance < bestDistance) {
       bestDistance = distance
       best = i
     }
   })
   return best
-}
-
-function splitOf(histogram: Float64Array): number {
-  let total = 0
-  let weighted = 0
-  for (let bin = 0; bin < 256; bin++) {
-    total += histogram[bin]!
-    weighted += bin * histogram[bin]!
-  }
-  let below = 0
-  let belowWeighted = 0
-  let best = 128
-  let bestSpread = -1
-  for (let bin = 0; bin < 256; bin++) {
-    below += histogram[bin]!
-    belowWeighted += bin * histogram[bin]!
-    const above = total - below
-    if (below === 0 || above === 0) continue
-    const spread = below * above * (belowWeighted / below - (weighted - belowWeighted) / above) ** 2
-    if (spread > bestSpread) {
-      bestSpread = spread
-      best = bin
-    }
-  }
-  return Math.min(SPLIT_CEILING, Math.max(SPLIT_FLOOR, (best + 1) / 256))
 }
 
 const RING = 0.04
@@ -138,20 +119,11 @@ export function cellsFromPixels(data: Uint8ClampedArray, side: number, backdrop:
       break
     }
   }
-  const back = paletteIndexOf(...oklabOf(...rgbOf(backdrop)), 0.5)
+  const back = paletteIndexOf(...oklabOf(...rgbOf(backdrop)))
 
   let cells: string[] = []
   for (const { chroma, contrast } of ENHANCE) {
     const lightnessAt = (i: number): number => Math.min(1, Math.max(0, median + (lab[i * 3]! - median) * contrast))
-    const neutral = new Float64Array(256)
-    for (let y = subject.y; y < subject.y + subject.size; y++) {
-      for (let x = subject.x; x < subject.x + subject.size; x++) {
-        const i = y * side + x
-        if (Math.hypot(lab[i * 3 + 1]!, lab[i * 3 + 2]!) * chroma >= ACHROMATIC_CHROMA) continue
-        neutral[Math.min(255, Math.floor(lightnessAt(i) * 256))]! += data[i * 4 + 3]! / 255
-      }
-    }
-    const split = splitOf(neutral)
 
     const area = new Float64Array(CELLS * PALETTE.length)
     const covered = new Float64Array(CELLS)
@@ -167,7 +139,7 @@ export function cellsFromPixels(data: Uint8ClampedArray, side: number, backdrop:
         area[cell * PALETTE.length + back]! += 1 - alpha
         common[back]! += 1 - alpha
         if (alpha === 0) continue
-        const colour = paletteIndexOf(lightnessAt(i), lab[i * 3 + 1]! * chroma, lab[i * 3 + 2]! * chroma, split)
+        const colour = paletteIndexOf(lightnessAt(i), lab[i * 3 + 1]! * chroma, lab[i * 3 + 2]! * chroma)
         area[cell * PALETTE.length + colour]! += alpha
         common[colour]! += alpha
         const acrossCell = (((x - subject.x) * GRID) / subject.size) % 1
@@ -215,7 +187,8 @@ export function cellsFromPixels(data: Uint8ClampedArray, side: number, backdrop:
       }
       if (near.includes(colour)) return colour
       const usual = near.reduce((best, each) => (near.filter(n => n === each).length > near.filter(n => n === best).length ? each : best))
-      return PALETTE_LAB[usual]![0] - PALETTE_LAB[colour]![0] >= FEATURE_CONTRAST ? colour : usual
+      const darker = PALETTE_LAB[usual]![0] - PALETTE_LAB[colour]![0]
+      return darker >= FEATURE_CONTRAST || (-darker >= FEATURE_CONTRAST && share(cell, colour) >= FEATURE_SHARE) ? colour : usual
     })
 
     cells = cleaned.map(colour => PALETTE[colour]!)

@@ -13,11 +13,6 @@ export default [
         "internalType": "contract AccountModule"
       },
       {
-        "name": "_register",
-        "type": "address",
-        "internalType": "contract Register"
-      },
-      {
         "name": "_wnt",
         "type": "address",
         "internalType": "contract IWNT"
@@ -40,6 +35,25 @@ export default [
   },
   {
     "type": "function",
+    "name": "authMap",
+    "inputs": [
+      {
+        "name": "user",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "authority",
     "inputs": [],
     "outputs": [
@@ -56,12 +70,12 @@ export default [
     "name": "deposit",
     "inputs": [
       {
-        "name": "_account",
+        "name": "_user",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "_user",
+        "name": "_to",
         "type": "address",
         "internalType": "address"
       },
@@ -102,6 +116,11 @@ export default [
           },
           {
             "name": "maxRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "maxSwapRelayFeeBps",
             "type": "uint256",
             "internalType": "uint256"
           }
@@ -245,82 +264,17 @@ export default [
             "name": "maxRelayFeeBps",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "maxSwapRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       }
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "depositEscrow",
-    "inputs": [
-      {
-        "name": "_store",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_account",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_user",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_config",
-        "type": "tuple",
-        "internalType": "struct GateConfig",
-        "components": [
-          {
-            "name": "attestor",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "feeReceiver",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "transferGasLimit",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxIntentTtl",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxRelayFeeBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "payable"
   },
   {
     "type": "function",
@@ -456,6 +410,11 @@ export default [
             "name": "maxRelayFeeBps",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "maxSwapRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       }
@@ -473,9 +432,9 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_enabled",
-        "type": "bool",
-        "internalType": "bool"
+        "name": "_selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "outputs": [],
@@ -615,12 +574,30 @@ export default [
             "name": "maxRelayFeeBps",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "maxSwapRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       }
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "wnt",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IWNT"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "error",
@@ -703,6 +680,27 @@ export default [
     "type": "error",
     "name": "Balance__NothingToWithdraw",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Balance__SwapInputNotSpent",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "balanceBefore",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "balanceAfter",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",
@@ -800,23 +798,12 @@ export default [
   },
   {
     "type": "error",
-    "name": "Intent__TokenNotValuable",
-    "inputs": [
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "address"
-      }
-    ]
-  },
-  {
-    "type": "error",
     "name": "TransferUtils__EmptyTokenTransferGasLimit",
     "inputs": [
       {
         "name": "token",
         "type": "address",
-        "internalType": "contract IERC20"
+        "internalType": "address"
       }
     ]
   },
@@ -848,7 +835,7 @@ export default [
       {
         "name": "token",
         "type": "address",
-        "internalType": "contract IERC20"
+        "internalType": "address"
       },
       {
         "name": "receiver",
@@ -869,7 +856,7 @@ export default [
       {
         "name": "token",
         "type": "address",
-        "internalType": "contract IERC20"
+        "internalType": "address"
       },
       {
         "name": "from",

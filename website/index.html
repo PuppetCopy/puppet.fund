@@ -8,13 +8,33 @@
     <meta name="description" content="__APP_DESC_LONG__">
     <meta name="theme-color" content="__THEME_BG_LIGHT__" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="__THEME_BG_DARK__" media="(prefers-color-scheme: dark)">
-    <link rel="preload" href="/assets/font/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <meta name="apple-mobile-web-app-title" content="__APP_NAME__">
+    <link rel="preload" href="./src/assets/font/InterVariable.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="./src/assets/font/PuppetNumbers.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="icon" href="./public/favicon.ico" sizes="48x48">
+    <link rel="icon" href="./public/favicon.svg" sizes="any" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="./public/assets/pwa/apple-180x180.png">
 
     <style>
         :root {
             --font: 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            --font-numbers: 'Puppet Numbers', var(--font);
             --text-sm: 1rem;
             --text-xxl: 1.45rem;
+            --hairline: 1px;
+        }
+
+        @media (min-resolution: 1.5dppx) {
+            :root {
+                --hairline: 0.5px;
+            }
+        }
+
+        @media (min-resolution: 2.5dppx) {
+            :root {
+                --hairline: 0.3333px;
+            }
         }
 
         * {
@@ -23,25 +43,22 @@
 
         html {
             text-rendering: geometricPrecision;
-            /* Reserve the scrollbar gutter so page content doesn't shift sideways when the
-               vertical scrollbar appears as content grows. */
             scrollbar-gutter: stable;
         }
 
         body {
             margin: 0;
             background-color: __THEME_BG_LIGHT__;
-            /* No-op while the body isn't a scroll container, but keeps the gutter reserved if it
-               ever becomes one. */
             scrollbar-gutter: stable;
         }
 
-        /* Every popover surface (aelea $Popover content rides the native popover attribute) scrolls with the same
-           subtle scrollbar the dropdowns use: thin, dimmed thumb, transparent track. Wheel smoothing comes from the
-           app's smooth-scroll layer; this covers the visual half. */
         [popover] {
             scrollbar-width: thin;
             scrollbar-color: color-mix(in srgb, var(--foreground) 50%, transparent) transparent;
+        }
+
+        [popover] > * {
+            max-width: 100%;
         }
 
         input[type=number]::-webkit-inner-spin-button,
@@ -68,12 +85,47 @@
             color: inherit;
         }
 
+        a {
+            text-decoration-line: underline;
+            text-decoration-color: color-mix(in srgb, var(--foreground) 35%, transparent);
+            text-underline-offset: 3px;
+        }
+
         @font-face {
             font-family: 'Inter';
-            src: url("/assets/font/InterVariable.woff2") format('woff2');
+            src: url("/src/assets/font/InterVariable.woff2") format('woff2');
             font-weight: 100 900;
             font-style: normal;
             font-display: swap;
+        }
+
+        @font-face {
+            font-family: 'Puppet Numbers';
+            src: url("/src/assets/font/PuppetNumbers.woff2") format('woff2');
+            font-weight: 700;
+            font-style: normal;
+            font-display: swap;
+            unicode-range: U+0024-0025, U+002C-002E, U+0030-0039, U+2212;
+        }
+
+        @font-face {
+            font-family: 'Inter';
+            src: url("/src/assets/font/InterVariable.woff2") format('woff2');
+            font-weight: 100 900;
+            font-style: normal;
+            font-display: swap;
+            unicode-range: U+0024;
+            size-adjust: 62%;
+        }
+
+        @font-face {
+            font-family: 'Puppet Numbers';
+            src: url("/src/assets/font/PuppetNumbers.woff2") format('woff2');
+            font-weight: 700;
+            font-style: normal;
+            font-display: swap;
+            unicode-range: U+0024;
+            size-adjust: 62%;
         }
 
         @keyframes rotate {
@@ -129,6 +181,21 @@
                 opacity: 0;
             }
         }
+
+        @keyframes promptIn {
+            from {
+                transform: translateY(16px);
+                opacity: 0;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            @keyframes promptIn {
+                from {
+                    opacity: 0;
+                }
+            }
+        }
     </style>
 
     <style id="aelea-theme-config">
@@ -136,13 +203,13 @@
             --name: 'light';
             --primary: #870B38;
             --message: #171B1F;
-            --background: #edf1f7;
-            --horizon: #dfe6f0;
+            --background: #e0e4ea;
+            --horizon: #d1d8e2;
             --middleground: #ffffff;
-            --foreground: #5c6b85;
-            --positive: #0c8f4c;
-            --negative: #d92d20;
-            --indeterminate: #b45309;
+            --foreground: #425169;
+            --positive: #006630;
+            --negative: #b30b19;
+            --indeterminate: #934003;
             --shade-pole: var(--background);
             --shadow: rgb(59 60 74 / 20%);
             --card-shadow: rgb(0 0 0 / 25%) 0px 0px 1px, rgb(59 60 74 / 15%) 0px 15px 20px, rgb(0 0 0 / 8%) 0px 1px 12px;
@@ -173,7 +240,7 @@
     <meta property="og:image" content="__OG_IMAGE__">
     <meta property="og:image:type" content="image/png">
     <meta property="og:image:width" content="1200">
-    <meta property="og:image:height" content="630">
+    <meta property="og:image:height" content="1200">
 
     <meta name="twitter:image:src" content="__OG_IMAGE__">
     <meta name="twitter:site" content="__TWITTER_ID__" />
@@ -181,11 +248,10 @@
     <meta name="twitter:title" content="__APP_DESC_SHORT__">
     <meta name="twitter:description" content="__APP_DESC_LONG__">
 
-    <script defer src="/pwa-loader.js"></script>
 </head>
 
 <body>
-    <script type="module" src="/src/main.ts"></script>
+    <script type="module" src="./src/main.ts"></script>
 </body>
 
 </html>

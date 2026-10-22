@@ -1,5 +1,6 @@
+import { PROTOCOL } from '@puppet/contracts/const'
 import type { IIAccount__Call } from '@puppet/contracts/types'
-import { type Address, getAddress, } from 'viem'
+import { type Address, getAddress } from 'viem'
 import type { ChainId } from '../const/index.js'
 import { decodeErc20 } from './erc20.js'
 import type { IOperateStep } from './types.js'
@@ -28,9 +29,9 @@ const erc20Reader: ICallReader = {
 
 const nativeReader: ICallReader = {
   readerId: 'native',
-  read(_chainId, call) {
+  read(_chainId, call, endsWithFee) {
     if (call.callData !== '0x') return null
-    return [{ kind: 'release', token: null, to: getAddress(call.target), amount: call.value }]
+    return endsWithFee ? [{ kind: 'fee', token: PROTOCOL.nativeToken, amount: call.value }] : [{ kind: 'release', token: null, to: getAddress(call.target), amount: call.value }]
   }
 }
 

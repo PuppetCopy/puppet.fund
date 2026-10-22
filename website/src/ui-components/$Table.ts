@@ -77,7 +77,7 @@ export const $defaultTableCell = $row(
   style({ padding: '6px 0', display: 'flex', minWidth: 0, alignItems: 'center', overflowWrap: 'break-word' })
 )
 export const $defaultTableHeaderCell = $defaultTableCell(
-  style({ alignItems: 'center', color: palette.foreground, fontSize: text.sm })
+  style({ alignItems: 'center', color: palette.foreground, fontSize: text.xs })
 )
 export const $defaultTableRowContainer = $node(isDesktopScreen ? spacing.big : spacing.default)
 export const $defaultTableContainer = $column(spacing.default, style({ flex: 1 }))
@@ -141,15 +141,7 @@ export const $Table = <T>({
             sortByChangeTether(nodeEvent('click'), constant(colSortBy))
           )(
             col.$head,
-            sortBy
-              ? $column(
-                  style({
-                    borderRadius: '50%',
-                    padding: '6px',
-                    border: `1px solid ${colorShade(palette.message, sortBy.selector === colSortBy ? 25 : 7.5)}`
-                  })
-                )($sortArrow(colSortBy, 'asc'), $sortArrow(colSortBy, 'desc'))
-              : empty
+            sortBy ? $column($sortArrow(colSortBy, 'asc'), $sortArrow(colSortBy, 'desc')) : empty
           )
         })
       )

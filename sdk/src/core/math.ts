@@ -1,4 +1,4 @@
-import { PRECISION } from '@puppet/contracts/const'
+import { PRECISION } from '../const/common.js'
 
 export function factor(a: bigint, b: bigint): bigint {
   return a ? (a * PRECISION.floatPrecisionExp) / b : 0n

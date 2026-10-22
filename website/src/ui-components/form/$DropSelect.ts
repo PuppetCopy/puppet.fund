@@ -1,4 +1,4 @@
-import { empty, type IOps, type IStream, map, switchLatest, toStream } from 'aelea/stream'
+import { empty, type IOps, type IStream, just, map, switchLatest, toStream } from 'aelea/stream'
 import type { IBehavior } from 'aelea/stream-extended'
 import {
   $node,
@@ -13,11 +13,12 @@ import {
   style,
   stylePseudo
 } from 'aelea/ui'
-import { $row, spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
+import { $column, $row, spacing } from 'aelea/ui-components'
+import { colorShade, palette, text } from 'aelea/ui-components-theme'
 import { $icon, dropAnchorKeyNav, keyActivate, listboxKeyNav } from '../$common.js'
 import { $caretDown } from '../$icons.js'
 import { $infoLabel } from '../$info.js'
+import { $defaultMiniButtonSecondary } from './$Button.js'
 import { $Dropdown } from './$Dropdown.js'
 
 export const $defaultDropSelectAnchor = $row(
@@ -48,25 +49,27 @@ export const $dropSelectJoinedListContainer = $node(
     border: `1px solid ${colorShade(palette.foreground, 60)}`,
     borderRadius: '0 0 14px 14px',
     padding: '6px',
-    gap: '2px',
     boxShadow: `0 8px 24px ${palette.shadow}`
   })
 )
 
 export const $defaultDropSelectOptionContainer = $node(
-  style({ cursor: 'pointer', padding: '0 2px', borderRadius: '10px', display: 'block' }),
+  style({ cursor: 'pointer', padding: '0 2px', display: 'block' }),
+  stylePseudo(':not(:last-child)', { borderBottom: `1px solid ${colorShade(palette.foreground, 15)}` }),
   stylePseudo(':hover', { backgroundColor: palette.horizon })
 )
 
-export interface I$DropSelect<T> {
-  value: IStream<T>
+export interface I$DropSelect<T, V = T> {
+  value: IStream<V>
   optionList: IStream<readonly T[]> | readonly T[]
   label?: string | IStream<string> | I$Node
+  align?: 'start' | 'end'
   $anchor?: INodeCompose
   $container?: INodeCompose
+  $valueContainer?: INodeCompose
   $dropListContainer?: INodeCompose
   $optionContainer?: INodeCompose
-  $valueLabel?: IOps<T, I$Node>
+  $valueLabel?: IOps<V, I$Node>
   $$option?: IOps<T, I$Node>
   closeOnSelect?: boolean
 }
@@ -79,18 +82,20 @@ const labelToNode = (label: string | IStream<string> | I$Node | undefined): I$No
   return switchLatest(map(v => (typeof v === 'string' ? $infoLabel($text(v)) : v), label as IStream<string | INode>))
 }
 
-export const $DropSelect = <T>({
+export const $DropSelect = <T, V = T>({
   value,
   optionList,
   label,
+  align,
   $anchor = $defaultDropSelectAnchor,
   $container,
+  $valueContainer = $row(spacing.default, style({ justifyContent: 'space-between', flex: 1 })),
   $dropListContainer = $dropSelectJoinedListContainer,
   $optionContainer = $defaultDropSelectOptionContainer,
   $$option = $stringRender<T>(),
-  $valueLabel = $stringRender<T>(),
+  $valueLabel = $stringRender<V>(),
   closeOnSelect
-}: I$DropSelect<T>) =>
+}: I$DropSelect<T, V>) =>
   component(([select, selectTether]: IBehavior<T>, [isOpen, isOpenTether]: IBehavior<boolean>) => {
     let anchorEl: HTMLElement | null = null
     let listEl: HTMLElement | null = null
@@ -113,6 +118,7 @@ export const $DropSelect = <T>({
         ),
         $optionContainer: $optionContainer(attr({ role: 'option', tabindex: '0' }), keyActivate()),
         closeOnSelect,
+        align,
         $anchor: $anchor(
           attr({ role: 'button', tabindex: '0', 'aria-haspopup': 'listbox' }),
           attrBehavior(map(open => ({ 'aria-expanded': open ? 'true' : 'false' }), isOpen)),
@@ -122,7 +128,7 @@ export const $DropSelect = <T>({
           dropAnchorKeyNav(() => listEl)
         )(
           labelToNode(label),
-          $row(spacing.default, style({ justifyContent: 'space-between', flex: 1 }))(
+          $valueContainer(
             switchLatest($valueLabel(toStream(value))),
             $icon({
               $content: $caretDown,
@@ -139,4 +145,49 @@ export const $DropSelect = <T>({
       }),
       { select }
     ]
+  })
+
+export interface IDropMenuItem {
+  label: string
+  description: string | null
+}
+
+export interface I$DropMenu<T extends IDropMenuItem> {
+  label: string
+  optionList: readonly T[]
+}
+
+export const $DropMenu = <T extends IDropMenuItem>({ label, optionList }: I$DropMenu<T>) =>
+  $DropSelect<T, string>({
+    value: just(label),
+    optionList,
+    align: 'end',
+    $anchor: $defaultMiniButtonSecondary,
+    $valueContainer: $row(spacing.tiny, style({ alignItems: 'center' })),
+    $valueLabel: map(shown => $node($text(shown))),
+    $dropListContainer: $node(
+      style({
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '2px',
+        maxWidth: '260px',
+        padding: '4px',
+        borderRadius: '10px',
+        border: `1px solid ${colorShade(palette.foreground, 25)}`,
+        background: palette.background,
+        boxShadow: `0 8px 24px ${palette.shadow}`,
+        transform: 'translateY(4px)'
+      })
+    ),
+    $optionContainer: $node(
+      style({ cursor: 'pointer', padding: '8px 10px', borderRadius: '8px', outline: 'none' }),
+      stylePseudo(':hover', { backgroundColor: colorShade(palette.foreground, 12) }),
+      stylePseudo(':focus-visible', { backgroundColor: colorShade(palette.foreground, 12) })
+    ),
+    $$option: map(item =>
+      $column(style({ gap: '2px' }))(
+        $node(style({ fontSize: text.sm, color: palette.message, whiteSpace: 'nowrap' }))($text(item.label)),
+        ...(item.description === null ? [] : [$node(style({ fontSize: text.xs, lineHeight: '1.4', color: palette.foreground, whiteSpace: 'normal' }))($text(item.description))])
+      )
+    )
   })

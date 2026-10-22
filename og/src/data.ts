@@ -1,108 +1,189 @@
+import { HUB_CANONICAL_TOKEN, HUB_CHAIN_ID, PRICE_PRECISION } from '@puppet/contracts/const'
 import { fundSymbolOf, gridOf } from '@puppet/sdk/account'
-import { IntervalTime, USD_DECIMALS } from '@puppet/sdk/const'
-import { formatFixed, readableUsd } from '@puppet/sdk/core'
+import { type ChainId, IntervalTime, TOKEN_META, USD_DECIMALS, USD_SYMBOL } from '@puppet/sdk/const'
+import { readableUsd } from '@puppet/sdk/core'
 import { createClient } from '@puppet/sdk/datastore'
-import { cashFor } from '@puppet/sdk/pool'
+import { oracleRate, USD_PRICE_DECIMALS, usdPriceFromRate } from '@puppet/sdk/evaluate'
+import { cashFor, profitFeeOf } from '@puppet/sdk/pool'
 import * as schema from '@puppet/sdk/schema'
-import { fundTable, holdingTable, masterMetricTable } from '@puppet/sdk/schema'
-import { avatarSvg } from '@puppet/sdk/ui-components'
-import { type Address, getAddress } from 'viem'
+import { fundMetricTable } from '@puppet/sdk/schema'
+import { fundMetric, PNL_SLOT_COUNT, pnlEventsAcross, pnlEventsOf, symbolOf, walletsOf } from '@puppet/sdk/state'
+import { avatarSvg, jazziconSvg, robotCellsOf } from '@puppet/sdk/ui-components'
+import { type Address, formatUnits, getAddress, isAddressEqual } from 'viem'
 
 const chronicleUrl = Bun.env.CHRONICLE_URL
 if (!chronicleUrl) throw new Error('CHRONICLE_URL is required')
 
+const oracleUrl = Bun.env.ORACLE_URL
+if (!oracleUrl) throw new Error('ORACLE_URL is required')
+
+export const TICK_MS = Number(Bun.env.CHRONICLE_TICK_MS)
+if (!Number.isInteger(TICK_MS) || TICK_MS <= 0) throw new Error('CHRONICLE_TICK_MS is required')
+
 const client = createClient({ storageUrl: chronicleUrl, schema, timeoutMs: 10_000 })
+const getRate = oracleRate(oracleUrl)
 const SPARK_INTERVAL = IntervalTime.MONTH
-const SPARK_POINTS = 48
+
+const MINUS = '\u2212'
+const usd = (wei: bigint, price: bigint): string => `$${readableUsd((wei * price) / 10n ** BigInt(USD_PRICE_DECIMALS - USD_DECIMALS))}`
 
 export type ITone = 'positive' | 'neutral' | 'negative'
 
-export interface ITopMaster {
-  rank: number
+export interface ILeaderRow {
   avatar: string
   label: string
-  value: string
-  detail: string
+  master: Address
+  venues: string[]
+  pnl: string
+  roi: string | null
+  tone: ITone
+  spark: { time: number; value: number }[]
 }
+
+export const LEADERBOARD_WINDOW = '7 Day'
+const LEADERBOARD_INTERVAL = IntervalTime.WEEK
 
 export interface IMasterCard {
   avatar: string
   label: string
   master: Address
-  backing: string
-  backers: number
+  allocated: string
+  puppets: string[]
+  puppetCount: number
   fundValue: string
   pnl: string
+  roi: string | null
+  window: string
   tone: ITone
-  spark: number[]
+  spark: { time: number; value: number }[]
 }
 
-function sparkSeries(pnlList: readonly bigint[]): number[] {
-  if (pnlList.length < 2) return []
-  let running = 0n
-  const series = pnlList.map(pnl => {
-    running += pnl
-    return formatFixed(USD_DECIMALS, running)
+export interface IPuppetCard {
+  avatar: string
+  account: Address
+  masterOf: string | null
+  inFunds: string
+  funds: string[]
+  fundCount: number
+}
+
+export async function fetchLeaderboard(limit: number): Promise<ILeaderRow[]> {
+  const until = Math.floor(Date.now() / 1000)
+  const since = until - LEADERBOARD_INTERVAL
+  const [rows, rate] = await Promise.all([
+    client.select(fundMetricTable, { where: { interval: LEADERBOARD_INTERVAL, lastUpdatedTimestamp: { gte: since } }, orderBy: { col: 'pnl', dir: 'desc' }, limit }),
+    getRate(symbolOf(HUB_CHAIN_ID as ChainId, HUB_CANONICAL_TOKEN.WETH), USD_SYMBOL, TICK_MS)
+  ])
+  const price = usdPriceFromRate(rate, USD_DECIMALS)
+  const usdPerEth = Number(formatUnits(price * 10n ** BigInt(TOKEN_META.WETH.decimals), USD_PRICE_DECIMALS))
+  const funds = rows.flatMap(row => (row.symbol === undefined || row.pixels === undefined ? [] : [{ row, profile: { symbol: row.symbol, pixels: row.pixels } }]))
+  return funds.map(({ row, profile }) => {
+    const events = pnlEventsOf(row)
+    const { pnl, points } = fundMetric(events, LEADERBOARD_INTERVAL, since, until, PNL_SLOT_COUNT)
+    const levels = events.map((event, k) => ({ time: event.time, index: row.performanceIndexList[k]! })).sort((a, b) => a.time - b.time)
+    const opening = levels.findLast(level => level.time <= since)?.index ?? row.openingIndex
+    const closing = levels.at(-1)?.index ?? row.openingIndex
+    const roi = opening === 0n ? null : (Number(closing) / Number(opening) - 1) * 100
+    return {
+      avatar: `data:image/svg+xml;base64,${btoa(avatarSvg(gridOf(profile)))}`,
+      label: fundSymbolOf(profile),
+      master: getAddress(row.master),
+      venues: row.venueList
+        .map((venue, index) => ({ venue, time: row.venueTimeList[index]! }))
+        .filter(active => active.time >= since)
+        .sort((a, b) => b.time - a.time)
+        .map(active => active.venue),
+      pnl: `${pnl < 0n ? MINUS : ''}${usd(pnl < 0n ? -pnl : pnl, price)}`,
+      roi: roi === null ? null : `${roi < 0 ? MINUS : ''}${Math.abs(roi).toFixed(2)}%`,
+      tone: pnl === 0n ? 'neutral' : pnl > 0n ? 'positive' : 'negative',
+      spark: points.map(point => ({ time: point.time, value: point.value * usdPerEth }))
+    }
   })
-  if (series.length <= SPARK_POINTS) return series
-  const step = (series.length - 1) / (SPARK_POINTS - 1)
-  return Array.from({ length: SPARK_POINTS }, (_, i) => series[Math.round(i * step)]!)
-}
-
-export async function fetchTopMasters(limit: number): Promise<ITopMaster[]> {
-  const [fundRows, holdings] = await Promise.all([client.select(fundTable), client.select(holdingTable)])
-  const backed = new Map<Address, { units: bigint; backers: number }>()
-  for (const holding of holdings) {
-    const master = getAddress(holding.master)
-    if (getAddress(holding.holder) === master || holding.units === 0n) continue
-    const row = backed.get(master)
-    if (row === undefined) backed.set(master, { units: holding.units, backers: 1 })
-    else backed.set(master, { units: row.units + holding.units, backers: row.backers + 1 })
-  }
-  return fundRows
-    .map(fundRow => {
-      const master = getAddress(fundRow.master)
-      const row = backed.get(master)
-      return {
-        fundRow,
-        backers: row === undefined ? 0 : row.backers,
-        backing: row === undefined ? 0n : cashFor(row.units, fundRow.totalUnits, fundRow.value)
-      }
-    })
-    .sort((a, b) => (b.backing > a.backing ? 1 : b.backing < a.backing ? -1 : 0))
-    .slice(0, limit)
-    .map((row, i) => ({
-      rank: i + 1,
-      avatar: `data:image/svg+xml;base64,${btoa(avatarSvg(gridOf(row.fundRow)))}`,
-      label: fundSymbolOf(row.fundRow),
-      value: `$${readableUsd(row.backing)}`,
-      detail: `${row.backers} backer${row.backers === 1 ? '' : 's'}`
-    }))
 }
 
 export async function fetchMasterCard(master: Address): Promise<IMasterCard | null> {
-  const [fundRow, holdings, metric] = await Promise.all([
-    client.find(fundTable, { master }),
-    client.select(holdingTable, { where: { master } }),
-    client.find(masterMetricTable, { id: `${SPARK_INTERVAL}:${master}` })
+  const [rows, rate, holdings] = await Promise.all([
+    client.select(fundMetricTable, { where: { master } }),
+    getRate(symbolOf(HUB_CHAIN_ID as ChainId, HUB_CANONICAL_TOKEN.WETH), USD_SYMBOL, TICK_MS),
+    client.select(schema.holdingTable, { where: { master } })
   ])
-  if (fundRow === undefined) return null
-  const backers = holdings.filter(holding => getAddress(holding.holder) !== master && holding.units > 0n)
+  const held = holdings.filter(h => h.shares > 0n && !isAddressEqual(h.holder, master))
+  const wallets = await walletsOf(client, held.map(h => h.holder))
+  const price = usdPriceFromRate(rate, USD_DECIMALS)
+  const usdPerEth = Number(formatUnits(price * 10n ** BigInt(TOKEN_META.WETH.decimals), USD_PRICE_DECIMALS))
+  const row = rows.find(each => each.interval === SPARK_INTERVAL)
+  if (row === undefined || row.symbol === undefined || row.pixels === undefined) return null
+  const until = Math.floor(Date.now() / 1000)
+  const first = pnlEventsAcross(rows, SPARK_INTERVAL).reduce((earliest, event) => (event.time > until - SPARK_INTERVAL && event.time < earliest ? event.time : earliest), until)
+  const interval = until - IntervalTime.DAY < first ? IntervalTime.DAY : until - IntervalTime.WEEK < first ? IntervalTime.WEEK : SPARK_INTERVAL
+  const start = first === until ? until - interval : Math.max(until - interval, first - Math.ceil((until - first) / 12))
+  const events = pnlEventsAcross(rows, interval)
+  const { pnl, points } = fundMetric(events, until - start, start, until, PNL_SLOT_COUNT)
+  const windowRow = rows.find(each => each.interval === interval)
+  if (windowRow === undefined) throw new Error(`the fund ${master} has a ${SPARK_INTERVAL}s metric row but no ${interval}s one`)
+  const levels = [...events].sort((a, b) => a.time - b.time)
+  const opening = levels.findLast(level => level.time <= until - interval)?.index ?? windowRow.openingIndex
+  const closing = levels.at(-1)?.index ?? windowRow.openingIndex
+  const roi = opening === 0n ? null : (Number(closing) / Number(opening) - 1) * 100
+  const profile = { symbol: row.symbol, pixels: row.pixels }
   return {
-    avatar: `data:image/svg+xml;base64,${btoa(avatarSvg(gridOf(fundRow)))}`,
-    label: fundSymbolOf(fundRow),
+    avatar: `data:image/svg+xml;base64,${btoa(avatarSvg(gridOf(profile)))}`,
+    label: fundSymbolOf(profile),
     master,
-    backing: `$${readableUsd(
-      cashFor(
-        backers.reduce((total, holding) => total + holding.units, 0n),
-        fundRow.totalUnits,
-        fundRow.value
-      )
-    )}`,
-    backers: backers.length,
-    fundValue: `$${readableUsd(fundRow.value)}`,
-    pnl: metric === undefined ? '-' : `${metric.pnl > 0n ? '+' : metric.pnl < 0n ? '-' : ''}$${readableUsd(metric.pnl < 0n ? -metric.pnl : metric.pnl)}`,
-    tone: metric === undefined || metric.pnl === 0n ? 'neutral' : metric.pnl > 0n ? 'positive' : 'negative',
-    spark: metric === undefined ? [] : sparkSeries(metric.pnlList)
+    allocated: usd(cashFor(row.backerShares, row.totalShares, row.valuation), price),
+    puppets: [...held]
+      .sort((a, b) => (a.shares > b.shares ? -1 : a.shares < b.shares ? 1 : 0))
+      .slice(0, 5)
+      .map(h => `data:image/svg+xml;base64,${btoa(jazziconSvg(wallets.get(getAddress(h.holder)) ?? getAddress(h.holder)))}`),
+    puppetCount: held.length,
+    fundValue: usd(row.valuation, price),
+    pnl: `${pnl < 0n ? MINUS : ''}${usd(pnl < 0n ? -pnl : pnl, price)}`,
+    roi: roi === null ? null : `${roi < 0 ? MINUS : ''}${Math.abs(roi).toFixed(2)}%`,
+    window: interval === IntervalTime.DAY ? '1 Day' : interval === IntervalTime.WEEK ? '7 Day' : '30 Day',
+    tone: pnl === 0n ? 'neutral' : pnl > 0n ? 'positive' : 'negative',
+    spark: points.map(point => ({ time: point.time, value: point.value * usdPerEth }))
+  }
+}
+
+export async function fetchPuppetCard(account: Address): Promise<IPuppetCard | null> {
+  const [accounts, bodies, mandates, holdings, rate] = await Promise.all([
+    client.select(schema.accountTable, { where: { account } }),
+    client.select(schema.accountTable, { where: { owner: account } }),
+    client.select(schema.mandateTable, { where: { puppet: account } }),
+    client.select(schema.holdingTable, { where: { holder: account } }),
+    getRate(symbolOf(HUB_CHAIN_ID as ChainId, HUB_CANONICAL_TOKEN.WETH), USD_SYMBOL, TICK_MS)
+  ])
+  const [first] = accounts
+  if (first === undefined) return null
+  const owned = [...new Set(bodies.map(row => getAddress(row.account)))]
+  const masters = [...new Set([...mandates, ...holdings].map(row => getAddress(row.master)))].filter(master => !isAddressEqual(master, account))
+  const [fundRows, metrics] =
+    masters.length + owned.length === 0
+      ? [[], []]
+      : await Promise.all([
+          client.select(schema.fundTable, { where: { master: { in: [...masters, ...owned] } } }),
+          client.select(fundMetricTable, { where: { master: { in: masters } } })
+        ])
+  const price = usdPriceFromRate(rate, USD_DECIMALS)
+  const inFunds = holdings.filter(holding => !isAddressEqual(holding.master, account)).reduce((total, holding) => {
+    const fundRow = fundRows.find(row => isAddressEqual(row.master, holding.master))
+    if (fundRow === undefined) throw new Error(`${account} holds ${holding.master} with no fund row`)
+    const [latest] = metrics.filter(row => isAddressEqual(row.master, holding.master)).sort((a, b) => b.lastUpdatedTimestamp - a.lastUpdatedTimestamp)
+    const nav = latest === undefined ? fundRow.value : latest.valuation
+    const gross = cashFor(holding.shares, fundRow.totalShares, nav)
+    return total + gross - profitFeeOf(gross, holding.cost, cashFor(PRICE_PRECISION, fundRow.totalShares, nav), fundRow.performanceFee)
+  }, 0n)
+  const [firstFund, ...moreFunds] = fundRows.filter(row => owned.some(body => isAddressEqual(body, row.master))).map(row => fundSymbolOf(row))
+  const wallet = getAddress(first.owner)
+  return {
+    avatar: `data:image/svg+xml;base64,${btoa(jazziconSvg(wallet))}`,
+    account: wallet,
+    masterOf: firstFund === undefined ? null : moreFunds.length === 0 ? firstFund : `${firstFund} +${moreFunds.length}`,
+    inFunds: usd(inFunds, price),
+    funds: masters.slice(0, 5).map(master => {
+      const fundRow = fundRows.find(row => isAddressEqual(row.master, master))
+      return `data:image/svg+xml;base64,${btoa(avatarSvg(fundRow === undefined ? robotCellsOf(master) : gridOf(fundRow)))}`
+    }),
+    fundCount: masters.length
   }
 }

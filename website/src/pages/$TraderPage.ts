@@ -1,329 +1,429 @@
-import { CHAIN_IDS, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
-import type { IFund__Position } from '@puppet/contracts/types'
-import { fundSymbolOf, gridOf, predictUserAccount } from '@puppet/sdk/account'
-import type { ChainId, IntervalTime } from '@puppet/sdk/const'
-import {
-  formatFixed,
-  getAccountExplorerUrl,
-  getTokenDescription,
-  getTxExplorerUrl,
-  getUnixTimestamp,
-  readableAddress,
-  readablePercentage,
-  readableTokenAmountLabel
-} from '@puppet/sdk/core'
-import { VALUE_KEY } from '@puppet/sdk/evaluate'
-import { cashFor } from '@puppet/sdk/pool'
-import type { IMandateRow } from '@puppet/sdk/schema'
-import { bondTokenOf, chainTokenOfKey } from '@puppet/sdk/state'
+import { CHAIN_IDS, HUB_CANONICAL_TOKEN, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import { fundSymbolOf, gridOf, type IStoredAccountCall } from '@puppet/sdk/account'
+import { type IMandateDraft, type IOwnState, storedCalls, syncCalls } from '@puppet/sdk/client'
+import { type ChainId, type IntervalTime, PRECISION, TOKEN_META } from '@puppet/sdk/const'
+import { formatFixed, getAccountExplorerUrl, getTokenDescription, getUnixTimestamp, readableAddress, readablePercentage, readableTokenAmount } from '@puppet/sdk/core'
+import { type IGetRate, USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
+import { fundValuationsOf } from '@puppet/sdk/fold'
+import { cashFor, performanceIndexOf, POOL_SHARE } from '@puppet/sdk/pool'
+import { formatThrownError } from '@puppet/sdk/compact'
+import { ACCOUNT_VENUE, accountTable, allowanceTable, balanceTable, fundMetricTable, fundTable, type IFundRow } from '@puppet/sdk/schema'
+import { fundMetric, pnlEventsAcross, tokenMetaByChainToken, tokenMetaKey, walletsOf } from '@puppet/sdk/state'
 import { robotCellsOf } from '@puppet/sdk/ui-components'
-import { VENUES } from '@puppet/sdk/venue'
-import { combine, constant, delay, empty, filter, type IStream, just, map, merge, nowWith, op, start, switchMap } from 'aelea/stream'
-import { type IBehavior, state } from 'aelea/stream-extended'
-import { $element, $node, $text, attr, component, effectProp, type I$Node, type INode, type IStyleCSS, nodeEvent, style, stylePseudo } from 'aelea/ui'
-import { $column, $Popover, $row, designSheet, isDesktopScreen, spacing } from 'aelea/ui-components'
+import type { IDigestClient } from '@puppet/sdk/datastore'
+import {
+  combine,
+  combineMap,
+  delay,
+  empty,
+  filter,
+  filterNull,
+  fromPromise,
+  type IStream,
+  just,
+  map,
+  merge,
+  nowWith,
+  op,
+  reduce,
+  sampleMap,
+  skipRepeats,
+  skipRepeatsWith,
+  start,
+  switchLatest,
+  switchMap
+} from 'aelea/stream'
+import { type IBehavior, type PromiseState, type PromiseStateDone, type PromiseStateError, PromiseStatus, state } from 'aelea/stream-extended'
+import { $element, $node, $text, attr, component, effectProp, type I$Node, type INode, type IStyleCSS, nodeEvent, style, styleBehavior, stylePseudo } from 'aelea/ui'
+import { $column, $Popover, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { $defaultAnchor, href, pushUrl } from 'aelea/ui-router'
-import { type Address, getAddress, isAddressEqual } from 'viem'
+import { type Address, formatUnits, getAddress, isAddressEqual } from 'viem'
 import {
+  $alertTooltip,
   $anchor,
   $arrowRight,
   $ButtonSecondary,
   $copy,
   $defaultMiniButtonPrimary,
-  $defaultMiniButtonSecondary,
-  $defaultTooltipDropContainer,
-  $defaultVScrollContainer,
-  $external,
+  $errorLabel,
+  $externalMark,
   $icon,
   $infoLabel,
   $infoTooltip,
-  $inlineSpinner,
+  $intermediateCircle,
+  $intermediateFailure,
+  $intermediatePill,
+  $intermediateProfile,
   $intermediatePromise,
+  $intermediateRow,
+  $intermediateText,
   $popoverCaret,
-  $puppeteer,
-  $Table,
-  $Tooltip,
-  type IPageRequest,
-  type TablePageResponse,
+  intermediateState,
+  maskBalance,
   text
 } from '@/ui-components'
-import { uiStorage } from '@/ui-storage'
-import { localStoreSchema } from '../app/localStoreSchema.js'
 import { routeSchema } from '../app/routeSchema.js'
-import { $jazzicon } from '../common/$avatar.js'
 import { chainName } from '../common/$chain.js'
-import { $tokenProfile } from '../common/$common.js'
-import { chainFor } from '../common/$contract.js'
+import { $tokenProfile, ethPrice } from '../common/$common.js'
 import { $fundAvatar } from '../common/$fundAvatar.js'
-import { $venueIcon } from '../common/$operationView.js'
 import { $heading3 } from '../common/$text.js'
 import { $card, $responsiveFlex } from '../common/elements/$common.js'
-import { operationSummary } from '../common/operation.js'
 import { $accountLabel } from '../components/$AccountProfile.js'
-import type { IPerformanceMetric } from '../components/$PerformanceMetric.js'
+import { $fundHolders } from '../components/$FundHolders.js'
+import { mandateTermsOf } from '../components/$MandatePosition.js'
+import { type IPerformanceMetric, performanceMetricLabelMap, pnlLabelOf } from '../components/$PerformanceMetric.js'
 import { $ValueTimeline } from '../components/participant/$ValueTimeline.js'
-import { $FamilyToggle, FAMILY, FAMILY_LABEL, type IFamily, PAGE } from '../components/portfolio/$AccountHistory.js'
+import { $AccountHistory } from '../components/portfolio/$AccountHistory.js'
 import { $MandateEditor } from '../components/portfolio/$MandateEditor.js'
-import type { IMandateDraft } from '../components/portfolio/draft.js'
 import { $editorPopoverContentContainer } from '../components/portfolio/editorUtils.js'
-import context from '../io/context.js'
-import { fetchMasterMetrics } from '../io/datastore/reads.js'
-import { type ITraderView, masterMetric, traderPositions, traderTimeline, traderView, unitPriceOf } from '../io/datastore/traders.js'
-import { accountHead, walkAccount } from '../io/journal/archive.js'
-import { accountHistory, type IAccountAction } from '../io/journal/history.js'
-import { formatUsd, priceFor } from '../io/price.js'
+import { readFundBook } from '@puppet/sdk/intent'
+import { $jazzicon, AVATAR_SIZE } from '../common/$avatar.js'
+import { getPrice, getRate, localGetRate, localPrice } from '../io/context.js'
+import { $avatarStack } from '../components/$avatarStack.js'
+import { answerState, client, localFirst, localFirstQuery, localReader, notLocal } from '../io/datastore/reads.js'
+import { mandatesInForce } from '../io/datastore/own.js'
+import { CHART_POINTS, holdersOf, pnlTipOf } from '../io/datastore/traders.js'
+import { accountHistory } from '../io/journal/history.js'
+import { journalDeps } from '../io/journal/journal.js'
+import type { IJournalEntries } from '@puppet/sdk/client'
+import { viewCall } from '../io/onchain/viewRead.js'
+import { formatUsd, formatUsdNumber, MINUS, priceFor, usdOf } from '../io/price.js'
+import { fundBalancesOf, type IFundLive, type IOpenPositions, openPositionsOf, standingAllowancesOf } from '../io/venue.js'
 import { $amountDisplay } from '../ui-components/$hintAdjustment.js'
-import { balanceAt, type IRootState } from '../wallet/index.js'
-import { $OpenPositions, type IShownValuation, markOf, valuedLabel } from './$OpenPositions.js'
+import type { IRootState } from '../wallet/index.js'
+import { $hoverList, $OpenPositions, $syncTip, TICK_SYNC_SCHEDULE_SEC } from './$OpenPositions.js'
 import { $navPill } from './$onboarding.js'
-import { $caption, $emptyNote, $headerFigure, $headerStub, ago } from './common.js'
+import { $caption, $emptyNote, $headerFigure, $vital, ago } from './common.js'
 import type { IPageFilterParams } from './types.js'
 
 export interface I$TraderPage extends IPageFilterParams {
   master: Address
   hideBalances: IStream<boolean>
-  walletRoot: IStream<IRootState | null>
-  mandatesQuery: IStream<Promise<IMandateRow[]>>
+  walletRoot: IStream<Promise<IRootState | null>>
+  journalQuery: IStream<Promise<{ bodyList: readonly { account: Address }[]; live: Promise<IFundLive> | null } | null>>
+  ownStateQuery: IStream<Promise<IOwnState | null>>
   draftMandateList: IStream<IMandateDraft[]>
 }
 
-const VALUE_TOKEN = chainTokenOfKey(HUB_CHAIN_ID, VALUE_KEY)
-const BOND_TOKEN = bondTokenOf(HUB_CHAIN_ID)
-const value = getTokenDescription(HUB_CHAIN_ID, VALUE_TOKEN)
-const bond = getTokenDescription(HUB_CHAIN_ID, BOND_TOKEN)
+type IAccountCalls = { calls: ReadonlyMap<ChainId, readonly IStoredAccountCall[]>; failures: ReadonlyMap<ChainId, unknown> }
 
 const $sectionLabel = (label: string): I$Node =>
   $node(style({ color: palette.foreground, fontSize: text.sm, fontWeight: '500', letterSpacing: '0.5px' }))($text(label))
 
-const $panel = (label: string, extraStyle: IStyleCSS, $content: I$Node, tooltip?: string, $headerEnd?: I$Node): I$Node => {
-  const $title = tooltip === undefined ? $sectionLabel(label) : $row(spacing.tiny, style({ alignItems: 'center' }))($sectionLabel(label), $infoTooltip(tooltip, palette.foreground))
+const OPEN_POSITIONS_TIP = 'What the fund holds on each venue it trades, as Puppet last read it: after any change to the fund, and at least hourly.'
+
+const $performanceIndexTip = $column(spacing.tiny)(
+  $node(style({ color: palette.foreground }))($text("Fund value per 1.00 invested, in ETH after the master's fee. It starts at 1.00, and new money joins at 1.00.")),
+  $node(style({ fontWeight: '600' }))($text('Index = Fund value / Capital invested'))
+)
+
+const $panel = (label: string, extraStyle: IStyleCSS, $content: I$Node, header: { $tip: I$Node; $headerEnd?: I$Node }): I$Node => {
+  const $title = $row(spacing.small, style({ alignItems: 'center' }))(
+    $row(spacing.tiny, style({ alignItems: 'center' }))($sectionLabel(label), header.$tip)
+  )
   return $column(spacing.default, style({ backgroundColor: palette.middleground, borderRadius: '8px', padding: '20px', ...extraStyle }))(
-    $headerEnd === undefined ? $title : $row(style({ alignItems: 'center', justifyContent: 'space-between', gap: '12px' }))($title, $headerEnd),
+    header.$headerEnd === undefined ? $title : $row(style({ alignItems: 'center', justifyContent: 'space-between', gap: '12px' }))($title, header.$headerEnd),
     $content
   )
 }
 
-const $metric = (label: string, $value: I$Node): I$Node =>
-  $column(spacing.tiny)($infoLabel($node(style({ whiteSpace: 'nowrap' }))($text(label))), $value)
-
-const $value = (label: string, $v: I$Node, tooltip?: string): I$Node =>
-  $column(spacing.tiny)(
-    tooltip
-      ? $row(spacing.tiny, style({ alignItems: 'center' }))($infoLabel($text(label)), $infoTooltip(tooltip, palette.foreground))
-      : $infoLabel($text(label)),
-    $node(style({ fontWeight: '700' }))($v)
+const $notRefreshed = (failures: IStream<Promise<ReadonlyMap<ChainId, unknown>>>): I$Node =>
+  switchLatest(
+    op(
+      intermediateState(failures),
+      switchMap(s =>
+        s.status !== PromiseStatus.DONE
+          ? empty
+          : just(
+              s.value.size === 0
+                ? empty
+                : $alertTooltip(
+                    $column(spacing.tiny)(...[...s.value].map(([chainId, error]) => $node($text(`${chainName(chainId)}: ${formatThrownError(error)}`)))),
+                    $text('Not refreshed')
+                  )
+            )
+      )
+    )
   )
 
-const $rowSeparator = $node(style({ height: '1px', margin: '0 10px', backgroundColor: colorShade(palette.foreground, 15) }))()
-
-const $hoverList = (rows: I$Node[]): I$Node =>
-  $column(style({ margin: '0 -10px' }))(
-    ...rows.flatMap((row, i) => {
-      const $item = $row(style({ padding: '8px 10px', borderRadius: '6px', alignItems: 'center' }), stylePseudo(':hover', { backgroundColor: colorShade(palette.foreground, 8) }))(row)
-      return i === 0 ? [$item] : [$rowSeparator, $item]
-    })
-  )
-
-const $total = (amount: bigint): I$Node => $headerFigure(readableTokenAmountLabel(value, amount))
-
-interface ILeg {
-  chainId: ChainId
-  token: Address
-  amount: bigint
-}
-
-const leg = (chainId: ChainId | bigint, token: Address, amount: bigint): ILeg => ({ chainId: Number(chainId) as ChainId, token, amount })
-const bondLeg = (amount: bigint): ILeg => leg(HUB_CHAIN_ID, BOND_TOKEN, amount)
-
-const legsOf = (a: IAccountAction): { ins: ILeg[]; outs: ILeg[] } => {
-  switch (a.kind) {
-    case 'deposit':
-      return { ins: [leg(a.chainId, a.token, a.amount)], outs: [] }
-    case 'selfWithdraw':
-    case 'withdraw':
-      return { ins: [], outs: [leg(a.chainId, a.token, a.amount)] }
-    case 'swap':
-    case 'fundSwap':
-      return { ins: [leg(a.destinationChainId, a.outputToken, a.outputAmount)], outs: [leg(a.chainId, a.token, a.amount)] }
-    case 'operate': {
-      const flows = a.steps.flatMap(s => (s.kind === 'venue' ? s.flows : []))
-      return {
-        ins: flows.filter(f => f.delta > 0n).map(f => leg(a.chainId, f.token, f.delta)),
-        outs: flows.filter(f => f.delta < 0n).map(f => leg(a.chainId, f.token, -f.delta))
-      }
-    }
-    case 'allocate':
-      return { ins: a.credit === null ? [] : [leg(a.credit.chainId, a.credit.token, a.credit.amount)], outs: [] }
-    case 'escrow':
-      return { ins: [], outs: [leg(a.chainId, a.token, a.amount)] }
-    case 'fulfil':
-      return { ins: [leg(a.chainId, a.token, a.amount)], outs: [] }
-    case 'refund':
-      return { ins: [], outs: [leg(a.chainId, a.token, a.amount)] }
-    case 'allocation':
-      return { ins: [], outs: [bondLeg(a.stake)] }
-    case 'sell':
-    case 'claim':
-      return { ins: [bondLeg(a.payout)], outs: [] }
-    case 'sellFee':
-    case 'claimFee':
-      return { ins: [bondLeg(a.payoutFee)], outs: [] }
-    case 'redeem':
-      return { ins: [], outs: [bondLeg(a.cash)] }
-    case 'genesis':
-    case 'createFund':
-    case 'revoke':
-    case 'withdrawRequest':
-    case 'mandate':
-      return { ins: [], outs: [] }
-  }
-}
-
-const describeAction = (a: IAccountAction): { label: string; venue: string | null; detail: string } => {
-  switch (a.kind) {
-    case 'genesis':
-      return { label: a.parent === null ? 'Account created' : 'Fund account created', venue: null, detail: '' }
-    case 'createFund':
-      return { label: 'Fund opened', venue: null, detail: '' }
-    case 'revoke':
-      return { label: 'Signers revoked', venue: null, detail: '' }
-    case 'withdrawRequest':
-      return { label: 'Withdrawal requested', venue: null, detail: '' }
-    case 'escrow':
-      return { label: 'Escrowed', venue: null, detail: `${readableTokenAmountLabel(getTokenDescription(a.chainId, a.token), a.amount)} committed` }
-    case 'fulfil':
-      return { label: 'Escrow released', venue: null, detail: readableTokenAmountLabel(getTokenDescription(a.chainId, a.token), a.amount) }
-    case 'refund':
-      return { label: 'Escrow refunded', venue: null, detail: readableTokenAmountLabel(getTokenDescription(a.chainId, a.token), a.amount) }
-    case 'deposit':
-      return { label: 'Deposit', venue: null, detail: 'into the personal balance' }
-    case 'selfWithdraw':
-      return { label: 'Withdrawal', venue: null, detail: 'from the personal balance' }
-    case 'swap':
-      return { label: 'Deposit across', venue: null, detail: `to ${chainName(Number(a.destinationChainId))}` }
-    case 'withdraw':
-      return { label: 'Withdraw', venue: null, detail: 'to the wallet' }
-    case 'operate': {
-      const actions = operationSummary(a.chainId, a.steps).actions
-      const venue = actions.map(x => x.venue).find(name => VENUES.some(v => v.name === name)) ?? null
-      return { label: venue ?? 'Trade', venue, detail: actions.map(x => x.label).join(', ') }
-    }
-    case 'fundSwap':
-      return { label: 'Account swap', venue: null, detail: Number(a.destinationChainId) === a.chainId ? '' : `to ${chainName(Number(a.destinationChainId))}` }
-    case 'allocate': {
-      const raised = a.backers > 0 ? `, ${a.backers} backer${a.backers === 1 ? '' : 's'} joined` : ''
-      const slice =
-        a.fee === null
-          ? ''
-          : a.credit !== null && a.credit.chainId !== HUB_CHAIN_ID
-            ? `; ${readableTokenAmountLabel(getTokenDescription(a.credit.chainId, a.credit.token), a.billed)} of the fee is billed on ${chainName(a.credit.chainId)} when the escrow releases`
-            : `; trader paid ${readableTokenAmountLabel(bond, a.masterSlice)} of the fee`
-      return { label: 'Allocate', venue: null, detail: `credited ${readableTokenAmountLabel(bond, a.credited)}${raised}${slice}` }
-    }
-    case 'allocation':
-      return { label: 'Backed', venue: null, detail: `a round of ${readableAddress(a.master)}` }
-    case 'sell':
-      return { label: 'Sold units', venue: null, detail: `of ${readableAddress(a.master)}` }
-    case 'sellFee':
-      return { label: 'Performance fee', venue: null, detail: `backer ${readableAddress(a.puppet)} sold` }
-    case 'redeem':
-      return { label: 'Redeem', venue: null, detail: `paid ${readableTokenAmountLabel(bond, a.payout)} to sellers` }
-    case 'claim':
-      return { label: 'Claim', venue: null, detail: `from ${readableAddress(a.master)}` }
-    case 'claimFee':
-      return { label: 'Performance fee', venue: null, detail: `backer ${readableAddress(a.holder)} claimed` }
-    case 'mandate':
-      return { label: 'Mandate', venue: null, detail: a.masters.map(m => readableAddress(m.master)).join(', ') }
-  }
-}
-
-export const $TraderPage = ({ master, hideBalances, activityTimeframe, walletRoot, mandatesQuery, draftMandateList }: I$TraderPage) =>
+export const $TraderPage = ({ master, hideBalances, activityTimeframe, performanceMetric, walletRoot, journalQuery, ownStateQuery, draftMandateList }: I$TraderPage) =>
   component(
     (
       [changeMandateDraft, changeMandateDraftTether]: IBehavior<IMandateDraft>,
       [changeActivityTimeframe, changeActivityTimeframeTether]: IBehavior<IntervalTime>,
-      [copyShareLink, copyShareLinkTether]: IBehavior<INode, string>,
-      [popMandate, popMandateTether]: IBehavior<PointerEvent, Address>,
-      [changePerformanceMetric, changePerformanceMetricTether]: IBehavior<IPerformanceMetric>,
-      [selectFamily, selectFamilyTether]: IBehavior<IFamily>,
-      [clickHistoryFilters, clickHistoryFiltersTether]: IBehavior<PointerEvent>,
-      [requestHistoryPage, requestHistoryPageTether]: IBehavior<IPageRequest>
+      [copyShareLink, copyShareLinkTether]: IBehavior<INode, Promise<void>>,
+      [popMandate, popMandateTether]: IBehavior<PointerEvent>,
+      [changePerformanceMetric, changePerformanceMetricTether]: IBehavior<IPerformanceMetric>
     ) => {
-      const family: IStream<IFamily> = state('all' as IFamily, selectFamily)
-      const performanceMetric = op(uiStorage.replayWrite(localStoreSchema.global.performanceMetric, changePerformanceMetric), state())
-      const viewQuery: IStream<Promise<ITraderView | undefined>> = op(just(traderView(master)), state())
-      const valuationQuery: IStream<Promise<IShownValuation | null>> = op(
-        viewQuery,
-        map(async q => {
-          const view = await q
-          const last = view?.valuations.at(-1)
-          return last === undefined ? null : markOf(last, view!.fundRow)
-        }),
-        state()
-      )
-      const sessionQuery = op(
-        combine({ root: walletRoot, mandates: mandatesQuery }),
-        map(async p => ({ root: p.root, mandates: await p.mandates, registry: await context.getTokenRegistry() })),
-        state()
-      )
-      const historyQuery = op(
-        viewQuery,
-        map(async q => {
-          const view = await q
-          if (view === undefined) return []
-          const user = view.user
-          const subjects = user === null ? [] : [{ account: view.master, user }, { account: predictUserAccount(user), user }]
-          const journals = await Promise.all(
-            subjects.map(async subject => ({
-              account: subject.account,
-              entries: new Map(
-                await Promise.all(
-                  CHAIN_IDS.map(async id => {
-                    const chainId = id as ChainId
-                    return [
-                      chainId,
-                      await walkAccount(chainId, subject.account, subject.user, await accountHead(chainId, subject.account))
-                    ] as const
-                  })
+      const callsOf = (account: Address): IStream<Promise<IAccountCalls>> =>
+        localFirst(
+          () =>
+            Promise.all(CHAIN_IDS.map(async id => [id as ChainId, await storedCalls(journalDeps.store, id as ChainId, account)] as const)).then(entries =>
+              entries.every(([, calls]) => calls.length === 0) ? notLocal : { calls: new Map(entries), failures: new Map<ChainId, unknown>() }
+            ),
+          () =>
+            syncCalls(journalDeps, null, CHAIN_IDS, [account], 'changed').then(async synced => {
+              const chains = await Promise.all(
+                [...synced.calls.get(getAddress(account))!].map(async ([chainId, result]) =>
+                  result.status === 'fulfilled'
+                    ? { chainId, calls: result.value, failure: null }
+                    : { chainId, calls: await storedCalls(journalDeps.store, chainId, account), failure: { error: result.reason as unknown } }
                 )
               )
-            }))
-          )
-          return accountHistory(journals)
-        }),
-        state()
+              return {
+                calls: new Map(chains.map(chain => [chain.chainId, chain.calls] as const)),
+                failures: new Map(chains.flatMap(chain => (chain.failure === null ? [] : [[chain.chainId, chain.failure.error] as const])))
+              }
+            })
+        )
+      const fundRowQuery: IStream<Promise<IFundRow | undefined>> = op(localFirstQuery(reader => reader.find(fundTable, { master })), answerState)
+      const bookOf = (reader: IDigestClient, rate: IGetRate) =>
+        readFundBook({ chronicle: reader }, master).then(book => {
+          const held = book.holdings.filter(h => h.shares > 0n)
+          return { book, held, wallets: walletsOf(reader, held.map(h => h.holder)), holders: holdersOf(reader, rate, book) }
+        })
+      const bookQuery = op(
+        localFirst(
+          () => bookOf(localReader, localGetRate),
+          () => bookOf(client, getRate)
+        ),
+        answerState
       )
-      const pnlQuery = op(
-        activityTimeframe,
-        map(async tf => {
-          const rows = await fetchMasterMetrics(tf, [master])
-          const until = getUnixTimestamp()
-          return rows.length === 0 ? null : masterMetric(rows, tf, until - tf, until)
+      const fundBookQuery = op(
+        combine({ fundRow: fundRowQuery, book: bookQuery }),
+        map(p =>
+          Promise.all([p.fundRow, p.book]).then(([fundRow, held]) => ({ ...held, fundRow }))
+        ),
+        answerState
+      )
+      const balanceRowsQuery = op(localFirstQuery(reader => reader.select(balanceTable, { where: { account: master } })), answerState)
+      const ownerQuery: IStream<Promise<Address | null>> = op(
+        localFirstQuery(reader => reader.select(accountTable, { where: { account: master } }).then(([row]) => (row === undefined ? null : getAddress(row.owner)))),
+        answerState
+      )
+      const masterCallsQuery = op(callsOf(master), answerState)
+      const valuationsQuery = op(
+        masterCallsQuery,
+        map(q =>
+          q.then(read => {
+            const hub = read.calls.get(HUB_CHAIN_ID as ChainId)
+            if (hub === undefined) throw new Error(`the journal of ${master} holds no hub chain`)
+            if (read.failures.has(HUB_CHAIN_ID as ChainId)) throw read.failures.get(HUB_CHAIN_ID as ChainId)
+            return fundValuationsOf(master, hub)
+          })
+        ),
+        answerState
+      )
+      const ownerCallsQuery: IStream<Promise<(IJournalEntries & Pick<IAccountCalls, 'failures'>) | null>> = op(
+        ownerQuery,
+        intermediateState,
+        filter((s): s is PromiseStateDone<Address | null> | PromiseStateError => s.status !== PromiseStatus.PENDING),
+        map(s => (s.status === PromiseStatus.DONE ? { owner: s.value } : { error: s.error })),
+        skipRepeatsWith((a, b) => 'owner' in a && 'owner' in b && a.owner === b.owner),
+        switchMap(found => {
+          if ('error' in found) return just(Promise.reject(found.error))
+          const owner = found.owner
+          if (owner === null) return just(Promise.resolve(null))
+          return op(
+            callsOf(owner),
+            map(q => q.then(read => ({ account: owner, entries: read.calls, failures: read.failures })))
+          )
         }),
-        state()
+        answerState
+      )
+      const historyQuery = op(
+        combine({ master: masterCallsQuery, owner: ownerCallsQuery }),
+        map(p => Promise.all([p.master, p.owner]).then(([read, owner]) => accountHistory([{ account: master, entries: read.calls }, ...(owner === null ? [] : [owner])]))),
+        answerState
+      )
+      const historyFailures = op(
+        combine({ master: masterCallsQuery, owner: ownerCallsQuery }),
+        map(p => Promise.all([p.master, p.owner]).then(([read, owner]) => new Map([...read.failures, ...(owner === null ? [] : owner.failures)])))
+      )
+      const sessionQuery = op(
+        combine({ root: walletRoot, own: ownStateQuery }),
+        map(p => Promise.all([p.root, p.own]).then(([root, own]) => ({ root, mandates: own === null ? [] : mandatesInForce(own) }))),
+        answerState
+      )
+      const liveQuery: IStream<Promise<IFundLive | null>> = op(
+        intermediateState(walletRoot),
+        map(s =>
+          s.status !== PromiseStatus.DONE ? null : s.value !== null && s.value.fund !== null && 'account' in s.value.fund && isAddressEqual(s.value.fund.account, master)
+        ),
+        filterNull,
+        skipRepeats,
+        switchMap(
+          (own): IStream<Promise<IFundLive | null>> =>
+            own
+              ? op(
+                  journalQuery,
+                  map(q => q.then(held => (held !== null && held.live !== null && held.bodyList.some(body => isAddressEqual(body.account, master)) ? held.live : null)))
+                )
+              : just(Promise.resolve(null))
+        ),
+        answerState
+      )
+      const storedVenuesQuery = op(localFirstQuery(reader => openPositionsOf(reader, master, [], null, null)), answerState)
+      const venuesQuery: IStream<Promise<IOpenPositions>> = op(
+        merge(
+          storedVenuesQuery,
+          op(
+            liveQuery,
+            intermediateState,
+            filter((s): s is PromiseStateDone<IFundLive | null> | PromiseStateError => s.status !== PromiseStatus.PENDING),
+            map(s => (s.status === PromiseStatus.DONE ? { live: s.value } : { error: s.error })),
+            sampleMap(
+              (stored, read) =>
+                'error' in read
+                  ? stored.then(open => ({ ...open, failed: [...open.failed, { venue: ACCOUNT_VENUE, reason: formatThrownError(read.error) }] }))
+                  : read.live === null
+                    ? null
+                    : Promise.resolve(read.live.open),
+              storedVenuesQuery
+            ),
+            filterNull
+          )
+        ),
+        answerState
+      )
+      const standingQuery = op(localFirstQuery(reader => reader.select(allowanceTable, { where: { account: master } }).then(rows => standingAllowancesOf(viewCall, rows))), answerState)
+      const balancesQuery = op(
+        combine({ read: masterCallsQuery, rows: balanceRowsQuery, venues: venuesQuery }),
+        map(p =>
+          Promise.all([p.read, p.rows, p.venues]).then(([read, rows, open]) => ({
+            failures: read.failures,
+            rows: fundBalancesOf(
+              read.calls,
+              rows.map(row => ({ chainId: Number(row.chainId) as ChainId, token: getAddress(row.token), amount: row.amount })),
+              open.holdings
+            )
+              .filter(row => tokenMetaByChainToken.has(tokenMetaKey(row.chainId, row.token)))
+              .map(row => ({ ...row, profile: getTokenDescription(row.chainId, row.token) }))
+          }))
+        ),
+        answerState
+      )
+      const ethRateQuery = op(
+        localFirst(
+          () => localPrice(HUB_CHAIN_ID as ChainId, HUB_CANONICAL_TOKEN.WETH),
+          () => getPrice(HUB_CHAIN_ID as ChainId, HUB_CANONICAL_TOKEN.WETH)
+        ),
+        answerState
+      )
+      const metricRowsQuery = op(localFirstQuery(reader => reader.select(fundMetricTable, { where: { master } })), answerState)
+      const pnlQuery = op(
+        combine({ rows: metricRowsQuery, tf: activityTimeframe }),
+        switchMap(p => {
+          const stored = p.rows.then(rows => {
+            const until = getUnixTimestamp()
+            const row = rows.find(each => each.interval === p.tf)
+            if (row === undefined) return null
+            const since = until - p.tf
+            const events = pnlEventsAcross(rows, p.tf)
+            return { ...fundMetric(events, p.tf, since, until, CHART_POINTS), start: since, row, events, updatedAt: row.lastUpdatedTimestamp }
+          })
+          const settle = (worth: IFundLive['worth'] | null, liveFailure: { error: unknown } | null) =>
+            stored.then(metric => (metric === null ? null : { ...metric, worth, liveFailure, tip: pnlTipOf(metric.pnl, metric.row, worth) }))
+          return merge(
+            just(settle(null, null)),
+            op(
+              fromPromise(stored.then(() => null, () => null)),
+              switchMap(() => liveQuery),
+              map(live => live.then(read => settle(read === null ? null : read.worth, null), (error: unknown) => settle(null, { error })))
+            )
+          )
+        }),
+        answerState
+      )
+      const indexQuery = op(
+        combine({ metric: pnlQuery, fundRow: fundRowQuery, valuations: valuationsQuery }),
+        map(p =>
+          Promise.all([p.metric, p.fundRow, p.valuations]).then(([metric, fundRow, valuations]) => {
+            const lastMark = valuations[valuations.length - 1]
+            if (lastMark === undefined || fundRow === undefined) return null
+            const worth = metric === null ? null : metric.worth
+            const anchor = metric !== null && metric.row.lastUpdatedTimestamp >= lastMark.blockTimestamp ? metric.row : null
+            const basis = anchor === null ? { time: lastMark.blockTimestamp, value: lastMark.after } : { time: anchor.lastUpdatedTimestamp, value: anchor.valuation }
+            const valued = performanceIndexOf(basis.value, fundRow)
+            const tip =
+              worth === null || worth.value === undefined || fundRow.totalShares === 0n || worth.time <= basis.time
+                ? null
+                : { time: worth.time, price: performanceIndexOf(worth.value, fundRow) }
+            return { index: formatFixed(TOKEN_META.WETH.decimals, tip === null ? valued : tip.price), basis, valued, tip, worth, liveFailure: metric === null ? null : metric.liveFailure }
+          })
+        ),
+        answerState
+      )
+      const allocationMarks = op(
+        combine({ valuations: valuationsQuery, eth: ethRateQuery }),
+        map(p =>
+          Promise.all([p.valuations, p.eth]).then(([valuations, eth]) =>
+            valuations.flatMap(round =>
+              round.sharesAfter > round.totalShares ? [{ time: round.blockTimestamp, label: `Allocated ${formatUsd(round.after - round.value, eth.price)}` }] : []
+            )
+          )
+        ),
+        answerState
       )
       const timelineQuery = op(
-        combine({ view: viewQuery, tf: activityTimeframe, metric: performanceMetric, pnl: pnlQuery }),
+        combine({ fundRow: fundRowQuery, valuations: valuationsQuery, tf: activityTimeframe, metric: performanceMetric, pnl: pnlQuery, eth: ethRateQuery }),
         map(async p => {
-          if (p.metric === 'pnl') return (await p.pnl)?.points ?? []
-          const view = await p.view
-          if (view === undefined) return []
           const until = getUnixTimestamp()
-          return traderTimeline(view.valuations, until - p.tf, until)
+          const since = until - p.tf
+          const [timeline, usdPerEth] = await Promise.all([
+            p.metric === 'pnl'
+              ? p.pnl.then(metric =>
+                  metric === null
+                    ? { marks: [], tip: null }
+                    : { marks: metric.points, tip: metric.tip === null || metric.tip.time < metric.start ? null : { time: metric.tip.time, value: formatFixed(TOKEN_META.WETH.decimals, metric.tip.pnl) } }
+                )
+              : Promise.all([p.fundRow, p.valuations, p.pnl]).then(([fundRow, valuations, metric]) => {
+                  if (fundRow === undefined || metric === null) return { marks: [], tip: null }
+                  const closed = valuations.slice(0, -1).findLastIndex(v => v.sharesAfter === 0n)
+                  const launch = valuations[closed + 1]
+                  if (launch === undefined) throw new Error(`fund ${master} has a fund row but no round`)
+                  const levels = [...metric.events].sort((a, b) => a.time - b.time)
+                  const step = Math.max(1, Math.ceil(p.tf / CHART_POINTS))
+                  const marks: { time: number; value: number }[] = []
+                  let next = 0
+                  let level = metric.row.openingIndex
+                  for (let time = since; time < until; time += step) {
+                    while (next < levels.length && levels[next]!.time <= time) level = levels[next++]!.index
+                    marks.push({ time, value: formatFixed(TOKEN_META.WETH.decimals, time < launch.blockTimestamp ? POOL_SHARE : level) })
+                  }
+                  while (next < levels.length) level = levels[next++]!.index
+                  marks.push({ time: until, value: formatFixed(TOKEN_META.WETH.decimals, level) })
+                  const worth = metric.worth
+                  return {
+                    marks,
+                    tip:
+                      worth === null || worth.value === undefined || fundRow.totalShares === 0n || worth.time <= metric.row.lastUpdatedTimestamp
+                        ? null
+                        : { time: worth.time, value: formatFixed(TOKEN_META.WETH.decimals, performanceIndexOf(worth.value, fundRow)) }
+                  }
+                }),
+            p.metric === 'pnl' ? p.eth.then(eth => Number(formatUnits(eth.price * 10n ** BigInt(TOKEN_META.WETH.decimals), USD_PRICE_DECIMALS))) : 1
+          ])
+          return {
+            marks: timeline.marks.map(point => ({ time: point.time, value: point.value * usdPerEth })),
+            tip: timeline.tip === null ? null : { time: timeline.tip.time, value: timeline.tip.value * usdPerEth }
+          }
         }),
-        state()
-      )
-      const positionsQuery = op(
-        viewQuery,
-        map(async q => {
-          const view = await q
-          return view === undefined ? [] : traderPositions(view.master)
-        }),
-        state()
+        answerState
       )
 
-      const shareLinkLabel = start('Copy share link', switchMap(() => merge(just('Link copied'), delay(1800, just('Copy share link'))), copyShareLink))
+      const shareLinkLabel = start(
+        'Copy share link',
+        switchMap(
+          copied =>
+            op(
+              fromPromise(copied.then(() => 'Link copied', (error: unknown) => `Not copied: ${formatThrownError(error)}`)),
+              switchMap(label => merge(just(label), delay(1800, just('Copy share link'))))
+            ),
+          copyShareLink
+        )
+      )
       const $shareLink = $element('span')(
         spacing.tiny,
         style({ color: palette.foreground, fontSize: text.sm, cursor: 'pointer', display: 'flex', alignItems: 'center' }),
@@ -331,12 +431,18 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, walletRoo
         copyShareLinkTether(
           nodeEvent('click'),
           map(() => {
-            const url = `${document.location.origin}/traders/${master}?s=${Date.now().toString(36)}`
-            navigator.clipboard.writeText(url)
-            return url
+            const share = Date.now().toString(36)
+            void fetch(`/api/og/masters/${master}?s=${share}`)
+            return navigator.clipboard.writeText(`${document.location.origin}/traders/${master}?s=${share}`)
           })
         )
-      )($icon({ $content: $copy, width: '12px' }), $text(shareLinkLabel))
+      )($icon({ $content: $copy, viewBox: '0 0 24 24', width: '13px' }), $text(shareLinkLabel))
+
+      const symbolText = op(
+        fundRowQuery,
+        map(q => q.then(fundRow => (fundRow === undefined ? readableAddress(master) : fundSymbolOf(fundRow)))),
+        answerState
+      )
 
       const $breadcrumb = $row(
         spacing.small,
@@ -344,7 +450,7 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, walletRoo
       )(
         $defaultAnchor(
           attr({ href: href(routeSchema.traders) }),
-          style({ color: palette.foreground, textDecoration: 'underline', textUnderlineOffset: '3px' }),
+          style({ color: palette.foreground }),
           effectProp(
             'onclick',
             nowWith(() => (ev: MouseEvent) => {
@@ -353,426 +459,524 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, walletRoo
               pushUrl(href(routeSchema.traders))
             })
           )
-        )($text('Traders')),
+        )($text('Funds')),
         $icon({ $content: $arrowRight, fill: palette.foreground, width: '8px' }),
-        $intermediatePromise({
-          $loader: $node(style({ color: palette.message }))($text(readableAddress(master))),
-          $display: map(async q => {
-            const fundRow = (await q)?.fundRow
-            return $node(style({ color: palette.message }))($text(fundRow === undefined ? readableAddress(master) : fundSymbolOf(fundRow)))
-          }, viewQuery)
-        })
+        $node(style({ color: palette.message }))($intermediateText(symbolText))
       )
 
       const $unknown = $card(spacing.big)(
-        $heading3($text('Unknown trader')),
-        $infoLabel($text(`${readableAddress(master)} has not traded yet.`)),
-        $row($navPill('All traders', routeSchema.traders, false))
+        $heading3($text('Unknown fund')),
+        $infoLabel($text(`${readableAddress(master)} has no fund yet. A fund opens with its master's first allocation round.`)),
+        $row($navPill('All funds', routeSchema.traders, false))
       )
 
-      const $page = (view: ITraderView): I$Node => {
-        const fundRow = view.fundRow
-        const name = fundRow === undefined ? readableAddress(view.master) : fundSymbolOf(fundRow)
-        const backers = view.holdings.filter(h => !isAddressEqual(h.holder, view.master))
-        const backing = fundRow === undefined ? null : cashFor(backers.reduce((total, h) => total + h.units, 0n), fundRow.totalUnits, fundRow.value)
-        const $dash = $node(style({ color: palette.foreground }))($text('-'))
-        const lastMark = view.valuations[view.valuations.length - 1]
-        const markAge = lastMark === undefined ? null : ago(lastMark.blockTimestamp)
+      const nameSize = isDesktopScreen ? text.lg : text.base
 
-        const $identity = $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
-          $node(style({ width: '56px', height: '56px', borderRadius: '50%', overflow: 'hidden', flexShrink: '0' }))($fundAvatar(fundRow === undefined ? robotCellsOf(view.master) : gridOf(fundRow), 56)),
-          $column(style({ minWidth: '0', gap: '2px' }))(
-            $node(style({ fontWeight: '600', fontSize: isDesktopScreen ? text.lg : text.base, color: palette.message, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }))($text(name)),
-            $row(spacing.tiny, style({ alignItems: 'center' }))($accountLabel({ address: view.master, primarySize: 1 }))
-          )
-        )
-
-        const $liveValue = $intermediatePromise({
-          $loader: $inlineSpinner,
-          $display: map(async q => {
-            const shown = await q
-            if (shown === null) return $dash
-            return $column(spacing.tiny)(
-              $amountDisplay({
-                hideBalances,
-                usd: map(price => formatUsd(shown.value, price), priceFor(HUB_CHAIN_ID, VALUE_TOKEN)),
-                amount: readableTokenAmountLabel(value, shown.value),
-                align: 'flex-start'
-              }),
-              $caption(`after the last round, ${ago(Number(shown.time))}`)
-            )
-          }, valuationQuery)
-        })
-
-        const $vitals = $row(spacing.big, style({ flexWrap: 'wrap', rowGap: '12px' }))(
-          $value(
-            'Fund value',
-            $liveValue,
-            'Everything the fund holds across chains and venues after its last round: the attested mark plus what the round brought in or paid out.'
-          ),
-          $value(
-            'Backing',
-            backing === null
-              ? $dash
-              : $amountDisplay({
-                  hideBalances,
-                  usd: map(price => formatUsd(backing, price), priceFor(HUB_CHAIN_ID, VALUE_TOKEN)),
-                  amount: readableTokenAmountLabel(value, backing),
-                  align: 'flex-start'
-                }),
-            `What the backers' shares are worth at the last mark${markAge === null ? '' : `, ${markAge}`}.`
-          ),
-          $value('Backers', $node(style({ color: palette.message }))($text(`${backers.length}`))),
-          $value(
-            'Queued',
-            $node(style({ color: palette.message }))(
-              $text(fundRow === undefined ? '-' : readableTokenAmountLabel(value, view.queue === undefined ? 0n : cashFor(view.queue.units, fundRow.totalUnits, fundRow.value)))
-            ),
-            'What backers have sold and wait for the trader to redeem, at the last mark.'
-          ),
-          $value(
-            'Fee',
-            $node(style({ color: palette.message }))($text(readablePercentage(PROTOCOL.performanceFee))),
-            'Performance fee the trader takes on backer gains when their share pays out.'
-          ),
-          $value(
-            'Skin',
-            $node(style({ color: palette.message }))($text(fundRow === undefined ? '-' : readablePercentage(fundRow.skin))),
-            'The share of the pool the trader must keep; it is the strictest skin among the mandates of current backers.'
-          )
-        )
-
-        const $back = $intermediatePromise({
-          $loader: $inlineSpinner,
-          $display: map(async q => {
-            const s = await q
-            const root = s.root
-            if (root !== null && isAddressEqual(root.account, view.master)) {
-              return $node(style({ fontSize: text.xs, color: palette.foreground, whiteSpace: 'nowrap' }))($text('This is your account'))
-            }
-            const nowSec = getUnixTimestamp()
-            const mine = root === null ? undefined : s.mandates.find(m => isAddressEqual(m.master, view.master) && isAddressEqual(m.puppet, root.account))
-            const active = mine !== undefined && mine.expiry > BigInt(nowSec)
-            return $Popover({
-              $contentContainer: $editorPopoverContentContainer,
-              $target: $ButtonSecondary({
-                $container: active ? $defaultMiniButtonPrimary(style({ borderColor: palette.indeterminate })) : $defaultMiniButtonPrimary,
-                disabled: just(false),
-                $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Back'), $popoverCaret())
-              })({ click: popMandateTether(map(() => view.master)) }),
-              $open: map(
-                () =>
-                  $MandateEditor({
-                    master: view.master,
-                    existing: mine,
-                    draft: map(list => list.find(d => d.mandate !== null && isAddressEqual(d.mandate.master, view.master)) ?? null, draftMandateList),
-                    needsDeposit: root === null || balanceAt(root.balances, HUB_CHAIN_ID, bondTokenOf(HUB_CHAIN_ID)) === 0n
-                  })({ changeMandateDraft: changeMandateDraftTether() }),
-                filter(key => isAddressEqual(key, view.master), popMandate)
-              ),
-              dismiss: changeMandateDraft
-            })({})
-          }, sessionQuery)
-        })
-
-        const $iconLink = (href: string, label: string, $glyph: I$Node): I$Node =>
-          $anchor(
-            attr({ href, target: '_blank', 'aria-label': label, title: label }),
-            style({ color: palette.foreground, display: 'inline-flex', alignItems: 'center', padding: '4px' }),
-            stylePseudo(':hover', { color: palette.message })
-          )($glyph)
-
-        const $profileOverview = $column(spacing.default)(
-          $row(spacing.default, style({ alignItems: 'center' }))($identity, $back),
-          $row(spacing.small, style({ alignItems: 'center' }))(
-            $iconLink(getAccountExplorerUrl(view.master), 'View trading account on explorer', $icon({ $content: $external, width: '13px' })),
-            $shareLink
-          ),
-          $vitals
-        )
-
-        const $metricsLead = $row(isDesktopScreen ? spacing.big : spacing.default, style({ alignItems: 'flex-start' }))(
-          $metric(
-            'PnL',
-            $intermediatePromise({
-              $loader: $inlineSpinner,
-              $display: map(async q => {
-                const pnl = (await q)?.pnl ?? null
-                return $column(spacing.tiny)(
-                  $node(style({ fontWeight: '700', color: pnl === null || pnl === 0n ? palette.message : pnl > 0n ? palette.positive : palette.negative }))(
-                    $text(pnl === null ? '-' : `${pnl > 0n ? '+' : ''}${readableTokenAmountLabel(value, pnl)}`)
-                  ),
-                  $caption(markAge === null ? 'from marks' : `through the mark ${markAge}`)
-                )
-              }, pnlQuery)
-            })
-          ),
-          $metric(
-            'Unit price',
-            $column(spacing.tiny)(
-              $node(style({ fontWeight: '700', color: palette.message }))($text(lastMark === undefined ? '-' : `$${formatFixed(value.decimals, unitPriceOf(lastMark)).toFixed(4)}`)),
-              $caption(markAge === null ? 'no mark yet' : `marked ${markAge}`)
-            )
-          )
-        )
-
-        const $hero = $node(style({ position: 'relative', width: '100%', backgroundColor: palette.middleground, overflow: 'hidden', ...(isDesktopScreen ? { height: '480px' } : {}) }))(
-          $node(style({ position: 'relative', width: '100%', maxWidth: '1400px', margin: '0 auto', ...(isDesktopScreen ? { height: '100%' } : {}) }))(
-            $ValueTimeline({
-              hideBalances,
-              timelineQuery,
-              unit: '$',
-              label: map(metric => (metric === 'pnl' ? 'Profit & Loss' : 'Growth of $1'), performanceMetric),
-              tooltip: map(
-                metric =>
-                  metric === 'pnl'
-                    ? 'Realized and open profit of the fund over the timeframe, as of each mark.'
-                    : 'What $1 put into this fund when it opened is worth at each mark. Allocations and redemptions buy in and out at this value, so it moves only with trading results and fees.',
-                performanceMetric
-              ),
-              activityTimeframe,
-              performanceMetric,
-              chartHeight: isDesktopScreen ? '480px' : '300px',
-              $lead: $row(style({ flex: 1, pointerEvents: 'all' }))($metricsLead)
-            })({ changeActivityTimeframe: changeActivityTimeframeTether(), changePerformanceMetric: changePerformanceMetricTether() }),
-            isDesktopScreen
-              ? $node(style({ position: 'absolute', inset: '0', zIndex: 10, pointerEvents: 'none', background: `linear-gradient(to right, ${palette.middleground} 0%, ${palette.middleground} 22%, transparent 52%)` }))()
-              : empty,
-            $card(
-              style({
-                padding: '24px',
-                zIndex: 20,
-                border: `1px solid ${colorShade(palette.foreground, 15)}`,
-                ...(isDesktopScreen ? { position: 'absolute', bottom: '36px', left: '20px', width: '440px', maxWidth: 'calc(100% - 40px)' } : { margin: '12px' })
-              })
-            )($profileOverview)
-          )
-        )
-
-        const cashOf = (positions: readonly IFund__Position[], total: bigint): bigint => total - positions.reduce((acc, p) => acc + p.valueInUsd, 0n)
-
-        const $balances = $panel(
-          'Balances',
-          {},
+      const $identity = $row(spacing.small, style({ alignItems: 'center', minWidth: '0' }))(
+        $node(style({ width: '56px', height: '56px', borderRadius: '50%', overflow: 'hidden', flexShrink: '0' }))(
           $intermediatePromise({
-            $loader: $inlineSpinner,
-            $display: map(async q => {
-              const shown = await q
-              if (shown === null || shown.assetList.length === 0) return $emptyNote('No balances', 'Cash the fund holds on each chain appears here.')
-              return $column(spacing.default)(
-                $hoverList(
-                  shown.assetList.map(asset => {
-                    const chainId = Number(asset.chainId) as ChainId
-                    const token = getAddress(asset.token)
-                    return $row(spacing.small, style({ alignItems: 'center', flex: 1 }))(
-                      $tokenProfile(chainId, token, 28, true),
-                      $node(style({ flex: 1 }))(),
-                      $amountDisplay({
-                        hideBalances,
-                        usd: map(price => formatUsd(asset.amount, price), priceFor(chainId, token)),
-                        amount: readableTokenAmountLabel(getTokenDescription(chainId, token), asset.amount),
-                        align: 'flex-end'
-                      })
+            $loader: $intermediateCircle(56),
+            $display: map(q => q.then(fundRow => $fundAvatar(fundRow === undefined ? robotCellsOf(master) : gridOf(fundRow), 56)), fundRowQuery)
+          })
+        ),
+        $column(style({ minWidth: '0', gap: '2px' }))(
+          $node(style({ fontWeight: '600', fontSize: nameSize, color: palette.message, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }))($intermediateText(symbolText)),
+          $row(spacing.tiny, style({ alignItems: 'center' }))($accountLabel({ address: master, primarySize: 0.85 }))
+        )
+      )
+
+      const $fundValue = $column(spacing.tiny)(
+        $node(style({ fontWeight: '600', color: palette.message }))(
+          $intermediateText(maskBalance(map(p => p.q.then(metric => (metric === null ? '-' : usdOf(metric.row.valuation, p.price))), combine({ q: pnlQuery, price: ethPrice() })), hideBalances))
+        ),
+        $caption(op(intermediateState(pnlQuery), switchMap(s => (s.status === PromiseStatus.DONE ? just(s.value === null ? '' : `valued ${ago(s.value.updatedAt)}`) : empty))))
+      )
+
+      const $vitals = $node(style({ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', columnGap: '24px', rowGap: '12px' }))(
+        $vital('Fund value', $fundValue, 'What the fund holds, at its last valuation.'),
+        $vital(
+          'Allocated',
+          $node(style({ fontWeight: '600', color: palette.message }))(
+            $intermediateText(
+              maskBalance(
+                map(
+                  p =>
+                    p.q.then(f => {
+                      if (f.fundRow === undefined) return '-'
+                      const puppetShares = f.held.filter(h => !isAddressEqual(h.holder, master)).reduce((total, h) => total + h.shares, 0n)
+                      return usdOf(cashFor(puppetShares, f.fundRow.totalShares, f.fundRow.value), p.price)
+                    }),
+                  combine({ q: fundBookQuery, price: ethPrice() })
+                ),
+                hideBalances
+              )
+            )
+          ),
+          $node(
+            $text(
+              start(
+                "What the puppets' shares are worth at the last mark.",
+                op(
+                  intermediateState(valuationsQuery),
+                  switchMap(s => {
+                    if (s.status !== PromiseStatus.DONE) return empty
+                    const lastMark = s.value[s.value.length - 1]
+                    return just(`What the puppets' shares are worth at the last mark${lastMark === undefined ? '' : `, ${ago(lastMark.blockTimestamp)}`}.`)
+                  })
+                )
+              )
+            )
+          )
+        ),
+        $vital(
+          'Puppets',
+          $intermediatePromise({
+            $loader: $intermediateCircle(14),
+            $display: map(
+              q =>
+                q.then(f =>
+                  f.wallets.then(wallets => {
+                    const holding = f.held.filter(h => !isAddressEqual(h.holder, master))
+                    const fundRow = f.fundRow
+                    return $avatarStack(
+                      [...holding].sort((a, b) => (a.shares > b.shares ? -1 : a.shares < b.shares ? 1 : 0)).map(h => $jazzicon(wallets.get(getAddress(h.holder)) ?? getAddress(h.holder), 14)),
+                      fundRow === undefined
+                        ? null
+                        : $intermediatePromise({
+                            $loader: $column(spacing.default)($intermediateRow($intermediateProfile(AVATAR_SIZE)), $intermediateRow($intermediateProfile(AVATAR_SIZE))),
+                            $display: just(
+                              f.holders.then(holders =>
+                                $fundHolders(hideBalances, null, wallets, fundRow, holding, f.book, holders.balances, just(holders.quotes), { wei: just(fundRow.value), price: ethPrice() }, just(null))
+                              )
+                            )
+                          })
                     )
                   })
                 ),
-                $caption(valuedLabel(shown))
+              fundBookQuery
+            )
+          })
+        ),
+        $vital(
+          'Queued',
+          $node(style({ color: palette.message }))(
+            $intermediateText(
+              map(
+                p =>
+                  p.q.then(f =>
+                    f.fundRow === undefined ? '-' : usdOf(cashFor(f.book.redemption === undefined ? 0n : f.book.redemption.queued, f.fundRow.totalShares, f.fundRow.value), p.price)
+                  ),
+                combine({ q: fundBookQuery, price: ethPrice() })
               )
-            }, valuationQuery)
-          }),
-          'Cash the fund holds on each chain at the last mark. Funds on a venue are under Open positions.',
-          $intermediatePromise({
-            $loader: $headerStub('72px'),
-            $display: map(async q => {
-              const shown = await q
-              return shown === null ? empty : $total(cashOf(shown.positionList, shown.value))
-            }, valuationQuery)
+            )
+          ),
+          'Shares queued to exit, at the last valuation. The next redemption pays them.'
+        ),
+        $vital(
+          'Fee',
+          $node(style({ color: palette.message }))(
+            $intermediateText(map(q => q.then(fundRow => (fundRow === undefined ? '-' : readablePercentage(fundRow.performanceFee).replace(/\.0+%$/, '%'))), fundRowQuery))
+          ),
+          `Each puppet pays it from its payout at exit, on its own gain since it allocated. The master keeps ${readablePercentage(PRECISION.basisPoints - PROTOCOL.protocolFeeShare).replace(/\.0+%$/, '%')} of it, the protocol the rest.`
+        )
+      )
+
+      const backQuery = op(
+        combine({ session: sessionQuery, fundRow: fundRowQuery }),
+        map(p =>
+          Promise.all([p.session, p.fundRow]).then(([s, fundRow]) => {
+            const root = s.root
+            if (root !== null && root.fund !== null && 'account' in root.fund && isAddressEqual(root.fund.account, master)) return { kind: 'self' as const }
+            if (fundRow === undefined) return { kind: 'none' as const }
+            const mine = root === null ? undefined : s.mandates.find(m => isAddressEqual(m.master, master) && isAddressEqual(m.puppet, root.account))
+            return { kind: 'mandate' as const, mine, active: mine !== undefined && mandateTermsOf(mine).until > BigInt(getUnixTimestamp()) }
+          })
+        ),
+        answerState
+      )
+      const backSettled = op(
+        intermediateState(backQuery),
+        map(s => (s.status === PromiseStatus.DONE ? s.value : null)),
+        filterNull,
+        state()
+      )
+      const $mandate = $Popover({
+        $contentContainer: $editorPopoverContentContainer,
+        $target: $ButtonSecondary({
+          $container: $defaultMiniButtonPrimary(styleBehavior(map(back => (back.kind === 'mandate' && back.active ? { borderColor: palette.indeterminate } : null), backSettled))),
+          disabled: just(false),
+          $content: $row(spacing.tiny, style({ alignItems: 'center' }))($text('Mandate'), $popoverCaret())
+        })({ click: popMandateTether() }),
+        $open: op(
+          popMandate,
+          sampleMap(
+            back =>
+              $MandateEditor({
+                master,
+                existing: back.kind === 'mandate' ? back.mine : undefined,
+                draft: map(list => list.find(d => d.mandate !== null && isAddressEqual(d.mandate.master, master)) ?? null, draftMandateList)
+              })({ changeMandateDraft: changeMandateDraftTether() }),
+            backSettled
+          )
+        ),
+        dismiss: changeMandateDraft
+      })({})
+      const $back = switchLatest(
+        op(
+          intermediateState(backQuery),
+          reduce(
+            (shown: 'self' | 'none' | 'mandate' | { error: unknown } | null, s: PromiseState<{ kind: 'self' | 'none' | 'mandate' }>) =>
+              s.status === PromiseStatus.DONE ? s.value.kind : s.status === PromiseStatus.ERROR && (shown === null || typeof shown !== 'string') ? { error: s.error } : shown,
+            null
+          ),
+          filterNull,
+          skipRepeats,
+          map(shape =>
+            shape === 'mandate'
+              ? $mandate
+              : typeof shape === 'string'
+                ? $node(style({ fontSize: text.xs, color: palette.foreground, whiteSpace: 'nowrap' }))($text(shape === 'self' ? 'This is your fund' : 'No fund to allocate to yet'))
+                : $errorLabel(shape.error)
+          ),
+          start($intermediatePill('52px', '30px'))
+        )
+      )
+
+      const $iconLink = (href: string, label: string, $glyph: I$Node): I$Node =>
+        $anchor(
+          attr({ href, target: '_blank', 'aria-label': label, title: label }),
+          style({ color: palette.foreground, display: 'inline-flex', alignItems: 'center', padding: '4px' }),
+          stylePseudo(':hover', { color: palette.message })
+        )($glyph)
+
+      const $profileOverview = $column(spacing.default)(
+        $row(spacing.default, style({ alignItems: 'center' }))($identity, $back),
+        $row(spacing.small, style({ alignItems: 'center' }))(
+          $iconLink(getAccountExplorerUrl(master), 'View trading account on explorer', $externalMark()),
+          $shareLink
+        ),
+        $vitals
+      )
+
+      const $liveFailureNote = (failure: { error: unknown } | null): I$Node[] => (failure === null ? [] : [$node($text(`Live value failed: ${formatThrownError(failure.error)}`))])
+
+      const $pnlTip = switchLatest(
+        op(
+          intermediateState(pnlQuery),
+          switchMap(s => {
+            if (s.status !== PromiseStatus.DONE) return empty
+            const metric = s.value
+            if (metric === null) return just($node($text('No activity yet')))
+            return just(
+              $column(spacing.tiny)(
+                $node($text(metric.tip === null ? `Valued ${ago(metric.updatedAt)}` : `Evaluated ${ago(metric.tip.time)}`)),
+                ...(metric.tip !== null
+                  ? [
+                      $node($text(`Valued ${ago(metric.updatedAt)}: `), $intermediateText(pnlLabelOf(metric.pnl))),
+                      $node($text('Live change since: '), $intermediateText(pnlLabelOf(metric.tip.pnl - metric.pnl)))
+                    ]
+                  : metric.worth !== null && metric.worth.value === undefined
+                    ? [$node($text(`Not evaluated: ${metric.worth.note}`))]
+                    : []),
+                ...$liveFailureNote(metric.liveFailure)
+              )
+            )
           })
         )
+      )
 
-        const $distribution = $panel(
-          'Distribution',
-          { flex: 1 },
-          fundRow === undefined || view.holdings.length === 0
-            ? $emptyNote('No holders yet', 'The trader and backers who join an allocation round appear here with their share.')
-            : (() => {
-                const ranked = [...view.holdings].sort((a, b) => (b.units > a.units ? 1 : b.units < a.units ? -1 : 0))
-                return $column(spacing.default)(
-                  ...ranked.map(h => {
-                    const held = cashFor(h.units, fundRow.totalUnits, fundRow.value)
-                    const share = fundRow.totalUnits > 0n ? Number((h.units * 10000n) / fundRow.totalUnits) / 100 : 0
-                    const isTrader = isAddressEqual(h.holder, view.master)
-                    return $column(spacing.tiny)(
-                      $row(spacing.small, style({ alignItems: 'center' }))(
-                        $anchor(
-                          attr({ href: `https://debank.com/profile/${getAddress(h.holder)}`, target: '_blank', title: 'Portfolio on DeBank' }),
-                          style({ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, color: 'inherit', textDecoration: 'none' }),
-                          stylePseudo(':hover', { opacity: '0.8' })
-                        )(
-                        $jazzicon(getAddress(h.holder), 26),
-                        $column(spacing.tiny, style({ minWidth: 0 }))(
-                          $row(spacing.tiny, style({ alignItems: 'center' }))(
-                            $accountLabel({ address: h.holder }),
-                            isTrader
-                              ? $Tooltip({
-                                  $dropContainer: $defaultTooltipDropContainer,
-                                  $content: $node($text('The trader. Keeps at least the skin share of the pool; backers hold the rest.')),
-                                  $anchor: $icon({ $content: $puppeteer, width: '13px', viewBox: '0 0 32 32', fill: palette.foreground, svgOps: style({ display: 'block', cursor: 'help' }) })
-                                })({})
-                              : empty
-                          ),
-                          $caption(`${share}% of the pool${h.allocatedAt > 0n && !isTrader ? `, joined ${ago(Number(h.allocatedAt))}` : ''}`)
-                        )
-                        ),
-                        $node(style({ flex: 1 }))(),
-                        $amountDisplay({
-                          hideBalances,
-                          usd: map(price => formatUsd(held, price), priceFor(HUB_CHAIN_ID, VALUE_TOKEN)),
-                          amount: readableTokenAmountLabel(value, held),
-                          align: 'flex-end'
-                        })
-                      ),
-                      $node(style({ height: '4px', borderRadius: '4px', backgroundColor: colorShade(palette.foreground, 20) }))(
-                        $node(style({ height: '4px', borderRadius: '4px', width: `${share}%`, backgroundColor: isTrader ? palette.indeterminate : palette.primary }))()
-                      )
-                    )
+      const $indexTip = switchLatest(
+        op(
+          intermediateState(indexQuery),
+          switchMap(s => {
+            if (s.status !== PromiseStatus.DONE) return empty
+            const figure = s.value
+            if (figure === null) return just($node($text('No mark yet')))
+            return just(
+              $column(spacing.small)(
+                $column(spacing.tiny)(
+                  $node($text(figure.tip === null ? `Valued ${ago(figure.basis.time)}` : `Evaluated ${ago(figure.tip.time)}`)),
+                  ...(figure.tip !== null
+                    ? [$node($text(`Valued ${ago(figure.basis.time)}: ${formatFixed(TOKEN_META.WETH.decimals, figure.valued).toFixed(4)}`))]
+                    : figure.worth !== null && figure.worth.value === undefined
+                      ? [$node($text(`Not evaluated: ${figure.worth.note}`))]
+                      : []),
+                  ...$liveFailureNote(figure.liveFailure)
+                ),
+                $performanceIndexTip
+              )
+            )
+          })
+        )
+      )
+
+      type IPnlRead = typeof pnlQuery extends IStream<Promise<infer M>> ? M : never
+      type IIndexRead = typeof indexQuery extends IStream<Promise<infer R>> ? R : never
+      const $metricsLead = $row(spacing.big, style({ flex: 1, alignItems: 'flex-start', pointerEvents: 'all' }))(
+        $vital(
+          'PnL',
+          $node(
+            styleBehavior(
+              op(
+                pnlQuery,
+                intermediateState,
+                filter((settled): settled is PromiseStateDone<IPnlRead> => settled.status === PromiseStatus.DONE),
+                map(settled => {
+                  const metric = settled.value
+                  if (metric === null) return { color: palette.message }
+                  const pnl = metric.tip === null ? metric.pnl : metric.tip.pnl
+                  return { color: pnl === 0n ? palette.message : pnl > 0n ? palette.positive : palette.negative }
+                })
+              )
+            )
+          )(
+            $intermediateText(
+              maskBalance(
+                map(p => p.q.then(metric => (metric === null ? '-' : usdOf(metric.tip === null ? metric.pnl : metric.tip.pnl, p.price))), combine({ q: pnlQuery, price: ethPrice() })),
+                hideBalances
+              )
+            )
+          )
+        ),
+        $vital(
+          'Performance Index',
+          $row(spacing.tiny, style({ alignItems: 'baseline' }))(
+            $node(style({ color: palette.message }))($intermediateText(map(q => q.then(read => (read === null ? '-' : read.index.toFixed(4))), indexQuery))),
+            $node(
+              style({ fontSize: text.sm }),
+              styleBehavior(
+                op(
+                  indexQuery,
+                  intermediateState,
+                  filter((settled): settled is PromiseStateDone<IIndexRead> => settled.status === PromiseStatus.DONE),
+                  map(settled => {
+                    const change = settled.value === null ? 0 : settled.value.index - 1
+                    return { color: change > 0 ? palette.positive : change < 0 ? palette.negative : palette.foreground }
                   })
                 )
-              })(),
-          `Who owns the pool, valued at the last mark${markAge === null ? '' : `, ${markAge}`}.`
-        )
-
-        const $openPositions = $panel(
-          'Open positions',
-          { flex: 1, minWidth: 0 },
-          $OpenPositions({
-            master,
-            hideBalances,
-            positions: positionsQuery,
-            valuation: valuationQuery,
-            $empty: $emptyNote('No open positions', 'Positions and funds this trader has on a venue or in transit appear here.')
-          })({}),
-          'Live GMX positions, plus every other venue book and transfer in flight at the last mark.',
-          $intermediatePromise({
-            $loader: $headerStub('72px'),
-            $display: map(async q => {
-              const shown = await q
-              return shown === null || shown.positionList.length === 0 ? empty : $total(shown.positionList.reduce((acc, p) => acc + p.valueInUsd, 0n))
-            }, valuationQuery)
-          })
-        )
-
-        const $legs = (legs: ILeg[], sign: string, color: string): I$Node =>
-          legs.length === 0
-            ? $node(style({ color: colorShade(palette.foreground, 60), fontSize: text.sm }))($text('-'))
-            : $column(spacing.tiny)(
-                ...legs.map(l =>
-                  $node(style({ color, fontSize: text.sm, whiteSpace: 'nowrap' }))($text(`${sign}${readableTokenAmountLabel(getTokenDescription(l.chainId, l.token), l.amount)}`))
+              )
+            )(
+              $intermediateText(
+                map(
+                  q =>
+                    q.then(read => {
+                      if (read === null) return ''
+                      const change = read.index - 1
+                      return `${change < 0 ? MINUS : ''}${(Math.abs(change) * 100).toFixed(2)}%`
+                    }),
+                  indexQuery
                 )
               )
-        const $actionCell = (a: IAccountAction): I$Node => {
-          const d = describeAction(a)
-          const accent = a.kind === 'allocate' || a.kind === 'redeem' ? palette.primary : palette.message
-          return $column(spacing.tiny, style({ minWidth: 0 }))(
-            $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap', minWidth: 0 }))(
-              d.venue === null
-                ? $node(style({ width: '7px', height: '7px', borderRadius: '50%', backgroundColor: accent, flexShrink: '0' }))()
-                : $venueIcon(d.venue),
-              $node(style({ fontWeight: '600', color: accent, fontSize: text.sm, whiteSpace: 'nowrap' }))($text(d.label)),
-              $caption(`on ${chainName(Number(a.chainId))}`)
+            )
+          )
+        )
+      )
+
+      const $hero = $node(style({ position: 'relative', width: '100%', backgroundColor: palette.middleground, overflow: 'hidden', ...(isDesktopScreen ? { height: '480px' } : {}) }))(
+        $node(style({ position: 'relative', width: '100%', maxWidth: '1400px', margin: '0 auto', padding: isDesktopScreen ? '0 20px' : '0 12px', ...(isDesktopScreen ? { height: '100%' } : {}) }))(
+          $ValueTimeline({
+            hideBalances,
+            timelineQuery,
+            axis: 'always',
+            format: map(metric => (metric === 'pnl' ? 'pnl' : 'index'), performanceMetric),
+            label: map(metric => (metric === 'pnl' ? 'Profit & Loss' : 'Performance Index'), performanceMetric),
+            $tip: switchLatest(
+              map(
+                metric =>
+                  $infoTooltip(
+                    metric === 'pnl'
+                      ? $column(spacing.small)($node($text("The fund's profit over the timeframe, in USD at the live ETH price.")), $pnlTip)
+                      : $indexTip,
+                    palette.foreground
+                  ),
+                performanceMetric
+              )
             ),
-            ...(d.detail === '' ? [] : [$node(style({ color: palette.foreground, fontSize: text.xs, paddingLeft: '15px' }))($text(d.detail))])
+            activityTimeframe,
+            under: null,
+            metric: { value: performanceMetric, labels: performanceMetricLabelMap },
+            chartHeight: isDesktopScreen ? '480px' : '300px',
+            events: allocationMarks,
+            ...(isDesktopScreen ? { $lead: $metricsLead } : {})
+          })({ changeActivityTimeframe: changeActivityTimeframeTether(), changePerformanceMetric: changePerformanceMetricTether() }),
+          isDesktopScreen
+            ? $node(style({ position: 'absolute', inset: '0', zIndex: 10, pointerEvents: 'none', background: `linear-gradient(to right, ${palette.middleground} 0%, ${palette.middleground} 22%, transparent 52%)` }))()
+            : empty,
+          $card(
+            style({
+              padding: '24px',
+              zIndex: 20,
+              border: `1px solid ${colorShade(palette.foreground, 15)}`,
+              ...(isDesktopScreen ? { position: 'absolute', bottom: '36px', left: '20px', width: '440px', maxWidth: 'calc(100% - 40px)' } : { margin: '12px 0' })
+            })
+          )($profileOverview)
+        )
+      )
+
+      type IBalances = typeof balancesQuery extends IStream<Promise<infer B>> ? B : never
+      const balanceState = op(intermediateState(balancesQuery), state())
+      const balanceShape = op(
+        balanceState,
+        reduce(
+          (shown: IBalances['rows'] | { error: unknown } | null, s: PromiseState<IBalances>) =>
+            s.status === PromiseStatus.DONE ? s.value.rows : s.status === PromiseStatus.ERROR && (shown === null || 'error' in shown) ? { error: s.error } : shown,
+          null
+        ),
+        filterNull,
+        skipRepeatsWith(
+          (a, b) =>
+            a === b ||
+            (!('error' in a) && !('error' in b) && a.length === b.length && a.every((row, i) => row.chainId === b[i]!.chainId && isAddressEqual(row.token, b[i]!.token)))
+        ),
+        state()
+      )
+
+      const $balances = $panel(
+        'Balances',
+        {},
+        switchLatest(
+          op(
+            balanceShape,
+            map(shape => {
+              if ('error' in shape) return $errorLabel(shape.error)
+              if (shape.length === 0) return $emptyNote('No balances', 'Cash the fund holds on each chain appears here.')
+              return $hoverList(
+                shape.map(row => {
+                  const held = op(
+                    balancesQuery,
+                    map(q => q.then(balances => balances.rows.find(each => each.chainId === row.chainId && isAddressEqual(each.token, row.token)) ?? null))
+                  )
+                  const price = priceFor(row.chainId, row.token)
+                  return $row(spacing.small, style({ alignItems: 'center', flex: 1 }))(
+                    $tokenProfile(row.chainId, row.token, 28, true, null, row.profile),
+                    $node(style({ flex: 1 }))(),
+                    $amountDisplay({
+                      hideBalances,
+                      usd: map(p => p.q.then(found => (found === null ? '-' : usdOf(found.amount, p.price))), combine({ q: held, price })),
+                      amount: map(q => q.then(found => (found === null ? '-' : readableTokenAmount(row.profile, found.amount))), held),
+                      align: 'flex-end'
+                    })
+                  )
+                })
+              )
+            }),
+            start($intermediateRow($intermediateProfile(28)))
+          )
+        ),
+        {
+          $tip: $row(spacing.tiny, style({ alignItems: 'center' }))(
+            $infoTooltip('Tokens the fund holds on each chain, which redemptions pay from. Open positions count once closed.', palette.foreground),
+            $notRefreshed(op(balancesQuery, map(q => q.then(balances => balances.failures))))
+          ),
+          $headerEnd: $headerFigure(
+            op(
+              balanceShape,
+              switchMap((shape): IStream<Promise<string> | string> => {
+                if ('error' in shape) return just(Promise.reject(shape.error))
+                if (shape.length === 0) return just('')
+                return combineMap(
+                  (q: Promise<IBalances>, ...prices: Promise<bigint | null>[]) =>
+                    Promise.all([q, Promise.all(prices)]).then(([balances, known]) => {
+                      const priceOf = new Map(shape.map((row, i) => [`${row.chainId}:${row.token}`, known[i]!]))
+                      const priced = balances.rows.flatMap(row => {
+                        const at = priceOf.get(`${row.chainId}:${row.token}`)
+                        return at === undefined || at === null ? [] : [Number(formatUnits(row.amount * at, USD_PRICE_DECIMALS))]
+                      })
+                      return priced.length < balances.rows.length ? '-' : formatUsdNumber(priced.reduce((sum, usd) => sum + usd, 0))
+                    }),
+                  balancesQuery,
+                  ...shape.map(row => priceFor(row.chainId, row.token))
+                )
+              })
+            )
           )
         }
-        const $historyFilter = $Popover({
-          $open: constant(
-            $column(spacing.small, style({ minWidth: '240px' }))(
-              $node(style({ color: palette.foreground, fontSize: text.sm }))($text('Show')),
-              $FamilyToggle({ family })({ selectFamily: selectFamilyTether() })
-            ),
-            clickHistoryFilters
-          ),
-          $target: $ButtonSecondary({
-            $container: $defaultMiniButtonSecondary(style({ height: '32px', padding: '0 12px', fontSize: text.sm, fontWeight: '500' })),
-            $content: $row(spacing.small, style({ alignItems: 'center', whiteSpace: 'nowrap' }))(
-              $node($text(map((f: IFamily) => FAMILY_LABEL[f], family))),
-              $popoverCaret()
-            )
-          })({ click: clickHistoryFiltersTether() })
-        })({})
-        const $history = $panel(
-          'History',
-          { flex: 1, minWidth: 0 },
-          $intermediatePromise({
-            $loader: $inlineSpinner,
-            $display: map(async p => {
-              const all = await p.query
-              const list = p.family === 'all' ? all : all.filter(a => FAMILY[a.kind] === p.family)
-              if (list.length === 0) return $emptyNote('Nothing here yet', 'Trades, fund swaps, allocations, deposits, withdrawals and redemptions appear here as they land.')
-              const pageOf = (offset: number): Promise<TablePageResponse<IAccountAction>> =>
-                Promise.resolve({ page: list.slice(offset, offset + PAGE), offset, pageSize: PAGE })
-              return $Table<IAccountAction>({
-                dataSource: merge(just(pageOf(0)), map(request => pageOf(request.offset), requestHistoryPage)),
-                scrollConfig: {
-                  $container: $defaultVScrollContainer(
-                    designSheet.customScroll,
-                    style({ maxHeight: '560px', overflowY: 'auto', marginRight: '-20px', paddingRight: '20px' })
-                  )
-                },
-                columns: [
-                  { $head: $text('Action'), gridTemplate: 'minmax(160px, 1.6fr)', $bodyCallback: map((a: IAccountAction) => $actionCell(a)) },
-                  { $head: $text('In'), gridTemplate: 'minmax(90px, 1fr)', $bodyCallback: map((a: IAccountAction) => $legs(legsOf(a).ins, '+', palette.positive)) },
-                  { $head: $text('Out'), gridTemplate: 'minmax(90px, 1fr)', $bodyCallback: map((a: IAccountAction) => $legs(legsOf(a).outs, '−', palette.negative)) },
-                  {
-                    $head: $text('Fee'),
-                    gridTemplate: 'minmax(80px, auto)',
-                    $bodyCallback: map((a: IAccountAction) =>
-                      a.fee === null
-                        ? $node(style({ color: colorShade(palette.foreground, 60), fontSize: text.sm }))($text('-'))
-                        : $node(style({ fontSize: text.xs, color: colorShade(palette.foreground, 70), whiteSpace: 'nowrap' }))(
-                            $text(readableTokenAmountLabel(getTokenDescription(a.chainId, a.fee.token), a.fee.amount))
-                          )
-                    )
-                  },
-                  {
-                    $head: $node(style({ flex: 1, textAlign: 'right' }))($text('Time')),
-                    gridTemplate: 'minmax(100px, auto)',
-                    $bodyCallback: map((a: IAccountAction) =>
-                      $row(spacing.small, style({ alignItems: 'center', placeContent: 'flex-end', flex: 1 }))(
-                        $node(style({ fontSize: text.xs, color: palette.foreground, whiteSpace: 'nowrap' }))($text(ago(a.time))),
-                        $anchor(
-                          attr({ href: getTxExplorerUrl(a.txHash, chainFor(a.chainId)), target: '_blank' }),
-                          style({ color: colorShade(palette.foreground, 70), display: 'flex', alignItems: 'center' })
-                        )($icon({ $content: $external, width: '12px', viewBox: '0 0 24 24', fill: 'currentColor' }))
-                      )
-                    )
-                  }
-                ]
-              })({ scrollRequest: requestHistoryPageTether() })
-            }, combine({ query: historyQuery, family }))
-          }),
-          'Venue trades, fund swaps, allocations, redemptions, fees and the personal balance across chains, newest first, read from the account log.',
-          $historyFilter
-        )
+      )
 
-        return $column(spacing.default, style({ width: '100%' }))(
-          $breadcrumb,
-          $hero,
-          $responsiveFlex(style({ alignItems: 'flex-start', maxWidth: '1400px', width: '100%', margin: '0 auto', padding: isDesktopScreen ? '0 20px' : '0 12px' }))(
-            $column(spacing.default, style({ width: isDesktopScreen ? '440px' : '100%', flexShrink: 0 }))($balances, $distribution),
-            $column(spacing.default, style({ flex: 1, minWidth: 0 }))($openPositions, $history)
+      const $distribution = $panel(
+        'Distribution',
+        { flex: 1 },
+        $intermediatePromise({
+          $loader: $intermediateRow($intermediateProfile(AVATAR_SIZE)),
+          $display: map(
+            q =>
+              q.then(f => {
+                const fundRow = f.fundRow
+                if (fundRow === undefined || f.held.length === 0) {
+                  return $emptyNote('No holders yet', 'The master and puppets who join an allocation round appear here with their share.')
+                }
+                return Promise.all([f.wallets, f.holders]).then(([wallets, holders]) =>
+                  $fundHolders(hideBalances, null, wallets, fundRow, f.held, f.book, holders.balances, just(holders.quotes), { wei: just(fundRow.value), price: ethPrice() }, just(null))
+                )
+              }),
+            fundBookQuery
           )
+        }),
+        {
+          $tip: $infoTooltip(
+            "Each holder's share of the fund, at its value after the last round or redeem.",
+            palette.foreground
+          )
+        }
+      )
+
+      const $openPositions = $panel(
+        'Open positions',
+        { flex: 1, minWidth: 0 },
+        $OpenPositions({
+          hideBalances,
+          positions: venuesQuery,
+          standing: standingQuery,
+          $empty: $emptyNote('No open positions', 'Positions and balances this fund holds on a venue or in transit appear here.')
+        }),
+        {
+          $tip: $intermediatePromise({
+            $loader: $infoTooltip(OPEN_POSITIONS_TIP, palette.foreground),
+            $display: map(q => q.then(open => $syncTip(OPEN_POSITIONS_TIP, open, TICK_SYNC_SCHEDULE_SEC), () => $infoTooltip(OPEN_POSITIONS_TIP, palette.foreground)), venuesQuery)
+          })
+        }
+      )
+
+      const $history = $column(spacing.default, style({ backgroundColor: palette.middleground, borderRadius: '8px', padding: '20px', flex: 1, minWidth: 0 }))(
+        $AccountHistory(
+          historyQuery,
+          (failure, $trailing) =>
+            $row(style({ alignItems: 'center', justifyContent: 'space-between', gap: '12px' }))(
+              $row(spacing.tiny, style({ alignItems: 'center' }))(
+                switchLatest(map(failed => (failed === null ? $sectionLabel('History') : $intermediateFailure(failed.error, $sectionLabel('History'), true)), failure)),
+                $infoTooltip("Everything the fund and its master did, across chains, newest first.", palette.foreground),
+                $notRefreshed(historyFailures)
+              ),
+              $trailing
+            ),
+          $emptyNote('Nothing here yet', 'Trades, fund swaps, allocations, deposits, withdrawals and redemptions appear here as they land.')
+        )({})
+      )
+
+      const $page = $column(spacing.default, style({ width: '100%' }))(
+        $breadcrumb,
+        $hero,
+        $responsiveFlex(style({ alignItems: 'flex-start', flexWrap: 'wrap', maxWidth: '1400px', width: '100%', margin: '0 auto', padding: isDesktopScreen ? '0 20px' : '0 12px' }))(
+          $column(spacing.default, style(isDesktopScreen ? { flex: '1 1 440px', minWidth: 0 } : { width: '100%' }))($balances, $distribution),
+          $column(spacing.default, style(isDesktopScreen ? { flex: '999 1 0', minWidth: 'min(100%, 520px)' } : { flex: 1, minWidth: 0, width: '100%' }))($openPositions, $history)
         )
-      }
+      )
 
       return [
-        $intermediatePromise({
-          $display: map(async q => {
-            const view = await q
-            return view === undefined ? $unknown : $page(view)
-          }, viewQuery)
-        }),
-        { changeMandateDraft, changeActivityTimeframe }
+        switchLatest(
+          map(
+            known => (known ? $page : $unknown),
+            op(
+              fundRowQuery,
+              intermediateState,
+              filter(s => s.status !== PromiseStatus.PENDING),
+              map(s => s.status !== PromiseStatus.DONE || s.value !== undefined),
+              start(true),
+              skipRepeats
+            )
+          )
+        ),
+        { changeMandateDraft, changeActivityTimeframe, changePerformanceMetric }
       ]
     }
   )

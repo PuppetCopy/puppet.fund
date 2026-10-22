@@ -1,5 +1,4 @@
-import { PRECISION } from '@puppet/contracts/const'
-import { USD_DECIMALS } from '../const/common.js'
+import { PRECISION, USD_DECIMALS } from '../const/common.js'
 import { formatFixed } from './parse.js'
 import type { ITokenDescription } from './types.js'
 
@@ -13,9 +12,20 @@ const readableNumber = (formatOptions: Intl.NumberFormatOptions) => (ammount: nu
     return Intl.NumberFormat('en-US', { ...readableAccountingNumber, ...formatOptions }).format(0)
   }
   const digitOptions =
-    absAmount >= 100 ? readableLargeNumber : absAmount >= 0.01 ? readableAccountingNumber : readableTinyNumber
+    absAmount >= 100 ? readableLargeNumber : absAmount >= 0.01 || absAmount === 0 ? readableAccountingNumber : readableTinyNumber
 
   return Intl.NumberFormat('en-US', { ...digitOptions, ...formatOptions }).format(ammount)
+}
+
+export const readableKey = (key: string): string =>
+  key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/^./, first => first.toUpperCase())
+    .trim()
+
+export const readableContractName = (source: string, key: string): string => {
+  const spelled = readableKey(key)
+  return spelled.toLowerCase().startsWith(`${source.toLowerCase()} `) ? `${source}${spelled.slice(source.length)}` : `${source} ${spelled}`
 }
 
 export const readableUnitAmount = readableNumber({})
@@ -25,8 +35,6 @@ export const readableLeverage = (a: bigint, b: bigint) =>
 const USD_DUST = 10n ** 28n
 export const dustToZeroUsd = (amount: bigint): bigint => (amount < USD_DUST && amount > -USD_DUST ? 0n : amount)
 export const readableUsd = (ammount: bigint) => readableUnitAmount(formatFixed(USD_DECIMALS, ammount))
-export const readablePnl = (ammount: bigint, decimals = USD_DECIMALS) =>
-  readableNumber({ signDisplay: 'exceptZero' })(formatFixed(decimals, ammount))
 export const readableTokenAmount = (token: ITokenDescription | number, amount: bigint) => {
   const value = formatFixed(typeof token === 'number' ? token : token.decimals, amount)
   const absValue = Math.abs(value)
@@ -36,19 +44,3 @@ export const readableTokenAmount = (token: ITokenDescription | number, amount: b
 }
 export const readableTokenAmountLabel = (token: { decimals: number; symbol: string }, amount: bigint) =>
   `${readableTokenAmount(token.decimals, amount)} ${token.symbol}`
-
-export function parseReadableNumber(stringNumber: string, locale?: Intl.NumberFormatOptions) {
-  const thousandSeparator = Intl.NumberFormat('en-US', locale)
-    .format(11111)
-    .replace(/\p{Number}/gu, '')
-  const decimalSeparator = Intl.NumberFormat('en-US', locale)
-    .format(1.1)
-    .replace(/\p{Number}/gu, '')
-
-  const parsed = Number.parseFloat(
-    stringNumber
-      .replace(new RegExp(`\\${thousandSeparator}`, 'g'), '')
-      .replace(new RegExp(`\\${decimalSeparator}`), '.')
-  )
-  return parsed
-}

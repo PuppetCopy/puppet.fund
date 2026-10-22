@@ -1,17 +1,19 @@
 import type { IIAccount__Call } from '@puppet/contracts/types'
-import { getAddress, type Hex } from 'viem'
+import { type Address, getAddress, type Hex } from 'viem'
 import type { ChainId } from '../const/index.js'
 import { READERS } from './readers.js'
-import type { IOperateStep } from './types.js'
+import type { IOperateStep, IVenueFacts } from './types.js'
 import { VENUES } from './venues.js'
 
 export function describeOperate(
   chainId: ChainId,
+  account: Address | null,
   callList: readonly IIAccount__Call[],
   endsWithFee: boolean,
-  resultList?: readonly Hex[]
+  resultList: readonly Hex[] | undefined,
+  facts: IVenueFacts
 ): IOperateStep[] {
-  const byVenue = VENUES.map(venue => venue.describe(chainId, callList, resultList))
+  const byVenue = VENUES.map(venue => venue.describe(chainId, account, callList, resultList, facts))
   const steps: IOperateStep[] = []
   callList.forEach((call, i) => {
     const described = byVenue.find(m => m.has(i))?.get(i)

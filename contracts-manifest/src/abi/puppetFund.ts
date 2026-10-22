@@ -28,12 +28,12 @@ export default [
         "internalType": "contract EscrowStore"
       },
       {
-        "name": "_register",
+        "name": "_shareImpl",
         "type": "address",
-        "internalType": "contract Register"
+        "internalType": "address"
       },
       {
-        "name": "_shareImpl",
+        "name": "_wnt",
         "type": "address",
         "internalType": "address"
       }
@@ -100,20 +100,15 @@ export default [
             ]
           },
           {
-            "name": "share",
+            "name": "shareToken",
             "type": "address",
-            "internalType": "contract Share"
+            "internalType": "contract ShareToken"
           },
           {
             "name": "valuation",
             "type": "tuple",
             "internalType": "struct Fund.Valuation",
             "components": [
-              {
-                "name": "value",
-                "type": "uint256",
-                "internalType": "uint256"
-              },
               {
                 "name": "assetList",
                 "type": "tuple[]",
@@ -130,7 +125,17 @@ export default [
                     "internalType": "address"
                   },
                   {
+                    "name": "id",
+                    "type": "uint256",
+                    "internalType": "uint256"
+                  },
+                  {
                     "name": "amount",
+                    "type": "uint256",
+                    "internalType": "uint256"
+                  },
+                  {
+                    "name": "value",
                     "type": "uint256",
                     "internalType": "uint256"
                   }
@@ -157,7 +162,7 @@ export default [
                     "internalType": "bytes32"
                   },
                   {
-                    "name": "valueInUsd",
+                    "name": "value",
                     "type": "uint256",
                     "internalType": "uint256"
                   }
@@ -166,15 +171,15 @@ export default [
             ]
           },
           {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
             "name": "price",
             "type": "tuple",
             "internalType": "struct Fund.Price",
             "components": [
-              {
-                "name": "token",
-                "type": "address",
-                "internalType": "address"
-              },
               {
                 "name": "amount",
                 "type": "uint256",
@@ -203,7 +208,12 @@ export default [
                 "internalType": "address"
               },
               {
-                "name": "amount",
+                "name": "total",
+                "type": "uint256",
+                "internalType": "uint256"
+              },
+              {
+                "name": "feeTotal",
                 "type": "uint256",
                 "internalType": "uint256"
               }
@@ -222,7 +232,7 @@ export default [
               {
                 "name": "mandate",
                 "type": "tuple",
-                "internalType": "struct AccountLib.Mandate",
+                "internalType": "struct MandateLib.Mandate",
                 "components": [
                   {
                     "name": "master",
@@ -236,6 +246,11 @@ export default [
                   },
                   {
                     "name": "allocationRate",
+                    "type": "uint256",
+                    "internalType": "uint256"
+                  },
+                  {
+                    "name": "exitCap",
                     "type": "uint256",
                     "internalType": "uint256"
                   },
@@ -266,7 +281,17 @@ export default [
         "internalType": "bytes32"
       },
       {
+        "name": "_valuation",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
         "name": "_coSig",
+        "type": "bytes",
+        "internalType": "bytes"
+      },
+      {
+        "name": "_ownerSignature",
         "type": "bytes",
         "internalType": "bytes"
       },
@@ -299,12 +324,36 @@ export default [
             "name": "maxRelayFeeBps",
             "type": "uint256",
             "internalType": "uint256"
+          },
+          {
+            "name": "maxSwapRelayFeeBps",
+            "type": "uint256",
+            "internalType": "uint256"
           }
         ]
       }
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "authMap",
+    "inputs": [
+      {
+        "name": "user",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -318,61 +367,6 @@ export default [
       }
     ],
     "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "claim",
-    "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_share",
-        "type": "address",
-        "internalType": "contract Share"
-      },
-      {
-        "name": "_holder",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_config",
-        "type": "tuple",
-        "internalType": "struct GateConfig",
-        "components": [
-          {
-            "name": "attestor",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "feeReceiver",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "transferGasLimit",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxIntentTtl",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxRelayFeeBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -415,320 +409,6 @@ export default [
   },
   {
     "type": "function",
-    "name": "redeem",
-    "inputs": [
-      {
-        "name": "_intent",
-        "type": "tuple",
-        "internalType": "struct Fund.RedeemIntent",
-        "components": [
-          {
-            "name": "header",
-            "type": "tuple",
-            "internalType": "struct AccountLib.IntentHeader",
-            "components": [
-              {
-                "name": "account",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "nonce",
-                "type": "uint256",
-                "internalType": "uint256"
-              },
-              {
-                "name": "deadline",
-                "type": "uint256",
-                "internalType": "uint256"
-              },
-              {
-                "name": "feeToken",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "fee",
-                "type": "uint256",
-                "internalType": "uint256"
-              }
-            ]
-          },
-          {
-            "name": "share",
-            "type": "address",
-            "internalType": "contract Share"
-          },
-          {
-            "name": "valuation",
-            "type": "tuple",
-            "internalType": "struct Fund.Valuation",
-            "components": [
-              {
-                "name": "value",
-                "type": "uint256",
-                "internalType": "uint256"
-              },
-              {
-                "name": "assetList",
-                "type": "tuple[]",
-                "internalType": "struct Fund.Asset[]",
-                "components": [
-                  {
-                    "name": "chainId",
-                    "type": "uint256",
-                    "internalType": "uint256"
-                  },
-                  {
-                    "name": "token",
-                    "type": "address",
-                    "internalType": "address"
-                  },
-                  {
-                    "name": "amount",
-                    "type": "uint256",
-                    "internalType": "uint256"
-                  }
-                ]
-              },
-              {
-                "name": "positionList",
-                "type": "tuple[]",
-                "internalType": "struct Fund.Position[]",
-                "components": [
-                  {
-                    "name": "chainId",
-                    "type": "uint256",
-                    "internalType": "uint256"
-                  },
-                  {
-                    "name": "venue",
-                    "type": "bytes32",
-                    "internalType": "bytes32"
-                  },
-                  {
-                    "name": "id",
-                    "type": "bytes32",
-                    "internalType": "bytes32"
-                  },
-                  {
-                    "name": "valueInUsd",
-                    "type": "uint256",
-                    "internalType": "uint256"
-                  }
-                ]
-              }
-            ]
-          },
-          {
-            "name": "price",
-            "type": "tuple",
-            "internalType": "struct Fund.Price",
-            "components": [
-              {
-                "name": "token",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "amount",
-                "type": "uint256",
-                "internalType": "uint256"
-              },
-              {
-                "name": "value",
-                "type": "uint256",
-                "internalType": "uint256"
-              }
-            ]
-          },
-          {
-            "name": "retire",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "drain",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      },
-      {
-        "name": "_structHash",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "_coSig",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_config",
-        "type": "tuple",
-        "internalType": "struct GateConfig",
-        "components": [
-          {
-            "name": "attestor",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "feeReceiver",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "transferGasLimit",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxIntentTtl",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxRelayFeeBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "registerModule",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "address",
-        "internalType": "contract Register"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "sell",
-    "inputs": [
-      {
-        "name": "_intent",
-        "type": "tuple",
-        "internalType": "struct Fund.SellIntent",
-        "components": [
-          {
-            "name": "header",
-            "type": "tuple",
-            "internalType": "struct AccountLib.IntentHeader",
-            "components": [
-              {
-                "name": "account",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "user",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "nonce",
-                "type": "uint256",
-                "internalType": "uint256"
-              },
-              {
-                "name": "deadline",
-                "type": "uint256",
-                "internalType": "uint256"
-              },
-              {
-                "name": "feeToken",
-                "type": "address",
-                "internalType": "address"
-              },
-              {
-                "name": "fee",
-                "type": "uint256",
-                "internalType": "uint256"
-              }
-            ]
-          },
-          {
-            "name": "master",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "share",
-            "type": "address",
-            "internalType": "contract Share"
-          },
-          {
-            "name": "units",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      },
-      {
-        "name": "_structHash",
-        "type": "bytes32",
-        "internalType": "bytes32"
-      },
-      {
-        "name": "_coSig",
-        "type": "bytes",
-        "internalType": "bytes"
-      },
-      {
-        "name": "_config",
-        "type": "tuple",
-        "internalType": "struct GateConfig",
-        "components": [
-          {
-            "name": "attestor",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "feeReceiver",
-            "type": "address",
-            "internalType": "address"
-          },
-          {
-            "name": "transferGasLimit",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxIntentTtl",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "maxRelayFeeBps",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "setAccess",
     "inputs": [
       {
@@ -737,9 +417,9 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_enabled",
-        "type": "bool",
-        "internalType": "bool"
+        "name": "_selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "outputs": [],
@@ -748,6 +428,19 @@ export default [
   {
     "type": "function",
     "name": "shareImpl",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "wnt",
     "inputs": [],
     "outputs": [
       {
@@ -780,45 +473,13 @@ export default [
   },
   {
     "type": "error",
-    "name": "Balance__InsufficientFund",
-    "inputs": [
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "balance",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "required",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
+    "name": "Account__InvalidSignature",
+    "inputs": []
   },
   {
     "type": "error",
     "name": "Balance__ZeroAmount",
     "inputs": []
-  },
-  {
-    "type": "error",
-    "name": "Escrow__InvalidFulfil",
-    "inputs": [
-      {
-        "name": "fulfilled",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "submitted",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
   },
   {
     "type": "error",
@@ -833,6 +494,38 @@ export default [
         "name": "curr",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Fund__CreditFeeMismatch",
+    "inputs": [
+      {
+        "name": "signed",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "billed",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Fund__CreditNotIncreasing",
+    "inputs": [
+      {
+        "name": "credited",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "total",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },
@@ -854,85 +547,10 @@ export default [
   },
   {
     "type": "error",
-    "name": "Fund__DrainExceedsQueue",
+    "name": "Fund__NotAccount",
     "inputs": [
       {
-        "name": "drain",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "queued",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Fund__DrainLeavesDust",
-    "inputs": [
-      {
-        "name": "queued",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "floor",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Fund__FeeUnfunded",
-    "inputs": [
-      {
-        "name": "amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "fee",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Fund__InsufficientUnits",
-    "inputs": [
-      {
-        "name": "held",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "required",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Fund__NativeRowsUnsupported",
-    "inputs": [
-      {
-        "name": "rows",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ]
-  },
-  {
-    "type": "error",
-    "name": "Fund__NothingToClaim",
-    "inputs": [
-      {
-        "name": "holder",
+        "name": "puppet",
         "type": "address",
         "internalType": "address"
       }
@@ -940,29 +558,19 @@ export default [
   },
   {
     "type": "error",
-    "name": "Fund__SkinBelowFloor",
+    "name": "Fund__UnitPriceMismatch",
     "inputs": [
       {
-        "name": "masterUnits",
+        "name": "amount",
         "type": "uint256",
         "internalType": "uint256"
       },
       {
-        "name": "exposedUnits",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "skin",
+        "name": "value",
         "type": "uint256",
         "internalType": "uint256"
       }
     ]
-  },
-  {
-    "type": "error",
-    "name": "Fund__ZeroDrain",
-    "inputs": []
   },
   {
     "type": "error",
@@ -987,12 +595,22 @@ export default [
   },
   {
     "type": "error",
-    "name": "Intent__TokenNotValuable",
+    "name": "Intent__RelayFeeRatioExceeded",
     "inputs": [
       {
-        "name": "token",
-        "type": "address",
-        "internalType": "address"
+        "name": "actual",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxBps",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },
@@ -1014,6 +632,17 @@ export default [
         "name": "cooldownPeriod",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Redeem__Open",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ]
   },

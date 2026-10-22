@@ -21,11 +21,6 @@ export default [
         "name": "_bodyImpl",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "_withdrawDelay",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "stateMutability": "nonpayable"
@@ -50,6 +45,25 @@ export default [
         "name": "digest",
         "type": "bytes24",
         "internalType": "bytes24"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "authMap",
+    "inputs": [
+      {
+        "name": "user",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "stateMutability": "view"
@@ -171,6 +185,11 @@ export default [
         "name": "_structHash",
         "type": "bytes32",
         "internalType": "bytes32"
+      },
+      {
+        "name": "_deadline",
+        "type": "uint256",
+        "internalType": "uint256"
       },
       {
         "name": "_coSig",
@@ -312,9 +331,9 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_enabled",
-        "type": "bool",
-        "internalType": "bool"
+        "name": "_selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "outputs": [],
@@ -329,19 +348,6 @@ export default [
         "name": "",
         "type": "address",
         "internalType": "address"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "withdrawDelay",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"

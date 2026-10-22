@@ -1,19 +1,11 @@
 # Notice
 
-This software includes the TradingView charting library available at <https://www.tradingview.com/>.
-
-All use of the TradingView charting library is subject to the terms and conditions outlined by TradingView, Inc. The use of the TradingView charting library within this software does not imply any affiliation with or endorsement by TradingView, Inc.
-
-Please find more details about the TradingView charting library and its licensing at <https://www.tradingview.com/HTML5-stock-forex-bitcoin-charting-library/>.
-
-This notice does not alter or extend the license of the underlying TradingView charting library and is provided for informational purposes only.
-
 ## Inter
 
-This software bundles and redistributes the Inter typeface as `assets/font/InterVariable.woff2`.
+This software bundles and redistributes the Inter typeface as `src/assets/font/InterVariable.woff2`.
 
 Copyright (c) 2016 The Inter Project Authors <https://github.com/rsms/inter>
 
-Inter is licensed under the SIL Open Font License, Version 1.1. The complete license text accompanies the font file at `assets/font/LICENSE.txt` and is also available at <https://openfontlicense.org>.
+Inter is licensed under the SIL Open Font License, Version 1.1. The complete license text accompanies the font at `public/assets/font/LICENSE.txt` and is also available at <https://openfontlicense.org>.
 
 The Inter font files are not part of the Licensed Work and are not covered by the Business Source License 1.1 that governs the remainder of this repository. They are distributed solely under the SIL Open Font License, Version 1.1.

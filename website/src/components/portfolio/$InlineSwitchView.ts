@@ -16,7 +16,7 @@ import {
   styleBehavior,
   stylePseudo
 } from 'aelea/ui'
-import { $column, $row, spacing } from 'aelea/ui-components'
+import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import {
   $caretDown,
@@ -103,8 +103,9 @@ export const SELECT_LIST_HEIGHT = '320px'
 export const $rowsContainer = $column(
   style({
     gap: '2px',
-    margin: '0 -20px',
+    margin: isDesktopScreen ? '0 -20px' : '0 -8px',
     height: SELECT_LIST_HEIGHT,
+    overflowX: 'hidden',
     overflowY: 'auto',
     scrollbarWidth: 'thin',
     scrollbarColor: `${palette.foreground} transparent`
@@ -165,20 +166,21 @@ export const matchesSearch = (query: string, terms: string[]): boolean => {
 
 export interface I$InlineSwitchView {
   $container: INodeCompose
+  $anchor?: INodeCompose
   $inputContent: ($anchor: I$Node) => I$Node
   $anchorContent: I$Node
-  $listContent: (open: IStream<PointerEvent>) => I$Node
+  $listContent: () => I$Node
   close: IStream<unknown>
 }
 
-export const $InlineSwitchView = (config: I$InlineSwitchView) =>
+export const $InlineSwitchView = ({ $anchor: $anchorContainer = $defaultDropSelectAnchor, ...config }: I$InlineSwitchView) =>
   component(([openList, openListTether]: IBehavior<INode, PointerEvent>) => {
     const selecting: IStream<boolean> = state(
       false,
       merge(constant(true, openList), constant(false, config.close))
     )
 
-    const $anchor = $defaultDropSelectAnchor(
+    const $anchor = $anchorContainer(
       attr({ role: 'button', tabindex: '0' }),
       keyActivate(),
       openListTether(nodeEvent('click'))
@@ -193,19 +195,17 @@ export const $InlineSwitchView = (config: I$InlineSwitchView) =>
       })
     )
 
-    const $list = config.$listContent(openList)
-
     return [
       config.$container(
         styleBehavior(
-          map(s => (s ? { margin: '-28px', borderRadius: '24px', width: 'auto', overflowX: 'hidden' } : null), selecting)
+          map(s => (s ? { margin: isDesktopScreen ? '-28px' : '-16px', borderRadius: '24px', width: 'auto', overflowX: 'hidden' } : null), selecting)
         )
       )(
         $node(
           style({ display: 'contents' }),
           styleBehavior(map(s => (s ? { display: 'none' } : { display: 'contents' }), selecting))
         )(config.$inputContent($anchor)),
-        switchMap(s => (s ? $list : empty), selecting)
+        switchMap(s => (s ? config.$listContent() : empty), selecting)
       ),
       { selecting }
     ]

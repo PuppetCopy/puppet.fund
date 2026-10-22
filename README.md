@@ -4,9 +4,8 @@
 
 Puppet is a self-custody shared wallet operated by humans and agents. Back a
 trader without handing over your money: they trade their own capital on GMX, your
-capital follows under rules you sign, and every action is co-signed and enforced
-on-chain. Custody never moves into the protocol. Copy-trading, finally without
-the custodian.
+capital follows under rules you sign, and every action is screened and co-signed
+within limits the chain enforces. Copy-trading, finally without the custodian.
 
 🔗 Live at **[puppet.fund](https://puppet.fund)**, with its hub on OP Mainnet.
 
@@ -28,22 +27,32 @@ self-custody.
 
 - **Smart-contract accounts, not a vault.** Each user controls a deterministic
   account-abstraction account; a trader's fund is a fund account derived from
-  theirs. Assets stay in accounts their owners control, never in the protocol.
-- **Co-signed intents.** Nothing executes on one signature. Every action is an
-  EIP-712 intent signed by the actor _and_ an attestor relay that first screens
-  it (GMX venue rules, swap slippage against a median oracle, bridge safety, NAV
-  bounds), then co-signs. A trader can only ever act inside what each backer
-  signed for, by signature, not by policy.
-- **Lazy capital pull, not upfront lockup.** Backers never escrow. Their balance
-  stays liquid in their own account and only moves to a fund when the trader
-  actually trades. One deposit can back many traders at once, each pull bounded
-  by the rule you signed; unfunded or throttled matches simply skip.
-- **Shares at an attested NAV.** A capital pull mints non-transferable shares at
-  a net asset value attested from a median of nine exchanges (Binance, Coinbase,
-  Kraken, OKX, Bybit, KuCoin, Bitget, Gate, Bitfinex) and Uniswap v3 pools,
-  verified on-chain. Backers redeem at that same NAV.
-- **Skin in the game.** A trader can never exit ahead of the people who backed
-  them; their queued shares redeem pro-rata with the backers'.
+  theirs. Balances stay in accounts their owners control, except escrow waiting
+  on a round and an open redemption's pot, which sit in protocol stores until
+  they are released or paid. An owner's wallet can revoke at any time: its
+  mandates end at once and its sessions 10 minutes later, and for the next 10
+  minutes the wallet withdraws its balance directly.
+- **Co-signed intents.** Every action an owner starts is an EIP-712 intent signed
+  by the owner _and_ an attestor relay that first screens it (venue rules, swap
+  slippage against the oracle's median, bridge safety, valuation bounds), then
+  co-signs. On its own signature the attestor moves no value: a round credits
+  escrow against a running total the owner signs, on another chain only once
+  it has been released into the fund there, and open escrow returns to the
+  owner's wallet a day after it asks; later redemption cohorts need no
+  signature.
+  Which venues a trade reaches is the attestor's screen.
+- **One balance, rounds on demand.** An investor's balance stays in its own
+  account and funds every trader it mandates. When the trader allocates, each
+  eligible mandate joins the round, bounded by the share and cooldown of the
+  mandate the investor set, and only into the fund it names; a revoke ends it.
+- **Shares at an attested value.** A round mints non-transferable shares at a net
+  asset value the trader signs line by line and the attestor checks against its
+  own read; the chain sums the attested lines and checks three cash bounds. A
+  redemption pays every queued holder at one price.
+- **Skin in the game.** Holders exit through a redemption the trader signs, so the
+  trader can delay their exits but never get ahead of them: the trader's own
+  exit joins the same queue pro rata or redeems the same fraction of every
+  stake.
 
 ## Fund an AI agent
 
@@ -57,7 +66,7 @@ on. It can never withdraw, and every action it takes is co-signed by the attesto
 inside its screens. The starter strategies carry the guardrails as instructions:
 on-chain stops, a drawdown halt, a daily cost budget.
 
-> **Fund the agent. Don't trust it.**
+> **Allocate to the agent. Trust the screens.**
 
 ## Live today
 

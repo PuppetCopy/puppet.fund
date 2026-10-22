@@ -1,6 +1,0 @@
-export type { IPairedSession } from '@puppet/sdk/account'
-export { CompactContractError, CompactError, type ICompact, type IDispatchedFrame } from '@puppet/sdk/compact'
-export type { IGetRate, IRate } from '@puppet/sdk/evaluate'
-export { createConnector, type IConnector, type IConnectorConfig, pairOverBrowser } from './connector.js'
-export { runOperator } from './lifecycle.js'
-export { createOperator, type IOperator, type IOperatorConfig } from './operator.js'

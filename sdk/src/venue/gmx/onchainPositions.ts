@@ -1,11 +1,10 @@
-import { TOKEN_META } from '@puppet/contracts/const'
 import { type Address, encodeAbiParameters, type Hex, keccak256, type PublicClient } from 'viem'
+import { USD_DECIMALS, USD_SYMBOL } from '../../const/common.js'
 import { usdPriceFromRate } from '../../evaluate/precision.js'
 import type { IGetRate } from '../../evaluate/types.js'
 import { symbolOf } from '../../state/tokenRegistry.js'
 import { GMX_V2_CONTRACT_MAP } from './contractMap.js'
-import { GMX_V2_CHAIN_ID } from './market.js'
-import { ARBITRUM_MARKET_LIST } from './marketList.js'
+import { GMX_V2_CHAIN_ID, readAllGmxMarkets } from './market.js'
 import type { IGmxClaimableProvider, IGmxClaimableRow, IGmxOrderProvider, IGmxPositionProvider, IGmxPositionRow } from './rows.js'
 
 export type { IGmxClaimableRow, IGmxOrderRow } from './rows.js'
@@ -13,8 +12,6 @@ export type { IGmxClaimableRow, IGmxOrderRow } from './rows.js'
 const READER = GMX_V2_CONTRACT_MAP.GmxReaderV2.address
 const READER_ABI = GMX_V2_CONTRACT_MAP.GmxReaderV2.abi
 const DATA_STORE = GMX_V2_CONTRACT_MAP.GmxDatastore.address
-
-const USD_PROXY = TOKEN_META.USDC.symbol
 
 const gmxPositionKey = (account: Address, market: Address, collateralToken: Address, isLong: boolean): Hex =>
   keccak256(
@@ -45,12 +42,8 @@ const claimableFundingKey = (market: Address, token: Address, account: Address):
   )
 
 export function makeOnchainGmxClaimableProvider(publicClient: PublicClient, blockNumber?: bigint): IGmxClaimableProvider {
-  const pairs = ARBITRUM_MARKET_LIST.flatMap(m => {
-    const market = m.marketToken
-    const tokens = [...new Set([m.longToken, m.shortToken])]
-    return tokens.map(token => ({ market, token }))
-  })
   return async account => {
+    const pairs = [...(await readAllGmxMarkets(publicClient, blockNumber))].flatMap(([market, m]) => [...new Set([m.longToken, m.shortToken])].map(token => ({ market, token })))
     const amounts = await publicClient.multicall({
       contracts: pairs.map(p => ({
         address: DATA_STORE,
@@ -82,6 +75,7 @@ export function makeOnchainGmxOrderProvider(publicClient: PublicClient, blockNum
       orderType: Number(info.order.numbers.orderType),
       sizeDeltaUsd: info.order.numbers.sizeDeltaUsd,
       collateralDeltaAmount: info.order.numbers.initialCollateralDeltaAmount,
+      executionFee: info.order.numbers.executionFee,
       triggerPrice: info.order.numbers.triggerPrice,
       isFrozen: info.order.flags.isFrozen
     }))
@@ -91,6 +85,7 @@ export function makeOnchainGmxOrderProvider(publicClient: PublicClient, blockNum
 export function makeOnchainGmxPositionProvider(
   publicClient: PublicClient,
   getRate: IGetRate,
+  freshness: number,
   blockNumber?: bigint
 ): IGmxPositionProvider {
   return async account => {
@@ -106,10 +101,7 @@ export function makeOnchainGmxPositionProvider(
       props.map(async (p): Promise<IGmxPositionRow> => {
         const market = p.addresses.market
         const collateralToken = p.addresses.collateralToken
-        const collateralPrice = usdPriceFromRate(
-          await getRate(symbolOf(GMX_V2_CHAIN_ID, collateralToken), USD_PROXY),
-          TOKEN_META.USDC.decimals
-        )
+        const collateralPrice = usdPriceFromRate(await getRate(symbolOf(GMX_V2_CHAIN_ID, collateralToken), USD_SYMBOL, freshness), USD_DECIMALS)
         return {
           positionKey: gmxPositionKey(account, market, collateralToken, p.flags.isLong),
           market,
@@ -119,7 +111,6 @@ export function makeOnchainGmxPositionProvider(
           sizeInTokens: p.numbers.sizeInTokens,
           collateralUsd: p.numbers.collateralAmount * collateralPrice,
           collateralAmount: p.numbers.collateralAmount,
-          storedPnlUsd: 0n,
           increasedAtTime: Number(p.numbers.increasedAtTime)
         }
       })

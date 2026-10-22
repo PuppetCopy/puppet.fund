@@ -10,7 +10,7 @@ export interface I$Link extends Omit<I$AeleaLink, '$anchor' | '$content'> {
 }
 
 export const $defaultLinkAnchor = $defaultAnchor(
-  style({ flexShrink: 0, minWidth: 0, color: palette.message, textDecoration: 'none' })
+  style({ flexShrink: 0, minWidth: 0, color: palette.message })
 )
 
 const disabledStyle = (disabled: IStream<boolean>) =>

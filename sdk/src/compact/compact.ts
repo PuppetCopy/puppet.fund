@@ -27,10 +27,22 @@ export type IAttestRequest<K extends IDerivedAction = IDerivedAction> = K extend
       input: IDerivedInputByKind[K]
       signature: Hex
       genesis?: IBodyGenesis
+      bodyShare?: { sid: Hex; pkA: Hex }
     }
   : never
 
 export type IDispatchRequest = IRelayRequest | IAttestRequest
+
+export interface IFulfilRequest {
+  kind: 'fulfil'
+  chainId: ChainId
+  body: Address
+  token: Address
+  total: bigint
+  feeTotal: bigint
+  ownerSignature: Hex
+  genesis: IBodyGenesis | null
+}
 
 export interface IDispatchedFrame {
   account: Address
@@ -45,6 +57,7 @@ interface ICompactOpts {
 
 export interface ICompact {
   dispatch(request: IDispatchRequest, timeoutMs?: number): Promise<IDispatchedFrame>
+  fulfil(request: IFulfilRequest, timeoutMs?: number): Promise<IDispatchedFrame>
   close(): void
 }
 
@@ -74,7 +87,7 @@ export function createCompact(opts: ICompactOpts): ICompact {
 
   async function post<T>(
     path: string,
-    request: IDispatchRequest,
+    request: IDispatchRequest | IFulfilRequest,
     timeoutMs: number,
     assertReply: (f: unknown) => asserts f is T
   ): Promise<T> {
@@ -128,6 +141,13 @@ export function createCompact(opts: ICompactOpts): ICompact {
             'soft'
           )
         }
+        if (res.status === 502 || res.status === 503 || res.status === 504) {
+          throw new CompactError(
+            'RELAY_UNREACHABLE',
+            `the relay could not take ${request.kind} (HTTP ${res.status}); it is restarting, busy or unreachable. Retry in a moment, and refresh your history first if you are unsure whether it went out.`,
+            'soft'
+          )
+        }
         throw new CompactError(
           'RELAY_REFUSED',
           `the relay refused ${request.kind} with HTTP ${res.status}; this is a malformed or oversized request, not a disagreement about the intent. Nothing was dispatched.`,
@@ -152,6 +172,9 @@ export function createCompact(opts: ICompactOpts): ICompact {
   return {
     dispatch(request: IDispatchRequest, timeoutMs = defaultTimeoutMs): Promise<IDispatchedFrame> {
       return post(isDerivedAction(request.kind) ? '/attest' : '/relay', request, timeoutMs, assertDispatchedFrame)
+    },
+    fulfil(request: IFulfilRequest, timeoutMs = defaultTimeoutMs): Promise<IDispatchedFrame> {
+      return post('/fulfil', request, timeoutMs, assertDispatchedFrame)
     },
     close(): void {
       disposed = true

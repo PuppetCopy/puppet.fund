@@ -1,36 +1,33 @@
+import { VENUE_ICONS } from '@puppet/sdk/ui-components'
 import { VENUES } from '@puppet/sdk/venue'
 import { empty } from 'aelea/stream'
-import { $node, $text, type I$Node, style } from 'aelea/ui'
+import { $node, $text, $wrapNativeElement, attr, type I$Node, type I$Slottable, style } from 'aelea/ui'
 import { $column, $icon, $row, spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $gmx, $hyperliquid, text } from '@/ui-components'
-import type { IStepField, IVenueAction } from './operation.js'
+import { palette } from 'aelea/ui-components-theme'
+import { $anchor, $externalMark, text } from '@/ui-components'
+import type { IStepField } from './operation.js'
 
-const VENUE_ICON: Record<string, I$Node> = {
-  gmx: $icon({ $content: $gmx, size: '16px', viewBox: '0 0 32 32', fill: palette.message }),
-  hyperliquid: $icon({ $content: $hyperliquid, size: '16px', viewBox: '-2 19 158 158', fill: palette.message })
+const iconless = VENUES.map(venue => venue.venueId).filter(id => VENUE_ICONS[id] === undefined)
+if (iconless.length > 0) throw new Error(`venue icon missing for ${iconless.join(', ')}: add it to VENUE_ICONS in sdk/src/ui-components/venueIcons.ts`)
+
+export const $venueIcon = (venue: string, size: number): I$Node => {
+  const known = VENUES.find(v => v.name === venue || v.venueId === venue)
+  const icon = VENUE_ICONS[known === undefined ? venue : known.venueId]
+  if (icon === undefined) return empty
+  const body = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg">${icon.body}</svg>`, 'image/svg+xml').documentElement.firstElementChild
+  if (body === null) throw new Error(`the icon of ${venue} has no shape`)
+  return $icon({ $content: $wrapNativeElement(body)(), viewBox: icon.viewBox, size: `${size}px`, fill: palette.message })
 }
 
-export const $venueIcon = (venue: string): I$Node => {
+export const $venueLink = (venue: string): I$Slottable => {
   const known = VENUES.find(v => v.name === venue || v.venueId === venue)
-  if (known === undefined) return empty
-  const icon = VENUE_ICON[known.venueId]
-  if (icon !== undefined) return icon
-  return $node(
-    style({
-      width: '16px',
-      height: '16px',
-      borderRadius: '50%',
-      backgroundColor: colorShade(palette.message, 20),
-      color: palette.message,
-      fontSize: '8px',
-      fontWeight: '700',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      flexShrink: '0'
-    })
-  )($text(known.name.slice(0, 2).toUpperCase()))
+  if (known === undefined) return $text(venue)
+  const host = known.dapp?.hosts[0]
+  if (host === undefined) return $text(known.name)
+  return $anchor(
+    attr({ href: `https://${host}`, target: '_blank', rel: 'noopener noreferrer' }),
+    style({ display: 'inline-flex', alignItems: 'center', color: palette.message })
+  )($text(known.name), $externalMark())
 }
 
 export const $venueFields = (fields: readonly IStepField[]): I$Node =>
@@ -38,15 +35,12 @@ export const $venueFields = (fields: readonly IStepField[]): I$Node =>
     ...fields.map(field =>
       $row(spacing.small, style({ alignItems: 'baseline', justifyContent: 'space-between', gap: '16px', whiteSpace: 'normal' }))(
         $node(style({ fontSize: text.xs, color: palette.foreground, whiteSpace: 'nowrap' }))($text(field.label)),
-        $node(style({ fontSize: text.xs, color: palette.message, wordBreak: 'break-all', textAlign: 'right' }))($text(field.value))
+        field.href === undefined
+          ? $node(style({ fontSize: text.xs, color: palette.message, wordBreak: 'break-all', textAlign: 'right' }))($text(field.value))
+          : $anchor(
+              attr({ href: field.href, target: '_blank', rel: 'noopener noreferrer' }),
+              style({ display: 'inline-flex', alignItems: 'center', fontSize: text.xs, color: palette.message, textAlign: 'right' })
+            )($text(field.value), $externalMark())
       )
     )
-  )
-
-export const $venueHeadline = (x: IVenueAction, ...$extra: I$Node[]): I$Node =>
-  $row(spacing.small, style({ alignItems: 'center', minWidth: 0 }))(
-    $venueIcon(x.venue),
-    $node(style({ fontSize: text.sm, color: palette.message, whiteSpace: 'nowrap' }))($text(x.venue)),
-    $node(style({ fontSize: text.sm, color: palette.message, whiteSpace: 'nowrap' }))($text(x.label)),
-    ...$extra
   )

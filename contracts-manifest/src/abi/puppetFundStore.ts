@@ -11,29 +11,20 @@ export default [
     "stateMutability": "nonpayable"
   },
   {
-    "type": "receive",
-    "stateMutability": "payable"
-  },
-  {
     "type": "function",
-    "name": "accruedMap",
+    "name": "authMap",
     "inputs": [
       {
-        "name": "master",
+        "name": "user",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "epoch",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "outputs": [
       {
-        "name": "accrued",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "stateMutability": "view"
@@ -53,17 +44,35 @@ export default [
   },
   {
     "type": "function",
-    "name": "creditedMap",
+    "name": "book",
+    "inputs": [
+      {
+        "name": "_master",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "bookedMap",
     "inputs": [
       {
         "name": "master",
         "type": "address",
         "internalType": "address"
-      },
-      {
-        "name": "chainId",
-        "type": "uint256",
-        "internalType": "uint256"
       },
       {
         "name": "token",
@@ -73,7 +82,7 @@ export default [
     ],
     "outputs": [
       {
-        "name": "credited",
+        "name": "booked",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -82,7 +91,7 @@ export default [
   },
   {
     "type": "function",
-    "name": "getEpochTokenList",
+    "name": "getCredit",
     "inputs": [
       {
         "name": "_master",
@@ -90,16 +99,33 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_epoch",
+        "name": "_chainId",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "_token",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "outputs": [
       {
         "name": "",
-        "type": "address[]",
-        "internalType": "address[]"
+        "type": "tuple",
+        "internalType": "struct FundStore.Credit",
+        "components": [
+          {
+            "name": "total",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "feeTotal",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "stateMutability": "view"
@@ -126,63 +152,88 @@ export default [
         "internalType": "struct FundStore.Holding",
         "components": [
           {
-            "name": "basis",
-            "type": "uint192",
-            "internalType": "uint192"
+            "name": "allocatedAt",
+            "type": "uint40",
+            "internalType": "uint40"
           },
           {
-            "name": "allocatedAt",
+            "name": "redeemedAt",
+            "type": "uint40",
+            "internalType": "uint40"
+          },
+          {
+            "name": "queued",
+            "type": "uint96",
+            "internalType": "uint96"
+          },
+          {
+            "name": "cost",
+            "type": "uint80",
+            "internalType": "uint80"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getRedemption",
+    "inputs": [
+      {
+        "name": "_master",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "tuple",
+        "internalType": "struct FundStore.Redemption",
+        "components": [
+          {
+            "name": "id",
             "type": "uint64",
             "internalType": "uint64"
-          }
-        ]
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "getPosition",
-    "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_holder",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "tuple",
-        "internalType": "struct FundStore.Position",
-        "components": [
-          {
-            "name": "epoch",
-            "type": "uint256",
-            "internalType": "uint256"
           },
           {
-            "name": "cursor",
-            "type": "uint256",
-            "internalType": "uint256"
+            "name": "fraction",
+            "type": "uint32",
+            "internalType": "uint32"
           },
           {
-            "name": "weight",
-            "type": "uint256",
-            "internalType": "uint256"
+            "name": "fee",
+            "type": "uint64",
+            "internalType": "uint64"
           },
           {
-            "name": "basis",
-            "type": "uint256",
-            "internalType": "uint256"
+            "name": "masterPay",
+            "type": "uint96",
+            "internalType": "uint96"
           },
           {
-            "name": "shortfall",
+            "name": "queued",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "owedLeft",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "potLeft",
+            "type": "uint96",
+            "internalType": "uint96"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "price",
             "type": "uint256",
             "internalType": "uint256"
           }
@@ -193,44 +244,8 @@ export default [
   },
   {
     "type": "function",
-    "name": "getQueue",
+    "name": "heldMap",
     "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "",
-        "type": "tuple",
-        "internalType": "struct FundStore.Queue",
-        "components": [
-          {
-            "name": "epoch",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "weight",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "owedMap",
-    "inputs": [
-      {
-        "name": "account",
-        "type": "address",
-        "internalType": "address"
-      },
       {
         "name": "token",
         "type": "address",
@@ -239,7 +254,7 @@ export default [
     ],
     "outputs": [
       {
-        "name": "amount",
+        "name": "held",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -250,6 +265,11 @@ export default [
     "type": "function",
     "name": "pay",
     "inputs": [
+      {
+        "name": "_master",
+        "type": "address",
+        "internalType": "address"
+      },
       {
         "name": "_token",
         "type": "address",
@@ -276,48 +296,6 @@ export default [
   },
   {
     "type": "function",
-    "name": "pushEpochToken",
-    "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_epoch",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "retiredMap",
-    "inputs": [
-      {
-        "name": "master",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "units",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
     "name": "setAccess",
     "inputs": [
       {
@@ -326,9 +304,9 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_enabled",
-        "type": "bool",
-        "internalType": "bool"
+        "name": "_selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "outputs": [],
@@ -336,30 +314,7 @@ export default [
   },
   {
     "type": "function",
-    "name": "setAccrued",
-    "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_epoch",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_accrued",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setCredited",
+    "name": "setCredit",
     "inputs": [
       {
         "name": "_master",
@@ -377,9 +332,21 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_total",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "_credit",
+        "type": "tuple",
+        "internalType": "struct FundStore.Credit",
+        "components": [
+          {
+            "name": "total",
+            "type": "uint256",
+            "internalType": "uint256"
+          },
+          {
+            "name": "feeTotal",
+            "type": "uint256",
+            "internalType": "uint256"
+          }
+        ]
       }
     ],
     "outputs": [],
@@ -405,85 +372,87 @@ export default [
         "internalType": "struct FundStore.Holding",
         "components": [
           {
-            "name": "basis",
-            "type": "uint192",
-            "internalType": "uint192"
+            "name": "allocatedAt",
+            "type": "uint40",
+            "internalType": "uint40"
           },
           {
-            "name": "allocatedAt",
+            "name": "redeemedAt",
+            "type": "uint40",
+            "internalType": "uint40"
+          },
+          {
+            "name": "queued",
+            "type": "uint96",
+            "internalType": "uint96"
+          },
+          {
+            "name": "cost",
+            "type": "uint80",
+            "internalType": "uint80"
+          }
+        ]
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "setRedemption",
+    "inputs": [
+      {
+        "name": "_master",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_redemption",
+        "type": "tuple",
+        "internalType": "struct FundStore.Redemption",
+        "components": [
+          {
+            "name": "id",
             "type": "uint64",
             "internalType": "uint64"
-          }
-        ]
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setOwed",
-    "inputs": [
-      {
-        "name": "_account",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_amount",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setPosition",
-    "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_holder",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_position",
-        "type": "tuple",
-        "internalType": "struct FundStore.Position",
-        "components": [
-          {
-            "name": "epoch",
-            "type": "uint256",
-            "internalType": "uint256"
           },
           {
-            "name": "cursor",
-            "type": "uint256",
-            "internalType": "uint256"
+            "name": "fraction",
+            "type": "uint32",
+            "internalType": "uint32"
           },
           {
-            "name": "weight",
-            "type": "uint256",
-            "internalType": "uint256"
+            "name": "fee",
+            "type": "uint64",
+            "internalType": "uint64"
           },
           {
-            "name": "basis",
-            "type": "uint256",
-            "internalType": "uint256"
+            "name": "masterPay",
+            "type": "uint96",
+            "internalType": "uint96"
           },
           {
-            "name": "shortfall",
+            "name": "queued",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "owedLeft",
+            "type": "uint128",
+            "internalType": "uint128"
+          },
+          {
+            "name": "potLeft",
+            "type": "uint96",
+            "internalType": "uint96"
+          },
+          {
+            "name": "token",
+            "type": "address",
+            "internalType": "address"
+          },
+          {
+            "name": "price",
             "type": "uint256",
             "internalType": "uint256"
           }
@@ -492,215 +461,6 @@ export default [
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setQueue",
-    "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_queue",
-        "type": "tuple",
-        "internalType": "struct FundStore.Queue",
-        "components": [
-          {
-            "name": "epoch",
-            "type": "uint256",
-            "internalType": "uint256"
-          },
-          {
-            "name": "weight",
-            "type": "uint256",
-            "internalType": "uint256"
-          }
-        ]
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setRetired",
-    "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_units",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setSkin",
-    "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_skin",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setTokenAccrued",
-    "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_epoch",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_accrued",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setTokenCursor",
-    "inputs": [
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_holder",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_epoch",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_cursor",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "skinMap",
-    "inputs": [
-      {
-        "name": "master",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "skin",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "tokenAccruedMap",
-    "inputs": [
-      {
-        "name": "master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "epoch",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "accrued",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
-  },
-  {
-    "type": "function",
-    "name": "tokenCursorMap",
-    "inputs": [
-      {
-        "name": "master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "holder",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "epoch",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "token",
-        "type": "address",
-        "internalType": "address"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "cursor",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "error",
@@ -729,12 +489,59 @@ export default [
   },
   {
     "type": "error",
+    "name": "FundStore__Unbooked",
+    "inputs": [
+      {
+        "name": "master",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "booked",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "FundStore__Unfunded",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "balance",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "held",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "TransferUtils__EmptyTokenTransferGasLimit",
     "inputs": [
       {
         "name": "token",
         "type": "address",
-        "internalType": "contract IERC20"
+        "internalType": "address"
       }
     ]
   },
@@ -766,7 +573,7 @@ export default [
       {
         "name": "token",
         "type": "address",
-        "internalType": "contract IERC20"
+        "internalType": "address"
       },
       {
         "name": "receiver",

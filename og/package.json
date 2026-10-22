@@ -1,20 +1,17 @@
 {
   "name": "og",
-  "license": "BSL-1.1",
+  "license": "BUSL-1.1",
   "private": true,
   "type": "module",
   "module": "ESNext",
   "description": "Puppet OpenGraph image service",
   "scripts": {
-    "dev": "bun run --hot ./src/server.ts",
-    "start": "bun run ./src/server.ts",
-    "clean": "rm -rf dist",
-    "tsgo:check": "tsgo --noEmit"
+    "typecheck": "bun check"
   },
   "dependencies": {
     "@puppet/contracts": "workspace:*",
     "@puppet/sdk": "workspace:*",
-    "@takumi-rs/core": "2.13.7",
+    "@takumi-rs/core": "2.14.0",
     "aelea": "catalog:",
     "viem": "catalog:"
   },

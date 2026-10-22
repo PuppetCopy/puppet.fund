@@ -1,13 +1,14 @@
-import { HUB_CHAIN_ID, PRECISION } from '@puppet/contracts/const'
+import { HUB_CANONICAL_TOKEN, HUB_CHAIN_ID } from '@puppet/contracts/const'
+import { SESSION_TTL_MS } from '@puppet/sdk/account'
+import type { IMandateDraft } from '@puppet/sdk/client'
+import { PRECISION } from '@puppet/sdk/const'
 import { getTokenDescription, getUnixTimestamp, readableDate, readablePercentage } from '@puppet/sdk/core'
 import type { IMandateRow } from '@puppet/sdk/schema'
-import { bondTokenOf } from '@puppet/sdk/state'
-import { combine, filter, type IStream, just, map, merge, op, sampleMap, start, switchMap } from 'aelea/stream'
+import { combine, constant, filter, filterNull, type IStream, just, map, merge, op, reduce, sampleMap, start, switchMap, take } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
-import { $node, $text, component, type I$Node, type I$Slottable, style, styleBehavior } from 'aelea/ui'
+import { $node, $text, attr, component, type I$Node, type I$Slottable, type INode, nodeEvent, style, styleBehavior } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $defaultAnchor, $Link } from 'aelea/ui-router'
 import type { Address } from 'viem'
 import {
   $ButtonPrimary,
@@ -18,29 +19,36 @@ import {
   $defaultMiniButtonSecondary,
   $FieldLabeled,
   $infoTooltip,
+  $labelDisplay,
+  $labeledDivider,
+  $popoverCaret,
+  keyActivate,
   text
 } from '@/ui-components'
-import { routeSchema } from '../../app/routeSchema.js'
-import { chainName } from '../../common/$chain.js'
-import type { IMandateDraft } from './draft.js'
+import { mandateTermsOf } from '../$MandatePosition.js'
 import { $editorPercentSlider } from './editorUtils.js'
 
 const COOLDOWN_OPTIONS = [0n, 3600n, 21_600n, 43_200n, 86_400n, 604_800n]
-const DEFAULT_COOLDOWN = 21_600n
-const EXPIRY_OPTIONS = [604_800n, 2_592_000n, 7_776_000n, 31_536_000n]
-const DEFAULT_EXPIRY = 2_592_000n
-const DEFAULT_SKIN = 5_000n
+const DEFAULT_COOLDOWN = 86_400n
+const EXPIRY_OPTIONS = [604_800n, 2_592_000n, 7_776_000n, 31_536_000n, 63_072_000n]
+const DEFAULT_EXPIRY = 7_776_000n
+const DEFAULT_ALLOCATION_RATE = 5_000n
+const DEFAULT_SKIN = 10_000n
+const DEFAULT_EXIT_CAP = 5_000n
 const RATE = Number(PRECISION.basisPoints)
 
-const EXAMPLE_MATCHABLE = 1_000
-const EXAMPLE_COLLATERAL = 400
+const EXAMPLE_MATCHABLE = 100
+const EXAMPLE_MASTER = 100
 const EXAMPLE_WINDOW_HOURS = 192
 const EXAMPLE_OPEN_HOURS = [0, 2, 10, 40, 56, 110, 176]
-const bondSymbol = getTokenDescription(HUB_CHAIN_ID, bondTokenOf(HUB_CHAIN_ID)).symbol
+const roundSymbols = Object.values(HUB_CANONICAL_TOKEN).map(token => getTokenDescription(HUB_CHAIN_ID, token).symbol).join(', ')
 
 const ratePercent = (v: number): string => readablePercentage(BigInt(Math.round(v * RATE)))
-const exampleAmount = (n: number): string => `${n.toLocaleString('en-US', { maximumFractionDigits: 2 })} ${bondSymbol}`
+const leverageLabel = (v: number): string => (v === 0 ? 'Uncapped' : `${Number(v.toPrecision(2))}x`)
+const skinPosition = (v: number): number => (v === 0 ? 1 : Math.min(1, Math.max(0, (Math.log10(v) + 1) / 2)))
+const exampleAmount = (n: number): string => `$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
 
+const DAY = 86_400n
 const DURATION_UNITS = [
   { seconds: 31_536_000n, label: 'year' },
   { seconds: 604_800n, label: 'week' },
@@ -112,28 +120,38 @@ export interface I$MandateEditor {
   master: Address
   existing: IMandateRow | undefined
   draft: IStream<IMandateDraft | null>
-  needsDeposit: boolean
 }
 
-export const $MandateEditor = ({ master, existing, draft, needsDeposit }: I$MandateEditor) =>
+export const $MandateEditor = ({ master, existing, draft }: I$MandateEditor) =>
   component(
     (
       [changeAllocation, changeAllocationTether]: IBehavior<number>,
       [changeSkin, changeSkinTether]: IBehavior<number>,
+      [changeExitCap, changeExitCapTether]: IBehavior<number>,
       [selectCooldown, selectCooldownTether]: IBehavior<bigint>,
       [typeCooldown, typeCooldownTether]: IBehavior<string>,
       [selectExpiry, selectExpiryTether]: IBehavior<bigint>,
       [typeExpiry, typeExpiryTether]: IBehavior<string>,
       [clickAdd, clickAddTether]: IBehavior<PointerEvent>,
-      [clickLeave, clickLeaveTether]: IBehavior<PointerEvent>
+      [clickEnd, clickEndTether]: IBehavior<PointerEvent>,
+      [toggleAdvanced, toggleAdvancedTether]: IBehavior<INode, PointerEvent>
     ) => {
       const nowSec = getUnixTimestamp()
-      const active = existing !== undefined && existing.expiry > BigInt(nowSec) ? existing : undefined
-      const allocation: IStream<number> = state(active ? Number(active.allocationRate) / RATE : 0.25, changeAllocation)
-      const skin: IStream<number> = state(Number(active?.skin ?? DEFAULT_SKIN) / RATE, changeSkin)
+      const until = existing === undefined ? null : mandateTermsOf(existing).until
+      const active = until !== null && until > BigInt(nowSec) ? existing : undefined
+      const drafted = op(draft, take(1), filterNull, map(d => d.mandate), state())
+      const allocation: IStream<number> = state(
+        Number(active?.allocationRate ?? DEFAULT_ALLOCATION_RATE) / RATE,
+        merge(changeAllocation, map(m => Number(m.allocationRate) / RATE, drafted))
+      )
+      const skin: IStream<number> = state(Number(active?.skin ?? DEFAULT_SKIN) / RATE, merge(changeSkin, map(m => Number(m.skin) / RATE, drafted)))
+      const exitCap: IStream<number> = state(Number(active?.exitCap ?? DEFAULT_EXIT_CAP) / RATE, merge(changeExitCap, map(m => Number(m.exitCap) / RATE, drafted)))
       const initialCooldown = active?.cooldownPeriod ?? DEFAULT_COOLDOWN
-      const cooldown: IStream<bigint | null> = state(initialCooldown as bigint | null, merge(selectCooldown, map(parseDuration, typeCooldown)))
-      const cooldownText: IStream<string> = start(readableDuration(initialCooldown), map(readableDuration, selectCooldown))
+      const cooldown: IStream<bigint | null> = state(
+        initialCooldown as bigint | null,
+        merge(selectCooldown, map(parseDuration, typeCooldown), map(m => m.cooldownPeriod, drafted))
+      )
+      const cooldownText: IStream<string> = start(readableDuration(initialCooldown), merge(map(readableDuration, selectCooldown), map(m => readableDuration(m.cooldownPeriod), drafted)))
       const cooldownError: IStream<string | null> = merge(
         map(text => (parseDuration(text) === null ? 'Type a duration like 30m, 6h or 2d' : null), typeCooldown),
         map(() => null, selectCooldown)
@@ -142,59 +160,81 @@ export const $MandateEditor = ({ master, existing, draft, needsDeposit }: I$Mand
         const period = parseDuration(input)
         return period === null || period === 0n ? null : period
       }
-      const expiryIn: IStream<bigint | null> = state(DEFAULT_EXPIRY as bigint | null, merge(selectExpiry, map(parseExpiry, typeExpiry)))
-      const expiryText: IStream<string> = start(readableDuration(DEFAULT_EXPIRY), map(readableDuration, selectExpiry))
+      const draftedExpiry: IStream<bigint> = op(
+        drafted,
+        map(m => m.expiry - BigInt(getUnixTimestamp())),
+        filter(left => left > 0n),
+        map(left => (left < DAY ? DAY : ((left + DAY / 2n) / DAY) * DAY))
+      )
+      const expiryIn: IStream<bigint | null> = state(DEFAULT_EXPIRY as bigint | null, merge(selectExpiry, map(parseExpiry, typeExpiry), draftedExpiry))
+      const expiryText: IStream<string> = start(readableDuration(DEFAULT_EXPIRY), merge(map(readableDuration, selectExpiry), map(readableDuration, draftedExpiry)))
       const expiryError: IStream<string | null> = merge(
         map(text => (parseExpiry(text) === null ? 'Type a duration like 30d, 12w or 1y' : null), typeExpiry),
         map(() => null, selectExpiry)
       )
-      const terms = combine({ allocation, skin, cooldown, expiryIn })
+      const expiryEdited: IStream<boolean> = state(false, constant(true, merge(selectExpiry, typeExpiry)))
+      const advanced: IStream<boolean> = state(false, reduce((open: boolean) => !open, false, toggleAdvanced))
+      const terms = combine({ allocation, skin, exitCap, cooldown, expiryIn })
 
-      const toDraft = (p: { allocation: number; skin: number; cooldown: bigint; expiryIn: bigint } | null): IMandateDraft => ({
+      const toDraft = (p: { allocation: number; skin: number; exitCap: number; cooldown: bigint; expiryIn: bigint }): IMandateDraft => ({
         kind: 'mandate',
         id: `mandate:${master}`,
         mandate: {
           master,
-          skin: p === null ? 0n : BigInt(Math.round(p.skin * RATE)),
-          allocationRate: p === null ? 0n : BigInt(Math.round(p.allocation * RATE)),
-          cooldownPeriod: p === null ? 0n : p.cooldown,
-          expiry: p === null ? 0n : BigInt(getUnixTimestamp()) + p.expiryIn
+          skin: BigInt(Math.round(p.skin * RATE)),
+          allocationRate: BigInt(Math.round(p.allocation * RATE)),
+          exitCap: BigInt(Math.round(p.exitCap * RATE)),
+          cooldownPeriod: p.cooldown,
+          expiry: BigInt(getUnixTimestamp()) + p.expiryIn
         }
       })
 
-      const $shareExplainer = $explainer(
-        'Each allocation round of this master takes at most this share of your deposit.',
+      const $rateExplainer = $explainer(
+        'The most each round takes of your deposit. Skin caps how much of the fund you can hold.',
         switchMap(
           rate =>
             $column(spacing.small)(
               $meterRow('Your deposit', 1, exampleAmount(EXAMPLE_MATCHABLE)),
-              $meterRow(`Per round at ${ratePercent(rate)}`, rate, exampleAmount(EXAMPLE_MATCHABLE * rate)),
-              $caption(`Your deposit is the ${bondSymbol} in your account on the hub, shared by every master you back. A withdrawal you requested is not counted, and part is kept for exit fees.`)
+              $meterRow(`Round 1 at ${ratePercent(rate)}`, rate, exampleAmount(EXAMPLE_MATCHABLE * rate)),
+              $meterRow('Round 2', rate * (1 - rate), exampleAmount(EXAMPLE_MATCHABLE * rate * (1 - rate))),
+              $meterRow('Round 3', rate * (1 - rate) ** 2, exampleAmount(EXAMPLE_MATCHABLE * rate * (1 - rate) ** 2)),
+              $caption(`Your deposit is your ${roundSymbols} on the hub, shared by every fund you mandate. Native ETH does not count.`)
             ),
           allocation
         )
       )
 
       const $skinExplainer = $explainer(
-        'The master must keep at least this share of the pool, so its own money always sits next to yours.',
-        switchMap(p => {
-          const room = p.skin === 0 ? Number.POSITIVE_INFINITY : EXAMPLE_COLLATERAL / p.skin - EXAMPLE_COLLATERAL
-          const shareCap = EXAMPLE_MATCHABLE * p.allocation
-          const backed = Math.min(room, shareCap)
+        "Your cap in this fund, compared with the master's own stake.",
+        switchMap(leverage => {
+          if (leverage === 0) return $caption("Uncapped: you can hold any amount of this fund, whatever the master's own stake.")
+          const cap = EXAMPLE_MASTER * leverage
+          const scale = Math.max(EXAMPLE_MASTER, cap)
           return $column(spacing.small)(
-            $meterRow('Master owns', EXAMPLE_COLLATERAL / EXAMPLE_MATCHABLE, exampleAmount(EXAMPLE_COLLATERAL)),
-            $meterRow(`Room at ${ratePercent(p.skin)}`, room / EXAMPLE_MATCHABLE, Number.isFinite(room) ? exampleAmount(room) : 'No limit'),
-            $meterRow(`Share cap at ${ratePercent(p.allocation)}`, shareCap / EXAMPLE_MATCHABLE, exampleAmount(shareCap)),
-            $meterRow('You back', backed / EXAMPLE_MATCHABLE, exampleAmount(backed)),
+            $meterRow('Master', EXAMPLE_MASTER / scale, exampleAmount(EXAMPLE_MASTER)),
+            $meterRow('You', cap / scale, exampleAmount(cap)),
             $caption(
-              `${room <= shareCap ? 'The room binds here.' : 'Your share cap binds here.'} The room is shared by every backer in the round; when they ask for more, every stake scales down pro-rata.`
+              `You can hold up to ${leverageLabel(leverage)} the master's stake.`
             )
           )
-        }, combine({ skin, allocation }))
+        }, skin)
+      )
+
+      const $exitCapExplainer = $explainer(
+        'Allocates less as puppets queue to exit, and nothing once the queue reaches this share.',
+        switchMap(p => {
+          const round = EXAMPLE_MATCHABLE * p.allocation
+          return $column(spacing.small)(
+            $meterRow('Nobody leaving', round / EXAMPLE_MATCHABLE, exampleAmount(round)),
+            $meterRow(`${ratePercent(p.exitCap / 2)} leaving`, round / 2 / EXAMPLE_MATCHABLE, exampleAmount(round / 2)),
+            $meterRow(`${ratePercent(p.exitCap)} leaving`, 0, exampleAmount(0)),
+            $caption('Protects you from joining a fund its puppets are rushing out of.')
+          )
+        }, combine({ exitCap, allocation }))
       )
 
       const $cooldownExplainer = $explainer(
-        "After you join one of this master's allocation rounds, you sit out its rounds until the cooldown has passed.",
+        "After a round you join, you sit out this fund's rounds until the cooldown passes.",
         switchMap((period: bigint) => {
           const hours = Number(period) / 3600
           let lastMatched: number | null = null
@@ -204,101 +244,162 @@ export const $MandateEditor = ({ master, existing, draft, needsDeposit }: I$Mand
             return { at: hour / EXAMPLE_WINDOW_HOURS, on }
           })
           return $column(spacing.small)(
-            $timelineRow('Master funds', dots.map(dot => ({ at: dot.at, on: true }))),
+            $timelineRow('Master allocates', dots.map(dot => ({ at: dot.at, on: true }))),
             $timelineRow('You join', dots),
             $caption(
               period === 0n
-                ? 'No cooldown: you can join every round this master funds.'
-                : `With ${readableDuration(period)} between rounds you join, the grey rounds go ahead without you. The example spans 8 days.`
+                ? 'No cooldown: you can join every round this master opens.'
+                : `With ${readableDuration(period)} between your rounds, grey rounds go ahead without you.`
             )
           )
         }, filter((period): period is bigint => period !== null, cooldown))
       )
 
-      const $term = (label: string, hint: string | I$Slottable, value: IStream<string>): I$Node =>
-        $row(spacing.small, style({ alignItems: 'center', justifyContent: 'space-between', fontSize: text.sm }))(
-          $row(spacing.tiny, style({ alignItems: 'center', color: palette.foreground }))($text(label), $infoTooltip(hint, palette.foreground)),
-          $node(style({ fontWeight: '600' }))($text(value))
+      const $sliderField = (
+        label: string,
+        $explainer: I$Slottable,
+        $value: I$Slottable,
+        $slider: I$Node,
+        hint: string,
+        validation: IStream<string | null>
+      ): I$Node =>
+        $column(spacing.small, style({ width: '100%' }))(
+          $row(spacing.small, style({ width: '100%' }))(
+            $labelDisplay(style({ width: '128px', minWidth: '128px' }))(
+              $row(spacing.tiny, style({ alignItems: 'center', whiteSpace: 'nowrap' }))($text(label), $infoTooltip($explainer, palette.foreground))
+            ),
+            $row(spacing.small, style({ flex: 1, minWidth: '0', alignItems: 'center', height: '48px', padding: '0 10px', backgroundColor: palette.background }))(
+              $node(style({ display: 'flex', flex: 1, minWidth: '0' }))($slider),
+              $node(style({ fontWeight: '600', fontSize: text.sm, minWidth: '56px', textAlign: 'right' }))($value)
+            )
+          ),
+          $node(style({ fontSize: text.xs, lineHeight: '1.5' }))(
+            switchMap(error => $node(style({ color: error === null ? palette.foreground : palette.negative }))($text(error ?? hint)), validation)
+          )
         )
 
       return [
         $column(spacing.default, style({ width: '394px', maxWidth: '100%' }))(
-          ...(needsDeposit
-            ? [
-                $row(spacing.small, style({ alignItems: 'center', fontSize: text.xs, color: palette.indeterminate, lineHeight: '1.4' }))(
-                  $node(style({ flex: 1 }))(
-                    $text(
-                      `Backing pays its relay fee and each round's stake from your ${getTokenDescription(HUB_CHAIN_ID, bondTokenOf(HUB_CHAIN_ID)).symbol} deposit on ${chainName(HUB_CHAIN_ID)}. Add a deposit before you submit.`
-                    )
-                  ),
-                  $Link({
-                    route: routeSchema.portfolio,
-                    $anchor: $defaultAnchor(style({ fontSize: text.xs, textDecoration: 'underline', whiteSpace: 'nowrap' })),
-                    $content: $text('Deposit')
-                  })({})
-                )
-              ]
-            : []),
-          $column(spacing.small)(
-            $term('Share of your deposit per round', $shareExplainer, map(ratePercent, allocation)),
-            $editorPercentSlider({ value: allocation, disabled: just(false), error: map(a => a >= 1, allocation), ariaLabel: 'allocation rate' })({
+          $sliderField(
+            'Skin',
+            $skinExplainer,
+            $node(styleBehavior(map(s => ({ color: `color-mix(in srgb, ${palette.negative} ${Math.round(skinPosition(s) * 100)}%, ${palette.positive})` }), skin)))(
+              $text(map(leverageLabel, skin))
+            ),
+            $editorPercentSlider({
+              value: map(skinPosition, skin),
+              disabled: just(false),
+              error: just(false),
+              ariaLabel: 'skin leverage',
+              color: just('transparent'),
+              trackColor: just(`linear-gradient(to right, ${palette.positive}, ${palette.negative})`)
+            })({
+              change: changeSkinTether(map(t => (t >= 1 ? 0 : Number((10 ** (2 * t - 1)).toPrecision(2)))))
+            }),
+            "Your cap, as a multiple of the master's own stake",
+            just(null)
+          ),
+          $sliderField(
+            'Rate',
+            $rateExplainer,
+            $text(map(ratePercent, allocation)),
+            $editorPercentSlider({ value: allocation, disabled: just(false), error: map(a => a >= 1 || Math.round(a * RATE) === 0, allocation), ariaLabel: 'allocation rate' })({
               change: changeAllocationTether()
             }),
-            $caption(map(a => (a >= 1 ? 'Keep part of your deposit on the route for exit fees.' : ''), allocation))
-          ),
-          $column(spacing.small)(
-            $term('Skin you require', $skinExplainer, map(ratePercent, skin)),
-            $editorPercentSlider({ value: skin, disabled: just(false), error: just(false), ariaLabel: 'skin ratio' })({
-              change: changeSkinTether()
-            })
-          ),
-          $Dropdown<bigint>({
-            $container: $defaultDropdownContainer(style({ display: 'flex', width: '100%' })),
-            $anchor: $FieldLabeled({
-              label: $row(spacing.tiny, style({ alignItems: 'center', whiteSpace: 'nowrap' }))($text('Cooldown'), $infoTooltip($cooldownExplainer, palette.foreground)),
-              labelWidth: 128,
-              value: cooldownText,
-              placeholder: 'Type a duration, e.g. 6h',
-              validation: cooldownError
-            })({ change: typeCooldownTether() }),
-            optionList: COOLDOWN_OPTIONS,
-            $$option: map(period => $node($text(readableDuration(period))))
-          })({ select: selectCooldownTether() }),
-          $Dropdown<bigint>({
-            $container: $defaultDropdownContainer(style({ display: 'flex', width: '100%' })),
-            $anchor: $FieldLabeled({
-              label: $row(spacing.tiny, style({ alignItems: 'center', whiteSpace: 'nowrap' }))(
-                $text('Backing until'),
-                $infoTooltip('The mandate stops matching after this date; sign it again to extend it.', palette.foreground)
-              ),
-              labelWidth: 128,
-              value: expiryText,
-              placeholder: 'Type a duration, e.g. 30d',
-              hint: map(
-                period =>
-                  period === null
-                    ? ''
-                    : `Until ${readableDate(getUnixTimestamp() + Number(period))}${active ? `, currently until ${readableDate(Number(active.expiry))}` : ''}`,
-                expiryIn
-              ),
-              validation: expiryError
-            })({ change: typeExpiryTether() }),
-            optionList: EXPIRY_OPTIONS,
-            $$option: map(period => $node($text(readableDuration(period))))
-          })({ select: selectExpiryTether() }),
-          $node(style({ fontSize: text.xs, color: palette.foreground }))(
-            $text(
-              `One broadcast on ${chainName(HUB_CHAIN_ID)} carries the whole mandate. Re-broadcasting replaces it; leaving is the same broadcast with an expiry of zero.`
+            'The most of your deposit one round can take',
+            map(
+              a =>
+                a >= 1
+                  ? 'A mandate cannot take 100%: part of your deposit stays back to pay your sell fee.'
+                  : Math.round(a * RATE) === 0
+                    ? 'At 0% you join no round'
+                    : null,
+              allocation
             )
           ),
+          $FieldLabeled({
+            label: $row(spacing.tiny, style({ alignItems: 'center', whiteSpace: 'nowrap' }))($text('Cooldown'), $infoTooltip($cooldownExplainer, palette.foreground)),
+            labelWidth: 128,
+            value: cooldownText,
+            placeholder: 'Type a duration, e.g. 6h',
+            hint: 'How long you sit out after joining a round',
+            validation: cooldownError,
+            $$field: $field =>
+              $Dropdown<bigint>({
+                $container: $defaultDropdownContainer(style({ display: 'flex', flex: 1, minWidth: '0' })),
+                $anchor: $field,
+                optionList: COOLDOWN_OPTIONS,
+                $$option: map(period => $node($text(readableDuration(period))))
+              })({ select: selectCooldownTether() })
+          })({ change: typeCooldownTether() }),
+          $node(style({ cursor: 'pointer' }), attr({ role: 'button', tabindex: '0' }), keyActivate(), toggleAdvancedTether(nodeEvent('click')))(
+            $labeledDivider(
+              $row(spacing.tiny, style({ alignItems: 'center', fontSize: text.xs, whiteSpace: 'nowrap' }))(
+                $text('Advanced'),
+                $node(style({ display: 'flex' }), styleBehavior(map(open => ({ transform: open ? 'rotate(180deg)' : 'none' }), advanced)))($popoverCaret())
+              )
+            )
+          ),
+          $node(style({ display: 'contents' }), styleBehavior(map(open => (open ? { display: 'contents' } : { display: 'none' }), advanced)))(
+          $FieldLabeled({
+            label: $row(spacing.tiny, style({ alignItems: 'center', whiteSpace: 'nowrap' }))(
+              $text('Expiry'),
+              $infoTooltip(
+                'Ends at this date, or with the session that signed it. A change replaces the whole mandate.',
+                palette.foreground
+              )
+            ),
+            labelWidth: 128,
+            value: expiryText,
+            placeholder: 'Type a duration, e.g. 30d',
+            hint: map(
+              period =>
+                period === null
+                  ? ''
+                  : `Allocating until ${readableDate(getUnixTimestamp() + Math.min(Number(period), SESSION_TTL_MS / 1000))} at the latest${active && until !== null ? `, currently until ${readableDate(Number(until))}` : ''}`,
+              expiryIn
+            ),
+            validation: expiryError,
+            $$field: $field =>
+              $Dropdown<bigint>({
+                $container: $defaultDropdownContainer(style({ display: 'flex', flex: 1, minWidth: '0' })),
+                $anchor: $field,
+                optionList: EXPIRY_OPTIONS,
+                $$option: map(period => $node($text(readableDuration(period))))
+              })({ select: selectExpiryTether() })
+          })({ change: typeExpiryTether() }),
+          $sliderField(
+            'Exit cap',
+            $exitCapExplainer,
+            $text(map(ratePercent, exitCap)),
+            $editorPercentSlider({ value: exitCap, disabled: just(false), error: map(c => c === 0, exitCap), ariaLabel: 'exit cap' })({
+              change: changeExitCapTether()
+            }),
+            'Sit out once this share of the fund is queued to exit',
+            map(c => (c === 0 ? 'At 0% you sit out every round' : null), exitCap)
+          )
+          ),
           $row(spacing.small, style({ justifyContent: 'flex-end', alignItems: 'center' }))(
-            ...(active
-              ? [$ButtonSecondary({ $container: $defaultMiniButtonSecondary, $content: $text('Leave') })({ click: clickLeaveTether() })]
-              : []),
+            ...(active === undefined ? [] : [$ButtonSecondary({ $container: $defaultMiniButtonSecondary, $content: $text('End mandate') })({ click: clickEndTether() })]),
             $ButtonPrimary({
               $container: $defaultMiniButtonPrimary,
-              disabled: map(p => p.cooldown === null || p.expiryIn === null || p.allocation >= 1, combine({ cooldown, expiryIn, allocation })),
-              $content: $text(map(d => (d ? 'Update in cart' : active ? 'Change' : 'Back this trader'), start(null, draft)))
+              disabled: map(p => {
+                const saved = p.draft === null ? active : p.draft.mandate
+                return (
+                  p.cooldown === null ||
+                  p.expiryIn === null ||
+                  p.allocation >= 1 ||
+                  Math.round(p.allocation * RATE) === 0 ||
+                  p.exitCap === 0 ||
+                  (saved !== undefined &&
+                    !p.edited &&
+                    BigInt(Math.round(p.skin * RATE)) === saved.skin &&
+                    BigInt(Math.round(p.allocation * RATE)) === saved.allocationRate &&
+                    BigInt(Math.round(p.exitCap * RATE)) === saved.exitCap &&
+                    p.cooldown === saved.cooldownPeriod)
+                )
+              }, combine({ cooldown, expiryIn, allocation, skin, exitCap, edited: expiryEdited, draft })),
+              $content: $text(map(d => (d !== null || active !== undefined ? 'Save' : 'Allocate to this fund'), start(null, draft)))
             })({ click: clickAddTether() })
           )
         ),
@@ -306,10 +407,26 @@ export const $MandateEditor = ({ master, existing, draft, needsDeposit }: I$Mand
           changeMandateDraft: merge(
             op(
               sampleMap(p => p, terms, clickAdd),
-              filter((p): p is { allocation: number; skin: number; cooldown: bigint; expiryIn: bigint } => p.cooldown !== null && p.expiryIn !== null && p.allocation < 1),
+              filter(
+                (p): p is { allocation: number; skin: number; exitCap: number; cooldown: bigint; expiryIn: bigint } =>
+                  p.cooldown !== null && p.expiryIn !== null && p.allocation < 1 && Math.round(p.allocation * RATE) > 0 && p.exitCap > 0
+              ),
               map(toDraft)
             ),
-            map(() => toDraft(null), clickLeave)
+            ...(active === undefined
+              ? []
+              : [
+                  op(
+                    clickEnd,
+                    map(
+                      (): IMandateDraft => ({
+                        kind: 'mandate',
+                        id: `mandate:${master}`,
+                        mandate: { master, skin: active.skin, allocationRate: active.allocationRate, exitCap: active.exitCap, cooldownPeriod: active.cooldownPeriod, expiry: 0n }
+                      })
+                    )
+                  )
+                ])
           )
         }
       ]

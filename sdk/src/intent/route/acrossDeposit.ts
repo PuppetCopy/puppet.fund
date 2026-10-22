@@ -1,27 +1,25 @@
-import { SWAP_PROVIDER } from '@puppet/contracts/const'
 import { type Address, type Client, concat, encodeFunctionData, getAddress, type Hex, pad, size } from 'viem'
 import { readContract } from 'viem/actions'
+import { PROTOCOL } from '@puppet/contracts/const'
 import { CompactError } from '../../compact/index.js'
 import type { ChainId } from '../../const/index.js'
+import { SWAP_PROVIDER } from '../../const/network.js'
 import { providerToken } from '../../state/tokenRegistry.js'
 
 export interface IAcrossTiming {
   quoteBuffer: number
   fillBuffer: number
-  fillMargin: number
 }
+
+const MIN_FILL_WINDOW_SEC = 120
+const FILL_DEADLINE_SKEW_SEC = 300
 
 const SPOKE_BUFFER_ABI = [
   { type: 'function', name: 'depositQuoteTimeBuffer', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint32' }] },
   { type: 'function', name: 'fillDeadlineBuffer', stateMutability: 'view', inputs: [], outputs: [{ type: 'uint32' }] }
 ] as const
 
-interface IAcrossBuffers {
-  quoteBuffer: number
-  fillBuffer: number
-}
-
-export async function readAcrossBuffers(client: Client, chainId: ChainId): Promise<IAcrossBuffers> {
+export async function readAcrossBuffers(client: Client, chainId: ChainId): Promise<IAcrossTiming> {
   const address = acrossSpokePoolOf(chainId)
   const [quoteBuffer, fillBuffer] = await Promise.all([
     readContract(client, { address, abi: SPOKE_BUFFER_ABI, functionName: 'depositQuoteTimeBuffer' }),
@@ -32,21 +30,21 @@ export async function readAcrossBuffers(client: Client, chainId: ChainId): Promi
 
 function acrossFillDeadline(timing: IAcrossTiming): number {
   const now = Math.floor(Date.now() / 1000)
-  if (timing.fillBuffer < timing.fillMargin) {
+  if (timing.fillBuffer < Number(PROTOCOL.maxIntentTtlSec) + MIN_FILL_WINDOW_SEC + FILL_DEADLINE_SKEW_SEC) {
     throw new CompactError(
       'ROUTE_UNAVAILABLE',
-      `across fillDeadlineBuffer ${timing.fillBuffer}s is shorter than the ${timing.fillMargin}s this intent stays mineable; no fill deadline can be quoted that survives the intent's own lifetime`,
+      `across fillDeadlineBuffer ${timing.fillBuffer}s is shorter than the ${PROTOCOL.maxIntentTtlSec}s an intent stays mineable plus ${MIN_FILL_WINDOW_SEC}s to fill and ${FILL_DEADLINE_SKEW_SEC}s of clock skew; no fill deadline can be quoted that survives the intent's own lifetime`,
       'hard'
     )
   }
-  return now + timing.fillBuffer
+  return now + timing.fillBuffer - FILL_DEADLINE_SKEW_SEC
 }
 
 export function acrossQuoteExpiry(timing: IAcrossTiming, quoteTimestamp: number): number {
   return quoteTimestamp + timing.quoteBuffer
 }
 
-export function verifyAcrossTiming(timing: IAcrossTiming, quoteTimestamp: number, fillDeadline: number): void {
+export function verifyAcrossTiming(timing: IAcrossTiming, quoteTimestamp: number, fillDeadline: number, mineableUntil: bigint): void {
   const now = Math.floor(Date.now() / 1000)
   if (quoteTimestamp > now) {
     throw new CompactError(
@@ -69,16 +67,16 @@ export function verifyAcrossTiming(timing: IAcrossTiming, quoteTimestamp: number
       'hard'
     )
   }
-  if (fillDeadline < now + timing.fillMargin) {
+  if (BigInt(fillDeadline) < mineableUntil + BigInt(MIN_FILL_WINDOW_SEC)) {
     throw new CompactError(
       'BAD_REQUEST',
-      `across fillDeadline ${fillDeadline} leaves less than ${timing.fillMargin}s of fill window, but this intent stays mineable until ${now + timing.fillMargin}; the deposit would land unfillable and refund on origin instead of bridging. Re-quote the route.`,
+      `across fillDeadline ${fillDeadline} leaves less than ${MIN_FILL_WINDOW_SEC}s of fill window after ${mineableUntil}, until when this intent stays mineable; the deposit could land unfillable and refund on origin instead of bridging. Re-quote the route.`,
       'soft'
     )
   }
 }
 
-const ACROSS_DEPOSIT_ABI = [
+export const ACROSS_DEPOSIT_ABI = [
   {
     type: 'function',
     name: 'deposit',
@@ -164,7 +162,7 @@ export interface IAcrossRouteFields {
   exclusivityParameter: number
 }
 
-const SUGGESTED_FEES_PATH = '/api/swap/across/suggested-fees'
+const SUGGESTED_FEES_PATH = '/suggested-fees'
 const UNSUPPORTED_LANE = /Unsupported token address/i
 const unsupportedLane = new Set<string>()
 

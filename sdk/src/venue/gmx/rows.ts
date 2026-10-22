@@ -9,7 +9,6 @@ export interface IGmxPositionRow {
   sizeInTokens: bigint
   collateralUsd: bigint
   collateralAmount: bigint
-  storedPnlUsd: bigint
   increasedAtTime: number
 }
 export type IGmxPositionProvider = (account: Address) => Promise<IGmxPositionRow[]>
@@ -22,6 +21,7 @@ export interface IGmxOrderRow {
   orderType: number
   sizeDeltaUsd: bigint
   collateralDeltaAmount: bigint
+  executionFee: bigint
   triggerPrice: bigint
   isFrozen: boolean
 }

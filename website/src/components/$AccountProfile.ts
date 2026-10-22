@@ -5,7 +5,7 @@ import { $column, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { $defaultAnchor, href } from 'aelea/ui-router'
 import type { Address } from 'viem'
-import { $anchor, softNavClick } from '@/ui-components'
+import { $anchor, $externalMark, softNavClick } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
 import { $jazzicon } from '../common/$avatar.js'
 import { $fundAvatar } from '../common/$fundAvatar.js'
@@ -39,7 +39,7 @@ export const $accountLabel = ({
   )
 }
 
-export const $fundProfile = (master: Address, cells: ICells, name: string | null, size = 28): I$Node => {
+export const $fundProfile = (master: Address, cells: ICells, name: string | null, ...$extra: I$Node[]): I$Node => {
   const url = href(routeSchema.traders.detail, { master })
   return $defaultAnchor(
     attr({ href: url }),
@@ -47,19 +47,20 @@ export const $fundProfile = (master: Address, cells: ICells, name: string | null
     style({ display: 'flex', alignItems: 'center', minWidth: '0', color: palette.message, textDecoration: 'none' }),
     softNavClick(url)
   )(
-    $fundAvatar(cells, size),
-    $column(style({ gap: '3px', minWidth: '0' }))(
+    $fundAvatar(cells),
+    $column(style({ gap: '3px', minWidth: '0', overflow: 'hidden' }))(
       ...(name === null
         ? []
         : [$node(style({ fontWeight: '600', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }))($text(name))]),
       $accountLabel({ address: master, primarySize: 0.85 })
-    )
+    ),
+    ...$extra
   )
 }
 
 export const $addressLink = (address: Address, size = 18): I$Node =>
   $anchor(
     attr({ href: `https://debank.com/profile/${address}`, target: '_blank', title: 'Portfolio on DeBank' }),
-    style({ display: 'flex', alignItems: 'center', gap: '6px', minWidth: '0', color: 'inherit', textDecoration: 'none' }),
+    style({ display: 'flex', alignItems: 'center', gap: '6px', minWidth: '0', color: 'inherit' }),
     stylePseudo(':hover', { opacity: '0.8' })
-  )($jazzicon(address, size), $node(style({ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }))($text(readableAddress(address))))
+  )($jazzicon(address, size), $node(style({ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }))($text(readableAddress(address))), $externalMark())

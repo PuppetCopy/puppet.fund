@@ -6,6 +6,16 @@ export default [
         "name": "_authority",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "_accountModule",
+        "type": "address",
+        "internalType": "contract AccountModule"
+      },
+      {
+        "name": "_maxFeeBps",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "nonpayable"
@@ -13,6 +23,38 @@ export default [
   {
     "type": "receive",
     "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "accountModule",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract AccountModule"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "authMap",
+    "inputs": [
+      {
+        "name": "user",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
+      }
+    ],
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -29,15 +71,39 @@ export default [
   },
   {
     "type": "function",
-    "name": "escrowedMap",
+    "name": "escrow",
     "inputs": [
       {
-        "name": "parent",
+        "name": "_owner",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "master",
+        "name": "_token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "escrowed_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "escrowedMap",
+    "inputs": [
+      {
+        "name": "owner",
         "type": "address",
         "internalType": "address"
       },
@@ -58,15 +124,44 @@ export default [
   },
   {
     "type": "function",
-    "name": "fulfilledMap",
+    "name": "feePaidMap",
     "inputs": [
       {
-        "name": "parent",
+        "name": "owner",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "master",
+        "name": "body",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "feePaid",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "fulfilledMap",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "body",
         "type": "address",
         "internalType": "address"
       },
@@ -87,22 +182,98 @@ export default [
   },
   {
     "type": "function",
-    "name": "pay",
+    "name": "heldMap",
     "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "held",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "maxFeeBps",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "refund",
+    "inputs": [
+      {
+        "name": "_owner",
+        "type": "address",
+        "internalType": "address"
+      },
       {
         "name": "_token",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "_to",
+        "name": "_gasLimit",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "returned_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "release",
+    "inputs": [
+      {
+        "name": "_owner",
         "type": "address",
         "internalType": "address"
       },
       {
-        "name": "_amount",
+        "name": "_body",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_total",
         "type": "uint256",
         "internalType": "uint256"
+      },
+      {
+        "name": "_feeTotal",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "_feeReceiver",
+        "type": "address",
+        "internalType": "address"
       },
       {
         "name": "_gasLimit",
@@ -115,6 +286,102 @@ export default [
   },
   {
     "type": "function",
+    "name": "releasedMap",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "released",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "requestReturn",
+    "inputs": [
+      {
+        "name": "_owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "_token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "returnAt_",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "returnAtMap",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "returnAt",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "returnedMap",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "returned",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "setAccess",
     "inputs": [
       {
@@ -123,65 +390,9 @@ export default [
         "internalType": "address"
       },
       {
-        "name": "_enabled",
-        "type": "bool",
-        "internalType": "bool"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setEscrowed",
-    "inputs": [
-      {
-        "name": "_parent",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_total",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "setFulfilled",
-    "inputs": [
-      {
-        "name": "_parent",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_master",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_token",
-        "type": "address",
-        "internalType": "address"
-      },
-      {
-        "name": "_total",
-        "type": "uint256",
-        "internalType": "uint256"
+        "name": "_selector",
+        "type": "bytes4",
+        "internalType": "bytes4"
       }
     ],
     "outputs": [],
@@ -209,8 +420,136 @@ export default [
   },
   {
     "type": "error",
+    "name": "Account__HeaderMismatch",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Account__NotDelegated",
+    "inputs": [
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Balance__InsufficientBalance",
+    "inputs": [
+      {
+        "name": "balance",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "required",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Balance__NothingToWithdraw",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "Balance__ZeroAmount",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Escrow__InvalidFulfil",
+    "inputs": [
+      {
+        "name": "fulfilled",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "submitted",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Escrow__ReturnNotReady",
+    "inputs": [
+      {
+        "name": "returnAt",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Escrow__Unfunded",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "balance",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "held",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Gate__InvalidModule",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Gate__InvalidRelayFeeBps",
+    "inputs": [
+      {
+        "name": "maxRelayFeeBps",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Intent__RelayFeeRatioExceeded",
+    "inputs": [
+      {
+        "name": "actual",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "maxBps",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
   },
   {
     "type": "error",
@@ -219,7 +558,7 @@ export default [
       {
         "name": "token",
         "type": "address",
-        "internalType": "contract IERC20"
+        "internalType": "address"
       }
     ]
   },
@@ -251,7 +590,7 @@ export default [
       {
         "name": "token",
         "type": "address",
-        "internalType": "contract IERC20"
+        "internalType": "address"
       },
       {
         "name": "receiver",

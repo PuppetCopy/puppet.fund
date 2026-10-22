@@ -1,14 +1,10 @@
-import { map, nowWith, switchLatest } from 'aelea/stream'
-import { state } from 'aelea/stream-extended'
-import { $element, $node, $text, attr, effectProp, type I$Node, style, stylePseudo } from 'aelea/ui'
+import { $element, $node, $text, attr, type I$Node, style, stylePseudo } from 'aelea/ui'
 import { $column, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
-import { $Link, href, pushUrl, type Route } from 'aelea/ui-router'
-import { $check, $copy, $icon, $throne, text } from '@/ui-components'
+import { $Link, type Route } from 'aelea/ui-router'
+import { $icon, $throne, softNavClick, text } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
 import { $puppetLogo } from '../common/$icons.js'
-import { promptInstallApp } from '../utils/pwaInstall.js'
-import { subject } from '../utils/subject.js'
 
 export const $stageHeader = (n: number, title: string): I$Node =>
   $row(spacing.default, style({ alignItems: 'center' }))(
@@ -71,88 +67,7 @@ export const $linkButton = (label: string, hrefValue: string, internal: boolean)
       cursor: 'pointer'
     })
   )
-  return internal ? a(attr({ href: hrefValue }))($text(label)) : a(attr({ href: hrefValue, target: '_blank' }))($text(label))
-}
-
-export const $terminal = (lines: string[], label = 'terminal'): I$Node => {
-  const copied = subject<boolean>()
-  return $column(
-    style({
-      border: `1px solid ${colorShade(palette.foreground, 30)}`,
-      borderRadius: '10px',
-      overflow: 'hidden'
-    })
-  )(
-    $row(
-      spacing.small,
-      style({
-        alignItems: 'baseline',
-        padding: '8px 14px',
-        color: palette.foreground,
-        fontSize: text.sm,
-        lineHeight: '1.5',
-        borderBottom: `1px solid ${colorShade(palette.foreground, 18)}`
-      })
-    )(
-      $node(style({ fontFamily: 'monospace', fontWeight: '700', flexShrink: '0' }))($text('>_')),
-      $node(style({ minWidth: '0', fontSize: text.xs }))($text(label))
-    ),
-    $node(
-      style({
-        position: 'relative',
-        padding: '12px 16px',
-        background: palette.background,
-        fontFamily: 'monospace',
-        fontSize: text.sm,
-        lineHeight: '1.7'
-      })
-    )(
-      $column(style({ paddingRight: '24px' }))(
-        ...lines.map(line => {
-          const [bin, ...rest] = line.split(' ')
-          return $row(style({ whiteSpace: 'pre-wrap', flexWrap: 'wrap' }))(
-            $node(style({ color: palette.foreground }))($text('$ ')),
-            $node(style({ color: palette.positive }))($text(bin)),
-            $node(style({ color: palette.message }))($text(rest.length ? ` ${rest.join(' ')}` : ''))
-          )
-        })
-      ),
-      $node(
-        attr({ role: 'button', 'aria-label': 'Copy command' }),
-        style({
-          position: 'absolute',
-          top: '8px',
-          right: '10px',
-          display: 'flex',
-          cursor: 'pointer',
-          opacity: '0.6'
-        }),
-        stylePseudo(':hover', { opacity: '1' }),
-        effectProp(
-          'onclick',
-          nowWith(() => () => {
-            navigator.clipboard
-              ?.writeText(lines.join('\n'))
-              .then(() => {
-                copied.push(true)
-                setTimeout(() => copied.push(false), 5_000)
-              })
-              .catch(() => {})
-          })
-        )
-      )(
-        switchLatest(
-          map(
-            isCopied =>
-              isCopied
-                ? $icon({ $content: $check, width: '15px', viewBox: '0 0 24 24', fill: palette.positive })
-                : $icon({ $content: $copy, width: '15px', viewBox: '0 0 24 24', fill: palette.foreground }),
-            state(false, copied.stream)
-          )
-        )
-      )
-    )
-  )
+  return internal ? a(attr({ href: hrefValue }), softNavClick(hrefValue))($text(label)) : a(attr({ href: hrefValue, target: '_blank' }))($text(label))
 }
 
 export const $pillAnchor = (filled: boolean, borderColor?: string) =>
@@ -192,7 +107,6 @@ export const $navPill = (label: string, route: Route, filled: boolean, borderCol
   $Link({ route, $content: $pillLabel(label, $glyph, filled), $anchor: $pillAnchor(filled, borderColor) })({})
 
 export const $launchCta = (): I$Node => {
-  const portfolioUrl = href(routeSchema.portfolio)
   return $row(
     spacing.default,
     style({
@@ -202,18 +116,8 @@ export const $launchCta = (): I$Node => {
       paddingTop: '4px'
     })
   )(
-    $pillAnchor(true)(
-      attr({ href: portfolioUrl }),
-      effectProp(
-        'onclick',
-        nowWith(() => (ev: MouseEvent) => {
-          if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.button !== 0) return
-          ev.preventDefault()
-          void promptInstallApp().finally(() => pushUrl(portfolioUrl))
-        })
-      )
-    )($pillLabel('Launch wallet', $puppetLogo, true)),
+    $navPill('Launch Fund', routeSchema.wallet, true, undefined, $puppetLogo),
     $node(style({ fontSize: text.xs, fontWeight: 'bold', color: palette.foreground }))($text('OR')),
-    $navPill('Explore traders', routeSchema.traders, false, palette.primary, $throne)
+    $navPill('Explore Funds', routeSchema.traders, false, palette.primary, $throne)
   )
 }

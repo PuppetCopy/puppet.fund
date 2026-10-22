@@ -1,11 +1,30 @@
-import { VIEM_CHAINS } from '@puppet/sdk/const'
+import { chainNameOf } from '@puppet/sdk/const'
 import { $element, $node, $text, attr, type I$Node, style } from 'aelea/ui'
 import { $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
+import chain1 from '../assets/chain/1.svg'
+import chain10 from '../assets/chain/10.svg'
+import chain137 from '../assets/chain/137.svg'
+import chain42161 from '../assets/chain/42161.svg'
+import chain43114 from '../assets/chain/43114.svg'
+import chain4326 from '../assets/chain/4326.svg'
+import chain4663 from '../assets/chain/4663.svg'
+import chain8453 from '../assets/chain/8453.svg'
 
-export const chainName = (id: number): string => VIEM_CHAINS.find(c => c.id === id)?.name ?? `Chain ${id}`
+export const chainName = (id: number): string => chainNameOf(id) ?? `Chain ${id}`
 
-const chainAssetSrc = (chainId: number): string => `/assets/chain/${chainId}.svg`
+const CHAIN_ICON: Record<number, string> = {
+  1: chain1,
+  10: chain10,
+  137: chain137,
+  4326: chain4326,
+  4663: chain4663,
+  8453: chain8453,
+  42161: chain42161,
+  43114: chain43114
+}
+
+const chainAssetSrc = (chainId: number): string | undefined => CHAIN_ICON[chainId]
 
 const px = (size: number | string): string => (typeof size === 'number' ? `${size}px` : size)
 

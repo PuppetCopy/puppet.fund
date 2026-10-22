@@ -1,0 +1,541 @@
+[
+  {
+    "title": "Rounds from your fund's key",
+    "lead": "Fund rounds open only from a device that holds your fund's key, and a fund's redemption goes on when one holder's payout is refused.",
+    "groups": [
+      {
+        "title": "Safety",
+        "changes": [
+          "Opening or allocating to a fund works only from a device that holds your fund's key, and tells you to restore the key on any other device.",
+          "Your actions wait only for your own account's records to catch up, never for a whole chain.",
+          "Value already in your fund when its first shares open counts as yours, so no later entrant shares in it.",
+          "A token that refuses one holder's payout no longer stalls a fund's redemption; that holder keeps their shares and can redeem again.",
+          "Sign out everywhere also ends every mandate, and 10 minutes later your wallet can withdraw each token straight from your account for 10 minutes.",
+          "App updates are approved by a public vote on Ethereum, and your device checks each one before it runs."
+        ]
+      },
+      {
+        "title": "Funds",
+        "changes": [
+          "Your first fund starts from one centered form: name it, pick its avatar, then connect or deposit right on it.",
+          "Wrapping or unwrapping ETH in your fund costs about a fifth of a swap's relay fee, so small amounts go through.",
+          "When a fund's value moves while an allocate is priced, the error says how far it moved and that submitting again prices it fresh.",
+          "End a mandate from its editor whenever you want a fund to stop allocating from your account.",
+          "Your share of your fund's redemption lands in your Puppet account.",
+          "A payout too small to cover its relay fee stays in the fund instead of going to fees, and its holder keeps those shares.",
+          "ETH you put in escrow is held as WETH.",
+          "Taking escrow back is two wallet steps: ask for it, then claim it a day later. Escrowing more cancels the request.",
+          "Allocate straight from escrow on any chain, with no bridge: it moves into your fund on that chain."
+        ]
+      },
+      {
+        "title": "Agents",
+        "changes": [
+          "This update clears your saved agents once: create them again and give each its new template.",
+          "An agent can no longer ask your wallet to sign; anything that needs your wallet runs from the app.",
+          "Your agent can run a venue's own actions, like Papertrade's, screened and simulated like yours."
+        ]
+      },
+      {
+        "title": "Fixed",
+        "changes": [
+          "Balances on your wallet page keep their order and stop flickering while they refresh.",
+          "History fits phone screens without scrolling sideways, and the fund page lays out cleanly on tablets.",
+          "The drawer shows the relay fee a fund swap actually pays.",
+          "Choosing an allocation's expiry shows when it really ends, which is never after the session that signs it.",
+          "Redeeming part of a fund that also holds value elsewhere goes through instead of failing at submit, and its preview shows exactly what it pays out.",
+          "Signing no longer hangs after the app opens, which sometimes needed a reload.",
+          "Your new fund keeps the name and avatar you chose, and the drawer shows them before you sign."
+        ]
+      }
+    ],
+    "approval": null
+  },
+  {
+    "title": "Fewer signature prompts",
+    "lead": null,
+    "groups": [
+      {
+        "title": "Fixed",
+        "changes": [
+          "Opening a fund takes two signatures again, or three when its deposit is bridged or swapped first.",
+          "GMX One-Click stays on once you enable it in this browser, instead of asking for the same signature again.",
+          "A fund's value counts the execution fee GMX holds for each open order, so placing a limit order no longer shows as a loss.",
+          "A fund that trades GMX through Express or One-Click counts its GMX positions in its value everywhere, even before its owner opens the app."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-17",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0xfFeDE4c88a72D4499C3f9F33CaACb7d820Be5bb7",
+      "tx": "0x7c0eafb64eb28e9f2b09cc79ea11ce52095226f5892542b7333ff4367da67df9"
+    }
+  },
+  {
+    "title": "Fees only on gains, agent templates",
+    "lead": "Each puppet now pays the performance fee only on its own gain, and every redemption pays out on OP.",
+    "groups": [
+      {
+        "title": "Exits",
+        "changes": [
+          "Every redemption pays out on OP, your own share included, and a redemption from another chain first bridges only what OP needs.",
+          "Each puppet pays the performance fee in cash when it exits, only on its own gain since it allocated: 90% to the master, 10% to the protocol.",
+          "Redeem shows each payout after its performance fee, and your row adds the fees you earn.",
+          "Redeeming from another chain sizes its bridge when you submit, from your fund's live value, and moves nothing if it no longer fits.",
+          "Redeem and Allocate let you sign a session right where they need one."
+        ]
+      },
+      {
+        "title": "Funds",
+        "changes": [
+          "Allocate holds your own capital in escrow on OP as on every other chain, and returning unused escrow pays your wallet.",
+          "Set a mandate's skin to Uncapped to join with no cap from the master's stake.",
+          "Relay fees cover only gas, with no protocol fee on each action.",
+          "GMX opening and closing fees are now 10% lower for funds, down from 25%, and GMX pays Puppet another 15% of them as referral revenue.",
+          "Tokens your fund holds on Hyperliquid's spot market count in its value at what they would sell for."
+        ]
+      },
+      {
+        "title": "Agents",
+        "changes": [
+          "Create as many agents as you like, each with its own name and avatar.",
+          "Pick a template for an agent in open formats any coding agent reads, from one AGENTS.md to an Agent Skills folder or a Bun program an LLM reviews and improves, and copy or download it.",
+          "A running agent shows up on its own while your wallet page is open, and one session lets every agent act.",
+          "Hyperliquid trading keys your agent approves get Puppet's fee discount, as keys approved through a dApp do.",
+          "An agent acts with your session, every request screened and simulated like your own, so run it where you would keep your keys.",
+          "This update resets your agent link once: create an agent and give it its new template."
+        ]
+      },
+      {
+        "title": "Wallet",
+        "changes": [
+          "One Sessions menu lists this browser, your linked dApps and your agents.",
+          "Your session survives a reload or a restart until it expires or you sign out.",
+          "Signing out also disconnects your wallet, in every open window.",
+          "Agree to the beta terms once, from Read Terms, before your first submit; your browser remembers it.",
+          "Open your fund's public page from the account menu.",
+          "Value charts open on one week.",
+          "Uniswap trades only route through pools without hooks, so no pool can take a hidden cut of your fund's swaps."
+        ]
+      },
+      {
+        "title": "Fixed",
+        "changes": [
+          "Redeeming from another chain works when you are your fund's only holder.",
+          "Allocate and Redeem use the session you already signed instead of asking again.",
+          "Linking your agent no longer fails when you take more than 10 seconds to sign its session.",
+          "A dApp or agent request that would fail is refused before you sign, with the reason, even when it sets its own gas.",
+          "Offline, your wallet keeps your last values and marks the ones it could not refresh, instead of showing error cards.",
+          "Withdrawing from Hyperliquid no longer dips your fund's PnL and ROI while the money travels back to your fund.",
+          "Your wallet shows an action's result as soon as it lands, without a reload.",
+          "A bridge still in flight no longer shows as an extra token in your wallet.",
+          "Swapping away all of a Valuable ERC-20 clears its row from your wallet."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-16",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0x5C389415B8C6080a544083fF4B8d4973A14b5515",
+      "tx": "0x02e81fedf4141a4cd06fa99d1c9addd687c7eb1240eaea8030872c3e0744fe49"
+    }
+  },
+  {
+    "title": "Many funds, one wallet",
+    "lead": null,
+    "groups": [
+      {
+        "title": "Wallet",
+        "changes": [
+          "Run several funds from one wallet: pick the active one from your fund's button on the wallet page, or create another from the same menu.",
+          "Open the brain button to link your agent, connect it, and see what it may do and until when.",
+          "In the avatar editor, click a cell you just painted to undo it.",
+          "The installed app opens offline, from the release it last verified.",
+          "Long-press the app icon for Wallet and Agents shortcuts.",
+          "This update resets your display preferences once, such as hidden balances and the leaderboard sort, and your first fund load syncs again."
+        ]
+      },
+      {
+        "title": "Fixed",
+        "changes": [
+          "A fund's page shows its latest value and how long ago it was valued, the same as the leaderboard."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-12",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0x8e966d2eE44b090758cE9298509B343942b67BD3",
+      "tx": "0xe4fd4dcb7ebbe3f58f2633b2f7175a419c828976969dde46fe7019fa9448ee5a"
+    }
+  },
+  {
+    "title": "Allocate across chains",
+    "lead": null,
+    "groups": [
+      {
+        "title": "Funds",
+        "changes": [
+          "Allocate on another chain from the same token held elsewhere, in one wallet transaction; the bridge and escrow follow by themselves."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-10",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0x1358A81912965235ecDe3678C9b139d5aa3d0830",
+      "tx": "0x8cf7280b4ecd3455457772b5e2b445d562204effda37da8daf3fbf209cfff0ab"
+    }
+  },
+  {
+    "title": "Wallet home, shareable puppets",
+    "lead": null,
+    "groups": [
+      {
+        "title": "Wallet",
+        "changes": [
+          "Your fund has its own wallet page, and the installed app opens straight into it.",
+          "Your account and your fund are separate pages, with no tabs to switch.",
+          "Create your fund right in your wallet, and learn to open positions on the new Quickstart page.",
+          "Deposit into a venue from any token your fund holds: it swaps first, then deposits all that arrives.",
+          "Polymarket deposits reach Polygon in one bridge from any chain, and withdrawals land in your fund there.",
+          "When Puppet refuses a dApp's request, or it fails after you approve, a card says why.",
+          "Approve or decline a dApp's request right from its notification.",
+          "A dApp's request opens the link panel in your wallet, and Later keeps it waiting on a badge."
+        ]
+      },
+      {
+        "title": "Sharing",
+        "changes": [
+          "Sharing a puppet's page link shows a preview card with what it holds in funds and the funds it backs."
+        ]
+      },
+      {
+        "title": "Funds",
+        "changes": [
+          "The Performance Index now weighs results by the capital behind them: new money joins at 1.00."
+        ]
+      },
+      {
+        "title": "Fixed",
+        "changes": [
+          "Each fee names who charges it, and venue fees now count in the total, like Hyperliquid's $1 per withdrawal.",
+          "A fund with everything in a venue can still sign, so it can activate or withdraw what it holds there.",
+          "A slow transaction is never reported as failed or sent twice, and dApps get its hash as soon as it is sent.",
+          "dApp links follow the wallet window you use, and a request never prompts twice.",
+          "When a price cannot be loaded, amounts say so instead of showing a dash, and fee and minimum checks wait or explain instead of passing.",
+          "A fund's live value no longer jumps right after a venue deposit."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-10",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0xbF1F4eFF5871D328CC8ee32850cd2Abe6CB49E2a",
+      "tx": "0x414476077bac4f37002aae7c123de561faa51cd9f775a17a07df0a132d82db10"
+    }
+  },
+  {
+    "title": "Smoother allocating, accurate share links",
+    "lead": null,
+    "groups": [
+      {
+        "title": "Fixed",
+        "changes": [
+          "Allocate offers only the tokens it can move into your fund, so picking POL on Polygon no longer fails.",
+          "Shared fund links name the PnL window their card shows."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-07",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0x862BdEb6Fbb38F4E1c0DA766D301a11B941C876c",
+      "tx": "0x4be56b1b970155545e3433256e5ec2636043a49a0066fba319eec45e1aa55b48"
+    }
+  },
+  {
+    "title": "Straight to the venue",
+    "lead": null,
+    "groups": [
+      {
+        "title": "Venues",
+        "changes": [
+          "Pear is no longer available through the dApp link; trade on Hyperliquid directly."
+        ]
+      },
+      {
+        "title": "Trading",
+        "changes": [
+          "Established tokens your fund buys show their logo, drawn like Puppet's other token icons."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-06",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0x13F9ae94780b0ADe5c02E68D91162189543Ca7DF",
+      "tx": "0x9c96ef9d52d7111bc325db8485d9faa5c01e25d31cd29855064512594469e421"
+    }
+  },
+  {
+    "title": "Exact fees, stock tokens, cyber apes",
+    "lead": null,
+    "groups": [
+      {
+        "title": "Trading",
+        "changes": [
+          "Swap and bridge fees show their exact cost, like $0.02 (0.06%); a swap between different tokens reads ≈.",
+          "Tokens your fund buys through Uniswap, like Robinhood stock tokens, show as Uniswap positions with their value and PnL, fees included."
+        ]
+      },
+      {
+        "title": "Avatars",
+        "changes": [
+          "1 in 16 accounts now wears a cyber ape instead of a robot."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-06",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0xA91e409B50C1fD51DA7a4b29649c80dd461FcfFA",
+      "tx": "0x886411cc3bd3f75256ea958196aae864ba1a9a38cdb70da81568b983309507e6"
+    }
+  },
+  {
+    "title": "Trade on Pear, smoother on small screens",
+    "lead": null,
+    "groups": [
+      {
+        "title": "Venues",
+        "changes": [
+          "Pear works through the dApp link, trading your fund's Hyperliquid account; fund it with Puppet's Hyperliquid Deposit."
+        ]
+      },
+      {
+        "title": "Fixed",
+        "changes": [
+          "The update prompt scrolls on small screens instead of being cut off.",
+          "Leaderboard fund names show at once, without waiting for your own account to load.",
+          "Your account chart no longer fails when you hold a token without a price; it draws the history up to that point."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-05",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0xC7ab23AE3a74f687382d5328027A5A42E8B5339C",
+      "tx": "0x22b494699ad98cd92ed50108d9c6da059688a01ebea7cd166605e633736788a5"
+    }
+  },
+  {
+    "title": "Lower trading fees, finer charts",
+    "lead": null,
+    "groups": [
+      {
+        "title": "Trading",
+        "changes": [
+          "GMX opening and closing fees are currently 25% lower for every fund, with nothing to set up.",
+          "GMX orders show their fee discount before you approve them.",
+          "Hyperliquid fees are currently 4% lower on a fund's first $25M of volume, applied when it enables trading there."
+        ]
+      },
+      {
+        "title": "Performance",
+        "changes": [
+          "PnL charts draw every recorded step, so longer timeframes show their real shape.",
+          "The leaderboard's puppet list shows each puppet's share, value and mandate, as the fund page does.",
+          "Share index shows its change since the fund opened.",
+          "PnL and Share index tooltips explain their figures in short lines.",
+          "Dollar amounts show thousands separators.",
+          "Fund page stats line up in an even grid."
+        ]
+      },
+      {
+        "title": "Fixed",
+        "changes": [
+          "No false update warning while a new version is still rolling out.",
+          "Hyperliquid entry and liquidation prices read as dollar amounts.",
+          "Pasting a dApp link keeps the link panel open while the dApp connects.",
+          "Disconnect works even after your wallet already ended its session.",
+          "Connect on the Account page opens the wallet list in a popover.",
+          "WalletConnect shows a loading spinner while its code prepares, and never an expired code on retry.",
+          "Wallet apps to open Puppet in are listed one per line, with their icons.",
+          "Create your fund in the dApp link panel goes to fund setup."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-05",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0x597F2Fd19F26Bb85fD889E57e1cde2F6a75E91C7",
+      "tx": "0xdc3bdabe7e383b2b1326f2a57db7fd1a052a7054c65a631d7d5197defda8fe33"
+    }
+  },
+  {
+    "title": "Clearer updates",
+    "lead": "Each update now leads with what is new and names the contract that approved it.",
+    "groups": [
+      {
+        "title": "Updates",
+        "changes": [
+          "New versions arrive as a card at the bottom, with Update now or Later.",
+          "Each update shows the HubGate contract that approved it, linked to the explorer.",
+          "The release log shows when the version you run was approved, and by which contract."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-05",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0xcF4D998A8A224208B328C69363BDda5a7dde66F7",
+      "tx": "0x75943535d97a1321c964030d83775659c642ff77f952082a4b510a5b7b00d25a"
+    }
+  },
+  {
+    "title": "Truer charts, fresher leaderboard",
+    "lead": null,
+    "groups": [
+      {
+        "title": "Performance",
+        "changes": [
+          "PnL charts span the whole timeframe you pick again.",
+          "Share index starts at 1.00 and fund value at its opening amount on every timeframe.",
+          "PnL and Share index agree on when they were last valued.",
+          "Your own rounds no longer show in PnL as a brief loss and gain."
+        ]
+      },
+      {
+        "title": "Funds",
+        "changes": [
+          "Fund value is right after a redemption finishes.",
+          "The top funds on the leaderboard refresh their value every five minutes."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-05",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0x771708A89a2192ab15d88507dA1aE4A9B211940C",
+      "tx": "0x5f77acea49ceffeef834f584e5bee956fa2dae0388b0ae5f65297b590ed55863"
+    }
+  },
+  {
+    "title": "Simpler exits, clearer raises",
+    "lead": null,
+    "groups": [
+      {
+        "title": "Exits",
+        "changes": [
+          "Redeem in ETH, USDC or USDT from any chain your fund holds them on; any other token is swapped to ETH first. The exit queue is paid first, then every stake alike.",
+          "Redeem sits above your fund's holders.",
+          "Each queued exit shows its payout after fees.",
+          "Before you redeem, see who gets paid and what OP must cover.",
+          "When OP is short, move funds there in one step.",
+          "A redemption pays everyone at one price and finishes paying the rest by itself.",
+          "Join your own exit queue with up to the share of your stake the queue takes.",
+          "Sell any time: an open redemption pays your part first.",
+          "Every holder a redemption pays carries the same small relay fee."
+        ]
+      },
+      {
+        "title": "Your fund",
+        "changes": [
+          "See what puppets can bring into your next round, per token, and Allocate from there.",
+          "Holders show their deposit, mandate rules and what they can add to the next round.",
+          "Your Puppet history shows round contributions next to the deposits that funded them.",
+          "Each puppet has a public profile with its value, returns and funds, opened from a fund's holders.",
+          "The public fund page shows a share index starting at 1.00.",
+          "Your performance fee arrives as fund shares on gains above your fund's high-water mark, with nothing to claim.",
+          "Opening a fund takes two signatures: your fund key and one session that names your fund.",
+          "Compact history with links to the explorer."
+        ]
+      },
+      {
+        "title": "Venues",
+        "changes": [
+          "Value and PnL per venue, with side, leverage and return for perps.",
+          "Standing allowances listed with Revoke, and shown on the public fund page.",
+          "One live sync dot for your fund, refreshed every 5 minutes.",
+          "Linked venues show a WalletConnect badge you can disconnect.",
+          "Fund balances include what a venue sends back, once the owner's sync sees it.",
+          "Over 30 more token icons and new GMX and Uniswap logos."
+        ]
+      },
+      {
+        "title": "Safety",
+        "changes": [
+          "Approvals a trade leaves behind reset to zero.",
+          "GMX One-Click works at its default settings.",
+          "Venue withdrawals stop at what the venue reports.",
+          "ETH and WETH convert one to one.",
+          "A swap fee never shows as a gain; costs under 0.1% read as < 0.1%."
+        ]
+      },
+      {
+        "title": "Updates",
+        "changes": [
+          "Each update lists what changed by topic.",
+          "A release log opens from Connections."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-05",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0xE3c287F225753F1cA18E0e4ee53fA7a99015d7F8",
+      "tx": "0x60a73aef0d5d9cea645b76e35f16b470f36d46ea5af49b7efc9119a4e1f5ce19"
+    }
+  },
+  {
+    "title": "Verified updates and fairer ETH exits",
+    "lead": null,
+    "groups": [
+      {
+        "title": null,
+        "changes": [
+          "Updates install only after on-chain approval, and this prompt lists what changed.",
+          "Agent link: connect an agent your LLM builds from your own instruction set, limited to the scopes you approve.",
+          "Masters can pay part of the exit queue, first in, first out.",
+          "A master's own exit pays the whole exit queue first.",
+          "Exit-queue payments show their relay fee as a share of what they pay.",
+          "Cross-chain moves start at $1.",
+          "Retrying no longer asks your wallet to sign what it already signed.",
+          "Each mandate shows its worth, return and any queued exit.",
+          "The Master chart shows your fund's total value.",
+          "Portfolio remembers whether you last opened Puppet or Master.",
+          "A new home page shows how trading and allocating work.",
+          "Fund values are measured in ETH on chain and shown in USD.",
+          "Exits pay out in ETH.",
+          "The performance fee applies only after your capital has come back.",
+          "When a master takes value out, every puppet is paid the same fraction.",
+          "Mandate limits count your whole position in a fund, not just each round.",
+          "Polygon is supported, and Polymarket is a screened venue.",
+          "Tokens with a Uniswap market are valued at what they could actually be sold for."
+        ]
+      }
+    ],
+    "approval": {
+      "date": "2026-10-01",
+      "contract": "HubGate implementation",
+      "chainId": 10,
+      "address": "0x8DBeF65911Bd470e909b309626D7c48e899C1c22",
+      "tx": "0xfaf7936ae31089325d019a137236aa7aa2e566eaa096e372e306cd3dd092dd05"
+    }
+  }
+]

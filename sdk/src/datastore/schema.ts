@@ -7,10 +7,10 @@ export interface IColumn<T = unknown, Opt extends boolean = false, Ix extends bo
   sqlType: 'text' | 'numeric' | 'integer'
   encode(v: T): string | number
   parse(raw: unknown): T
-  flags: { pk: boolean; indexed: boolean; optional: boolean }
+  flags: { pk: boolean; indexed: boolean; sorted: boolean; optional: boolean }
 }
 
-type IColumnType = 'text' | 'hex' | 'address' | 'bigint' | 'int' | 'bool' | 'bigint[]' | 'int[]' | 'hex[]'
+type IColumnType = 'text' | 'hex' | 'address' | 'bigint' | 'int' | 'bool' | 'bigint[]' | 'int[]' | 'hex[]' | 'text[]'
 
 interface ITypeMap {
   text: string
@@ -22,6 +22,7 @@ interface ITypeMap {
   'bigint[]': bigint[]
   'int[]': number[]
   'hex[]': Hex[]
+  'text[]': string[]
 }
 
 interface ICodec<T> {
@@ -43,19 +44,20 @@ const codecs: { [K in IColumnType]: ICodec<ITypeMap[K]> } = {
     parse: v => (v as (string | number)[]).map(x => BigInt(x))
   },
   'int[]': { sqlType: 'text', encode: v => JSON.stringify(v), parse: v => v as number[] },
-  'hex[]': { sqlType: 'text', encode: v => JSON.stringify(v), parse: v => v as Hex[] }
+  'hex[]': { sqlType: 'text', encode: v => JSON.stringify(v), parse: v => v as Hex[] },
+  'text[]': { sqlType: 'text', encode: v => JSON.stringify(v), parse: v => v as string[] }
 }
 
 export function t<const Ty extends IColumnType, const Opt extends boolean = false, const Ix extends boolean = false>(
   type: Ty,
-  opts?: { pk?: boolean; optional?: Opt; indexed?: Ix }
+  opts?: { pk?: boolean; optional?: Opt; indexed?: Ix; sorted?: boolean }
 ): IColumn<ITypeMap[Ty], Opt, Ix> {
   const codec = codecs[type] as ICodec<ITypeMap[Ty]>
   return {
     sqlType: codec.sqlType,
     encode: codec.encode,
     parse: codec.parse,
-    flags: { pk: opts?.pk ?? false, indexed: opts?.indexed ?? false, optional: opts?.optional ?? false }
+    flags: { pk: opts?.pk ?? false, indexed: opts?.indexed ?? false, sorted: opts?.sorted ?? false, optional: opts?.optional ?? false }
   }
 }
 
@@ -89,6 +91,12 @@ export function table<Cols extends IColumns>(
 export const isTable = (v: unknown): v is ITable<IColumns> =>
   typeof v === 'object' && v !== null && (v as Record<symbol, unknown>)[TABLE] === true
 
+export function rowKey<Cols extends IColumns>(table: ITable<Cols>, row: InferRow<Cols>): string {
+  if (table.key) return table.key(row)
+  const pk = Object.keys(table.columns).find(k => table.columns[k].flags.pk) ?? 'id'
+  return (row as Record<string, unknown>)[pk] as string
+}
+
 type IFilter<V> = V | { in: readonly V[] } | { gte: number } | { lte: number }
 export type IWhere<Cols extends IColumns> = { [K in keyof Cols]?: IFilter<ColType<Cols[K]>> }
 
@@ -98,6 +106,7 @@ export interface IQuery<Cols extends IColumns> {
   orderBy?: { col: keyof Cols & string; dir?: 'asc' | 'desc' }
   limit?: number
   offset?: number
+  after?: string
 }
 
 const isOp = (f: unknown): f is { in?: readonly unknown[]; gte?: number; lte?: number } =>

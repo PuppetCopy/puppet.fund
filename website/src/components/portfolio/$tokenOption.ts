@@ -4,8 +4,8 @@ import type { ChainId } from '@puppet/sdk/const'
 import { isNativeToken, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
 import { symbolOf, wrappedNativeAddressOf } from '@puppet/sdk/state'
-import { combine, constant, filter, type IStream, just, map, merge, op, start, switchLatest, switchMap } from 'aelea/stream'
-import { type IBehavior, multicast, state } from 'aelea/stream-extended'
+import { combine, combineMap, constant, filter, type IStream, just, map, merge, op, skipRepeatsWith, start, switchLatest, switchMap, take } from 'aelea/stream'
+import { type IBehavior, multicast, PromiseStatus, type PromiseStateDone, state } from 'aelea/stream-extended'
 import {
   $node,
   $text,
@@ -22,19 +22,17 @@ import { type Address, formatUnits, type Hex, isAddressEqual } from 'viem'
 import {
   $amountDisplay,
   $check,
-  $icon,
-  $inlineSpinner,
-  $intermediatePromise,
-  $labeledDivider,
-  $loadingValue,
-  $spinner,
-  $wallet,
   fadeInX,
+  $icon,
+  $labeledDivider,
+  $intermediateText,
+  intermediateState,
+  maskBalance,
   text
 } from '@/ui-components'
 import { $chainIcon, $tokenWithChainBadge, chainName } from '../../common/$chain.js'
-import { $tokenIcon, $tokenProfile, $tokenProfileStub } from '../../common/$common.js'
-import { formatUsd } from '../../io/price.js'
+import { $tokenIcon, $tokenProfile, $intermediateTokenProfile } from '../../common/$common.js'
+import { formatUsd, usdOf } from '../../io/price.js'
 import {
   $breadcrumbSearchHeader,
   $closeButton,
@@ -52,20 +50,21 @@ export interface ITokenInputOption {
   address: Address
   token: Hex
   balance: bigint | null
+  shown?: IStream<Promise<bigint>>
   decimals: number
-  usdValue?: IStream<string>
-  usd?: bigint | null
+  price?: IStream<Promise<bigint | null>>
   disabled?: boolean
   selected?: boolean
+  caption?: string
 }
 
 export interface ITokenRowDisplay {
   symbol: string
   title?: string
   chainId?: number
-  amount: string
+  amount: IStream<Promise<string> | string> | string
   hideBalances: IStream<boolean>
-  usd?: IStream<string>
+  usd?: IStream<Promise<string> | string>
   subtitle?: string | I$Node
   subtitleColor?: string
 }
@@ -109,14 +108,19 @@ export const $tokenBalanceRow = (r: ITokenRowDisplay): I$Node => {
           align: 'flex-end',
           usdFontSize: text.sm
         })
-      : $node(style({ fontSize: text.sm, color: palette.foreground }))($text(r.amount))
+      : $node(style({ fontSize: text.sm, color: palette.foreground }))(typeof r.amount === 'string' ? $text(r.amount) : $intermediateText(maskBalance(r.amount, r.hideBalances)))
   )
 }
 
-export const $optionRow = (hideBalances: IStream<boolean>, opt: ITokenInputOption, display: { title: string; subtitle: string }): I$Node => {
+export const $optionRow = (hideBalances: IStream<boolean>, opt: ITokenInputOption, display: { title: string; subtitle: string }, usd: IStream<Promise<string> | string>): I$Node => {
   const hasBalance = opt.balance !== null && opt.balance > 0n
+  const unit = { decimals: opt.decimals, symbol: opt.symbol }
   const balanceText =
-    opt.balance === null ? '-' : readableTokenAmountLabel({ decimals: opt.decimals, symbol: opt.symbol }, opt.balance)
+    opt.shown !== undefined
+      ? map(shown => shown.then(balance => readableTokenAmountLabel(unit, balance)), opt.shown)
+      : opt.balance === null
+        ? '-'
+        : readableTokenAmountLabel(unit, opt.balance)
   return $row(
     spacing.small,
     style({
@@ -124,7 +128,7 @@ export const $optionRow = (hideBalances: IStream<boolean>, opt: ITokenInputOptio
       borderRadius: '10px',
       flex: 1,
       alignItems: 'center',
-      opacity: opt.disabled ? '0.4' : hasBalance ? '1' : '0.5',
+      opacity: opt.disabled ? '0.4' : hasBalance || (opt.shown !== undefined && opt.balance === null) ? '1' : '0.5',
       cursor: opt.disabled ? 'not-allowed' : 'pointer'
     })
   )(
@@ -136,7 +140,7 @@ export const $optionRow = (hideBalances: IStream<boolean>, opt: ITokenInputOptio
       amount: balanceText,
       hideBalances,
       subtitleColor: hasBalance && !opt.disabled ? palette.primary : undefined,
-      usd: opt.balance !== null ? opt.usdValue : undefined
+      usd: (opt.shown !== undefined || opt.balance !== null) && opt.price !== undefined ? usd : undefined
     }),
     ...(opt.selected ? [$icon({ $content: $check, viewBox: '0 0 24 24', fill: palette.primary, size: '14px' })] : [])
   )
@@ -147,41 +151,17 @@ export const $swapGroupDivider = (label: string): I$Node =>
     $labeledDivider($node(style({ fontSize: text.xs }))($text(label)))
   )
 
-export const decorateOptionList = (
-  options: ITokenInputOption[],
-  selected: { chainId: ChainId; address: Address },
-  priceOf: (opt: ITokenInputOption) => bigint | null,
-): ITokenInputOption[] => {
-  const usdRaw = (opt: ITokenInputOption): bigint | null => {
-    if (opt.balance === null) return null
-    const price = priceOf(opt)
-    if (price === null) return null
-    return opt.balance * price
-  }
-  const usdOf = (opt: ITokenInputOption): number => {
-    const usd = usdRaw(opt)
-    return usd === null ? 0 : Number(formatUnits(usd, USD_PRICE_DECIMALS))
-  }
-  options.sort(
-    (a, b) => usdOf(b) - usdOf(a) || Number(a.disabled ?? false) - Number(b.disabled ?? false)
-  )
-  return options.map(opt => ({
-    ...opt,
-    usd: usdRaw(opt),
-    selected: opt.chainId === selected.chainId && isAddressEqual(opt.address, selected.address)
-  }))
-}
+const optionKey = (o: ITokenInputOption): string => `${o.chainId}:${o.address}`
 
 export interface ITokenSymbolGroup {
   symbol: string
   options: ITokenInputOption[]
-  usd: bigint | null
   balance: bigint | null
   selected: boolean
   disabled: boolean
 }
 
-export const aggregateBySymbol = (list: readonly ITokenInputOption[]): ITokenSymbolGroup[] => {
+export const aggregateBySymbol = (list: readonly ITokenInputOption[], ranks: ReadonlyMap<string, number>): ITokenSymbolGroup[] => {
   const bySymbol = new Map<string, ITokenInputOption[]>()
   for (const opt of list) {
     const asset = symbolOf(opt.chainId, opt.token)
@@ -189,23 +169,58 @@ export const aggregateBySymbol = (list: readonly ITokenInputOption[]): ITokenSym
     if (group) group.push(opt)
     else bySymbol.set(asset, [opt])
   }
-  const groups = [...bySymbol.entries()].map(([symbol, options]): ITokenSymbolGroup => ({
-    symbol,
-    options,
-    usd: options.reduce<bigint | null>((sum, o) => {
-      if (sum === null || o.balance === null) return null
-      if (o.balance === 0n) return sum
-      return o.usd === null || o.usd === undefined ? null : sum + o.usd
-    }, 0n),
-    balance: options.reduce<bigint | null>((sum, o) => (sum === null || o.balance === null ? null : sum + o.balance), 0n),
-    selected: options.some(o => o.selected),
-    disabled: options.every(o => o.disabled)
-  }))
-  groups.sort((a, b) => {
-    const usdNum = (g: (typeof groups)[number]) => (g.usd === null ? 0 : Number(formatUnits(g.usd, USD_PRICE_DECIMALS)))
-    return usdNum(b) - usdNum(a)
-  })
-  return groups
+  const rankOf = (g: ITokenSymbolGroup): number => g.options.reduce((sum, o) => sum + (ranks.get(optionKey(o)) ?? 0), 0)
+  return [...bySymbol.entries()]
+    .map(([symbol, options]): ITokenSymbolGroup => ({
+      symbol,
+      options,
+      balance: options.reduce<bigint | null>((sum, o) => (sum === null || o.balance === null ? null : sum + o.balance), 0n),
+      selected: options.some(o => o.selected),
+      disabled: options.every(o => o.disabled)
+    }))
+    .sort((a, b) => rankOf(b) - rankOf(a) || Number(a.disabled) - Number(b.disabled))
+}
+
+const optionUsd = (o: ITokenInputOption): IStream<Promise<string> | string> => {
+  const balance = o.balance
+  if (o.price === undefined) return just('-')
+  if (o.shown !== undefined) return combineMap((shown, at) => shown.then(held => usdOf(held, at)), o.shown, o.price)
+  return balance === null ? just('-') : map(at => usdOf(balance, at), o.price)
+}
+
+const shownOf = (g: ITokenSymbolGroup): IStream<Promise<bigint>>[] | null =>
+  g.options.every(o => o.shown !== undefined) ? g.options.map(o => o.shown!) : null
+
+const groupUsd = (g: ITokenSymbolGroup): IStream<Promise<string> | string> => {
+  const shown = shownOf(g)
+  if (shown !== null) {
+    const prices = g.options.flatMap(o => (o.price === undefined ? [] : [o.price]))
+    if (prices.length < g.options.length) return just('-')
+    return combineMap(
+      (...answers: Promise<bigint | null>[]) =>
+        Promise.all(answers).then(values => {
+          const at = values.slice(shown.length)
+          const sum = values
+            .slice(0, shown.length)
+            .reduce<bigint | null>((total, held, i) => (total === null || held === 0n ? total : held === null || at[i] === null ? null : total + held * at[i]!), 0n)
+          return sum === null ? '-' : formatUsd(sum, 1n)
+        }),
+      ...shown,
+      ...prices
+    )
+  }
+  const held = g.options.filter(o => o.balance !== 0n)
+  const priced = held.flatMap(o => (o.balance === null || o.price === undefined ? [] : [{ balance: o.balance, price: o.price }]))
+  if (priced.length < held.length) return just('-')
+  if (priced.length === 0) return just(formatUsd(0n, 1n))
+  return combineMap(
+    (...ats: Promise<bigint | null>[]) =>
+      Promise.all(ats.map((at, i) => at.then(known => (known === null ? null : priced[i]!.balance * known)))).then(values => {
+        const sum = values.reduce<bigint | null>((total, v) => (total === null || v === null ? null : total + v), 0n)
+        return sum === null ? '-' : formatUsd(sum, 1n)
+      }),
+    ...priced.map(each => each.price)
+  )
 }
 
 const fundedOptions = (g: ITokenSymbolGroup): ITokenInputOption[] => g.options.filter(o => o.balance !== null && o.balance > 0n)
@@ -228,29 +243,33 @@ const directPick = (g: ITokenSymbolGroup): ITokenInputOption | null => {
   return funded.length === 1 && !funded[0].disabled ? funded[0] : null
 }
 
-export const $symbolGroupRow = (hideBalances: IStream<boolean>, g: ITokenSymbolGroup): I$Node => {
-  const hasBalance = fundedOptions(g).length > 0
+const groupBalanceText = (g: ITokenSymbolGroup, balances: readonly (bigint | null)[]): string => {
   const held = new Map<string, { decimals: number; amount: bigint }>()
-  for (const o of g.options) {
-    if (o.balance !== null && o.balance > 0n) {
-      held.set(o.symbol, { decimals: o.decimals, amount: (held.get(o.symbol)?.amount ?? 0n) + o.balance })
-    }
-  }
+  g.options.forEach((o, i) => {
+    const balance = balances[i]
+    if (balance !== undefined && balance !== null && balance > 0n) held.set(o.symbol, { decimals: o.decimals, amount: (held.get(o.symbol)?.amount ?? 0n) + balance })
+  })
   const parts = [...held]
     .sort(([a], [b]) => Number(b === g.symbol) - Number(a === g.symbol))
     .map(([symbol, h]) => readableTokenAmountLabel({ decimals: h.decimals, symbol }, h.amount))
+  return parts.length === 0 ? readableTokenAmountLabel({ decimals: g.options[0].decimals, symbol: g.symbol }, 0n) : parts.join(' + ')
+}
+
+export const $symbolGroupRow = (hideBalances: IStream<boolean>, g: ITokenSymbolGroup, usd: IStream<Promise<string> | string>): I$Node => {
+  const hasBalance = fundedOptions(g).length > 0
+  const shown = shownOf(g)
   const balanceText =
-    g.balance === null
-      ? '-'
-      : parts.length === 0
-        ? readableTokenAmountLabel({ decimals: g.options[0].decimals, symbol: g.symbol }, g.balance)
-        : parts.join(' + ')
+    shown !== null
+      ? combineMap((...answers: Promise<bigint>[]) => Promise.all(answers).then(balances => groupBalanceText(g, balances)), ...shown)
+      : g.balance === null
+        ? '-'
+        : groupBalanceText(g, g.options.map(o => o.balance))
   const $content = $row(
     style({
       padding: '8px',
       borderRadius: '10px',
       flex: 1,
-      opacity: g.disabled ? '0.4' : hasBalance ? '1' : '0.5',
+      opacity: g.disabled ? '0.4' : hasBalance || (shown !== null && g.balance === null) ? '1' : '0.5',
       cursor: g.disabled ? 'not-allowed' : 'pointer'
     })
   )(
@@ -258,7 +277,7 @@ export const $symbolGroupRow = (hideBalances: IStream<boolean>, g: ITokenSymbolG
       symbol: g.symbol,
       amount: balanceText,
       hideBalances,
-      usd: g.balance === null ? undefined : just(g.usd === null ? '-' : formatUsd(g.usd, 1n)),
+      usd: shown !== null || g.balance !== null ? usd : undefined,
       subtitle: $presence(g),
       subtitleColor: directPick(g) !== null ? palette.primary : undefined
     })
@@ -271,10 +290,11 @@ type IListStep = { step: 'symbols' } | { step: 'chains'; symbol: string }
 export interface I$TokenSelectFlow {
   hideBalances: IStream<boolean>
   selection: IStream<{ chainId: ChainId; address: Address }>
-  balanceQuery: IStream<Promise<unknown>>
   value: IStream<ITokenInputOption>
   optionList: IStream<readonly ITokenInputOption[]>
   destinationChainId?: ChainId
+  listLabel: string
+  $balanceLead: I$Node
   $container: INodeCompose
   $inputContent: ($anchor: I$Node) => I$Node
 }
@@ -289,6 +309,30 @@ export const $TokenSelectFlow = (config: I$TokenSelectFlow) =>
       [searchInput, searchInputTether]: IBehavior<INode<HTMLInputElement>, string>,
       [selecting, selectingTether]: IBehavior<boolean>
     ) => {
+      const options = op(config.optionList, state())
+      const ranks: IStream<ReadonlyMap<string, number>> = op(
+        options,
+        switchMap(list =>
+          combineMap(
+            (...ats: Promise<bigint | null>[]) =>
+              Promise.allSettled(ats).then(
+                settled =>
+                  new Map(
+                    list.map((o, i) => {
+                      const at = settled[i]!
+                      return [optionKey(o), o.balance === null || at.status === 'rejected' || at.value === null ? 0 : Number(formatUnits(o.balance * at.value, USD_PRICE_DECIMALS))]
+                    })
+                  )
+              ),
+            ...list.map(o => o.price ?? just(Promise.resolve(null)))
+          )
+        ),
+        intermediateState,
+        filter((s): s is PromiseStateDone<Map<string, number>> => s.status === PromiseStatus.DONE),
+        map(s => s.value),
+        start(new Map<string, number>()),
+        state()
+      )
       const select: IStream<ITokenInputOption> = op(
         merge(
           op(pickSymbol, map(directPick), filter((o): o is ITokenInputOption => o !== null)),
@@ -298,11 +342,10 @@ export const $TokenSelectFlow = (config: I$TokenSelectFlow) =>
         multicast
       )
 
-      const $listContent = (open: IStream<PointerEvent>): I$Node => {
+      const $listContent = (): I$Node => {
         const step: IStream<IListStep> = state(
           { step: 'symbols' } as IListStep,
           merge(
-            constant({ step: 'symbols' } as IListStep, open),
             op(
               pickSymbol,
               filter(g => !g.disabled && g.options.length > 1 && directPick(g) === null),
@@ -312,12 +355,13 @@ export const $TokenSelectFlow = (config: I$TokenSelectFlow) =>
           )
         )
         const query: IStream<string> = state('', merge(searchInput, constant('', step)))
+        const groupList = op(combine({ list: options, ranks: op(ranks, take(1)) }), map(p => aggregateBySymbol(p.list, p.ranks)), state())
         return switchMap(m => {
           const chains = m.step === 'chains'
           const $header = $breadcrumbSearchHeader(
             chains ? [{ label: m.symbol, $lead: $tokenIcon(m.symbol, '16px'), op: goBackTether(nodeEvent('click')) }] : [],
             $listSearchInput(
-              chains ? 'Select chain' : 'Select deposit token',
+              chains ? 'Select chain' : config.listLabel,
               searchInputTether(nodeEvent('input'), map(searchInputValue)),
               !chains
             ),
@@ -329,59 +373,92 @@ export const $TokenSelectFlow = (config: I$TokenSelectFlow) =>
                   $lead: $chainIcon(config.destinationChainId, 16)
                 }
           )
-          const $rowList = switchMap(
-            p =>
-              $rowsContainer(
-                ...(chains
-                  ? p.list
-                      .filter(o => symbolOf(o.chainId, o.token) === m.symbol)
-                      .map(o => ({
-                        opt: o,
-                        variant: isNativeToken(o.address)
-                          ? 'Native'
-                          : isAddressEqual(o.address, wrappedNativeAddressOf(o.chainId))
-                            ? 'Native + Wrapped'
-                            : symbolOf(o.chainId, o.token)
-                      }))
-                      .filter(x => matchesSearch(p.query, [chainName(x.opt.chainId), x.opt.symbol, x.variant]))
-                      .sort(
-                        (a, b) =>
-                          Number(a.opt.chainId !== config.destinationChainId) -
-                            Number(b.opt.chainId !== config.destinationChainId) ||
-                          Number(b.opt.chainId === HUB_CHAIN_ID) - Number(a.opt.chainId === HUB_CHAIN_ID) ||
-                          a.opt.chainId - b.opt.chainId ||
-                          Number(b.variant === 'Native') - Number(a.variant === 'Native')
-                      )
-                      .flatMap((x, i, all) => [
-                        ...(config.destinationChainId !== undefined &&
+          const $rowList = chains
+            ? op(
+                combine({ list: options, query }),
+                map(p =>
+                  p.list
+                    .filter(o => symbolOf(o.chainId, o.token) === m.symbol)
+                    .map(o => ({
+                      opt: o,
+                      variant: isNativeToken(o.address)
+                        ? 'Native'
+                        : isAddressEqual(o.address, wrappedNativeAddressOf(o.chainId))
+                          ? 'Native + Wrapped'
+                          : o.symbol
+                    }))
+                    .filter(x => matchesSearch(p.query, [chainName(x.opt.chainId), x.opt.symbol, x.variant]))
+                    .sort(
+                      (a, b) =>
+                        Number(a.opt.chainId !== config.destinationChainId) -
+                          Number(b.opt.chainId !== config.destinationChainId) ||
+                        Number(b.opt.chainId === HUB_CHAIN_ID) - Number(a.opt.chainId === HUB_CHAIN_ID) ||
+                        a.opt.chainId - b.opt.chainId ||
+                        Number(b.variant === 'Native') - Number(a.variant === 'Native')
+                    )
+                    .map((x, i, all) => {
+                      const divider =
+                        config.destinationChainId !== undefined &&
                         x.opt.chainId !== config.destinationChainId &&
                         (i === 0 || all[i - 1]!.opt.chainId === config.destinationChainId) &&
                         p.query.trim() === ''
-                          ? [$swapGroupDivider('Crosschain')]
-                          : []),
-                        $pressableRow(pickChainTether(nodeEvent('click'), constant(x.opt)))(
-                          $optionRow(config.hideBalances, x.opt, { title: chainName(x.opt.chainId), subtitle: x.variant })
+                      const o = x.opt
+                      return { ...x, divider, key: [divider, o.chainId, o.address, x.variant, o.caption, o.balance, o.decimals, o.disabled, o.selected, o.price === undefined].join(':') }
+                    })
+                ),
+                skipRepeatsWith((a, b) => a.length === b.length && a.every((row, i) => row.key === b[i]!.key)),
+                map(rows =>
+                  $rowsContainer(
+                    ...rows.flatMap(x => [
+                      ...(x.divider ? [$swapGroupDivider('Crosschain')] : []),
+                      $pressableRow(pickChainTether(nodeEvent('click'), constant(x.opt)))(
+                        $optionRow(
+                          config.hideBalances,
+                          x.opt,
+                          { title: chainName(x.opt.chainId), subtitle: x.opt.caption ?? x.variant },
+                          op(
+                            options,
+                            map(list => list.find(o => o.chainId === x.opt.chainId && isAddressEqual(o.address, x.opt.address))),
+                            filter((o): o is ITokenInputOption => o !== undefined),
+                            switchMap(optionUsd)
+                          )
                         )
-                      ])
-                  : aggregateBySymbol(p.list)
-                      .filter(g => matchesSearch(p.query, [g.symbol, ...g.options.map(o => o.symbol)]))
-                      .flatMap(g => [
-                        $pressableRow(pickSymbolTether(nodeEvent('click'), constant(g)))(
-                          $symbolGroupRow(config.hideBalances, g)
+                      )
+                    ])
+                  )
+                ),
+                switchLatest
+              )
+            : op(
+                combine({ list: groupList, query }),
+                map(p =>
+                  p.list
+                    .filter(g => matchesSearch(p.query, [g.symbol, ...g.options.map(o => o.symbol)]))
+                    .map(g => ({ g, key: [g.symbol, ...g.options.map(o => [o.chainId, o.address, o.symbol, o.balance, o.decimals, o.disabled].join(':'))].join('|') }))
+                ),
+                skipRepeatsWith((a, b) => a.length === b.length && a.every((row, i) => row.key === b[i]!.key)),
+                map(rows =>
+                  $rowsContainer(
+                    ...rows.map(({ g }) =>
+                      $pressableRow(pickSymbolTether(nodeEvent('click'), constant(g)))(
+                        $symbolGroupRow(
+                          config.hideBalances,
+                          g,
+                          op(
+                            groupList,
+                            map(list => list.find(each => each.symbol === g.symbol)),
+                            filter((each): each is ITokenSymbolGroup => each !== undefined),
+                            switchMap(groupUsd)
+                          )
                         )
-                      ]))
-              ),
-            combine({ list: config.optionList, query })
-          )
-          const $rows = $intermediatePromise({
-            $loader: $rowsContainer($spinner),
-            $display: map(async loaded => {
-              await loaded
-              return $rowList
-            }, config.balanceQuery)
-          })
+                      )
+                    )
+                  )
+                ),
+                switchLatest
+              )
           return fadeInX(
-            $column(style({ flex: '1', minWidth: '0', gap: '6px' }))($header, $rows),
+            $column(style({ flex: '1', minWidth: '0', gap: '6px' }))($header, $rowList),
             m.step === 'symbols' ? -20 : 20
           )
         }, step)
@@ -394,28 +471,29 @@ export const $TokenSelectFlow = (config: I$TokenSelectFlow) =>
             $column(spacing.tiny, style({ alignItems: 'flex-end' }))(
               $anchor,
               $row(spacing.tiny, style({ alignItems: 'center', color: palette.foreground, fontSize: text.xs }))(
-                $icon({ $content: $wallet, viewBox: '0 0 32 32', fill: palette.foreground, size: '12px', svgOps: style({ display: 'block' }) }),
+                config.$balanceLead,
                 $text('Balance:'),
-                $intermediatePromise({
-                  $loader: $inlineSpinner,
-                  $display: map(async loaded => {
-                    await loaded
-                    return switchMap(
-                      opt =>
-                        opt.usdValue
-                          ? $loadingValue(opt.usdValue)
-                          : $node($text(opt.balance === null ? '-' : readableTokenAmount(opt.decimals, opt.balance))),
-                      config.value
-                    )
-                  }, config.balanceQuery)
-                })
+                $intermediateText(
+                  maskBalance(
+                    op(
+                      config.value,
+                      switchMap((opt): IStream<Promise<string> | string> => {
+                        const balance = opt.balance
+                        if (opt.shown !== undefined) return opt.price !== undefined ? optionUsd(opt) : map(shown => shown.then(held => readableTokenAmount(opt.decimals, held)), opt.shown)
+                        if (balance !== null && opt.price !== undefined) return optionUsd(opt)
+                        return just(balance === null ? '-' : readableTokenAmount(opt.decimals, balance))
+                      })
+                    ),
+                    config.hideBalances
+                  )
+                )
               )
             )
           ),
         $anchorContent: op(
           config.selection,
           map(s => $tokenProfile(s.chainId, s.address)),
-          start($tokenProfileStub()),
+          start($intermediateTokenProfile()),
           switchLatest
         ),
         $listContent,

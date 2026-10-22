@@ -1,10 +1,13 @@
-import { CHAIN_IDS, SWAP_PROVIDER } from '@puppet/contracts/const'
+import { CHAIN_IDS, PROTOCOL } from '@puppet/contracts/const'
 import type { IAccountLib__IntentHeader, ISwapLib__SwapParams } from '@puppet/contracts/types'
-import { type Address, getAddress, type Hex, isAddressEqual, size, } from 'viem'
+import { type Address, encodeFunctionData, getAddress, type Hex, isAddressEqual, parseAbi, size } from 'viem'
 import { CompactContractError } from '../../compact/error.js'
 import { CompactError } from '../../compact/index.js'
 import type { ChainId } from '../../const/index.js'
-import { providerToken } from '../../state/tokenRegistry.js'
+import { SWAP_PROVIDER } from '../../const/network.js'
+import { providerToken, wrappedNativeAddressOf } from '../../state/tokenRegistry.js'
+import * as IntentLib from '../intentLib.js'
+import type { IDraftContext, } from '../shared.js'
 import type { IAcrossTiming } from './acrossDeposit.js'
 import {
   ACROSS_DEPOSIT_BYTES,
@@ -16,9 +19,9 @@ import {
   verifyAcrossTiming
 } from './acrossDeposit.js'
 import { decodeAcrossSwapAndBridge, verifyAcrossSwapAndBridge } from './acrossSwapAndBridge.js'
-import * as IntentLib from '../intentLib.js'
+import { verifyKyberSwap } from './kyberSwap.js'
 import { verifyLifiSwap } from './lifiSwap.js'
-import type { IDraftContext, } from '../shared.js'
+import { verifyRelaySwap } from './relaySwap.js'
 
 export type ISwapRoute =
   | ({ kind: 'across' } & IAcrossRouteFields)
@@ -26,6 +29,19 @@ export type ISwapRoute =
   | { kind: 'acrossSwap'; providerCallData: Hex }
 
 export type IWithdrawRoute = { kind: 'transfer' } | ISwapRoute
+
+export const routeSwaps = (route: IWithdrawRoute): boolean => route.kind === 'swap' || route.kind === 'acrossSwap'
+
+const WRAPPED_NATIVE_ABI = parseAbi(['function deposit() payable', 'function withdraw(uint256 wad)'])
+
+export const wrapCallData = (chainId: ChainId, inputToken: Address, outputToken: Address, amount: bigint): Hex | null => {
+  const wrapped = wrappedNativeAddressOf(chainId)
+  if (isAddressEqual(inputToken, PROTOCOL.nativeToken) && isAddressEqual(outputToken, wrapped)) return encodeFunctionData({ abi: WRAPPED_NATIVE_ABI, functionName: 'deposit' })
+  if (isAddressEqual(inputToken, wrapped) && isAddressEqual(outputToken, PROTOCOL.nativeToken)) {
+    return encodeFunctionData({ abi: WRAPPED_NATIVE_ABI, functionName: 'withdraw', args: [amount] })
+  }
+  return null
+}
 
 export function routeQuoteExpiry(route: IWithdrawRoute, timing: IAcrossTiming): number | null {
   if (route.kind === 'across') return acrossQuoteExpiry(timing, route.quoteTimestamp)
@@ -54,7 +70,6 @@ interface ISwapCommon {
 }
 
 interface ISwapAttestContext extends IDraftContext {
-  sourceBalance: bigint
   timing: IAcrossTiming
 }
 
@@ -68,12 +83,18 @@ interface IRouteBounds {
   route: ISwapRoute
   fillDeadline: number
   timing: IAcrossTiming
+  mineableUntil: bigint
 }
 
 export function routeProvider(chainId: ChainId, route: ISwapRoute): Address {
   if (route.kind === 'across') return acrossSpokePoolOf(chainId)
-  if (route.kind === 'acrossSwap') return ACROSS_PERIPHERY
+  if (route.kind === 'acrossSwap') {
+    const decoded = decodeAcrossSwapAndBridge(route.providerCallData)
+    if (decoded === null) throw new CompactError('BAD_REQUEST', 'the across swap route calldata matches none of the swapAndBridge, depositNative or SpokePool deposit shapes', 'hard')
+    return decoded.origin.kind === 'deposit' ? acrossSpokePoolOf(chainId) : ACROSS_PERIPHERY
+  }
   const provider = getAddress(route.provider)
+  if (isAddressEqual(provider, wrappedNativeAddressOf(chainId))) return provider
   const declared = SWAP_PROVIDER[chainId as keyof typeof SWAP_PROVIDER] as Record<string, Address> | undefined
   if (declared === undefined) {
     throw new CompactError('BAD_REQUEST', `chain ${chainId} declares no swap provider`, 'hard')
@@ -109,7 +130,7 @@ export function resolveSwapRoute(depositor: Address, recipient: Address, input: 
         `bridge deposit names ${exclusive} as exclusive filler, which is a party to this intent; the signer cannot be the guaranteed counterparty to their own bridge`
       )
     }
-    verifyAcrossTiming(input.timing, input.route.quoteTimestamp, input.fillDeadline)
+    verifyAcrossTiming(input.timing, input.route.quoteTimestamp, input.fillDeadline, input.mineableUntil)
     return buildAcrossDeposit({
       depositor,
       recipient,
@@ -134,7 +155,8 @@ export function resolveSwapRoute(depositor: Address, recipient: Address, input: 
         outputToken: input.outputToken,
         outputAmount: input.outputAmount,
         destinationChainId: input.destinationChainId,
-        timing: input.timing
+        timing: input.timing,
+        mineableUntil: input.mineableUntil
       },
       input.route.providerCallData
     )
@@ -146,23 +168,40 @@ export function resolveSwapRoute(depositor: Address, recipient: Address, input: 
         'cross-chain swap-and-bridge is not signable: its delivery recipient cannot be verified. Use a same-asset bridge, or bridge same-asset then swap locally.'
       )
     }
+    if (isAddressEqual(input.route.provider, wrappedNativeAddressOf(input.chainId))) {
+      const expected = wrapCallData(input.chainId, inputToken, input.outputToken, input.netInputAmount)
+      if (
+        !isAddressEqual(depositor, recipient) ||
+        expected === null ||
+        input.route.providerCallData.toLowerCase() !== expected.toLowerCase() ||
+        input.outputAmount > input.netInputAmount
+      ) {
+        throw new CompactError('BAD_REQUEST', `the wrapped native contract only wraps or unwraps exactly ${input.netInputAmount} into the account itself`, 'hard')
+      }
+      return expected
+    }
     if (input.route.providerCallData === '0x') {
       throw new CompactError('BAD_REQUEST', 'swap provider calldata is empty')
     }
-    const lifiDiamond = (SWAP_PROVIDER[input.chainId as keyof typeof SWAP_PROVIDER] as { lifiDiamond?: Address } | undefined)
-      ?.lifiDiamond
-    if (lifiDiamond !== undefined && isAddressEqual(input.route.provider, lifiDiamond)) {
-      verifyLifiSwap(
-        recipient,
-        input.route.providerCallData,
-        inputToken,
-        input.netInputAmount,
-        input.outputToken,
-        input.outputAmount
-      )
+    const declared = SWAP_PROVIDER[input.chainId as keyof typeof SWAP_PROVIDER] as { lifiDiamond?: Address; relayApprovalProxy?: Address; kyberswap?: Address } | undefined
+    const provider = input.route.provider
+    if (declared?.relayApprovalProxy !== undefined && isAddressEqual(provider, declared.relayApprovalProxy)) {
+      verifyRelaySwap(recipient, input.route.providerCallData, inputToken, input.netInputAmount, input.outputToken)
+    } else if (declared?.lifiDiamond !== undefined && isAddressEqual(provider, declared.lifiDiamond)) {
+      verifyLifiSwap(input.chainId, recipient, input.route.providerCallData, inputToken, input.netInputAmount, input.outputToken, input.outputAmount)
+    } else if (declared?.kyberswap !== undefined && isAddressEqual(provider, declared.kyberswap)) {
+      verifyKyberSwap(recipient, input.route.providerCallData, inputToken, input.netInputAmount, input.outputToken, input.outputAmount)
+    } else {
+      throw new CompactError('BAD_REQUEST', `swap provider ${provider} has no calldata decoder on chain ${input.chainId}, so its route cannot be screened`, 'hard')
     }
     return input.route.providerCallData
   }
+}
+
+export function verifySwap(fee: bigint, inputAmount: bigint, outputAmount: bigint): void {
+  if (inputAmount === 0n) throw new CompactContractError('Balance__NothingToSwap', [])
+  if (outputAmount === 0n) throw new CompactContractError('Balance__ZeroSwapOutput', [])
+  IntentLib.verifyRelayFeeRatio(fee, inputAmount, PROTOCOL.maxSwapRelayFeeBps)
 }
 
 export function buildSwapParams(
@@ -171,31 +210,14 @@ export function buildSwapParams(
   ctx: ISwapAttestContext,
   input: ISwapCommon
 ): ISwapLib__SwapParams {
-  if (input.header.fee > 0n && !isAddressEqual(input.header.feeToken, input.inputToken)) {
-    throw new CompactContractError('Intent__FeeTokenMismatch', [input.header.feeToken, input.inputToken])
-  }
-  if (input.inputAmount === 0n) throw new CompactContractError('Balance__NothingToSwap', [])
-  if (input.outputAmount === 0n) throw new CompactContractError('Balance__ZeroSwapOutput', [])
-  IntentLib.verifyRelayFeeRatio(input.header.fee, input.inputAmount)
-
-  const local = input.destinationChainId === BigInt(ctx.chainId)
   const providerCallData = resolveSwapRoute(depositor, recipient, {
     ...input,
     timing: ctx.timing,
+    mineableUntil: input.header.deadline,
     chainId: ctx.chainId,
     netInputAmount: input.inputAmount - input.header.fee
   })
   const provider = routeProvider(ctx.chainId, input.route)
-  IntentLib.verifyRegisteredTokenCap(ctx.tokenRegistry, ctx.chainId, input.inputToken, input.inputAmount)
-
-  if (ctx.sourceBalance < input.inputAmount) {
-    throw new CompactContractError('Balance__InsufficientBalance', [ctx.sourceBalance, input.inputAmount])
-  }
-
-  if (local) {
-    const destChainId = Number(input.destinationChainId) as ChainId
-    IntentLib.verifyRegisteredTokenCap(ctx.tokenRegistry, destChainId, input.outputToken, input.outputAmount)
-  }
 
   return {
     inputToken: input.inputToken,

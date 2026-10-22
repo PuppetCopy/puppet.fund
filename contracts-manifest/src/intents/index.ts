@@ -9,23 +9,25 @@ export const ACCOUNT_DOMAIN = { name: 'Puppet', version: '1' } as const
 export const CHAINLESS_DOMAIN = { name: 'Puppet', version: '1' } as const
 
 export const TYPEHASH = {
-  AllocateIntent: '0x0b014f03a0102cdd8647e38f2bd2e7efc57ca9a35d32ea5a8562913d3d640c35',
-  Credit: '0x544d9fe81c2fab9f5ed6d73d3fdcb8c26a57a71f51408f6494894f2de7ce3798',
+  AllocateIntent: '0x24ba3c7c1e3b4cb03c2299bf2ef8094c729e7efedcbf700bdd0d5cb758cdbf0a',
+  Asset: '0x0456966e89c1db52320a9e85298e215886da64de929b21bcc711add382dc6e4e',
+  Call: '0xfcb48734d824feb977a3628bc46453ca17117be1d2e7bb603fcb246a00104dad',
+  Credit: '0x6b174adec53a5605ccd84b260a766fadd688606239667269ca9e9afe8335fac8',
+  CreditTotal: '0x794e499a2d6bec6229b753efc52346a9d26a7e8a32e91221b6d7f36953532c33',
   DepositAcrossIntent: '0x0fa755bdd8baa2035f8329e650b6b75fb4ca130ddcbe965b0b4c59169fbaa3d6',
-  EscrowIntent: '0x06a26750b89737189586dfad344c5e17701b15e3557334f84be10e15e642ed7f',
-  Fulfil: '0xad7769fdb7f176f8aad2ee098d642efab4f98cce82d2cd8586c81c4edd9d22ae',
   FundSwapIntent: '0xfffe49af4dd2ec72b433afe11453d5ea5c03fb853b98f32e4b38171fb04fd21c',
   Genesis: '0xca690b65e92cddc39907dafcf47b3fda9b5942417bd51ce35602f668d92745b0',
   IntentHeader: '0x220563108260c7f71e6ed61961c6ad1b1d9a80622aee50ff313ef5994a277e57',
-  Mandate: '0x4101a7bc750d14e04b3d10509207e63dcedf87d53a2c6dbc6b2db896d9acf43b',
-  MandateIntent: '0xff7d60b7156b84685d64aef02dd8c076839e883fff2a3c64d787f2dc42abb6b1',
-  OperateIntent: '0x8221ac6b04c28fc9c2f364ffb60b844f52328cd8c7b8b203c7e5e6715bd3c91b',
-  Price: '0x9078e00e22f2b956a3c15d2ef196d6253a9007b49b80419d821b19e0a1a512e4',
-  RedeemIntent: '0xce98159168008db6c916342de595b7d733f272e9906f7f3803062f25ad118452',
-  SellIntent: '0x8e857f21751a73772103345d7ba291768d68e2ff5e35f8c6ff7638d99d0fb6b1',
-  Session: '0x69ae1defa7b25a81d5b3fb83b2c49b76a6e105d9451e98030320ea77fb5305cb',
+  MandateIntent: '0x9a912730d75d637797b0fbde0e4235a8c38b8ce7f3fcd27fae50cd8b66c84364',
+  OperateIntent: '0x3af61d96decc77a84d3e00f13e012de93cc92b4bf624e382aedf9819c4278a70',
+  Position: '0xacb1ac5de8e1c782b55ba181a75eb129b86c2ca88077e6375a311e3e4c1f4844',
+  Price: '0xb61960c5b7768908a3854c66bd6c0bd4c43ad60b06b7bc4982da3f2fd77076d8',
+  RedeemIntent: '0x3f10237bf6d5f14d8069d80eb6d2f9e2e162ba3864b98c9e1b78fabfcf39441e',
+  RetireEscrowIntent: '0x3236e5bf5512b8120132df02da61fa780872b9b2a61f3b339156ae596fe8e5ed',
+  SellIntent: '0x3bb6845d03c3f93bd63742552e91a468cf4bdba25110370147f029906a653e46',
+  Session: '0x64ebdb43b155fa9c2a269ff25219f5d78f96f966858c636c15349ee1b5ed6ccf',
   SwapParams: '0x52c571063c1aaa69398a375e8e2b86139061822ac70ea183a8dd35609e0d4488',
-  Valuation: '0x69a8da74692592a3b8069b05d46e773d928cc8f266ebd10bbca75c68c613aecb',
+  Valuation: '0x135ac17a528392cc9480250a07a052c3e52dc09c049455ee432ddee746b1cceb',
   WithdrawIntent: '0x5ca1ae96c67e734829aca6dffefe565e26d96b0c25586a5319518e313231db18'
 } as const
 
@@ -36,6 +38,16 @@ export const GENESIS_TYPES = {
   ]
 } as const
 
+export const CREDIT_TOTAL_TYPES = {
+  CreditTotal: [
+    { name: 'master', type: 'address' },
+    { name: 'chainId', type: 'uint256' },
+    { name: 'token', type: 'address' },
+    { name: 'total', type: 'uint256' },
+    { name: 'feeTotal', type: 'uint256' }
+  ]
+} as const
+
 export const SESSION_TYPES = {
   Session: [
     { name: 'statement', type: 'string' },
@@ -43,40 +55,46 @@ export const SESSION_TYPES = {
     { name: 'signer', type: 'address' },
     { name: 'issuedAt', type: 'uint256' },
     { name: 'expiry', type: 'uint256' },
-    { name: 'epoch', type: 'uint256' }
+    { name: 'epoch', type: 'uint256' },
+    { name: 'fund', type: 'address' }
   ]
 } as const
 
 export const MAX_SESSION_TTL = 2592000n
 
-export const SESSION_STATEMENT = 'Authorize this signer to act for my https://puppet.fund account.\n\nVerify the website address.'
+export const SESSION_REVOKE_DELAY = 600n
 
-export const MANDATE_TYPES = {
-  Mandate: [
-    { name: 'master', type: 'address' },
-    { name: 'skin', type: 'uint256' },
-    { name: 'allocationRate', type: 'uint256' },
-    { name: 'cooldownPeriod', type: 'uint256' },
-    { name: 'expiry', type: 'uint256' }
-  ]
-} as const
+export const SESSION_STATEMENT = 'Authorize this signer to act for my https://puppet.fund account. If a fund is named below, it belongs to my account.\n\nVerify the website address.'
 
-export const VALUATION_TYPES = {
-  Valuation: [
-    { name: 'value', type: 'uint256' },
-    { name: 'assetListHash', type: 'bytes32' },
-    { name: 'positionListHash', type: 'bytes32' }
-  ]
-} as const
+export const MAX_SESSION_BYTES = 4096n
+
+export const WALLET_SIGNATURE_TAG = '0xb4484f983b8d978812f1a94144aafc19d98e8fbab9eafd61acbf793f641b40ed'
+
+export const SESSION_ENVELOPE = [
+  { name: 'signer', type: 'address' },
+  { name: 'issuedAt', type: 'uint256' },
+  { name: 'expiry', type: 'uint256' },
+  { name: 'epoch', type: 'uint256' },
+  { name: 'fund', type: 'address' },
+  { name: 'grant', type: 'bytes' },
+  { name: 'inner', type: 'bytes' }
+] as const
+
+export const FUND_APPROVAL = [
+  { name: 'signer', type: 'address' },
+  { name: 'issuedAt', type: 'uint256' },
+  { name: 'expiry', type: 'uint256' },
+  { name: 'epoch', type: 'uint256' },
+  { name: 'grant', type: 'bytes' }
+] as const
 
 export const INTENTS = {
-  escrow: {
+  retireEscrow: {
     gate: 'LiquidityGate',
-    primaryType: 'EscrowIntent',
+    primaryType: 'RetireEscrowIntent',
     types: {
-      EscrowIntent: [
+      RetireEscrowIntent: [
         { name: 'header', type: 'IntentHeader' },
-        { name: 'master', type: 'address' },
         { name: 'token', type: 'address' },
         { name: 'amount', type: 'uint256' }
       ],
@@ -177,8 +195,14 @@ export const INTENTS = {
     types: {
       OperateIntent: [
         { name: 'header', type: 'IntentHeader' },
-        { name: 'callListHash', type: 'bytes32' },
+        { name: 'callList', type: 'Call[]' },
         { name: 'tokenList', type: 'address[]' }
+      ],
+      Call: [
+        { name: 'target', type: 'address' },
+        { name: 'value', type: 'uint256' },
+        { name: 'gasLimit', type: 'uint256' },
+        { name: 'callData', type: 'bytes' }
       ],
       IntentHeader: [
         { name: 'account', type: 'address' },
@@ -196,9 +220,8 @@ export const INTENTS = {
     types: {
       MandateIntent: [
         { name: 'header', type: 'IntentHeader' },
-        { name: 'mandateListHash', type: 'bytes32' },
-        { name: 'tokenList', type: 'address[]' },
-        { name: 'arm', type: 'bool' }
+        { name: 'epoch', type: 'uint256' },
+        { name: 'mandateListHash', type: 'bytes32' }
       ],
       IntentHeader: [
         { name: 'account', type: 'address' },
@@ -207,70 +230,6 @@ export const INTENTS = {
         { name: 'deadline', type: 'uint256' },
         { name: 'feeToken', type: 'address' },
         { name: 'fee', type: 'uint256' }
-      ]
-    }
-  },
-  createFund: {
-    gate: 'HubGate',
-    primaryType: 'AllocateIntent',
-    types: {
-      AllocateIntent: [
-        { name: 'header', type: 'IntentHeader' },
-        { name: 'share', type: 'address' },
-        { name: 'valuationHash', type: 'bytes32' },
-        { name: 'price', type: 'Price' },
-        { name: 'credit', type: 'Credit' },
-        { name: 'allocationListHash', type: 'bytes32' }
-      ],
-      Credit: [
-        { name: 'chainId', type: 'uint256' },
-        { name: 'token', type: 'address' },
-        { name: 'amount', type: 'uint256' }
-      ],
-      IntentHeader: [
-        { name: 'account', type: 'address' },
-        { name: 'user', type: 'address' },
-        { name: 'nonce', type: 'uint256' },
-        { name: 'deadline', type: 'uint256' },
-        { name: 'feeToken', type: 'address' },
-        { name: 'fee', type: 'uint256' }
-      ],
-      Price: [
-        { name: 'token', type: 'address' },
-        { name: 'amount', type: 'uint256' },
-        { name: 'value', type: 'uint256' }
-      ]
-    }
-  },
-  allocate: {
-    gate: 'HubGate',
-    primaryType: 'AllocateIntent',
-    types: {
-      AllocateIntent: [
-        { name: 'header', type: 'IntentHeader' },
-        { name: 'share', type: 'address' },
-        { name: 'valuationHash', type: 'bytes32' },
-        { name: 'price', type: 'Price' },
-        { name: 'credit', type: 'Credit' },
-        { name: 'allocationListHash', type: 'bytes32' }
-      ],
-      Credit: [
-        { name: 'chainId', type: 'uint256' },
-        { name: 'token', type: 'address' },
-        { name: 'amount', type: 'uint256' }
-      ],
-      IntentHeader: [
-        { name: 'account', type: 'address' },
-        { name: 'user', type: 'address' },
-        { name: 'nonce', type: 'uint256' },
-        { name: 'deadline', type: 'uint256' },
-        { name: 'feeToken', type: 'address' },
-        { name: 'fee', type: 'uint256' }
-      ],
-      Price: [
-        { name: 'token', type: 'address' },
-        { name: 'amount', type: 'uint256' },
-        { name: 'value', type: 'uint256' }
       ]
     }
   },
@@ -280,9 +239,8 @@ export const INTENTS = {
     types: {
       SellIntent: [
         { name: 'header', type: 'IntentHeader' },
-        { name: 'master', type: 'address' },
-        { name: 'share', type: 'address' },
-        { name: 'units', type: 'uint256' }
+        { name: 'shareToken', type: 'address' },
+        { name: 'shares', type: 'uint256' }
       ],
       IntentHeader: [
         { name: 'account', type: 'address' },
@@ -300,11 +258,18 @@ export const INTENTS = {
     types: {
       RedeemIntent: [
         { name: 'header', type: 'IntentHeader' },
-        { name: 'share', type: 'address' },
-        { name: 'valuationHash', type: 'bytes32' },
-        { name: 'price', type: 'Price' },
-        { name: 'retire', type: 'uint256' },
-        { name: 'drain', type: 'uint256' }
+        { name: 'shareToken', type: 'address' },
+        { name: 'valuation', type: 'Valuation' },
+        { name: 'token', type: 'address' },
+        { name: 'fraction', type: 'uint256' },
+        { name: 'join', type: 'uint256' }
+      ],
+      Asset: [
+        { name: 'chainId', type: 'uint256' },
+        { name: 'token', type: 'address' },
+        { name: 'id', type: 'uint256' },
+        { name: 'amount', type: 'uint256' },
+        { name: 'value', type: 'uint256' }
       ],
       IntentHeader: [
         { name: 'account', type: 'address' },
@@ -314,29 +279,124 @@ export const INTENTS = {
         { name: 'feeToken', type: 'address' },
         { name: 'fee', type: 'uint256' }
       ],
-      Price: [
+      Position: [
+        { name: 'chainId', type: 'uint256' },
+        { name: 'venue', type: 'bytes32' },
+        { name: 'id', type: 'bytes32' },
+        { name: 'value', type: 'uint256' }
+      ],
+      Valuation: [
+        { name: 'assetList', type: 'Asset[]' },
+        { name: 'positionList', type: 'Position[]' }
+      ]
+    }
+  },
+  createFund: {
+    gate: 'HubGate',
+    primaryType: 'AllocateIntent',
+    types: {
+      AllocateIntent: [
+        { name: 'header', type: 'IntentHeader' },
+        { name: 'shareToken', type: 'address' },
+        { name: 'valuation', type: 'Valuation' },
         { name: 'token', type: 'address' },
+        { name: 'price', type: 'Price' },
+        { name: 'credit', type: 'Credit' },
+        { name: 'allocationListHash', type: 'bytes32' }
+      ],
+      Asset: [
+        { name: 'chainId', type: 'uint256' },
+        { name: 'token', type: 'address' },
+        { name: 'id', type: 'uint256' },
         { name: 'amount', type: 'uint256' },
         { name: 'value', type: 'uint256' }
+      ],
+      Credit: [
+        { name: 'chainId', type: 'uint256' },
+        { name: 'token', type: 'address' },
+        { name: 'total', type: 'uint256' },
+        { name: 'feeTotal', type: 'uint256' }
+      ],
+      IntentHeader: [
+        { name: 'account', type: 'address' },
+        { name: 'user', type: 'address' },
+        { name: 'nonce', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' },
+        { name: 'feeToken', type: 'address' },
+        { name: 'fee', type: 'uint256' }
+      ],
+      Position: [
+        { name: 'chainId', type: 'uint256' },
+        { name: 'venue', type: 'bytes32' },
+        { name: 'id', type: 'bytes32' },
+        { name: 'value', type: 'uint256' }
+      ],
+      Price: [
+        { name: 'amount', type: 'uint256' },
+        { name: 'value', type: 'uint256' }
+      ],
+      Valuation: [
+        { name: 'assetList', type: 'Asset[]' },
+        { name: 'positionList', type: 'Position[]' }
+      ]
+    }
+  },
+  allocate: {
+    gate: 'HubGate',
+    primaryType: 'AllocateIntent',
+    types: {
+      AllocateIntent: [
+        { name: 'header', type: 'IntentHeader' },
+        { name: 'shareToken', type: 'address' },
+        { name: 'valuation', type: 'Valuation' },
+        { name: 'token', type: 'address' },
+        { name: 'price', type: 'Price' },
+        { name: 'credit', type: 'Credit' },
+        { name: 'allocationListHash', type: 'bytes32' }
+      ],
+      Asset: [
+        { name: 'chainId', type: 'uint256' },
+        { name: 'token', type: 'address' },
+        { name: 'id', type: 'uint256' },
+        { name: 'amount', type: 'uint256' },
+        { name: 'value', type: 'uint256' }
+      ],
+      Credit: [
+        { name: 'chainId', type: 'uint256' },
+        { name: 'token', type: 'address' },
+        { name: 'total', type: 'uint256' },
+        { name: 'feeTotal', type: 'uint256' }
+      ],
+      IntentHeader: [
+        { name: 'account', type: 'address' },
+        { name: 'user', type: 'address' },
+        { name: 'nonce', type: 'uint256' },
+        { name: 'deadline', type: 'uint256' },
+        { name: 'feeToken', type: 'address' },
+        { name: 'fee', type: 'uint256' }
+      ],
+      Position: [
+        { name: 'chainId', type: 'uint256' },
+        { name: 'venue', type: 'bytes32' },
+        { name: 'id', type: 'bytes32' },
+        { name: 'value', type: 'uint256' }
+      ],
+      Price: [
+        { name: 'amount', type: 'uint256' },
+        { name: 'value', type: 'uint256' }
+      ],
+      Valuation: [
+        { name: 'assetList', type: 'Asset[]' },
+        { name: 'positionList', type: 'Position[]' }
       ]
     }
   }
 } as const satisfies IntentActionMap
 
 export const SCHEDULED = {
-  fulfil: {
-    gate: 'SpokeGate',
-    primaryType: 'Fulfil',
-    types: {
-      Fulfil: [
-        { name: 'store', type: 'address' },
-        { name: 'parent', type: 'address' },
-        { name: 'token', type: 'address' },
-        { name: 'round', type: 'bytes32' },
-        { name: 'fromTotal', type: 'uint256' },
-        { name: 'fulfilledTotal', type: 'uint256' },
-        { name: 'fee', type: 'uint256' }
-      ]
-    }
-  }
+
+} as const satisfies IntentActionMap
+
+export const OWN = {
+
 } as const satisfies IntentActionMap

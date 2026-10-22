@@ -1,28 +1,45 @@
-import { PRECISION } from '@puppet/contracts/const'
+import { PRECISION } from '../const/common.js'
 import { abs, delta, max } from '../core/math.js'
+import type { IRedeemPlan } from '../pool/index.js'
 import type { ISignerGain } from './types.js'
 
 const share = (part: bigint, whole: bigint): bigint => (whole === 0n ? 0n : (part * PRECISION.basisPoints) / whole)
 
 export const allocateSignerGain = (input: {
-  masterUnits: bigint
+  masterShares: bigint
   supply: bigint
-  masterCredit: bigint
-  totalEntering: bigint
-}): ISignerGain => ({
-  above: share(input.masterUnits, input.supply),
-  below: share(input.masterCredit, input.totalEntering)
-})
+  valuation: bigint
+  creditValue: bigint
+  puppetValue: bigint
+  performanceFee: bigint
+  protocolFeeShare: bigint
+}): { valuation: ISignerGain; price: ISignerGain } => {
+  const entering = input.creditValue + input.puppetValue
+  const weight = input.valuation + entering
+  const price = {
+    above: weight === 0n ? 0n : (share(input.masterShares, input.supply) * entering) / weight,
+    below: weight === 0n ? 0n : (input.creditValue * PRECISION.basisPoints) / weight
+  }
+  const fee = weight === 0n ? 0n : (input.performanceFee * (PRECISION.basisPoints - input.protocolFeeShare) * input.puppetValue) / (PRECISION.basisPoints * weight)
+  return { valuation: { above: price.above, below: price.below + fee }, price }
+}
 
 export const redeemSignerGain = (input: {
-  masterWeight: bigint
-  queueWeight: bigint
-  masterUnits: bigint
-  remainingUnits: bigint
-}): ISignerGain => ({
-  above: share(input.masterWeight, input.queueWeight),
-  below: share(input.masterUnits, input.remainingUnits)
-})
+  plan: Pick<IRedeemPlan, 'supply' | 'masterShares' | 'masterPart' | 'full' | 'redemption'>
+  performanceFee: bigint
+  protocolFeeShare: bigint
+}): ISignerGain => {
+  const { plan } = input
+  const whole = plan.supply * PRECISION.basisPoints
+  const owed = plan.redemption.owedLeft
+  const fee = whole === 0n ? 0n : (input.performanceFee * (PRECISION.basisPoints - input.protocolFeeShare) * owed) / (PRECISION.basisPoints * whole)
+  if (plan.full) return { above: fee, below: share(owed, whole) }
+  const exiting = owed + plan.masterPart * PRECISION.basisPoints
+  return {
+    above: share(plan.masterPart, plan.supply) + fee,
+    below: ((plan.masterShares - plan.masterPart) * exiting * PRECISION.basisPoints) / (plan.supply * (whole - exiting))
+  }
+}
 
 const driftBps = (claimed: bigint, mark: bigint): bigint => {
   const denom = max(abs(claimed), abs(mark))

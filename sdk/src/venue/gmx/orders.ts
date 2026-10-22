@@ -1,8 +1,7 @@
-import { GMX, PROTOCOL } from '@puppet/contracts/const'
+import { PROTOCOL } from '@puppet/contracts/const'
 import type { IIAccount__Call } from '@puppet/contracts/types'
 import { type Address, encodeFunctionData, erc20Abi, type Hex, isAddressEqual, zeroAddress } from 'viem'
-import { GMX_DECREASE_SWAP_TYPE, GMX_DECREASE_TYPES, GMX_INCREASE_TYPES, GMX_ORDER_VAULT, GMX_ROUTER, GMX_ROUTER_ABI, GMX_TOKEN_SPENDER, GMX_WNT } from './contracts.js'
-import { ARBITRUM_MARKET_LIST } from './marketList.js'
+import { GMX_DECREASE_SWAP_TYPE, GMX_DECREASE_TYPES, GMX_INCREASE_TYPES, GMX_ORDER_VAULT, GMX_REFERRAL_CODE, GMX_ROUTER, GMX_ROUTER_ABI, GMX_TOKEN_SPENDER, GMX_WNT } from './contracts.js'
 
 export interface IGmxOrder {
   orderType: number
@@ -88,7 +87,7 @@ function encodeGmxCreateOrder(
         isLong: order.isLong,
         shouldUnwrapNativeToken,
         autoCancel: order.autoCancel ?? false,
-        referralCode: GMX.referralCode,
+        referralCode: GMX_REFERRAL_CODE,
         dataList: []
       }
     ]
@@ -104,58 +103,34 @@ export function buildGmxOrderCalls(order: IGmxOrder, ctx: IGmxBuildContext): IGm
   }
   const deposit = isIncrease ? order.collateralDelta : 0n
   const withdraw = isIncrease ? 0n : order.collateralDelta
+  const routerCall = (legs: readonly Hex[], value: bigint): IIAccount__Call =>
+    gmxCall(GMX_ROUTER, encodeFunctionData({ abi: GMX_ROUTER_ABI, functionName: 'multicall', args: [legs] }), 1_000_000n + 150_000n * BigInt(legs.length - 1), value)
 
   if (isAddressEqual(base, PROTOCOL.nativeToken)) {
     const total = deposit + executionFee
-    const createOrder = gmxCall(GMX_ROUTER, encodeGmxCreateOrder(master, GMX_WNT, order, withdraw, executionFee, true), 1_000_000n)
     return {
-      callList: [gmxCall(GMX_ROUTER, gmxSendWnt(total), 150_000n, total), createOrder],
+      callList: [routerCall([gmxSendWnt(total), encodeGmxCreateOrder(master, GMX_WNT, order, withdraw, executionFee, true)], total)],
       outflows: [{ token: base, amountOut: total }]
     }
   }
 
   const wethBase = isAddressEqual(base, GMX_WNT)
-  const createOrder = gmxCall(GMX_ROUTER, encodeGmxCreateOrder(master, base, order, withdraw, executionFee, !wethBase), 1_000_000n)
+  const createOrder = encodeGmxCreateOrder(master, base, order, withdraw, executionFee, !wethBase)
 
   if (wethBase) {
     const total = deposit + executionFee
-    const funding = [
-      gmxCall(base, gmxApprove(total), 100_000n),
-      gmxCall(GMX_ROUTER, gmxSendTokens(base, executionFee), 150_000n)
-    ]
-    if (deposit > 0n) funding.push(gmxCall(GMX_ROUTER, gmxSendTokens(base, deposit), 150_000n))
     return {
-      callList: [...funding, createOrder, gmxCall(base, gmxApprove(0n), 100_000n)],
+      callList: [gmxCall(base, gmxApprove(total), 100_000n), routerCall([gmxSendTokens(base, total), createOrder], 0n), gmxCall(base, gmxApprove(0n), 100_000n)],
       outflows: [{ token: base, amountOut: total }]
     }
   }
 
-  const funding: IIAccount__Call[] = []
-  if (deposit > 0n) funding.push(gmxCall(base, gmxApprove(deposit), 100_000n))
-  funding.push(gmxCall(GMX_ROUTER, gmxSendWnt(executionFee), 150_000n, executionFee))
-  if (deposit > 0n) funding.push(gmxCall(GMX_ROUTER, gmxSendTokens(base, deposit), 150_000n))
-  const callList = [...funding, createOrder]
-  if (deposit > 0n) callList.push(gmxCall(base, gmxApprove(0n), 100_000n))
+  const router = routerCall(deposit > 0n ? [gmxSendWnt(executionFee), gmxSendTokens(base, deposit), createOrder] : [gmxSendWnt(executionFee), createOrder], executionFee)
   return {
-    callList,
+    callList: deposit > 0n ? [gmxCall(base, gmxApprove(deposit), 100_000n), router, gmxCall(base, gmxApprove(0n), 100_000n)] : [router],
     outflows: [
       { token: PROTOCOL.nativeToken, amountOut: executionFee },
       { token: base, amountOut: deposit }
     ]
   }
-}
-
-export function selectGmxMarket(baseToken: Address, indexToken: Address): Address {
-  const matches = ARBITRUM_MARKET_LIST.filter(
-    m =>
-      isAddressEqual(m.indexToken as Address, indexToken) &&
-      (isAddressEqual(m.longToken as Address, baseToken) || isAddressEqual(m.shortToken as Address, baseToken))
-  )
-  if (matches.length === 0) throw new Error(`GMX market not found for index=${indexToken} collateral=${baseToken}`)
-  if (matches.length === 1) return matches[0].marketToken as Address
-  const canonical = matches.filter(
-    m => isAddressEqual(m.longToken as Address, baseToken) && !isAddressEqual(m.shortToken as Address, baseToken)
-  )
-  if (canonical.length === 1) return canonical[0].marketToken as Address
-  throw new Error(`ambiguous GMX market for index=${indexToken} collateral=${baseToken}; pass the marketToken directly`)
 }

@@ -1,33 +1,43 @@
+import { PROTOCOL } from '@puppet/contracts/const'
 import type { IIAccount__Call } from '@puppet/contracts/types'
-import { type Address, decodeFunctionData, getAddress, isAddress, isAddressEqual, pad, size, slice, toFunctionSelector } from 'viem'
-import { readableTokenAmountLabel } from '../../core/readable.js'
+import { type Address, encodeFunctionData, erc20Abi, formatUnits, getAddress, type Hex, isAddress, isAddressEqual, parseSignature, parseUnits, toHex, zeroAddress } from 'viem'
+import { USD_DECIMALS } from '../../const/common.js'
 import { getTokenDescription } from '../../core/token.js'
 import { decodeErc20, isRegisteredToken } from '../erc20.js'
 import type { IDappScreenReason, IGuardReason, IOperateStep, IScreenContext, IVenue } from '../types.js'
-import {
-  CCTP_HYPERCORE_DEXES,
-  CCTP_HYPERCORE_FORWARDER,
-  CCTP_HYPERCORE_MAX_FEE,
-  CCTP_HYPEREVM_DOMAIN,
-  CCTP_TOKEN_MESSENGER,
-  CCTP_TOKEN_MESSENGER_ABI,
-  HYPERCORE_USDC,
-  HYPERCORE_WITHDRAW_DESTINATIONS,
-  HYPERLIQUID_ACTION_DOMAIN,
-  HYPERLIQUID_ADMITTED_ACTIONS,
-  HYPERLIQUID_BRIDGE,
-  HYPERLIQUID_CHAIN_ID,
-  HYPERLIQUID_CONTRACTS,
-  HYPERLIQUID_DEPOSIT_MIN,
-  HYPERLIQUID_DEPOSIT_TOKEN,
-  HYPERLIQUID_SEND_TO_EVM,
-  HYPERLIQUID_USER_DOMAIN,
-  HYPERLIQUID_WITHDRAW,
-  hyperCoreRecipientOf
-} from './contracts.js'
-import { valueHyperliquidAccount } from './evaluate.js'
+import { approvesCctp, CCTP_HYPERCORE_DEXES, cctpBurn, HYPERCORE_PERPS_DEX, screenHyperCoreForward } from '../cctp.js'
+import { HYPERLIQUID_ACTION_DOMAIN, HYPERLIQUID_ADMITTED_ACTIONS, HYPERLIQUID_APPROVE_AGENT, HYPERLIQUID_BRIDGE, HYPERLIQUID_CHAIN_ID, HYPERLIQUID_CONTRACTS, HYPERLIQUID_DEPOSIT_MIN, HYPERLIQUID_DEPOSIT_TOKEN, HYPERLIQUID_EXCHANGE_URL, HYPERLIQUID_REFERRAL_ACTION, HYPERLIQUID_SEND_TO_EVM, HYPERLIQUID_USER_DOMAIN, HYPERLIQUID_WITHDRAW, HYPERLIQUID_WITHDRAW_FEE } from './contracts.js'
+import { hyperliquidInfo, hyperliquidPositions, hyperliquidWithdrawLanding, readHyperliquidBalance } from './evaluate.js'
 
 const PLATFORM = 'hyperliquid'
+
+export async function submitHyperliquidAction(action: { type: 'setReferrer'; code: string }, nonce: number, signature: Hex): Promise<void> {
+  const { r, s, yParity } = parseSignature(signature)
+  const res = await fetch(HYPERLIQUID_EXCHANGE_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action, nonce, signature: { r, s, v: yParity + 27 }, vaultAddress: null })
+  })
+  const text = await res.text()
+  if (!res.ok) throw new Error(`Hyperliquid answered ${res.status} to ${action.type}: ${text}`)
+  const reply = JSON.parse(text) as { status: string; response: unknown }
+  if (reply.status !== 'ok') throw new Error(`Hyperliquid refused ${action.type}: ${typeof reply.response === 'string' ? reply.response : text}`)
+}
+
+export async function admitHyperliquidAction(account: Address, action: { type: 'setReferrer'; code: string }, nonce: number): Promise<IDappScreenReason[]> {
+  if (action?.type !== HYPERLIQUID_REFERRAL_ACTION.type || action.code !== HYPERLIQUID_REFERRAL_ACTION.code || !Number.isSafeInteger(nonce) || nonce <= 0) {
+    return [
+      {
+        code: 'DAPP_ACTION_NOT_ADMITTED',
+        detail: `the account key signs no Hyperliquid action but ${HYPERLIQUID_REFERRAL_ACTION.type} with Puppet's code ${HYPERLIQUID_REFERRAL_ACTION.code} under a timestamp nonce`
+      }
+    ]
+  }
+  const { referredBy } = await hyperliquidInfo<{ referredBy: { referrer: Address; code: string } | null }>({ type: 'referral', user: account })
+  return referredBy === null ? [] : [{ code: 'REFERRAL_BOUND', detail: `Hyperliquid already lists ${account} as referred by code ${referredBy.code}; a referral binds once` }]
+}
+
+const WITHDRAW_DECIMALS = getTokenDescription(HYPERLIQUID_CHAIN_ID, HYPERLIQUID_DEPOSIT_TOKEN).decimals
 
 function bridgeDeposit(call: IIAccount__Call): { amount: bigint } | null {
   const dec = decodeErc20(call.callData)
@@ -36,75 +46,91 @@ function bridgeDeposit(call: IIAccount__Call): { amount: bigint } | null {
   return isAddressEqual(to, HYPERLIQUID_BRIDGE) ? { amount } : null
 }
 
-const BURN_SELECTOR = toFunctionSelector(CCTP_TOKEN_MESSENGER_ABI[0])
-const FORWARDER_WORD = pad(CCTP_HYPERCORE_FORWARDER).toLowerCase()
-
-function cctpBurn(call: IIAccount__Call) {
-  if (!isAddressEqual(call.target, CCTP_TOKEN_MESSENGER) || size(call.callData) < 4 || slice(call.callData, 0, 4) !== BURN_SELECTOR) return null
-  const [amount, destinationDomain, mintRecipient, burnToken, destinationCaller, maxFee, minFinalityThreshold, hookData] = decodeFunctionData({
-    abi: CCTP_TOKEN_MESSENGER_ABI,
-    data: call.callData
-  }).args
-  return { amount, destinationDomain, mintRecipient, burnToken, destinationCaller, maxFee, minFinalityThreshold, hookData }
-}
-
-function approvesCctp(call: IIAccount__Call): boolean {
-  const dec = decodeErc20(call.callData)
-  return dec?.functionName === 'approve' && isAddressEqual((dec.args as readonly [Address, bigint])[0], CCTP_TOKEN_MESSENGER)
-}
-
-function screenCctpBurn(account: Address, burn: NonNullable<ReturnType<typeof cctpBurn>>): IGuardReason[] {
-  const reasons: IGuardReason[] = []
-  if (!isAddressEqual(burn.burnToken, HYPERLIQUID_DEPOSIT_TOKEN)) {
-    reasons.push({ code: 'VENUE_DEPOSIT_BAD_TOKEN', detail: `a Hyperliquid CCTP deposit burns ${HYPERLIQUID_DEPOSIT_TOKEN} only, not ${burn.burnToken}` })
-  }
-  if (burn.destinationDomain !== CCTP_HYPEREVM_DOMAIN) {
-    reasons.push({ code: 'VENUE_DEPOSIT_BAD_DESTINATION', detail: `CCTP destination domain ${burn.destinationDomain} is not HyperEVM (${CCTP_HYPEREVM_DOMAIN})` })
-  }
-  if (burn.mintRecipient.toLowerCase() !== FORWARDER_WORD || burn.destinationCaller.toLowerCase() !== FORWARDER_WORD) {
-    reasons.push({
-      code: 'VENUE_DEPOSIT_BAD_DESTINATION',
-      detail: `CCTP mintRecipient ${burn.mintRecipient} and destinationCaller ${burn.destinationCaller} must both be the HyperCore forwarder ${CCTP_HYPERCORE_FORWARDER}`
-    })
-  }
-  if (burn.maxFee > CCTP_HYPERCORE_MAX_FEE) {
-    reasons.push({ code: 'VENUE_DEPOSIT_FEE', detail: `CCTP maxFee ${burn.maxFee} exceeds the ${CCTP_HYPERCORE_MAX_FEE} HyperCore forwarding fee` })
-  }
-  const forward = hyperCoreRecipientOf(burn.hookData)
-  if (forward === null) {
-    reasons.push({ code: 'VENUE_DEPOSIT_BAD_RECIPIENT', detail: `CCTP hookData ${burn.hookData} does not forward to a HyperCore recipient` })
-  } else {
-    if (!isAddressEqual(forward.recipient, account)) {
-      reasons.push({ code: 'VENUE_DEPOSIT_BAD_RECIPIENT', detail: `a Hyperliquid deposit may only credit the account itself (${account}), not ${forward.recipient}` })
-    }
-    if (!CCTP_HYPERCORE_DEXES.has(forward.dex)) {
-      reasons.push({ code: 'VENUE_DEPOSIT_BAD_DEX', detail: `HyperCore destination dex ${forward.dex} is neither perps (0) nor spot (${0xffffffff})` })
-    }
-  }
-  return reasons
-}
-
 export const hyperliquidVenue: IVenue = {
   venueId: PLATFORM,
   name: 'Hyperliquid',
   chains: [HYPERLIQUID_CHAIN_ID],
   contracts: HYPERLIQUID_CONTRACTS,
-  value: valueHyperliquidAccount,
+  positions: hyperliquidPositions,
+  deposit: {
+    chainId: HYPERLIQUID_CHAIN_ID,
+    token: HYPERLIQUID_DEPOSIT_TOKEN,
+    min: HYPERLIQUID_DEPOSIT_MIN,
+    creditSec: 0,
+    callsOf: (_account, amount) => [
+      {
+        target: HYPERLIQUID_DEPOSIT_TOKEN,
+        value: 0n,
+        gasLimit: PROTOCOL.transferGasLimit,
+        callData: encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [HYPERLIQUID_BRIDGE, amount] })
+      }
+    ]
+  },
+  withdraw: {
+    chainId: HYPERLIQUID_CHAIN_ID,
+    token: HYPERLIQUID_DEPOSIT_TOKEN,
+    balance: async (_ctx, account) => {
+      const { total, free } = await readHyperliquidBalance(account)
+      return { total: (total * 10n ** BigInt(WITHDRAW_DECIMALS)) / 10n ** BigInt(USD_DECIMALS), free: (free * 10n ** BigInt(WITHDRAW_DECIMALS)) / 10n ** BigInt(USD_DECIMALS) }
+    },
+    feeOf: () => HYPERLIQUID_WITHDRAW_FEE,
+    typedData: async (_ctx, account, amount, time) => ({
+      domain: { name: HYPERLIQUID_USER_DOMAIN, version: '1', chainId: HYPERLIQUID_CHAIN_ID, verifyingContract: zeroAddress },
+      types: {
+        [HYPERLIQUID_WITHDRAW]: [
+          { name: 'hyperliquidChain', type: 'string' },
+          { name: 'destination', type: 'string' },
+          { name: 'amount', type: 'string' },
+          { name: 'time', type: 'uint64' }
+        ]
+      },
+      primaryType: HYPERLIQUID_WITHDRAW,
+      message: {
+        hyperliquidChain: 'Mainnet',
+        destination: account.toLowerCase(),
+        amount: formatUnits(amount, WITHDRAW_DECIMALS),
+        time: BigInt(time)
+      }
+    }),
+    landing: hyperliquidWithdrawLanding
+  },
+  async submit(typedData, signature) {
+    if (typedData.domain?.name !== HYPERLIQUID_USER_DOMAIN || typedData.primaryType !== HYPERLIQUID_WITHDRAW || typedData.domain.chainId === undefined) {
+      throw new Error(`only a Hyperliquid ${HYPERLIQUID_WITHDRAW} is submitted to the venue, not ${typedData.domain?.name} ${typedData.primaryType}`)
+    }
+    const { hyperliquidChain, destination, amount, time } = typedData.message
+    const { r, s, yParity } = parseSignature(signature)
+    const res = await fetch(HYPERLIQUID_EXCHANGE_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        action: { type: 'withdraw3', hyperliquidChain, signatureChainId: toHex(BigInt(typedData.domain.chainId)), destination, amount, time: Number(time) },
+        nonce: Number(time),
+        signature: { r, s, v: yParity + 27 }
+      })
+    })
+    const text = await res.text()
+    if (!res.ok) throw new Error(`Hyperliquid answered ${res.status} to the withdrawal: ${text}`)
+    const reply = JSON.parse(text) as { status: string; response: unknown }
+    if (reply.status !== 'ok') throw new Error(`Hyperliquid refused the withdrawal: ${typeof reply.response === 'string' ? reply.response : text}`)
+  },
+  dapp: { hosts: ['hyperliquid.xyz'], chains: [HYPERLIQUID_CHAIN_ID] },
   claims(ctx: IScreenContext, call) {
     if (ctx.chainId !== HYPERLIQUID_CHAIN_ID) return false
-    if (cctpBurn(call) !== null) return true
+    const burn = cctpBurn(call)
+    if (burn !== null) return burn.forward !== null && isAddressEqual(burn.forward.recipient, ctx.account)
     return isRegisteredToken(ctx, call.target) && (bridgeDeposit(call) !== null || approvesCctp(call))
   },
-  screen(ctx, call) {
+  screen(_ctx, call) {
     const reasons: IGuardReason[] = []
     if (call.value !== 0n) {
       reasons.push({ code: 'NATIVE_VALUE_FORBIDDEN', detail: `call to ${call.target} forwards native value ${call.value}` })
     }
     const burn = cctpBurn(call)
-    if (burn !== null) return [...reasons, ...screenCctpBurn(ctx.account, burn)]
+    if (burn !== null) return [...reasons, ...screenHyperCoreForward(burn, HYPERLIQUID_DEPOSIT_TOKEN, CCTP_HYPERCORE_DEXES)]
     if (approvesCctp(call)) {
       if (!isAddressEqual(call.target, HYPERLIQUID_DEPOSIT_TOKEN)) {
-        reasons.push({ code: 'VENUE_DEPOSIT_BAD_TOKEN', detail: `Circle CCTP deposits into Hyperliquid take ${HYPERLIQUID_DEPOSIT_TOKEN} only, not ${call.target}` })
+        reasons.push({ code: 'VENUE_DEPOSIT_BAD_TOKEN', detail: `Circle CCTP deposits to HyperCore take ${HYPERLIQUID_DEPOSIT_TOKEN} only, not ${call.target}` })
       }
       return reasons
     }
@@ -117,21 +143,21 @@ export const hyperliquidVenue: IVenue = {
     }
     return reasons
   },
-  outflows(call) {
+  outflows(account, call) {
     const burn = cctpBurn(call)
-    if (burn !== null) return [{ token: getAddress(burn.burnToken), amount: burn.amount }]
+    if (burn !== null) return burn.forward !== null && isAddressEqual(burn.forward.recipient, account) ? [{ token: getAddress(burn.burnToken), amount: burn.amount }] : []
     const deposit = bridgeDeposit(call)
     return deposit === null ? [] : [{ token: getAddress(call.target), amount: deposit.amount }]
   },
-  describe(chainId, callList) {
+  exchange: () => ({ spent: [], received: [] }),
+  describe(chainId, account, callList) {
     const out = new Map<number, IOperateStep[]>()
     if (chainId !== HYPERLIQUID_CHAIN_ID) return out
     callList.forEach((call, i) => {
       const burn = cctpBurn(call)
       if (burn !== null) {
+        if (account === null || burn.forward === null || !isAddressEqual(burn.forward.recipient, account)) return
         const token = getAddress(burn.burnToken)
-        const description = getTokenDescription(HYPERLIQUID_CHAIN_ID, token)
-        const forward = hyperCoreRecipientOf(burn.hookData)
         out.set(i, [
           {
             kind: 'venue',
@@ -139,12 +165,9 @@ export const hyperliquidVenue: IVenue = {
             key: null,
             call: 'depositForBurnWithHook',
             label: 'Deposit',
-            fields: [
-              { label: 'amount', value: readableTokenAmountLabel(description, burn.amount) },
-              { label: 'bridge fee', value: `up to ${readableTokenAmountLabel(description, burn.maxFee)}` },
-              ...(forward === null ? [] : [{ label: 'credits', value: `your Hyperliquid ${forward.dex === 0 ? 'perps' : 'spot'} balance` }])
-            ],
-            flows: [{ token, delta: -burn.amount }]
+            fields: [{ label: 'credits', value: `your Hyperliquid ${burn.forward.dex === HYPERCORE_PERPS_DEX ? 'perps' : 'spot'} balance` }],
+            flows: [{ token, delta: -burn.amount, exact: true }],
+            fees: burn.maxFee === 0n ? [] : [{ payee: 'route', token, amount: burn.maxFee, expected: null }]
           }
         ])
         return
@@ -159,8 +182,9 @@ export const hyperliquidVenue: IVenue = {
           key: null,
           call: 'transfer',
           label: 'Deposit',
-          fields: [{ label: 'amount', value: readableTokenAmountLabel(getTokenDescription(HYPERLIQUID_CHAIN_ID, token), deposit.amount) }],
-          flows: [{ token, delta: -deposit.amount }]
+          fields: [],
+          flows: [{ token, delta: -deposit.amount, exact: true }],
+          fees: []
         }
       ])
     })
@@ -185,21 +209,7 @@ export const hyperliquidVenue: IVenue = {
       return []
     }
     if (typedData.primaryType === HYPERLIQUID_SEND_TO_EVM) {
-      const m = typedData.message
-      const recipient = typeof m.destinationRecipient === 'string' ? m.destinationRecipient.toLowerCase() : ''
-      const own = account.toLowerCase().slice(2)
-      const toSelf = recipient === `0x${own}` || recipient === `0x${own.padStart(64, '0')}`
-      const reasons: IDappScreenReason[] = []
-      if (typeof m.token !== 'string' || !HYPERCORE_USDC.has(m.token)) {
-        reasons.push({ code: 'DAPP_ACTION_NOT_ADMITTED', detail: `a Hyperliquid transfer out may only move USDC, not ${String(m.token)}` })
-      }
-      if (m.addressEncoding !== 'hex' || !toSelf) {
-        reasons.push({ code: 'DAPP_EXIT_DESTINATION', detail: `a Hyperliquid transfer out may only return to the account itself (${account}), not to ${String(m.destinationRecipient)} (${String(m.addressEncoding)})` })
-      }
-      if (!HYPERCORE_WITHDRAW_DESTINATIONS.has(Number(m.destinationChainId))) {
-        reasons.push({ code: 'DAPP_EXIT_DESTINATION', detail: `a Hyperliquid transfer out may only land on Arbitrum or Optimism, not destination ${String(m.destinationChainId)}` })
-      }
-      return reasons
+      return [{ code: 'DAPP_ACTION_NOT_ADMITTED', detail: 'transfers out of Hyperliquid go through its Withdraw to Arbitrum for now, so every outflow settles on the bridge' }]
     }
     if (HYPERLIQUID_ADMITTED_ACTIONS.has(typedData.primaryType)) return []
     return [
@@ -208,6 +218,23 @@ export const hyperliquidVenue: IVenue = {
         detail: `${typedData.primaryType} (${Object.keys(typedData.message).join(', ')}) is not an admitted Hyperliquid action; anything unlisted may move value or control out of the gated account`
       }
     ]
+  },
+  async attestTypedData(_clients, account, typedData) {
+    if (typedData.domain?.name !== HYPERLIQUID_USER_DOMAIN || typedData.primaryType !== HYPERLIQUID_WITHDRAW) return []
+    const { free } = await readHyperliquidBalance(account)
+    if (parseUnits(String(typedData.message.amount), USD_DECIMALS) <= free) return []
+    const available = formatUnits(free, USD_DECIMALS)
+    return [
+      {
+        code: 'DAPP_EXIT_ABOVE_AVAILABLE',
+        detail: `Hyperliquid can release ${available} USDC now, not ${String(typedData.message.amount)}; the rest backs open orders or positions. Withdraw ${available} USDC or less, or cancel open orders first.`
+      }
+    ]
+  },
+  presign(_account, typedData) {
+    return typedData.domain?.name === HYPERLIQUID_USER_DOMAIN && typedData.primaryType === HYPERLIQUID_APPROVE_AGENT
+      ? [{ kind: 'hyperliquidAction', action: HYPERLIQUID_REFERRAL_ACTION, nonce: Date.now() }]
+      : []
   },
   message() {
     return null

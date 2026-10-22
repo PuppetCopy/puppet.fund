@@ -1,22 +1,21 @@
+import { type ITokenProfiles, tokenUnitOf } from '@puppet/sdk/client'
 import type { ChainId } from '@puppet/sdk/const'
-import { getTokenDescription, readableAddress, readableTokenAmountLabel } from '@puppet/sdk/core'
+import { getAccountExplorerUrl, getTokenDescription, readableAddress, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { contractLabelOf } from '@puppet/sdk/state'
-import { type IOperateStep, VENUES } from '@puppet/sdk/venue'
-import { type Address, type Hex, isAddressEqual } from 'viem'
-
-export interface ITokenFlow {
-  token: { symbol: string; decimals: number }
-  delta: bigint
-}
+import { type IOperateStep, SAMPLEABLE_ALLOWANCE, VENUES } from '@puppet/sdk/venue'
+import { type Address, getAddress, type Hex, isAddressEqual } from 'viem'
+import { chainFor } from './$contract.js'
 
 export interface IStepField {
   label: string
   value: string
+  href?: string
 }
 
 export interface IVenueAction {
   venueId: string
   venue: string
+  spender: Address | null
   label: string
   call: string
   fields: IStepField[]
@@ -25,12 +24,7 @@ export interface IVenueAction {
 
 export interface IOperationSummary {
   actions: IVenueAction[]
-  flows: ITokenFlow[]
 }
-
-export const readableFlow = (f: ITokenFlow): string => `${f.delta > 0n ? '+' : ''}${readableTokenAmountLabel(f.token, f.delta)}`
-
-const UNBOUNDED_ALLOWANCE = 2n ** 128n - 1n
 
 const NATIVE: Address = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
 
@@ -38,9 +32,8 @@ const venueName = (venueId: string): string => VENUES.find(v => v.venueId === ve
 
 const labelled = (chainId: ChainId, address: Address): string => `${contractLabelOf(chainId, address).name} ${readableAddress(address)}`
 
-export function operationSummary(chainId: ChainId, steps: readonly IOperateStep[]): IOperationSummary {
+export function operationSummary(chainId: ChainId, steps: readonly IOperateStep[], profiles: ITokenProfiles): IOperationSummary {
   const actions: IVenueAction[] = []
-  const flows: ITokenFlow[] = []
   const paired = new Set<number>()
   steps.forEach((step, i) => {
     if (step.kind !== 'approve' || step.amount === 0n || paired.has(i)) return
@@ -63,39 +56,46 @@ export function operationSummary(chainId: ChainId, steps: readonly IOperateStep[
         actions.push({
           venueId: s.venueId,
           venue: venueName(s.venueId),
+          spender: null,
           label: s.label,
           call: s.call,
-          fields: [...s.fields],
+          fields: [
+            ...s.fields,
+            ...s.fees.map(fee => ({
+              label: fee.payee === 'venue' ? `${venueName(s.venueId)} fee` : 'Route fee',
+              value: `${fee.expected === null ? '' : `about ${readableTokenAmountLabel(tokenUnitOf(chainId, fee.token, profiles), fee.expected)}, `}up to ${readableTokenAmountLabel(tokenUnitOf(chainId, fee.token, profiles), fee.amount)}`
+            }))
+          ],
           orderKey: s.key
         })
-        for (const flow of s.flows) flows.push({ token: getTokenDescription(chainId, flow.token), delta: flow.delta })
         break
       case 'release':
         actions.push({
           venueId: '',
           venue: readableAddress(s.to),
+          spender: null,
           label: 'Release',
           call: s.token === null ? 'send' : 'transfer',
           fields: [
-            { label: 'to', value: labelled(chainId, s.to) },
-            { label: 'amount', value: readableTokenAmountLabel(getTokenDescription(chainId, s.token ?? NATIVE), s.amount) }
+            { label: 'to', value: labelled(chainId, s.to), href: getAccountExplorerUrl(s.to, chainFor(chainId)) },
+            { label: 'amount', value: readableTokenAmountLabel(tokenUnitOf(chainId, s.token ?? NATIVE, profiles), s.amount) }
           ],
           orderKey: null
         })
-        flows.push({ token: getTokenDescription(chainId, s.token ?? NATIVE), delta: -s.amount })
         break
       case 'approve': {
         if (paired.has(i)) break
-        const desc = getTokenDescription(chainId, s.token)
-        const amount = s.amount > UNBOUNDED_ALLOWANCE ? `unlimited ${desc.symbol}` : readableTokenAmountLabel(desc, s.amount)
+        const desc = tokenUnitOf(chainId, s.token, profiles)
+        const amount = s.amount >= SAMPLEABLE_ALLOWANCE ? `unlimited ${desc.symbol}` : readableTokenAmountLabel(desc, s.amount)
         actions.push({
           venueId: '',
-          venue: VENUES.find(v => v.contracts.some(c => c.pullsTokens === true && isAddressEqual(c.address, s.spender)))?.name ?? readableAddress(s.spender),
+          venue: VENUES.find(v => v.contracts.some(c => isAddressEqual(c.address, s.spender)))?.name ?? readableAddress(s.spender),
+          spender: getAddress(s.spender),
           label: s.amount === 0n ? `Revoke ${desc.symbol} approval` : `Approve ${amount}`,
           call: 'approve',
           fields: [
             { label: 'token', value: `${desc.symbol} ${readableAddress(s.token)}` },
-            { label: 'spender', value: labelled(chainId, s.spender) },
+            { label: 'spender', value: labelled(chainId, s.spender), href: getAccountExplorerUrl(s.spender, chainFor(chainId)) },
             { label: 'amount', value: s.amount === 0n ? 'none, the approval is cleared' : amount }
           ],
           orderKey: null
@@ -108,10 +108,11 @@ export function operationSummary(chainId: ChainId, steps: readonly IOperateStep[
         actions.push({
           venueId: '',
           venue: readableAddress(s.target),
+          spender: null,
           label: 'Call',
           call: s.selector,
           fields: [
-            { label: 'contract', value: labelled(chainId, s.target) },
+            { label: 'contract', value: labelled(chainId, s.target), href: getAccountExplorerUrl(s.target, chainFor(chainId)) },
             { label: 'selector', value: s.selector },
             ...(s.value === 0n ? [] : [{ label: 'value', value: readableTokenAmountLabel(getTokenDescription(chainId, NATIVE), s.value) }])
           ],
@@ -120,5 +121,5 @@ export function operationSummary(chainId: ChainId, steps: readonly IOperateStep[
         break
     }
   }
-  return { actions, flows }
+  return { actions }
 }

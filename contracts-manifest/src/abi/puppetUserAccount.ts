@@ -60,6 +60,11 @@ export default [
         "internalType": "bytes32"
       },
       {
+        "name": "_deadline",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
         "name": "_coSig",
         "type": "bytes",
         "internalType": "bytes"
@@ -134,13 +139,6 @@ export default [
   },
   {
     "type": "function",
-    "name": "requestWithdraw",
-    "inputs": [],
-    "outputs": [],
-    "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
     "name": "revokeSessions",
     "inputs": [],
     "outputs": [],
@@ -172,28 +170,10 @@ export default [
         "name": "_amount",
         "type": "uint256",
         "internalType": "uint256"
-      },
-      {
-        "name": "_gasLimit",
-        "type": "uint256",
-        "internalType": "uint256"
       }
     ],
     "outputs": [],
     "stateMutability": "nonpayable"
-  },
-  {
-    "type": "function",
-    "name": "withdrawRequestedAt",
-    "inputs": [],
-    "outputs": [
-      {
-        "name": "",
-        "type": "uint256",
-        "internalType": "uint256"
-      }
-    ],
-    "stateMutability": "view"
   },
   {
     "type": "error",
@@ -209,6 +189,11 @@ export default [
   {
     "type": "error",
     "name": "Account__Executing",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "Account__ForbiddenPull",
     "inputs": []
   },
   {
@@ -234,19 +219,19 @@ export default [
   },
   {
     "type": "error",
-    "name": "Account__WithdrawNotOpen",
+    "name": "Account__WithdrawClosed",
     "inputs": [
       {
-        "name": "requestedAt",
-        "type": "uint256",
-        "internalType": "uint256"
-      },
-      {
-        "name": "delay",
+        "name": "revokedAt",
         "type": "uint256",
         "internalType": "uint256"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "Balance__NothingToWithdraw",
+    "inputs": []
   },
   {
     "type": "error",
@@ -255,12 +240,28 @@ export default [
   },
   {
     "type": "error",
+    "name": "Intent__ExpiredDeadline",
+    "inputs": [
+      {
+        "name": "deadline",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "currentTimestamp",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
     "name": "TransferUtils__EmptyTokenTransferGasLimit",
     "inputs": [
       {
         "name": "token",
         "type": "address",
-        "internalType": "contract IERC20"
+        "internalType": "address"
       }
     ]
   },
@@ -292,7 +293,7 @@ export default [
       {
         "name": "token",
         "type": "address",
-        "internalType": "contract IERC20"
+        "internalType": "address"
       },
       {
         "name": "receiver",

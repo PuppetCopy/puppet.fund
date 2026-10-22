@@ -1,11 +1,12 @@
+import { PROTOCOL } from '@puppet/contracts/const'
 import { predictUserAccount } from '@puppet/sdk/account'
+import type { IUnsealed, IWithdrawDraft } from '@puppet/sdk/client'
 import { formatThrownError } from '@puppet/sdk/compact'
-import { ADDRESS_ZERO, type ChainId, resolveDispatchChainId } from '@puppet/sdk/const'
-import { getTokenDescription, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
-import { deliveredLeg, type IWithdrawInput } from '@puppet/sdk/intent'
+import { type ChainId, PRECISION, resolveDispatchChainId } from '@puppet/sdk/const'
+import { getTokenDescription, readablePercentage, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
+import type { IWithdrawInput } from '@puppet/sdk/intent'
 import {
   type IRelayFeeQuote,
-  type ITokenRegistryMap,
   RELAY_RATE_MAX_STALE_MS,
   symbolOf
 } from '@puppet/sdk/state'
@@ -29,16 +30,17 @@ import { $node, $text, component, type INode, nodeEvent, style, styleBehavior } 
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
 import { type Hex, isAddressEqual } from 'viem'
-import { $ButtonPrimaryOutline, $noteTooltip, $TokenAmountInput, text } from '@/ui-components'
+import { uiStorage } from '@/ui-storage'
+import { editorChoiceKey, type IStoredPath } from '../../app/localStoreSchema.js'
+import { $intermediateText, $noteTooltip, text, $TokenAmountInput } from '@/ui-components'
 import type { ISwapRequest } from '../../io/bridge/swapQuote.js'
 import context, { DISPLAY_QUOTE_TTL_MS } from '../../io/context.js'
 import { priceFor } from '../../io/price.js'
 import type { IConnectedWallet } from '../../wallet/index.js'
 import { balanceAt, type IRootState } from '../../wallet/index.js'
+import { $DraftSave, type ISelectedRoute } from './$DraftSave.js'
 import { $crumbTrail } from './$InlineSwitchView.js'
-import { $SwapProviderFeeEditor, type ISelectedRoute } from './$SwapProviderFeeEditor.js'
-import { $SwapTargetFlow, type ISwapTargetOption, withdrawTargetOptions } from './$SwapTargetFlow.js'
-import type { IUnsealed, IWithdrawDraft } from './draft.js'
+import { type ISwapTargetOption, withdrawTargetOptions } from './$SwapTargetFlow.js'
 import {
   $editorAmountLabel,
   $editorFlowContainer,
@@ -50,13 +52,11 @@ import {
   createFocusState,
   scaleByPercent,
 } from './editorUtils.js'
-import { walletClientForChain } from './runner/_shared.js'
 
 export interface I$WithdrawEditor {
   accountState: IRootState
   chainId: ChainId
   token: Hex
-  tokenRegistry: ITokenRegistryMap
   walletAccount: IConnectedWallet
   existingDraft: IStream<IWithdrawDraft | null>
 }
@@ -75,7 +75,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       [enterPress, enterPressTether]: IBehavior<KeyboardEvent>,
       [selectedRoute, selectedRouteTether]: IBehavior<ISelectedRoute>
     ) => {
-      const { accountState, chainId, token, tokenRegistry, walletAccount, existingDraft } = config
+      const { accountState, chainId, token, existingDraft } = config
       const authoredBalance = balanceAt(accountState.balances, chainId, token)
       const from = accountState.account
       const to = accountState.user
@@ -91,17 +91,12 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
 
       const balance: IStream<bigint> = just(authoredBalance)
 
-      const receiveOptions = withdrawTargetOptions(tokenRegistry, chainId, token)
+      const receiveOptions = withdrawTargetOptions(chainId, token)
       const isDestChainId = (id: number): id is ChainId => receiveOptions.some(o => o.chainId === id)
       const optionsOn = (chainId: ChainId): readonly ISwapTargetOption[] => receiveOptions.filter(o => o.chainId === chainId)
       const userChain: IStream<ChainId> = op(
         pickReceive,
-        map(o => {
-          void walletClientForChain(walletAccount.walletClient, o.chainId).catch(err =>
-            console.error('[withdraw] wallet chain switch failed', err)
-          )
-          return o.chainId
-        }),
+        map(o => o.chainId),
         multicast
       )
       const draftChain: IStream<ChainId> = op(
@@ -109,7 +104,23 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
         filter((d): d is IWithdrawDraft => d !== null && isDestChainId(d.output.chainId)),
         map(d => d.output.chainId)
       )
-      const chainSelection = state(chainId, merge(userChain, draftChain))
+      const storedReceive: IStream<ISwapTargetOption> = op(
+        combine({
+          path: uiStorage.replayWrite<IStoredPath | null>(
+            editorChoiceKey(to, 'withdraw'), null,
+            map(o => ({ source: { chainId, address: token }, dest: { chainId: o.chainId, address: o.id } }), pickReceive)
+          ),
+          draft: existingDraft
+        }),
+        map(p =>
+          p.draft !== null || p.path === null || p.path.source.chainId !== chainId || !isAddressEqual(p.path.source.address, token)
+            ? undefined
+            : receiveOptions.find(o => o.chainId === p.path!.dest.chainId && isAddressEqual(o.id, p.path!.dest.address))
+        ),
+        filter((o): o is ISwapTargetOption => o !== undefined),
+        state()
+      )
+      const chainSelection = state(chainId, merge(userChain, draftChain, map(o => o.chainId, storedReceive)))
 
       const draftReceiveToken: IStream<Hex> = op(
         existingDraft,
@@ -118,7 +129,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       )
       const rawReceiveToken: IStream<Hex> = state(
         token,
-        merge(map(o => o.id, pickReceive), draftReceiveToken)
+        merge(map(o => o.id, pickReceive), draftReceiveToken, map(o => o.id, storedReceive))
       )
       const receiveSel: IStream<ISwapTargetOption> = op(
         combine({ chainId: chainSelection, id: rawReceiveToken }),
@@ -190,11 +201,17 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
               if (params.route.limitError) return params.route.limitError
             }
             if (params.balance <= fee) {
-              return `Balance must exceed execution fee ${readableTokenAmountLabel(tokenDescription, fee)}`
+              return `Balance must exceed the relay fee ${readableTokenAmountLabel(tokenDescription, fee)}`
             }
             if (params.amount === 0n) return null
             if (params.amount + fee > params.balance) {
               return `Exceeds available ${readableTokenAmount(tokenDescription, params.balance - fee)}`
+            }
+            const moved = params.amount === 0n ? params.balance : params.amount + fee
+            const capBps = needsRoute(params.sel) ? PROTOCOL.maxSwapRelayFeeBps : PROTOCOL.maxRelayFeeBps
+            if (fee * PRECISION.basisPoints > moved * capBps) {
+              const floor = (fee * PRECISION.basisPoints + capBps - 1n) / capBps
+              return `Below the ${readableTokenAmountLabel(tokenDescription, floor)} minimum: the relay fee is capped at ${readablePercentage(capBps)} of what moves`
             }
             return null
           },
@@ -238,12 +255,6 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
 
       const tokenPrice = priceFor(chainId, token)
 
-      const $bridgeFeeRow = $SwapProviderFeeEditor({
-        active: map(needsRoute, receiveSel),
-        request,
-        maxLegs: 1
-      })({ selectRoute: selectedRouteTether() })
-
       const valueToShow: IStream<string> = map(
         (p: { amt: bigint; focused: boolean }) => (p.amt === 0n ? '' : readableTokenAmount(decimals, p.amt)),
         filter((p: { amt: bigint; focused: boolean }) => !p.focused, combine({ amt: amountValue, focused }))
@@ -275,10 +286,10 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
         $container: $overlaySliderContainer
       })({ change: sliderPercentTether() })
 
-      const amountUsd: IStream<string> = amountUsdLabel(amountValue, tokenPrice)
+      const amountUsd: IStream<Promise<string> | string> = amountUsdLabel(amountValue, tokenPrice)
       const $alert = $noteSlot(
         switchMap(
-          msg => (msg ? $noteTooltip($text(msg)) : $node(style({ color: palette.foreground, fontSize: text.xs }))($text(amountUsd))),
+          msg => (msg ? $noteTooltip($text(msg)) : $node(style({ color: palette.foreground, fontSize: text.xs }))($intermediateText(amountUsd))),
           alert
         )
       )
@@ -294,35 +305,19 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
 
       const hidden: IStream<boolean> = start(false, selectingDest)
 
-      const $receive = $SwapTargetFlow({
-        value: receiveSel,
-        optionList: just(receiveOptions),
-        source: just({ chainId, symbol: symbolOf(chainId, token) }),
-        $container: $row(
-          style({ margin: '0 -28px', padding: '0 28px', gap: '12px', alignItems: 'center', fontSize: text.sm }),
-          styleBehavior(map(h => (h ? { background: palette.background, padding: '20px 28px' } : null), hidden))
-        ),
-        $inputContent: $anchor =>
-          $node(style({ display: 'contents' }))(
-            $node(style({ color: palette.foreground, fontWeight: '500', whiteSpace: 'nowrap' }))($text('Receive')),
-            $anchor
-          )
-      })({ select: pickReceiveTether(), selecting: selectingDestTether() })
-
       return [
         $column(spacing.default, style({ width: '394px', maxWidth: '100%' }))(
           $node(style({ display: 'contents' }), styleBehavior(map(h => (h ? { display: 'none' } : { display: 'contents' }), hidden)))(
             $topSection,
             $node(style({ margin: '0 -26px', display: 'flex' }))($percentSlider)
           ),
-          $receive,
-          $node(style({ display: 'contents' }), styleBehavior(map(h => (h ? { display: 'none' } : { display: 'contents' }), hidden)))(
-            $row(style({ fontSize: text.sm }))($bridgeFeeRow),
-            $row(spacing.default, style({ alignItems: 'center' }))(
-              $node(style({ flex: 1 }))(),
-              $ButtonPrimaryOutline({ disabled, $content: $text('Save') })({ click: clickAddDraftTether() })
-            )
-          )
+          $DraftSave({
+            target: { value: receiveSel, optionList: just(receiveOptions), source: just({ chainId, symbol: symbolOf(chainId, token) }) },
+            request,
+            active: map(needsRoute, receiveSel),
+            alert,
+            disabled
+          })({ select: pickReceiveTether(), selecting: selectingDestTether(), selectRoute: selectedRouteTether(), save: clickAddDraftTether() })
         ),
         (() => {
           type IDraftSnapshot = {
@@ -354,6 +349,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
                   chainId,
                   balanceBefore: authoredBalance,
                   inputAmount: { amount: grossAmount, token },
+                  routeInput: input.outputAmount,
                   output: {
                     receiver: to,
                     chainId,
@@ -367,24 +363,15 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
               }
 
               const plan = params.route.plan
-              const signed = plan === null || plan.length > 1 ? null : plan[0]
-              const outputToken = params.sel.id
+              if (plan === null) throw new Error('this withdraw has no quoted route yet; wait for the route before adding it')
               const input: IUnsealed<IWithdrawInput> = {
                 inputToken: token,
-                outputToken,
+                outputToken: params.sel.id,
                 inputAmount: grossAmount,
-                outputAmount: plan === null ? 0n : deliveredLeg(plan).outputAmount,
+                outputAmount: plan.outputAmount,
                 destinationChainId: BigInt(params.sel.chainId),
-                route:
-                  signed !== null
-                    ? signed.route
-                    : {
-                        kind: 'across',
-                        exclusiveRelayer: ADDRESS_ZERO,
-                        quoteTimestamp: 0,
-                        exclusivityParameter: 0
-                      },
-                fillDeadline: signed === null ? 0 : Math.floor(signed.fillDeadline)
+                route: plan.route,
+                fillDeadline: Math.floor(plan.fillDeadline)
               }
               return {
                 kind: 'withdraw',
@@ -392,11 +379,12 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
                 chainId,
                 balanceBefore: authoredBalance,
                 inputAmount: { amount: grossAmount, token },
+                routeInput: plan.inputAmount,
                 output: {
                   receiver: to,
                   chainId: params.sel.chainId,
-                  amount: plan === null ? grossAmount : deliveredLeg(plan).outputAmount,
-                  expected: plan === null ? grossAmount : deliveredLeg(plan).expectedOutputAmount,
+                  amount: plan.outputAmount,
+                  expected: plan.expectedOutputAmount,
                   token: params.sel.id,
                   approx: true
                 },

@@ -1,5 +1,5 @@
 import { PROTOCOL } from '@puppet/contracts/const'
-import { type Address, decodeFunctionData, getAddress, type Hex, isAddressEqual, zeroAddress } from 'viem'
+import { type Address, decodeFunctionData, getAddress, type Hex, isAddressEqual, parseAbi, toFunctionSelector, zeroAddress } from 'viem'
 import { CompactError } from '../../compact/index.js'
 import type { ChainId } from '../../const/index.js'
 
@@ -114,11 +114,54 @@ const LIFI_SWAP_ABI = [
   }
 ] as const
 
+const LIFI_FEE_ABI = parseAbi([
+  'function forwardERC20Fees(address token, (address recipient, uint256 amount)[] fees)',
+  'function forwardNativeFees((address recipient, uint256 amount)[] fees) payable',
+  'function collectTokenFees(address tokenAddress, uint256 integratorFee, uint256 lifiFee, address integratorAddress)',
+  'function collectNativeFees(uint256 integratorFee, uint256 lifiFee, address integratorAddress) payable'
+])
+
+const FEE_SELECTORS = LIFI_FEE_ABI.map(item => toFunctionSelector(item))
+
+const LIFI_FEE_FORWARDER: Partial<Record<ChainId, Address>> = {
+  10: '0xCE40449B773a3E6E5e769ADb4e567179d4828cbd',
+  137: '0xCE40449B773a3E6E5e769ADb4e567179d4828cbd',
+  4663: '0xF4BFFE4dfC693f37715A47c15BdA8af9ed8f7Cf1',
+  42161: '0xCE40449B773a3E6E5e769ADb4e567179d4828cbd'
+}
+
+const LIFI_FEE_RECIPIENT = getAddress('0xC06ebbefD94032B85424D51906e2A335EFAe264B')
+const LIFI_FEE_MAX_BPS = 100n
+const BASIS_POINTS = 10_000n
+
 const fail: (reason: string) => never = reason => {
   throw new CompactError('BAD_REQUEST', `lifi swap route rejected: ${reason}`, 'hard')
 }
 
+const feePaidBy = (chainId: ChainId, leg: { callTo: Address; callData: Hex }): bigint => {
+  const decoded = (() => {
+    try {
+      return decodeFunctionData({ abi: LIFI_FEE_ABI, data: leg.callData })
+    } catch {
+      return fail(`route calls a fee function on ${leg.callTo} that does not decode`)
+    }
+  })()
+  if (decoded.functionName === 'collectTokenFees' || decoded.functionName === 'collectNativeFees') {
+    return fail(`route pays an integrator fee to ${decoded.args.at(-1)} through LI.FI's fee collector`)
+  }
+  const forwarder = LIFI_FEE_FORWARDER[chainId]
+  if (forwarder === undefined || !isAddressEqual(leg.callTo, forwarder)) {
+    return fail(`route forwards fees through ${leg.callTo}, not LI.FI's fee forwarder ${forwarder ?? 'on this chain'}`)
+  }
+  const fees = decoded.functionName === 'forwardERC20Fees' ? decoded.args[1] : decoded.args[0]
+  return fees.reduce((total, fee) => {
+    if (!isAddressEqual(fee.recipient, LIFI_FEE_RECIPIENT)) fail(`route pays a fee to ${fee.recipient}, not LI.FI's ${LIFI_FEE_RECIPIENT}`)
+    return total + fee.amount
+  }, 0n)
+}
+
 export function verifyLifiSwap(
+  chainId: ChainId,
   recipient: Address,
   callData: Hex,
   inputToken: Address,
@@ -129,6 +172,7 @@ export function verifyLifiSwap(
   let receiver: Address
   let minOut: bigint
   let pulled = 0n
+  let fee = 0n
   let delivered: Address | null = null
   const pulledTokens: Address[] = []
   try {
@@ -141,11 +185,14 @@ export function verifyLifiSwap(
         pulled += leg.fromAmount
         pulledTokens.push(isAddressEqual(leg.sendingAssetId, zeroAddress) ? PROTOCOL.nativeToken : leg.sendingAssetId)
       }
+      if (FEE_SELECTORS.some(selector => leg.callData.startsWith(selector))) fee += feePaidBy(chainId, leg)
       delivered = isAddressEqual(leg.receivingAssetId, zeroAddress) ? PROTOCOL.nativeToken : leg.receivingAssetId
     }
-  } catch {
+  } catch (err) {
+    if (err instanceof CompactError) throw err
     fail('calldata does not match a known LI.FI same-chain swap facet')
   }
+  if (fee * BASIS_POINTS > pulled * LIFI_FEE_MAX_BPS) fail(`route pays LI.FI ${fee} of ${pulled}, above the ${LIFI_FEE_MAX_BPS} bps cap`)
   for (const token of pulledTokens) {
     if (!isAddressEqual(token, inputToken)) {
       fail(`route pulls ${token} but the intent funds ${inputToken}`)
@@ -161,14 +208,12 @@ export function verifyLifiSwap(
   if (minOut < outputAmount) {
     fail(`route minAmountOut ${minOut} is below the signed outputAmount ${outputAmount}; the intent floor must be enforceable`)
   }
-  if (pulled > inputAmount) {
-    fail(
-      `route pulls ${pulled} but only ${inputAmount} is approved to it; re-quote the route and the relay fee together`
-    )
+  if (pulled !== inputAmount) {
+    fail(`route pulls ${pulled}, but the intent spends exactly ${inputAmount} on it; re-quote the route and the relay fee together`)
   }
 }
 
-const LIFI_QUOTE_PATH = '/api/swap/lifi/v1/quote'
+const LIFI_QUOTE_PATH = '/v1/quote'
 const LIFI_SLIPPAGE = 0.005
 const QUOTE_TIMEOUT_MS = 10_000
 
@@ -180,6 +225,7 @@ interface ILifiQuoteResponse {
 
 export async function quoteLifiSwap(
   endpoint: string,
+  diamond: Address,
   account: Address,
   recipient: Address,
   bounds: { chainId: ChainId; inputToken: Address; outputToken: Address; inputAmount: bigint },
@@ -210,12 +256,15 @@ export async function quoteLifiSwap(
   if (value !== attached) {
     throw new CompactError('ROUTE_UNAVAILABLE', `LI.FI route asks for ${value} native value but the account attaches ${attached}`)
   }
-  const provider = getAddress(quote.transactionRequest.to)
-  if (quote.estimate.approvalAddress && !isAddressEqual(quote.estimate.approvalAddress, provider)) {
+  if (!isAddressEqual(quote.transactionRequest.to, diamond)) {
+    throw new CompactError('ROUTE_UNAVAILABLE', `LI.FI routes through ${quote.transactionRequest.to}, not the diamond ${diamond} pinned for chain ${bounds.chainId}`)
+  }
+  if (quote.estimate.approvalAddress && !isAddressEqual(quote.estimate.approvalAddress, diamond)) {
     throw new CompactError('ROUTE_UNAVAILABLE', 'LI.FI approval target differs from the swap router')
   }
   const outputAmount = BigInt(quote.estimate.toAmountMin)
   verifyLifiSwap(
+    bounds.chainId,
     recipient,
     quote.transactionRequest.data,
     getAddress(bounds.inputToken),
@@ -224,7 +273,7 @@ export async function quoteLifiSwap(
     outputAmount
   )
   return {
-    route: { kind: 'swap', provider, providerCallData: quote.transactionRequest.data },
+    route: { kind: 'swap', provider: diamond, providerCallData: quote.transactionRequest.data },
     outputAmount,
     expectedOutputAmount: BigInt(quote.estimate.toAmount),
     tool: quote.toolDetails?.name ?? 'LI.FI',

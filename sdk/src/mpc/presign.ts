@@ -1,3 +1,4 @@
+import { concatBytes } from '@noble/curves/utils.js'
 import { type Hex, hexToBytes } from 'viem'
 import {
   decodePoint,
@@ -79,15 +80,11 @@ export interface IPresignatureBob {
 
 const sidOf = (share: IShare): Uint8Array => hexToBytes(share.sid)
 
-const transcriptOf = (sid: Uint8Array, B: IPoint, m2: IPresignMessage2, m3: IPresignMessage3, m4: IPresignMessage4, open: IOtOpening, correlation: [ICorrelation, ICorrelation]): Uint8Array =>
+const transcriptOf = (sid: Uint8Array, head: Uint8Array, open: IOtOpening, correlation: [ICorrelation, ICorrelation]): Uint8Array =>
   hashBytes(
     'mul-transcript',
     sid,
-    pointBytes(B),
-    hexToBytes(m2.DB),
-    hexListBytes(m2.A),
-    hexListBytes(m3.xi),
-    hexListBytes(m4.response),
+    head,
     hexListBytes(open.h0),
     hexListBytes(open.h1),
     hexListBytes(correlation[0].tau),
@@ -109,10 +106,9 @@ export function presignAlice1(share: IShare): { state: IPresignAlice1; msg: IPre
 
 export interface IPresignBob1 {
   share: IShare
-  B: IPoint
   kB: bigint
   ot: IOtReceiverState
-  m2: IPresignMessage2
+  head: Uint8Array
 }
 
 export function presignBob1(share: IShare, m1: IPresignMessage1): { state: IPresignBob1; msg: IPresignMessage2 } {
@@ -126,7 +122,7 @@ export function presignBob1(share: IShare, m1: IPresignMessage1): { state: IPres
   choices.set(encodeInput(Fn.mul(shareScalar(share), kBInv)), MUL_LENGTH)
   const { state, A } = otReceiverChoose(sid, B, choices)
   const m2 = { DB: encodePoint(G.multiply(kB)), A }
-  return { state: { share, B, kB, ot: state, m2 }, msg: m2 }
+  return { state: { share, kB, ot: state, head: concatBytes(pointBytes(B), hexToBytes(m2.DB), hexListBytes(A)) }, msg: m2 }
 }
 
 interface IPresignAlice2 extends IPresignAlice1 {
@@ -172,13 +168,12 @@ export function presignAlice2(state: IPresignAlice1, m2: IPresignMessage2): { st
 }
 
 export interface IPresignBob2 extends IPresignBob1 {
-  m3: IPresignMessage3
-  m4: IPresignMessage4
+  xi: Hex[]
 }
 
 export function presignBob2(state: IPresignBob1, m3: IPresignMessage3): { state: IPresignBob2; msg: IPresignMessage4 } {
   const m4 = { response: otReceiverRespond(state.ot, m3.xi) }
-  return { state: { ...state, m3, m4 }, msg: m4 }
+  return { state: { ...state, xi: m3.xi, head: concatBytes(state.head, hexListBytes(m3.xi), hexListBytes(m4.response)) }, msg: m4 }
 }
 
 export function presignAlice3(state: IPresignAlice2, m4: IPresignMessage4): { presignature: IPresignatureAlice; msg: IPresignMessage5 } {
@@ -187,7 +182,12 @@ export function presignAlice3(state: IPresignAlice2, m4: IPresignMessage4): { pr
   const mul0 = cotSender(state.pads, 0, state.alpha[0], state.alphaHat[0])
   const mul1 = cotSender(state.pads, MUL_LENGTH, state.alpha[1], state.alphaHat[1])
   const correlation: [ICorrelation, ICorrelation] = [mul0.correlation, mul1.correlation]
-  const transcript = transcriptOf(sid, state.key.B, state.m2, state.m3, m4, open, correlation)
+  const transcript = transcriptOf(
+    sid,
+    concatBytes(pointBytes(state.key.B), hexToBytes(state.m2.DB), hexListBytes(state.m2.A), hexListBytes(state.m3.xi), hexListBytes(m4.response)),
+    open,
+    correlation
+  )
   const check: [IMulCheck, IMulCheck] = [
     mulCheckSender(mulChallenge(transcript, 0), mul0.shares, state.alpha[0], state.alphaHat[0]),
     mulCheckSender(mulChallenge(transcript, 1), mul1.shares, state.alpha[1], state.alphaHat[1])
@@ -212,10 +212,10 @@ export function presignAlice3(state: IPresignAlice2, m4: IPresignMessage4): { pr
 
 export function presignBob3(state: IPresignBob2, m5: IPresignMessage5): IPresignatureBob {
   const sid = sidOf(state.share)
-  otReceiverVerify(state.ot, state.m3.xi, m5.open)
+  otReceiverVerify(state.ot, state.xi, m5.open)
   const mul0 = cotReceiver(state.ot, 0, m5.correlation[0])
   const mul1 = cotReceiver(state.ot, MUL_LENGTH, m5.correlation[1])
-  const transcript = transcriptOf(sid, state.B, state.m2, state.m3, state.m4, m5.open, m5.correlation)
+  const transcript = transcriptOf(sid, state.head, m5.open, m5.correlation)
   mulCheckReceiver(mulChallenge(transcript, 0), state.ot, 0, mul0, m5.check[0])
   mulCheckReceiver(mulChallenge(transcript, 1), state.ot, MUL_LENGTH, mul1, m5.check[1])
   const t1 = mulShare(mul0.tB)

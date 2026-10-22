@@ -1,45 +1,43 @@
-import { HUB_CHAIN_ID } from '@puppet/contracts/const'
-import DEPLOYMENTS from '@puppet/contracts/deployments'
-import { type ChainId, IntervalTime } from '@puppet/sdk/const'
-import { uiStorage } from '@/ui-storage'
-import type { IStreamStoreKey } from '../app/storage/storage.js'
-import type { IPerformanceMetric } from '../components/$PerformanceMetric.js'
+import { PROTOCOL } from '@puppet/contracts/const'
+import type { ChainId } from '@puppet/sdk/const'
+import type { IAgentTemplateId } from '@puppet/sdk/agent'
+import type { ICells } from '@puppet/sdk/ui-components'
+import type { Address } from 'viem'
+import { AGENT_SLOT_PREFIX } from './secretSlots.js'
 
-const DB_NAME = `root:${DEPLOYMENTS[`Dictate:${HUB_CHAIN_ID}`].address}`
+export type IPortfolioRole = 'puppet' | 'master'
 
-export const localStoreSchema = uiStorage.createStoreDefinition(DB_NAME, 3, {
-  global: {
-    activityTimeframe: IntervalTime.WEEK,
-    performanceMetric: 'pnl' as IPerformanceMetric,
-    hideBalances: false
-  }
-})
+export const LEADERBOARD_SORT_KEYS = ['performance', 'nav'] as const
+export interface ILeaderboardSort {
+  direction: 'asc' | 'desc'
+  selector: (typeof LEADERBOARD_SORT_KEYS)[number]
+}
 
-export interface IDepositSource {
+export interface IChainAddress {
   chainId: ChainId
   address: `0x${string}`
 }
 
-export interface IDepositPath {
-  source: IDepositSource
-  dest: IDepositSource
+export interface IStoredPath {
+  source: IChainAddress
+  dest: IChainAddress
 }
 
-export function depositDestinationKey(wallet: string, scope: string): IStreamStoreKey<IDepositPath | null> {
-  return {
-    dbName: DB_NAME,
-    storeName: 'global',
-    key: `depositDestination:${scope}:${wallet.toLowerCase()}`,
-    initialValue: null
-  }
+export const editorChoiceKey = (owner: string, scope: string): string => `${scope}:${owner.toLowerCase()}`
+
+export interface IAgentIdentity {
+  secret: string
+  port: number
+  name: string
+  cells: ICells
+  fund: Address
+  template: IAgentTemplateId
+  strategy: string
 }
 
-export function depositSourceKey(wallet: string): IStreamStoreKey<IDepositSource | null> {
-  return {
-    dbName: DB_NAME,
-    storeName: 'global',
-    key: `depositSource:${wallet.toLowerCase()}`,
-    initialValue: null
-  }
+export interface IAgentBook {
+  list: readonly IAgentIdentity[]
+  pending: IAgentIdentity | null
 }
 
+export const agentBookSlot = (wallet: string): string => `${AGENT_SLOT_PREFIX}agents:${PROTOCOL.version}:${wallet.toLowerCase()}`

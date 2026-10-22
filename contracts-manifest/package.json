@@ -6,20 +6,12 @@
   "type": "module",
   "sideEffects": false,
   "scripts": {
-    "build": "tsgo -b",
-    "clean": "rm -rf dist",
-    "tsgo:check": "tsgo --noEmit"
+    "typecheck": "bun check"
   },
-  "files": ["dist"],
   "exports": {
-    ".": {
-      "types": "./dist/types/index.d.ts",
-      "import": "./dist/esm/index.js"
-    },
-    "./*": {
-      "types": "./dist/types/*/index.d.ts",
-      "import": "./dist/esm/*/index.js"
-    }
+    ".": "./src/index.ts",
+    "./parity.json": "./parity.json",
+    "./*": "./src/*/index.ts"
   },
   "devDependencies": {
     "viem": "catalog:"

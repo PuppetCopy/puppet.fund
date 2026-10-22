@@ -1,86 +1,212 @@
-import { HUB_CHAIN_ID, PRECISION, PROTOCOL } from '@puppet/contracts/const'
-import type { IFund__Allocation } from '@puppet/contracts/types'
-import { allocationRoom, cooledDown } from '@puppet/sdk/allocation'
-import { CompactContractError, CompactError, formatThrownError, type IComposedValuation, requestValuation } from '@puppet/sdk/compact'
-import type { ChainId } from '@puppet/sdk/const'
-import { getDuration, getTokenDescription, readableDate, readablePercentage, readableTokenAmountLabel } from '@puppet/sdk/core'
-import { DEFAULT_EVALUATION_CONFIG, VALUE_KEY } from '@puppet/sdk/evaluate'
+import { HUB_CANONICAL_TOKEN, HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
+import type { IFund__Allocation, IFund__Price } from '@puppet/contracts/types'
+import { type IArrival, quoteRelayFee } from '@puppet/sdk/client'
+import { CompactContractError, CompactError, formatThrownError, type IValuationOwner, requestValuation } from '@puppet/sdk/compact'
+import { type ChainId, PRICED_DEADLINE_SEC } from '@puppet/sdk/const'
+import { getTokenDescription, getUnixTimestamp, readablePercentage } from '@puppet/sdk/core'
 import {
   allocationTermsOf,
+  clientOf,
+  fromChain,
   type IAllocationCandidate,
+  type IFundBook,
   type IFundState,
   mandateDigest,
-  readAllocationBlock,
   readAllocationCandidates,
+  readCreditBook,
+  readFundBook,
   readFundState,
-  valuationRatesOf
+  readMandateWindow
 } from '@puppet/sdk/intent'
-import { floorOf, type IAllocatePlan, planAllocate } from '@puppet/sdk/pool'
-import { bondTokenOf, chainTokenOfKey, type IRelayFeeQuote } from '@puppet/sdk/state'
-import { combine, filter, type IStream, just, map, merge, op } from 'aelea/stream'
+import { type IAllocatePlan, planAllocate, valuationOf } from '@puppet/sdk/pool'
+import type { IFundRow } from '@puppet/sdk/schema'
+import { chainTokenOfKey, providerToken, relayFeeOf, tokenKeyOf, walletsOf } from '@puppet/sdk/state'
+import { combine, filter, type IStream, map, op, skipRepeatsWith } from 'aelea/stream'
 import { type IBehavior, type PromiseState, type PromiseStateDone, type PromiseStateError, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
 import { $node, $text, component, type I$Node, type I$Slottable, type INode, nodeEvent, style, styleBehavior } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
-import { colorShade, palette } from 'aelea/ui-components-theme'
-import { type Address, isAddressEqual } from 'viem'
-import { $amountDisplay, $infoTooltip, $intermediatePromise, text } from '@/ui-components'
-import context, { DISPLAY_QUOTE_TTL_MS, getRate } from '../../io/context.js'
-import { fetchFundShare } from '../../io/datastore/reads.js'
+import { palette } from 'aelea/ui-components-theme'
+import { type Address, getAddress, isAddressEqual } from 'viem'
+import { $amountDisplay, $infoTooltip, $intermediatePromise, $intermediateLine, SEPARATOR_COLOR, text } from '@/ui-components'
+import { $jazzicon } from '../../common/$avatar.js'
+import { clientDeps } from '../../io/clientDeps.js'
+import context, { DISPLAY_QUOTE_TTL_MS } from '../../io/context.js'
+import { client } from '../../io/datastore/reads.js'
 import { matchmakerUrl } from '../../io/matchmaker/index.js'
-import { formatUsd, priceFor } from '../../io/price.js'
+import { priceFor, usdOf } from '../../io/price.js'
 import { $addressLink } from '../$AccountProfile.js'
-import { $detailLine, } from './$SourceAmountInput.js'
-import type { IArrival } from './draft.js'
 import { $miniButton } from './editorUtils.js'
-import { quoteRelayFee, terms } from './runner/_shared.js'
 
 const HUB = HUB_CHAIN_ID as ChainId
-const valueToken = chainTokenOfKey(HUB, VALUE_KEY)
-const value = getTokenDescription(HUB, valueToken)
-const bond = getTokenDescription(HUB, bondTokenOf(HUB))
 
-const shareOf = (part: bigint, whole: bigint): bigint => (whole === 0n ? 0n : (part * 10_000n) / whole)
 
-interface ISnapshot {
-  quote: IComposedValuation
+export interface IRoundSnapshot {
+  token: Address
   state: IFundState
   candidates: IAllocationCandidate[]
-  blocked: string | null
-  feeMap: IRelayFeeQuote
+  now: bigint
+  deadline: bigint
+  feeCeiling: bigint
   feeReserve: bigint
 }
 
-interface IRound {
-  value: bigint
+export interface IPooledRound {
+  token: Address
+  snapshot: Promise<IRoundSnapshot>
+}
+
+interface ISnapshot extends IRoundSnapshot {
+  mark: { value: bigint; price: IFund__Price }
+}
+
+export interface IRaise {
+  token: Address
+  fundRow: Pick<IFundRow, 'master' | 'totalShares'>
+  joinList: readonly { holder: Address; amount: bigint; shares: bigint }[]
+}
+
+export interface IRound {
   rows: IFund__Allocation[]
   plan: IAllocatePlan | null
   error: string | null
+  after: IRaise | null
 }
 
 const readableRoundError = (err: unknown): string => {
+  const feeShort = 'Your allocation does not cover your slice of the relay fee; allocate more'
   if (err instanceof CompactContractError) {
-    if (err.code === 'Fund__SkinBelowFloor') return 'Your ownership would fall below the pool floor; contribute more so the puppets fit'
-    if (err.code === 'Balance__ZeroAmount') return 'Nothing to fund: deposit, or wait until a puppet can join'
+    if (err.code === 'Balance__ZeroAmount') return 'Nothing to allocate: deposit, or wait until a puppet can join'
+    if (err.code === 'Intent__RelayFeeRatioExceeded') return feeShort
   }
+  if (err instanceof CompactError && err.code === 'POOL_OVERFLOW') return feeShort
   return formatThrownError(err)
 }
 
 
-const $stubBar = (width: string): I$Node =>
-  $node(style({ width, height: '12px', borderRadius: '6px', background: colorShade(palette.foreground, 15) }))()
+type IRoundFund = Pick<IFundRow, 'master' | 'shareToken' | 'performanceFee'>
+
+export function readRounds(fundRow: IRoundFund, book: Promise<IFundBook> | null, tokens: readonly Address[]): IPooledRound[] {
+  const master = fundRow.master
+  const pinnedQuery = fromChain('the latest block', HUB, clientOf(clientDeps, HUB).getBlock())
+  const shared = Promise.all([
+    pinnedQuery,
+    pinnedQuery.then(pinned => readFundState(clientDeps, fundRow, pinned.number)),
+    context.getRelayFeeQuote(HUB, HUB_CANONICAL_TOKEN.WETH, DISPLAY_QUOTE_TTL_MS)
+  ])
+  const priced = tokens.filter(token => !isAddressEqual(token, PROTOCOL.nativeToken))
+  const candidateLists =
+    priced.length === 0
+      ? Promise.resolve([])
+      : book === null
+        ? Promise.reject(new Error(`a round of ${master} over priced tokens needs its fund book`))
+        : Promise.all([pinnedQuery, book]).then(async ([pinned, held]) =>
+            readAllocationCandidates(clientDeps, master, fundRow.shareToken, priced, pinned.number, await readMandateWindow(clientDeps, held, priced, pinned))
+          )
+  return tokens.map(token => ({
+    token,
+    snapshot: (async (): Promise<IRoundSnapshot> => {
+      const [[pinned, fund, feeMap], lists, feeReserve] = await Promise.all([shared, candidateLists, quoteRelayFee(clientDeps, HUB, 'sell', false, token, 0n, 0n, 0n)])
+      const at = priced.findIndex(each => isAddressEqual(each, token))
+      return {
+        token,
+        state: fund,
+        candidates: at === -1 ? [] : lists[at]!,
+        now: pinned.timestamp,
+        deadline: BigInt(getUnixTimestamp() + PRICED_DEADLINE_SEC / 2),
+        feeCeiling: feeMap('allocate', true, PROTOCOL.maxCohortSize, 0n, 0n),
+        feeReserve
+      }
+    })()
+  }))
+}
+
+export async function planRound(
+  master: Address,
+  snap: IRoundSnapshot,
+  mark: { value: bigint; price: IFund__Price },
+  credit: (IArrival & { bound: boolean }) | null
+): Promise<IRound> {
+  const amount = credit === null ? 0n : credit.amount
+  const allocation = {
+    ...snap.state,
+    kind: 'allocate' as const,
+    master,
+    now: snap.now,
+    deadline: snap.deadline,
+    value: mark.value,
+    price: mark.price,
+    feeReserve: snap.feeReserve,
+    feeCeiling: snap.feeCeiling,
+    candidates: snap.candidates
+  }
+  const rows = allocationTermsOf(allocation, amount)
+  if (amount === 0n && rows.length === 0) return { rows, plan: null, error: null, after: null }
+  const abroad = credit !== null && amount > 0n && credit.chainId !== HUB
+  const payers = BigInt(rows.length) + 1n
+  const convert = await context.getFeeConverter(HUB, HUB_CANONICAL_TOKEN.WETH, DISPLAY_QUOTE_TTL_MS)
+  const fee = relayFeeOf(convert, HUB, 'allocate', false, BigInt(rows.length), 0n, 0n)
+  const release = abroad
+    ? relayFeeOf(await context.getFeeConverter(credit.chainId, providerToken(credit.token, credit.chainId), DISPLAY_QUOTE_TTL_MS), credit.chainId, 'fulfil', !credit.bound, 0n, 0n, 0n)
+    : 0n
+  const credited = credit === null || amount === 0n ? null : await readCreditBook(clientDeps, snap.state.owner, master, credit.chainId, providerToken(credit.token, credit.chainId))
+  try {
+    const plan = planAllocate({
+      now: snap.now,
+      owner: snap.state.owner,
+      supply: snap.state.supply,
+      redemption: snap.state.redemption,
+      masterShares: snap.state.masterShares,
+      value: mark.value,
+      fee,
+      price: mark.price,
+      credit:
+        credit === null || credited === null
+          ? { chainId: 0n, total: 0n, feeTotal: 0n }
+          : { chainId: BigInt(credit.chainId), total: credited.total + amount, feeTotal: credited.feeTotal + ((fee / payers) * mark.price.amount) / mark.price.value + release },
+      credited,
+      rowList: rows.map(row => {
+        const candidate = snap.candidates.find(c => isAddressEqual(c.puppet, row.puppet))
+        if (candidate === undefined) throw new Error(`the round names ${row.puppet}, whose balance and holding were not read`)
+        return {
+          puppet: row.puppet,
+          amount: row.amount,
+          skin: row.mandate.skin,
+          rate: row.mandate.allocationRate,
+          exitCap: row.mandate.exitCap,
+          cooldownPeriod: row.mandate.cooldownPeriod,
+          balance: candidate.available,
+          held: candidate.held,
+          cost: candidate.cost,
+          allocatedAt: candidate.allocatedAt,
+          mandated: candidate.epoch !== null && candidate.registered === mandateDigest(row.mandate, candidate.epoch) && row.mandate.expiry > snap.deadline
+        }
+      })
+    })
+    const joinList = rows.flatMap((row, i) => {
+      const planned = plan.rowList[i]
+      return planned === null || planned === undefined ? [] : [{ holder: row.puppet, amount: row.amount, ...planned }]
+    })
+    const after: IRaise = {
+      token: snap.token,
+      fundRow: { master, totalShares: snap.state.supply + plan.minted },
+      joinList: plan.contributed > 0n ? [...joinList, { holder: master, amount, shares: plan.contributed }] : joinList
+    }
+    return { rows, plan, error: null, after }
+  } catch (err) {
+    return { rows, plan: null, error: readableRoundError(err), after: null }
+  }
+}
+
 const $cell = (minWidth: string) => $node(style({ minWidth, flexShrink: '0', display: 'flex', justifyContent: 'flex-end', whiteSpace: 'nowrap' }))
 const $roundRow = ($label: I$Slottable, $stake: I$Slottable, $share: I$Slottable): I$Node =>
-  $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm, minHeight: '20px' }))(
+  $row(spacing.small, style({ alignItems: 'center', minHeight: '20px' }))(
     $node(style({ flex: 1, minWidth: '0' }))($label),
     $cell('96px')($stake),
     $cell('120px')($share)
   )
-const $roundHeader = ($label: I$Slottable): I$Node =>
-  $node(style({ color: palette.foreground, fontSize: text.xs }))($roundRow($label, $text('Stake'), $text('Share')))
-const $totals = (...$lines: I$Node[]): I$Node =>
-  $column(spacing.small, style({ borderTop: `1px solid ${palette.horizon}`, paddingTop: '12px' }))(...$lines)
-const $stubStake = (): I$Node => $column(style({ gap: '4px', alignItems: 'flex-end' }))($stubBar('64px'), $stubBar('48px'))
-const $roundGroup = (...$rows: I$Node[]): I$Node => $column(spacing.small)(...$rows)
+const $roundHeader: I$Node = $node(style({ color: palette.foreground, fontSize: text.xs }))($roundRow($node(), $text('Allocated'), $text('Share')))
+const $roundGroup = ($header: I$Node, ...$rows: I$Node[]): I$Node =>
+  $column(spacing.small, style({ fontSize: text.sm }))($header, ...$rows.map($row => $node(style({ borderTop: `1px solid ${SEPARATOR_COLOR}`, paddingTop: '8px' }))($row)))
 const $footer = ($label: I$Slottable, $action: I$Slottable): I$Node =>
   $row(spacing.small, style({ alignItems: 'center', minHeight: '24px' }))(
     $row(spacing.tiny, style({ flex: 1, alignItems: 'center', fontSize: text.xs, color: palette.foreground, whiteSpace: 'nowrap' }))($label),
@@ -88,194 +214,160 @@ const $footer = ($label: I$Slottable, $action: I$Slottable): I$Node =>
   )
 
 export interface I$AllocationSimulation {
-  master: Address
+  fundRow: IRoundFund
+  owner: IValuationOwner
+  signed: boolean
   hideBalances: IStream<boolean>
+  rounds: IStream<Promise<readonly IPooledRound[] | null>>
   arrival: IStream<IArrival>
+  boundChains: ReadonlySet<ChainId>
 }
 
-export const $AllocationSimulation = ({ master, hideBalances, arrival }: I$AllocationSimulation) =>
+export const $AllocationSimulation = ({ fundRow, owner, signed, hideBalances, rounds, arrival, boundChains }: I$AllocationSimulation) =>
   component(
-    ([clickRefresh, clickRefreshTether]: IBehavior<INode<HTMLButtonElement>, MouseEvent>) => {
-      const bondToken = bondTokenOf(HUB)
+    (
+      [clickRefresh, clickRefreshTether]: IBehavior<INode<HTMLButtonElement>, MouseEvent>,
+      [enableSession, enableSessionTether]: IBehavior<INode<HTMLButtonElement>, MouseEvent>
+    ) => {
+      const master = fundRow.master
       const snapshotQuery: IStream<Promise<ISnapshot>> = op(
-        merge(just(null), clickRefresh),
-        map(async (): Promise<ISnapshot> => {
-          const share = await fetchFundShare(master)
-          const [quote, fundState, candidates, blocked, feeMap, feeReserve] = await Promise.all([
-            requestValuation(matchmakerUrl, master, share),
-            readFundState(terms, master, share),
-            readAllocationCandidates(terms, master),
-            readAllocationBlock(terms, master),
-            context.getRelayFeeQuote(HUB, bondToken, DISPLAY_QUOTE_TTL_MS),
-            quoteRelayFee(HUB, 'sell', false, bondToken, 0n, 0n, 0n, null)
-          ])
-          return { quote, state: fundState, candidates, blocked, feeMap, feeReserve }
+        combine({
+          leg: op(
+            arrival,
+            skipRepeatsWith((a, b) => a.chainId === b.chainId && isAddressEqual(a.token, b.token))
+          ),
+          rounds
+        }),
+        map(async (p): Promise<ISnapshot> => {
+          const hubForm = chainTokenOfKey(HUB, tokenKeyOf(p.leg.chainId, p.leg.token))
+          const token = p.leg.chainId === HUB ? hubForm : providerToken(hubForm, HUB)
+          const pool = await p.rounds
+          const pooled = pool === null ? undefined : pool.find(entry => isAddressEqual(entry.token, token))
+          const snap = pooled === undefined ? await readRounds(fundRow, isAddressEqual(token, PROTOCOL.nativeToken) ? null : readFundBook(clientDeps, master), [token])[0]!.snapshot : { ...(await pooled.snapshot), deadline: BigInt(getUnixTimestamp() + PRICED_DEADLINE_SEC / 2) }
+          const quote = await requestValuation(matchmakerUrl, master, snap.state.shareToken, token, owner, null)
+          return { ...snap, mark: { value: valuationOf(quote.valuation), price: quote.price } }
         }),
         state()
       )
-      const roundOf = async (snap: ISnapshot, arrived: IArrival): Promise<IRound> => {
-        const rates = await valuationRatesOf(getRate, [arrived])
-        const marked = rates.toValue(arrived.chainId, arrived.token, arrived.amount)
-        const value = isAddressEqual(arrived.token, bondTokenOf(arrived.chainId))
-          ? marked
-          : (marked * (PRECISION.basisPoints - DEFAULT_EVALUATION_CONFIG.driftToleranceBps)) / PRECISION.basisPoints
-        const rows = allocationTermsOf(
-          {
-            ...snap.state,
-            master,
-            nowSec: BigInt(Math.floor(Date.now() / 1000)),
-            value: snap.quote.valuation.value,
-            blocked: snap.blocked,
-            feeReserve: snap.feeReserve,
-            feeCeiling: snap.feeMap('allocate', true, PROTOCOL.maxCohortSize, 0n, 0n),
-            candidates: snap.candidates
-          },
-          value
-        )
-        if (arrived.amount === 0n && rows.length === 0) return { value, rows, plan: null, error: null }
-        const fee = await quoteRelayFee(HUB, 'allocate', false, bondToken, BigInt(rows.length), 0n, 0n, arrived.amount > 0n ? arrived.chainId : null)
-        try {
-          const plan = planAllocate({
-            skin: snap.state.skin,
-            supply: snap.state.supply,
-            queued: snap.state.queued,
-            masterUnits: snap.state.masterUnits,
-            value: snap.quote.valuation.value,
-            fee,
-            credit: { chainId: BigInt(arrived.chainId), amount: arrived.amount, value },
-            rowList: rows.map(row => {
-              const candidate = snap.candidates.find(c => isAddressEqual(c.puppet, row.puppet))
-              if (candidate === undefined) throw new Error(`the round names ${row.puppet}, whose balance and holding were not read`)
-              return { stake: row.stake, skin: row.mandate.skin, rate: row.mandate.allocationRate, balance: candidate.available, basis: candidate.basis }
-            })
-          })
-          return { value, rows, plan, error: null }
-        } catch (err) {
-          return { value, rows, plan: null, error: readableRoundError(err) }
-        }
-      }
-      const round: IStream<PromiseState<IRound>> = op(
-        combine({ query: snapshotQuery, arrival }),
-        map(async p => roundOf(await p.query, p.arrival)),
-        promiseState,
+      const walletsQuery = op(
+        snapshotQuery,
+        map(q => q.then(snap => walletsOf(client, snap.candidates.map(candidate => candidate.puppet)))),
         state()
       )
-
-      const $detailStub = (...$extra: I$Node[]): I$Node => $column(spacing.default)(
-        $roundGroup(
-          $roundHeader($stubBar('90px')),
-          $roundRow($stubBar('110px'), $stubStake(), $stubBar('50px'))
-        ),
-        $totals(
-          $detailLine('Funded', $stubBar('110px'), "Everyone in the round buys in at the fund's value as of this valuation."),
-          $detailLine('Your share', $stubBar('50px'))
-        ),
-        ...$extra
+      const roundQuery: IStream<Promise<IRound>> = op(
+        combine({
+          query: snapshotQuery,
+          arrival: op(
+            arrival,
+            skipRepeatsWith((a, b) => a.chainId === b.chainId && isAddressEqual(a.token, b.token) && a.amount === b.amount)
+          )
+        }),
+        map(async p => {
+          const snap = await p.query
+          return planRound(master, snap, snap.mark, { ...p.arrival, bound: boundChains.has(p.arrival.chainId) })
+        }),
+        state()
       )
+      const round: IStream<PromiseState<IRound>> = op(roundQuery, promiseState, state())
+      const $intermediateGroup: I$Node = $roundGroup($roundHeader, $roundRow($intermediateLine('7em'), $intermediateLine('5em'), $intermediateLine('3em')))
+
       const refusalOf = (err: unknown): string => {
-        if (err instanceof CompactError && err.code === 'CHRONICLE_BEHIND') return 'Indexing your last action, retry shortly'
-        if (err instanceof CompactError && err.code === 'MARK_TOO_SOON') return 'Fund was just valued, retry shortly'
+        if (err instanceof CompactError && (err.code === 'CHRONICLE_BEHIND' || err.code === 'FUND_UNRECORDED')) return 'Indexing your last action, retry shortly'
         return 'Could not value the fund'
       }
 
-      const $details = (snap: ISnapshot): I$Node => {
-        const v = snap.quote.valuation
-        const before = snap.state.masterUnits
-        const floorBefore = floorOf(snap.state.skin, snap.state.supply - snap.state.queued, before)
-        const nowSec = BigInt(Math.floor(Date.now() / 1000))
-        const stakeOf = (rows: readonly IFund__Allocation[]): bigint => rows.reduce((total, row) => total + row.stake, 0n)
+      const $details = (): I$Node => {
         const settled = filter((s): s is PromiseStateDone<IRound> | PromiseStateError => s.status !== PromiseStatus.PENDING, round)
-        const cell = (fn: (r: IRound) => string): I$Slottable => $text(map(s => (s.status === PromiseStatus.DONE ? fn(s.value) : '-'), settled))
-        const priced = combine({ s: settled, price: priceFor(HUB, valueToken) })
-        const joinedRows = (r: IRound): IFund__Allocation[] => {
-          const plan = r.plan
-          return plan === null ? [] : r.rows.filter((_, i) => plan.rowList[i] !== null)
-        }
-        const joinedStake = (r: IRound): bigint => stakeOf(joinedRows(r))
-        const joinedCount = (r: IRound): number => joinedRows(r).length
-        const reasonOf = (c: IAllocationCandidate, floor: bigint): string => {
-          if (snap.blocked !== null) return snap.blocked
-          if (!c.delegated) return 'account not set up on the hub'
-          if (c.registered !== mandateDigest(c.puppet, c.mandate)) return 'not registered yet'
-          if (c.mandate.expiry <= nowSec) return 'mandate expired'
-          if (!cooledDown(c.allocatedAt, c.mandate.cooldownPeriod, nowSec)) {
-            const end = c.allocatedAt + c.mandate.cooldownPeriod
-            return `${readableDate(Number(end), { month: 'short', day: 'numeric' })} · in ${getDuration(end - nowSec)}`
-          }
-          if (allocationRoom(c.mandate, c.available > snap.feeReserve ? c.available - snap.feeReserve : 0n, c.basis) === 0n) return 'nothing available'
-          if (c.mandate.skin > floor) return `wants ${readablePercentage(c.mandate.skin)} floor`
-          return 'no room at this amount'
-        }
-        const $candidate = (c: IAllocationCandidate): I$Node => {
-          const at = (r: IRound): number => r.rows.findIndex(row => isAddressEqual(row.puppet, c.puppet))
-          const joined = (r: IRound): { units: bigint; total: bigint } | null => {
-            if (at(r) < 0 || r.plan === null) return null
-            const row = r.plan.rowList[at(r)]
-            return row === null || row === undefined ? null : { units: row.units, total: snap.state.supply + r.plan.minted }
-          }
-          const why = (r: IRound): string =>
-            at(r) >= 0 && r.plan !== null ? 'too small for its fee share' : reasonOf(c, r.plan === null ? floorBefore : r.plan.skin)
-          return $roundRow(
-            $addressLink(c.puppet),
-            $amountDisplay({
-              hideBalances,
-              usd: map(p => (p.s.status !== PromiseStatus.DONE ? '-' : joined(p.s.value) === null ? '' : formatUsd(p.s.value.rows[at(p.s.value)]!.stake, p.price)), priced),
-              amount: map(s => (s.status !== PromiseStatus.DONE ? '-' : joined(s.value) === null ? '' : readableTokenAmountLabel(bond, s.value.rows[at(s.value)]!.stake)), settled),
-              align: 'flex-end',
-              usdFontSize: text.sm
-            }),
-            $node(
-              styleBehavior(
-                map(s => (s.status === PromiseStatus.DONE && joined(s.value) !== null ? null : { color: palette.foreground, fontSize: text.xs }), settled)
-              )
-            )(cell(r => {
-              const row = joined(r)
-              return row === null ? why(r) : readablePercentage(shareOf(row.units, row.total))
-            }))
-          )
-        }
-        return $column(spacing.default)(
-          $roundGroup(
-            $roundHeader(cell(r => `Round · ${joinedCount(r)} joining`)),
-            ...(snap.candidates.length === 0
-              ? [$node(style({ fontSize: text.xs, color: palette.foreground }))($text('No puppets mandate you yet; the round is yours alone.'))]
-              : snap.candidates.map($candidate))
-          ),
-          $totals(
-            $detailLine(
-              'Funded',
-              $text(map(p => (p.s.status === PromiseStatus.DONE && p.s.value.plan !== null ? formatUsd(joinedStake(p.s.value) + p.s.value.value, p.price) : '-'), priced)),
-              `Everyone in the round buys in at the fund's value as of this valuation, ${readableTokenAmountLabel(value, v.value)}. A contribution in another token counts at its market price less ${readablePercentage(DEFAULT_EVALUATION_CONFIG.driftToleranceBps)}, the margin the attestor accepts.`
-            ),
-            $detailLine(
-              'Your share',
-              cell(r => (r.plan === null ? '-' : readablePercentage(shareOf(r.plan.masterUnits, snap.state.supply + r.plan.minted)))),
-              'Your ownership of the fund once this round lands.'
-            ),
-            $node(
-              style({ fontSize: text.xs, color: palette.negative, lineHeight: '1.4' }),
-              styleBehavior(map(s => (s.status === PromiseStatus.DONE && s.value.error === null ? { display: 'none' } : null), settled))
-            )($text(map(s => (s.status === PromiseStatus.DONE ? (s.value.error ?? '') : readableRoundError(s.error)), settled)))
-          )
-        )
+        return $node(
+          style({ fontSize: text.xs, color: palette.negative, lineHeight: '1.4' }),
+          styleBehavior(map(s => (s.status === PromiseStatus.DONE && s.value.error === null ? { display: 'none' } : null), settled))
+        )($text(map(s => (s.status === PromiseStatus.DONE ? (s.value.error ?? '') : readableRoundError(s.error)), settled)))
       }
 
-      const $simulation = $intermediatePromise({
-        $loader: $detailStub(),
-        $$fail: err =>
-          $detailStub(
-            $footer(
-              $row(spacing.tiny, style({ alignItems: 'center', color: palette.indeterminate }))(
-                $text(refusalOf(err)),
-                $infoTooltip(err instanceof CompactError ? err.detail : formatThrownError(err))
-              ),
-              $miniButton('Retry', false, clickRefreshTether(nodeEvent('click')))
+      const $group = (snap: ISnapshot, round: IRound, wallets: ReadonlyMap<Address, Address>): I$Node => {
+        const description = getTokenDescription(HUB, snap.token)
+        const after = round.after
+        const totalShares = after === null ? snap.state.supply : after.fundRow.totalShares
+        const own = after === null ? undefined : after.joinList.find(j => isAddressEqual(j.holder, master))
+        const ownAmount = own === undefined ? 0n : own.amount
+        return $roundGroup(
+          $roundHeader,
+          $roundRow(
+            $row(spacing.small, style({ alignItems: 'center' }))($jazzicon(owner.user, 20), $text('You')),
+            round.error === null
+              ? $amountDisplay({
+                  hideBalances,
+                  usd: map(price => usdOf(ownAmount, price), priceFor(HUB, snap.token)),
+                  align: 'flex-end',
+                  usdFontSize: text.sm
+                })
+              : $text('-'),
+            $text(
+              round.error === null
+                ? readablePercentage(totalShares === 0n ? 0n : ((snap.state.masterShares + (own === undefined ? 0n : own.shares)) * 10_000n) / totalShares)
+                : '-'
             )
           ),
-        $display: map(async query => $details(await query), snapshotQuery)
+          ...(round.rows.length === 0
+            ? [
+                $node(style({ fontSize: text.xs, color: palette.foreground, minHeight: '20px', display: 'flex', alignItems: 'center' }))(
+                  $text(`No mandated puppet holds ${description.symbol} on the hub yet`)
+                )
+              ]
+            : (after === null ? [] : after.joinList).flatMap(j => {
+                if (isAddressEqual(j.holder, master)) return []
+                const held = snap.candidates.find(c => isAddressEqual(c.puppet, j.holder))?.held
+                if (held === undefined) throw new Error(`the round names ${j.holder}, whose holding was not read`)
+                return [
+                  $roundRow(
+                    $addressLink(wallets.get(getAddress(j.holder)) ?? getAddress(j.holder)),
+                    $amountDisplay({
+                      hideBalances,
+                      usd: map(price => usdOf(j.amount, price), priceFor(HUB, snap.token)),
+                      align: 'flex-end',
+                      usdFontSize: text.sm
+                    }),
+                    $text(readablePercentage(totalShares === 0n ? 0n : ((held + j.shares) * 10_000n) / totalShares))
+                  )
+                ]
+              }))
+        )
+      }
+      const $simulation = $intermediatePromise({
+        $loader: $intermediateGroup,
+        $$fail: err =>
+          $column(spacing.default)(
+            signed
+              ? $footer(
+                  $row(spacing.tiny, style({ alignItems: 'center', color: palette.indeterminate }))(
+                    $text(refusalOf(err)),
+                    $infoTooltip(err instanceof CompactError ? err.detail : formatThrownError(err))
+                  ),
+                  $miniButton('Retry', false, clickRefreshTether(nodeEvent('click')))
+                )
+              : $footer(
+                  $row(spacing.tiny, style({ alignItems: 'center' }))(
+                    $text('Live value needs a session'),
+                    $infoTooltip("The round is priced on your fund's live value, which the attestor serves only to a session on this device. Signing it is free.")
+                  ),
+                  $miniButton('Sign session', false, enableSessionTether(nodeEvent('click')))
+                )
+          ),
+        $display: map(
+          async p => {
+            const [snap, live, wallets] = await Promise.all([p.snap, p.live, p.wallets])
+            return $column(spacing.default)($group(snap, live, wallets), $details())
+          },
+          combine({ snap: snapshotQuery, live: roundQuery, wallets: walletsQuery })
+        )
       })
 
-      const backers: IStream<bigint | null> = map(s => (s.status === PromiseStatus.DONE && s.value.plan !== null ? BigInt(s.value.rows.length) : null), round)
-      return [$simulation, { backers }]
+      const puppets: IStream<bigint | null> = map(s => (s.status === PromiseStatus.DONE && s.value.plan !== null ? BigInt(s.value.rows.length) : null), round)
+      const raise: IStream<IRaise | null> = op(
+        round,
+        filter(s => s.status !== PromiseStatus.PENDING),
+        map(s => (s.status === PromiseStatus.DONE ? s.value.after : null))
+      )
+      return [$simulation, { puppets, raise, refreshRounds: clickRefresh, enableSession }]
     }
   )
