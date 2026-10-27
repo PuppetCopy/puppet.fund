@@ -7,9 +7,9 @@ export interface IGmxPositionRow {
   isLong: boolean
   sizeInUsd: bigint
   sizeInTokens: bigint
-  collateralUsd: bigint
   collateralAmount: bigint
   increasedAtTime: number
+  decreasedAtTime: number
 }
 export type IGmxPositionProvider = (account: Address) => Promise<IGmxPositionRow[]>
 

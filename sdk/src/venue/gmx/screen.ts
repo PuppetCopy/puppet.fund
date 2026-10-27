@@ -11,9 +11,9 @@ import { tokenMetaByChainToken, tokenMetaKey } from '../../state/tokenRegistry.j
 import { isRegisteredToken } from '../erc20.js'
 import type { IDappScreenReason, IGuardReason, IOperateStep, IScreenContext, IVenue, IVenueFacts } from '../types.js'
 import { GMX_V2_CONTRACT_MAP } from './contractMap.js'
-import { GMX_ADMITTED_ORDER_TYPES, GMX_DECREASE_TYPES, GMX_INCREASE_TYPES, GMX_MAX_SWAP_PATH_LENGTH, GMX_ONE_CLICK_MESSAGE, GMX_ORDER_CUSTODY_TYPES, GMX_ORDER_VAULT, GMX_REFERRAL_CODE, GMX_REFERRAL_STORAGE, GMX_REFERRAL_STORAGE_ABI, GMX_RELAY_DOMAIN_NAME, GMX_RELAY_ROUTER, GMX_ROUTER, GMX_SUBACCOUNT_APPROVAL_TYPES, GMX_SUBACCOUNT_ORDER_ACTION, GMX_SUBACCOUNT_RELAY_ROUTER, GMX_SWAP_TYPES, GMX_TOKEN_SPENDER, GMX_UI_FEE_RECEIVER, GMX_V2_CHAIN_ID, GMX_WNT } from './contracts.js'
+import { GMX_ADMITTED_ORDER_TYPES, GMX_DECREASE_TYPES, GMX_INCREASE_TYPES, GMX_MAX_SWAP_PATH_LENGTH, GMX_ONE_CLICK_MESSAGE, GMX_ORDER_CUSTODY_TYPES, GMX_ORDER_TYPE, GMX_ORDER_VAULT, GMX_REFERRAL_CODE, GMX_REFERRAL_STORAGE, GMX_REFERRAL_STORAGE_ABI, GMX_RELAY_DOMAIN_NAME, GMX_RELAY_ROUTER, GMX_ROUTER, GMX_SUBACCOUNT_APPROVAL_TYPES, GMX_SUBACCOUNT_ORDER_ACTION, GMX_SUBACCOUNT_RELAY_ROUTER, GMX_SWAP_TYPES, GMX_TOKEN_SPENDER, GMX_UI_FEE_RECEIVER, GMX_V2_CHAIN_ID, GMX_WNT } from './contracts.js'
 import { gmxOutflows, routerApproval, traceSwapPathOutput, unwrapRouterCalls } from './decode.js'
-import { GMX_ORDER_TYPE, gmxPositions } from './evaluate.js'
+import { gmxPositions } from './evaluate.js'
 import { readGmxMarkets } from './market.js'
 import { resolveGmxOneClickApproval } from './oneClick.js'
 import { gmxOrderOutcome } from './outcome.js'
@@ -332,14 +332,32 @@ export const gmxVenue: IVenue = {
     detail: 'a GMX contract',
     pullsTokens: isAddressEqual(entry.address, GMX_TOKEN_SPENDER) || key === 'GmxRouter',
     standing: isAddressEqual(entry.address, GMX_TOKEN_SPENDER)
-  })).concat({
-    chainId: GMX_V2_CHAIN_ID,
-    address: GMX_REFERRAL_STORAGE,
-    name: 'GMX ReferralStorage',
-    detail: "GMX's referral registry; a fund binds only Puppet's code",
-    pullsTokens: false,
-    standing: false
-  }),
+  })).concat(
+    {
+      chainId: GMX_V2_CHAIN_ID,
+      address: GMX_REFERRAL_STORAGE,
+      name: 'GMX ReferralStorage',
+      detail: "GMX's referral registry; a fund binds only Puppet's code",
+      pullsTokens: false,
+      standing: false
+    },
+    {
+      chainId: GMX_V2_CHAIN_ID,
+      address: GMX_RELAY_ROUTER,
+      name: 'GMX Express relay router',
+      detail: "relays GMX Express orders signed as a digest; GMX's Router allowance bounds what they can move",
+      pullsTokens: false,
+      standing: false
+    },
+    {
+      chainId: GMX_V2_CHAIN_ID,
+      address: GMX_SUBACCOUNT_RELAY_ROUTER,
+      name: 'GMX One-Click relay router',
+      detail: "relays orders from the fund's GMX One-Click trading subaccount",
+      pullsTokens: false,
+      standing: false
+    }
+  ),
   claims(ctx, call) {
     if (ctx.chainId !== GMX_V2_CHAIN_ID) return false
     if (isAddressEqual(call.target, GMX_ROUTER) || isAddressEqual(call.target, GMX_REFERRAL_STORAGE)) return true

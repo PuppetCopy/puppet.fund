@@ -1,7 +1,7 @@
-import { type Address, getAddress } from 'viem'
+import { type Address, getAddress, isAddressEqual } from 'viem'
 import { readContract } from 'viem/actions'
-import { USD_DECIMALS, USD_SYMBOL } from '../../const/common.js'
-import type { ChainId } from '../../const/index.js'
+import { IntervalTime, USD_DECIMALS, USD_SYMBOL } from '../../const/common.js'
+import { getDuration } from '../../core/date.js'
 import { readableAddress } from '../../core/format.js'
 import { readableLeverage, readableUsd } from '../../core/readable.js'
 import { max } from '../../core/math.js'
@@ -12,78 +12,17 @@ import type { IPriceSource } from '../../evaluate/types.js'
 import { type ITokenMetaKey, tokenMetaByChainToken, tokenMetaKey } from '../../state/tokenRegistry.js'
 import type { IVenueMarket, IVenuePosition, IVenueValueParams } from '../types.js'
 import { GMX_V2_CONTRACT_MAP } from './contractMap.js'
+import { GMX_ORDER_CUSTODY_TYPES, GMX_ORDER_TYPE, GMX_REFERRAL_STORAGE, GMX_UI_FEE_RECEIVER } from './contracts.js'
 import { GMX_WNT, readGmxMarkets } from './market.js'
-import { makeOnchainGmxClaimableProvider, makeOnchainGmxOrderProvider, makeOnchainGmxPositionProvider } from './onchainPositions.js'
-import { getPositionPnlUsd } from './position.js'
-import type { IGmxClaimableRow, IGmxOrderRow, IGmxPositionRow } from './rows.js'
+import { makeOnchainGmxClaimableProvider, makeOnchainGmxOrderProvider, makeOnchainGmxPositionProvider, readGmxOpenings } from './onchainPositions.js'
 
 export type { IGmxClaimableRow, IGmxOrderRow, IGmxPositionRow } from './rows.js'
-
-export const GMX_ORDER_TYPE = {
-  MarketSwap: 0,
-  LimitSwap: 1,
-  MarketIncrease: 2,
-  LimitIncrease: 3,
-  MarketDecrease: 4,
-  LimitDecrease: 5,
-  StopLossDecrease: 6,
-  StopIncrease: 8
-} as const
-
-export const GMX_INCREASE_TYPES: ReadonlySet<number> = new Set([
-  GMX_ORDER_TYPE.MarketIncrease,
-  GMX_ORDER_TYPE.LimitIncrease,
-  GMX_ORDER_TYPE.StopIncrease
-])
-
-export const GMX_DECREASE_TYPES: ReadonlySet<number> = new Set([
-  GMX_ORDER_TYPE.MarketDecrease,
-  GMX_ORDER_TYPE.LimitDecrease,
-  GMX_ORDER_TYPE.StopLossDecrease
-])
-
-export const GMX_ORDER_CUSTODY_TYPES: ReadonlySet<number> = new Set([
-  GMX_ORDER_TYPE.MarketSwap,
-  GMX_ORDER_TYPE.LimitSwap,
-  GMX_ORDER_TYPE.MarketIncrease,
-  GMX_ORDER_TYPE.LimitIncrease,
-  GMX_ORDER_TYPE.StopIncrease
-])
 
 const GMX_ORDER_EXECUTING_TYPES: ReadonlySet<number> = new Set([
   GMX_ORDER_TYPE.MarketSwap,
   GMX_ORDER_TYPE.MarketIncrease,
   GMX_ORDER_TYPE.MarketDecrease
 ])
-
-
-type IGmxPriceMap = Map<ITokenMetaKey, IPriceSource>
-
-function gmxTokensToPrice(
-  markets: ReadonlyMap<Address, IVenueMarket>,
-  rows: IGmxPositionRow[],
-  orders: IGmxOrderRow[],
-  claimables: IGmxClaimableRow[]
-): Address[] {
-  const tokens = new Set<Address>()
-  for (const r of rows) {
-    const indexToken = markets.get(getAddress(r.market))?.indexToken
-    if (indexToken !== undefined) tokens.add(indexToken)
-    tokens.add(r.collateralToken)
-  }
-  for (const o of orders) {
-    if (GMX_ORDER_CUSTODY_TYPES.has(o.orderType)) tokens.add(o.collateralToken)
-    if (o.executionFee > 0n) tokens.add(GMX_WNT)
-  }
-  for (const c of claimables) tokens.add(c.token)
-  return [...tokens]
-}
-
-function tokenAmountToUsd(priceByToken: IGmxPriceMap, chainId: ChainId, token: Address, amount: bigint): bigint | null {
-  const entry = priceByToken.get(tokenMetaKey(chainId, token))
-  if (!entry || entry.price === 0n) return null
-  return amount * entry.price
-}
 
 const GMX_ORDER_NAME: Readonly<Record<number, string>> = {
   [GMX_ORDER_TYPE.MarketSwap]: 'Market swap',
@@ -96,24 +35,42 @@ const GMX_ORDER_NAME: Readonly<Record<number, string>> = {
   [GMX_ORDER_TYPE.StopIncrease]: 'Stop increase'
 }
 
-export async function gmxPositions({ chainId, account, blockNumber, nowSec, clients, getRate, freshness }: IVenueValueParams): Promise<IVenuePosition[]> {
+const signedUsd = (usd: bigint): string => `${usd < 0n ? '\u2212\u2060' : usd > 0n ? '+\u2060' : ''}$${readableUsd(usd < 0n ? -usd : usd)}`
+
+export async function gmxPositions({ chainId, account, blockNumber, blockTimestamp, nowSec, clients, getRate, freshness }: IVenueValueParams): Promise<IVenuePosition[]> {
   const publicClient = clients[chainId]
   if (publicClient === undefined) throw new Error('GMX positions need a chain client')
   const [positions, orders, claimables] = await Promise.all([
-    makeOnchainGmxPositionProvider(publicClient, getRate, freshness, blockNumber)(account),
+    makeOnchainGmxPositionProvider(publicClient, blockNumber)(account),
     makeOnchainGmxOrderProvider(publicClient, blockNumber)(account),
     makeOnchainGmxClaimableProvider(publicClient, blockNumber)(account)
   ])
   if (positions.length === 0 && orders.length === 0 && claimables.length === 0) return []
-  const markets = await readGmxMarkets(publicClient, [...positions.map(row => row.market), ...orders.map(o => o.market)], blockNumber)
-  const indexOf = (market: Address): Address | undefined => markets.get(getAddress(market))?.indexToken
-  const priceByToken: IGmxPriceMap = new Map()
-  const unlisted = [...new Set([...positions.flatMap(row => [indexOf(row.market), row.collateralToken]), ...orders.map(o => indexOf(o.market))])].filter(
-    (token): token is Address => token !== undefined && !tokenMetaByChainToken.has(tokenMetaKey(chainId, token))
-  )
+  const [markets, openings] = await Promise.all([
+    readGmxMarkets(publicClient, [...positions.map(row => row.market), ...orders.map(o => o.market)], blockNumber),
+    readGmxOpenings(publicClient, account, positions, blockNumber)
+  ])
+  const marketOf = (market: Address): IVenueMarket | undefined => markets.get(getAddress(market))
+  const positionTokens = positions.flatMap(row => {
+    const market = marketOf(row.market)
+    return [row.collateralToken, ...(market === undefined ? [] : [market.indexToken, market.longToken, market.shortToken])]
+  })
+  const unlisted = [
+    ...new Set([...positionTokens, ...orders.flatMap(o => marketOf(o.market)?.indexToken ?? [])].map(token => getAddress(token)))
+  ].filter(token => !tokenMetaByChainToken.has(tokenMetaKey(chainId, token)))
+  const priceByToken = new Map<ITokenMetaKey, IPriceSource>()
   const [profiles] = await Promise.all([
     readTokenProfiles(req => readContract(publicClient, req), chainId, unlisted),
-    ...gmxTokensToPrice(markets, positions, orders, claimables).map(async token => {
+    ...[
+      ...new Set(
+        [
+          ...positionTokens,
+          ...(positions.length === 0 ? [] : [GMX_WNT]),
+          ...orders.flatMap(o => [...(GMX_ORDER_CUSTODY_TYPES.has(o.orderType) ? [o.collateralToken] : []), ...(o.executionFee > 0n ? [GMX_WNT] : [])]),
+          ...claimables.map(c => c.token)
+        ].map(token => getAddress(token))
+      )
+    ].map(async token => {
       const key = tokenMetaKey(chainId, token)
       const meta = tokenMetaByChainToken.get(key)
       if (!meta) return
@@ -123,11 +80,8 @@ export async function gmxPositions({ chainId, account, blockNumber, nowSec, clie
   ])
   const marked = new Map<Address, string>()
   await Promise.all(
-    [...new Set(positions.flatMap(row => {
-      const token = indexOf(row.market)
-      return token === undefined ? [] : [getAddress(token)]
-    }))]
-      .filter(token => !tokenMetaByChainToken.has(tokenMetaKey(chainId, token)))
+    unlisted
+      .filter(token => positionTokens.some(held => isAddressEqual(held, token)))
       .map(async token => {
         const profile = profiles.get(token)
         if (profile === undefined) return
@@ -138,6 +92,10 @@ export async function gmxPositions({ chainId, account, blockNumber, nowSec, clie
         marked.set(token, priced.via)
       })
   )
+  const priceOf = (token: Address): IPriceSource | undefined => {
+    const entry = priceByToken.get(tokenMetaKey(chainId, token))
+    return entry === undefined || entry.price === 0n ? undefined : entry
+  }
   const symbolOfToken = (token: Address): string =>
     tokenMetaByChainToken.get(tokenMetaKey(chainId, token))?.symbol ?? profiles.get(getAddress(token))?.symbol ?? readableAddress(token)
   const decimalsOf = (token: Address): number => {
@@ -145,50 +103,104 @@ export async function gmxPositions({ chainId, account, blockNumber, nowSec, clie
     if (meta === undefined) throw new Error(`GMX token ${token} is priced but not registered`)
     return meta.decimals
   }
+  const valued = positions.flatMap(row => {
+    const market = marketOf(row.market)
+    if (market === undefined) return []
+    const [index, long, short, collateral] = [market.indexToken, market.longToken, market.shortToken, row.collateralToken].map(priceOf)
+    return index === undefined || long === undefined || short === undefined || collateral === undefined ? [] : [{ row, index, long, short, collateral }]
+  })
+  const infos = await publicClient.multicall({
+    allowFailure: false,
+    blockNumber,
+    contracts: valued.map(({ row, index, long, short }) => ({
+      address: GMX_V2_CONTRACT_MAP.GmxReaderV2.address,
+      abi: GMX_V2_CONTRACT_MAP.GmxReaderV2.abi,
+      functionName: 'getPositionInfo' as const,
+      args: [
+        GMX_V2_CONTRACT_MAP.GmxDatastore.address,
+        GMX_REFERRAL_STORAGE,
+        row.positionKey,
+        { indexTokenPrice: { min: index.price, max: index.price }, longTokenPrice: { min: long.price, max: long.price }, shortTokenPrice: { min: short.price, max: short.price } },
+        0n,
+        GMX_UI_FEE_RECEIVER,
+        true
+      ] as const
+    }))
+  })
   const rows: IVenuePosition[] = []
   for (const row of positions) {
-    const indexToken = indexOf(row.market)
-    const indexEntry = indexToken === undefined ? undefined : priceByToken.get(tokenMetaKey(chainId, indexToken))
-    const pnlUsd = indexEntry === undefined ? null : getPositionPnlUsd(row.isLong, row.sizeInUsd, row.sizeInTokens, indexEntry.price)
-    const indexName = indexToken === undefined ? row.market : symbolOfToken(indexToken)
+    const market = marketOf(row.market)
+    const indexName = market === undefined ? row.market : symbolOfToken(market.indexToken)
     const indexDecimals =
-      indexToken === undefined ? undefined : (tokenMetaByChainToken.get(tokenMetaKey(chainId, indexToken))?.decimals ?? profiles.get(getAddress(indexToken))?.decimals)
-    rows.push({
+      market === undefined ? undefined : (tokenMetaByChainToken.get(tokenMetaKey(chainId, market.indexToken))?.decimals ?? profiles.get(getAddress(market.indexToken))?.decimals)
+    const collateralName = symbolOfToken(row.collateralToken)
+    const held = {
       holder: account,
       chainId: BigInt(chainId),
       contract: GMX_V2_CONTRACT_MAP.GmxDatastore.address,
       key: row.positionKey,
-      kind: 'perp',
+      kind: 'perp' as const,
       label: `${indexName}/USD ${row.isLong ? 'long' : 'short'}`,
       size: indexDecimals === undefined ? row.sizeInUsd : row.sizeInTokens,
       unit: indexDecimals === undefined ? 'USD' : indexName,
       decimals: indexDecimals === undefined ? USD_DECIMALS : indexDecimals,
-      ...(indexDecimals === undefined ? {} : { long: row.isLong, entry: row.sizeInUsd, collateral: row.collateralAmount, collateralUnit: symbolOfToken(row.collateralToken) }),
-      cost: row.collateralUsd,
-      value: pnlUsd === null ? undefined : max(0n, row.collateralUsd + pnlUsd),
-      fieldLabelList: pnlUsd === null ? ['Notional', 'Collateral', 'Priced by'] : ['Notional', 'Leverage', 'Collateral', 'Priced by'],
-      fieldValueList:
-        pnlUsd === null
-          ? [`$${readableUsd(row.sizeInUsd)}`, symbolOfToken(row.collateralToken), `unpriced: no oracle market or Uniswap v3 pool prices ${indexName}`]
-          : [
-              `$${readableUsd(row.sizeInUsd)}`,
-              row.collateralUsd + pnlUsd > 0n ? readableLeverage(row.sizeInUsd, row.collateralUsd + pnlUsd) : 'underwater',
-              symbolOfToken(row.collateralToken),
-              (indexToken === undefined ? undefined : marked.get(getAddress(indexToken))) ?? 'the oracle'
-            ],
-      time: indexEntry === undefined ? nowSec : indexEntry.time
-    })
+      ...(indexDecimals === undefined ? {} : { long: row.isLong, entry: row.sizeInUsd, collateral: row.collateralAmount, collateralUnit: collateralName })
+    }
+    const at = valued.findIndex(entry => entry.row === row)
+    if (market === undefined || at === -1) {
+      const unpriced = market === undefined ? undefined : [market.indexToken, market.longToken, market.shortToken, row.collateralToken].find(token => priceOf(token) === undefined)
+      rows.push({
+        ...held,
+        fieldLabelList: ['Notional', 'Priced by'],
+        fieldValueList: [
+          `$${readableUsd(row.sizeInUsd)}`,
+          unpriced === undefined ? `unpriced: GMX holds no market ${row.market}` : `unpriced: no oracle market or Uniswap v3 pool prices ${symbolOfToken(unpriced)}`
+        ],
+        time: nowSec
+      })
+      continue
+    }
+    const { index, long, short, collateral } = valued[at]!
+    const info = infos[at]!
+    const fees = info.fees
+    const claimable = fees.funding.claimableLongTokenAmount * long.price + fees.funding.claimableShortTokenAmount * short.price
+    const holding = fees.borrowing.borrowingFeeAmount + fees.funding.fundingFeeAmount
+    const accruedCost = holding * collateral.price - claimable
+    const value = max(0n, row.collateralAmount * collateral.price + info.uncappedBasePnlUsd - accruedCost)
+    const opening = openings.get(row.positionKey)!
+    const wnt = priceOf(GMX_WNT)
+    const openingUsd = typeof opening === 'string' || wnt === undefined ? null : opening.fee * collateral.price + opening.executionFee * wnt.price
+    const cost = openingUsd === null ? undefined : row.collateralAmount * collateral.price + openingUsd
+    const equity = row.collateralAmount * collateral.price + info.basePnlUsd
+    const via = marked.get(getAddress(market.indexToken))
+    const fields: [string, string][] = [
+      ['Realized', ''],
+      ...(typeof opening === 'string'
+        ? ([['Opening fees', `not tracked: ${opening}`]] as [string, string][])
+        : ([
+            ['Opening fees', signedUsd(-opening.fee * collateral.price)],
+            ['Execution fees', wnt === undefined ? 'unpriced: no oracle price for the execution fee' : signedUsd(-opening.executionFee * wnt.price)]
+          ] as [string, string][])),
+      [`Recurring \u00b7 past ${getDuration(blockTimestamp - Math.max(row.increasedAtTime, row.decreasedAtTime), IntervalTime.HR, '0 secs')}`, ''],
+      ['Borrow fee', signedUsd(-fees.borrowing.borrowingFeeAmount * collateral.price)],
+      ['Funding fee', signedUsd(claimable - fees.funding.fundingFeeAmount * collateral.price)],
+      ['Notional', `$${readableUsd(row.sizeInUsd)}`],
+      ['Leverage', equity > 0n ? readableLeverage(row.sizeInUsd, equity) : 'underwater'],
+      ...(via === undefined ? [] : ([['Priced by', via]] as [string, string][]))
+    ]
+    rows.push({ ...held, cost, value, accruedCost, fieldLabelList: fields.map(([label]) => label), fieldValueList: fields.map(([, text]) => text), time: index.time })
   }
   for (const o of orders) {
     const custody = GMX_ORDER_CUSTODY_TYPES.has(o.orderType) && o.collateralDeltaAmount > 0n
     const executing = GMX_ORDER_EXECUTING_TYPES.has(o.orderType)
     if (!custody && !executing && o.executionFee === 0n) continue
-    const entry = priceByToken.get(tokenMetaKey(chainId, o.collateralToken))
-    if (custody && (entry === undefined || entry.price === 0n)) throw new Error(`no oracle price for resting order collateral ${o.collateralToken}`)
-    const executionFeeUsd = o.executionFee === 0n ? 0n : tokenAmountToUsd(priceByToken, chainId as ChainId, GMX_WNT, o.executionFee)
-    if (executionFeeUsd === null) throw new Error(`no oracle price for the execution fee GMX holds in ${GMX_WNT}`)
+    const entry = priceOf(o.collateralToken)
+    if (custody && entry === undefined) throw new Error(`no oracle price for resting order collateral ${o.collateralToken}`)
+    const wnt = priceOf(GMX_WNT)
+    if (o.executionFee > 0n && wnt === undefined) throw new Error(`no oracle price for the execution fee GMX holds in ${GMX_WNT}`)
+    const executionFeeUsd = o.executionFee === 0n ? 0n : o.executionFee * wnt!.price
     const value = (custody ? o.collateralDeltaAmount * entry!.price : 0n) + executionFeeUsd
-    const indexToken = indexOf(o.market)
+    const indexToken = marketOf(o.market)?.indexToken
     const indexDecimals =
       indexToken === undefined ? undefined : (tokenMetaByChainToken.get(tokenMetaKey(chainId, indexToken))?.decimals ?? profiles.get(getAddress(indexToken))?.decimals)
     const trigger = o.triggerPrice === 0n || indexDecimals === undefined ? null : `$${readableUsd(o.triggerPrice * 10n ** BigInt(indexDecimals))}`
@@ -215,8 +227,9 @@ export async function gmxPositions({ chainId, account, blockNumber, nowSec, clie
   }
   for (const c of claimables) {
     if (c.amount === 0n) continue
-    const claimUsd = tokenAmountToUsd(priceByToken, chainId as ChainId, c.token, c.amount)
-    if (claimUsd === null) throw new Error(`no oracle price for claimable funding token ${c.token}`)
+    const claim = priceOf(c.token)
+    if (claim === undefined) throw new Error(`no oracle price for claimable funding token ${c.token}`)
+    const claimUsd = c.amount * claim.price
     rows.push({
       holder: account,
       chainId: BigInt(chainId),
@@ -231,7 +244,7 @@ export async function gmxPositions({ chainId, account, blockNumber, nowSec, clie
       value: claimUsd,
       fieldLabelList: [],
       fieldValueList: [],
-      time: priceByToken.get(tokenMetaKey(chainId, c.token))!.time
+      time: claim.time
     })
   }
   return rows

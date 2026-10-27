@@ -2,6 +2,7 @@ import { PROTOCOL } from '@puppet/contracts/const'
 import { type Address, decodeAbiParameters, decodeFunctionData, getAddress, type Hex, isAddressEqual, parseAbi, parseAbiParameters } from 'viem'
 import { CompactError } from '../../compact/index.js'
 import type { ChainId } from '../../const/index.js'
+import { providerGas } from '../../state/fee.js'
 
 const KYBER_CHAIN: Partial<Record<ChainId, string>> = {
   10: 'optimism',
@@ -116,7 +117,7 @@ export async function quoteKyberSwap(
   bounds: { chainId: ChainId; inputToken: Address; outputToken: Address; inputAmount: bigint },
   signal?: AbortSignal
 ): Promise<{
-  route: { kind: 'swap'; provider: Address; providerCallData: Hex }
+  route: { kind: 'swap'; provider: Address; providerCallData: Hex; gas: bigint }
   outputAmount: bigint
   expectedOutputAmount: bigint
   tool: string
@@ -162,7 +163,7 @@ export async function quoteKyberSwap(
     throw new CompactError('ROUTE_UNAVAILABLE', `KyberSwap route asks for ${value} native value but the account attaches ${attached}`)
   }
   return {
-    route: { kind: 'swap', provider: router, providerCallData: built.data.data },
+    route: { kind: 'swap', provider: router, providerCallData: built.data.data, gas: providerGas(BigInt(built.data.gas)) },
     outputAmount: verifyKyberSwap(recipient, built.data.data, bounds.inputToken, bounds.inputAmount, bounds.outputToken, 0n),
     expectedOutputAmount: BigInt(built.data.amountOut),
     tool: 'KyberSwap',

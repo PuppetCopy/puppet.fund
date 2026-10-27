@@ -79,7 +79,7 @@ export async function attestOperateIntent(ctx: IOperateAttestContext, intent: IS
   if (boughtPriced.length < bought.length) {
     throw new CompactError(
       'ASSET_NOT_PRICEABLE',
-      `the trade acquires ${bought.filter(each => !isPriced(each)).map(each => each.token).join(', ')}, which no oracle feed or Uniswap v3 pool with a 30-minute price history can value at this amount`,
+      `the trade acquires ${bought.filter(each => !isPriced(each)).map(each => each.token).join(', ')}, which no oracle feed, Uniswap v3 pool with a 30-minute price history or graduated Pons pool with 30 minutes of quotes can value at this amount`,
       'hard'
     )
   }

@@ -11,33 +11,41 @@ export interface IAgentPairing {
   account: Address
 }
 
+export const AGENT_LINK_ENV = 'PUPPET_AGENT_LINK'
+
+export const agentLinkOf = (pairing: IAgentPairing): string => `ws://127.0.0.1:${pairing.port}/${getAddress(pairing.account)}#${pairing.secret}`
+
+export const agentLinkLineOf = (pairing: IAgentPairing): string => `${AGENT_LINK_ENV}="${agentLinkOf(pairing)}"`
+
 const CHECK_NONCE = '0'.repeat(64)
 
-export function agentConnection(port: number, secret: string, account: Address): string {
+const EXAMPLE_SECRET = 'puppet-example'
+
+export function agentConnection(): string {
   return [
     '## Connect to Puppet (keep this section unchanged)',
     '',
-    'You operate the owner’s Puppet fund through the Puppet app open in the owner’s browser. The app holds every key of the fund and screens, simulates and signs each request as it would the owner’s own. The owner sees every request and can remove you.',
+    'You operate the owner’s Puppet fund through the Puppet app, while the owner has their wallet open in the browser. The app holds every key of the fund and screens, simulates and signs each request as it would the owner’s own. The owner sees every request and can remove you.',
     '',
-    `- Address: ws://127.0.0.1:${port}. You listen; the app connects to you.`,
-    `- Link secret: ${secret}. It is your identity: use it only for the proofs below and keep this file private. Never print, log or send the secret.`,
-    `- Fund: ${account}.`,
+    `- Link: read ${AGENT_LINK_ENV} from the .env file beside you. Its value is ws://127.0.0.1:<port>/<fund>#<secret>: the port you listen on, the fund you operate, and after # the link secret. The owner copies this one line from Sessions, New agent in their Puppet wallet. The line wraps the value in double quotes, because an unquoted # starts a comment in .env: a .env loader strips the quotes, and a reader of your own must strip them too.`,
+    '- The link secret is your identity: use it only for the proofs below and keep .env private. Never print, log or send the secret.',
+    '- The fund address is public: read its balances and positions at that address whenever you need them, linked or not.',
     '',
     'Build the link in four levels and pass each check before the next. Frames are JSON text messages; hex is lowercase.',
     '',
     'Level 1: listen',
-    `- Run a WebSocket server on 127.0.0.1 port ${port}. Accept one connection at a time and close any second one. Keep listening after every close: the app connects on its own while the owner’s wallet page is open, and again after any restart of either side.`,
-    `- Check: a WebSocket client connects to ws://127.0.0.1:${port}.`,
+    '- Run a WebSocket server on 127.0.0.1 at the link’s port. Accept one connection at a time and close any second one. Keep listening after every close: the app connects on its own while the owner has their wallet open, and again after any restart of either side.',
+    '- Check: a WebSocket client connects to ws://127.0.0.1:<port>.',
     '',
     'Level 2: prove the link',
     '1. When the app connects, send {"type":"challenge","nonce":N}, where N is 32 random bytes as hex.',
     '2. The app sends {"type":"prove","proof":P,"nonce":M}, where M is its own 32 random bytes as hex. Close the connection unless P = hex(HMAC-SHA256(key: the secret as UTF-8 text, message: "puppet-app:" + N)), or when no such frame arrives within 10 seconds.',
     '3. Send {"type":"prove","proof":hex(HMAC-SHA256(key: the secret as UTF-8 text, message: "puppet-agent:" + M))}.',
-    `- Check, with Z = ${CHECK_NONCE} (64 zeros): HMAC-SHA256(secret, "puppet-app:" + Z) = ${linkProof(secret, 'app', CHECK_NONCE)}, and HMAC-SHA256(secret, "puppet-agent:" + Z) = ${linkProof(secret, 'agent', CHECK_NONCE)}.`,
+    `- Check your HMAC with the example secret ${EXAMPLE_SECRET} and Z = ${CHECK_NONCE} (64 zeros): HMAC-SHA256("${EXAMPLE_SECRET}", "puppet-app:" + Z) = ${linkProof(EXAMPLE_SECRET, 'app', CHECK_NONCE)}, and HMAC-SHA256("${EXAMPLE_SECRET}", "puppet-agent:" + Z) = ${linkProof(EXAMPLE_SECRET, 'agent', CHECK_NONCE)}.`,
     '',
     'Level 3: wait for linked',
-    '- After your proof, wait as long as it takes (the owner may first sign a session) for {"type":"linked","user":"0x…","account":"0x…","manual":"…"}: the owner’s wallet, the fund, and the manual of every request, reply and rule. Send nothing before it. Save the manual to MANUAL.md beside this file and read it before your first request: it is the reference for every request.',
-    '- Check: account is the fund above; otherwise close the connection.',
+    '- After your proof, wait as long as it takes (the owner may first sign a session) for {"type":"linked","user":"0x…","account":"0x…","manual":"…"}: the owner’s wallet, the fund you operate, and the manual of every request, reply and rule. Send nothing before it. Save the manual to MANUAL.md beside this file and read it before your first request: it is the reference for every request.',
+    '- Check: account is the fund in your link; otherwise close the connection.',
     '',
     'Level 4: send requests',
     '- Send {"type":"request","id":n,"kind":…} with the fields the manual gives for that kind, one at a time. Each request gets exactly one reply with the same id; wait for it before sending the next.',
@@ -112,7 +120,7 @@ export function agentManual(): string {
     '- {"type":"failed","id":1,"code":"…","detail":"…"}: refused or failed, with the reason in detail. A contract refusal uses the contract’s error name as code.',
     '- These may still land within about 5 minutes, so do not resend before then and leave deadlines and quotes that margin: DISPATCH_TIMEOUT, RELAY_UNREACHABLE, BAD_ACK, a REQUEST_FAILED whose detail says it was dispatched, and a connection that closes before the reply. After that, check the fund’s records before resending: a request that landed and is sent again runs twice.',
     '- BUSY: another request is running; send the next after its reply.',
-    '- SESSION_EXPIRED: the app’s signing session lapsed, and nothing was sent; the owner signs a session in the app. SESSION_KEY_LOST: the browser lost the session’s key, and nothing was sent; the owner signs a session in the app. CHAIN_SESSION_MISSING: the owner makes one trade on that chain in the app. FUND_KEY_MISSING: the browser lost the fund’s key; the owner signs a session in the app, which restores it. After the app restarts it connects again only once the owner opens the fund’s wallet page; until then requests fail as not linked. A session revoked from another device is refused without a reply code: the request fails after its deadline with nothing sent.',
+    '- SESSION_EXPIRED: the app’s signing session lapsed, and nothing was sent; the owner signs a session in the app. SESSION_KEY_LOST: the browser lost the session’s key, and nothing was sent; the owner signs a session in the app. CHAIN_SESSION_MISSING: the owner makes one trade on that chain in the app. FUND_KEY_MISSING: the browser lost the fund’s key; the owner signs a session in the app, which restores it. After the app restarts it connects again on its own once the owner opens their wallet; until then requests fail as not linked. A session revoked from another device is refused without a reply code: the request fails after its deadline with nothing sent.',
     '- operate, allocate, redeem and retire are simulated from the fund before signing; one that would revert fails with the reason and pays no fee.',
     '',
     'Rules',
@@ -120,17 +128,7 @@ export function agentManual(): string {
     '- A venue trading key the fund approves through sign, such as a Hyperliquid API wallet, trades on that venue directly. Venues admit only keys that cannot withdraw or transfer.',
     `- Chains: ${chains}.`,
     '- Facts are the fund’s own records: balances on each chain, what each call sent into each venue, transits, standing allowances and the exit queue. Positions and PnL are evaluations. The app answers no reads: read balances from each chain and positions from each venue, for the fund address. It only runs requests, and re-reads and simulates each one at submit.',
-    '- Requests run only while the app is open on the fund’s wallet page, and each takes seconds to co-sign and relay. Fast strategies do not fit. While the app is closed requests fail, so only a stop order resting at the venue protects a position: place it in the entry’s request, or with a venue trading key the fund approved through sign.',
+    '- Requests run only while the owner’s wallet is open, and each takes seconds to co-sign and relay. Fast strategies do not fit. While it is closed requests fail, so only a stop order resting at the venue protects a position: place it in the entry’s request, or with a venue trading key the fund approved through sign.',
     '- The fund counts value in ETH; WETH is its neutral position.'
   ].join('\n')
-}
-
-export function pairingFromInstruction(text: string): IAgentPairing {
-  const port = text.match(/ws:\/\/127\.0\.0\.1:(\d+)/)?.[1]
-  const secret = text.match(/Link secret: ([^\s.]+)\./)?.[1]
-  const account = text.match(/Fund: (0x[0-9a-fA-F]{40})/)?.[1]
-  if (port === undefined || secret === undefined || account === undefined) {
-    throw new Error('the text is not an agent template from /wallet/agent, which names the port, the link secret and the fund')
-  }
-  return { port: Number(port), secret, account: getAddress(account) }
 }

@@ -8,7 +8,7 @@ import { DEFAULT_EVALUATION_CONFIG, USD_PRICE_DECIMALS } from '@puppet/sdk/evalu
 import { type IFundState, REDEEM_BRIDGE_MARGIN_BPS, redeemFeeFor, sizeRedeem } from '@puppet/sdk/intent'
 import { cashFor, claimOf, type IRedeemPlan, isOpen, joinCapOf, payoutLineOf, planCohort, planRedeem, sharesFor, valuationOf, valueFor } from '@puppet/sdk/pool'
 import type { IFundRow, IHoldingRow } from '@puppet/sdk/schema'
-import { tokenKeyOf, tokenMetaByChainToken, tokenMetaKey } from '@puppet/sdk/state'
+import { tokenKeyOf, tokenMetaByChainToken, tokenMetaKey, TYPICAL_SUBCALL_GAS } from '@puppet/sdk/state'
 import { combine, constant, empty, filter, filterNull, type IStream, just, map, merge, op, sampleMap, skipRepeats, skipRepeatsWith, switchLatest, switchMap, take } from 'aelea/stream'
 import { type IBehavior, promiseState, type PromiseState, type PromiseStateDone, PromiseStatus, state } from 'aelea/stream-extended'
 import { attr, component, $element, type I$Node, $node, style, styleBehavior, stylePseudo, $text } from 'aelea/ui'
@@ -29,7 +29,7 @@ import { $addressLink } from '../$AccountProfile.js'
 import { $DraftSave, type ISelectedRoute } from './$DraftSave.js'
 import { $SourceAmountInput } from './$SourceAmountInput.js'
 import { $TokenSelectFlow, type ITokenInputOption } from './$tokenOption.js'
-import { $editorFlowContainer, amountUsdLabel, submitOn } from './editorUtils.js'
+import { $editorFlowContainer, amountUsdLabel, QUOTE_CALLDATA_BYTES, submitOn } from './editorUtils.js'
 import { answerState, notLocal } from '../../io/datastore/reads.js'
 
 const HUB = HUB_CHAIN_ID as ChainId
@@ -441,7 +441,7 @@ export const $RedeemEditor = ({ master, owner, signed, hideBalances, fundRow, fu
             if ('error' in sized) return { ...idle, ready, error: sized.error }
             return { ...idle, ready, sized: sized.sized, error: null, source: intent }
           }
-          const relay = read.sourceFeeQuote('fundSwap', false, 0n, 0n, 0n)
+          const relay = read.sourceFeeQuote('fundSwap', false, 0n, TYPICAL_SUBCALL_GAS, QUOTE_CALLDATA_BYTES)
           if (relay * PRECISION.basisPoints > typedAmount * PROTOCOL.maxSwapRelayFeeBps) {
             const floor = (relay * PRECISION.basisPoints + PROTOCOL.maxSwapRelayFeeBps - 1n) / PROTOCOL.maxSwapRelayFeeBps
             return { ...idle, ready, error: `Below the ${readableTokenAmountLabel(from, floor)} minimum: the relay fee is capped at ${readablePercentage(PROTOCOL.maxSwapRelayFeeBps)} of what moves` }
@@ -852,6 +852,7 @@ export const $RedeemEditor = ({ master, owner, signed, hideBalances, fundRow, fu
           $DraftSave({
             target: null,
             request,
+            inputFee: map(p => (p.base.leg === null || p.read.status !== PromiseStatus.DONE ? null : { gross: p.base.leg.input, quote: p.read.value.sourceFeeQuote, kind: 'fundSwap' as const }), combine({ base, read: readQuery })),
             commit: commitAmount,
             active: map(b => b.leg !== null, base),
             alert,

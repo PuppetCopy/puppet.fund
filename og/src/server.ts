@@ -21,7 +21,7 @@ const CARD_LIMIT = 512
 const BUILD_SLOTS = 8
 const BUILD_QUEUE = 64
 const STATIC_CACHE = 'public, max-age=86400'
-const CARD_CACHE = `public, max-age=${TICK_MS / 1000}`
+const RETRY_MS = 15_000
 
 const FUNDS_ABOUT = 'Masters run funds, puppets allocate to them.'
 const FUND_ABOUT = 'A fund on Puppet, run by its master, puppets allocate to it.'
@@ -34,69 +34,66 @@ const png = (bytes: Uint8Array, cacheControl: string): Response =>
 
 const brand = await render($brand)
 
-type ICard = { title: string; description: string; png: Uint8Array }
-type IEntry = { at: number; card: Promise<ICard>; next: Promise<ICard> | null }
+type IBuilt = { title: string; description: string; png: Uint8Array; tick: number | null }
+type ICard = IBuilt & { until: number }
+type IEntry = { card: Promise<ICard>; until: number }
 
 const cards = new Map<string, IEntry>()
 const queued: (() => void)[] = []
 let building = 0
 
-const cardOf = (key: string, build: () => Promise<ICard>): Promise<ICard> => {
-  const now = Date.now()
+const cardOf = (key: string, build: () => Promise<IBuilt>): Promise<ICard> => {
   const held = cards.get(key)
   if (held !== undefined) {
     cards.delete(key)
     cards.set(key, held)
-    if (now - held.at < TICK_MS) return held.card
-    if (held.next !== null) return now - held.at < 2 * TICK_MS ? held.card : held.next
+    if (Date.now() < held.until) return held.card
   }
-  const next = (async () => {
-    if (building < BUILD_SLOTS) building++
-    else if (queued.length < BUILD_QUEUE) await new Promise<void>(resolve => queued.push(resolve))
-    else throw new Error(`${BUILD_SLOTS} builds running and ${BUILD_QUEUE} queued`)
-    try {
-      return await build()
-    } finally {
-      const turn = queued.shift()
-      if (turn === undefined) building--
-      else turn()
-    }
-  })()
-  if (held !== undefined && now - held.at < 2 * TICK_MS) {
-    held.next = next
-    next.then(
-      () => {
-        if (cards.get(key) === held) cards.set(key, { at: now, card: next, next: null })
-      },
-      (err: unknown) => {
-        console.error(`og card ${key} refresh failed`, err)
-        held.next = null
+  const entry: IEntry = {
+    until: Number.POSITIVE_INFINITY,
+    card: (async () => {
+      if (building < BUILD_SLOTS) building++
+      else if (queued.length < BUILD_QUEUE) await new Promise<void>(resolve => queued.push(resolve))
+      else throw new Error(`${BUILD_SLOTS} builds running and ${BUILD_QUEUE} queued`)
+      try {
+        const built = await build()
+        const builtAt = Date.now()
+        const nextTick = (built.tick === null ? builtAt : built.tick) + TICK_MS
+        return { ...built, until: nextTick > builtAt ? nextTick : builtAt + RETRY_MS }
+      } finally {
+        const turn = queued.shift()
+        if (turn === undefined) building--
+        else turn()
       }
-    )
-    return held.card
+    })()
   }
-  const entry: IEntry = { at: now, card: next, next: null }
   cards.set(key, entry)
   for (const oldest of cards.keys()) {
     if (cards.size <= CARD_LIMIT) break
     cards.delete(oldest)
   }
-  next.then(undefined, (err: unknown) => {
-    console.error(`og card ${key} failed`, err)
-    if (cards.get(key) === entry) cards.delete(key)
-  })
-  return next
+  entry.card.then(
+    card => {
+      entry.until = card.until
+    },
+    (err: unknown) => {
+      console.error(`og card ${key} failed`, err)
+      if (cards.get(key) === entry) cards.delete(key)
+    }
+  )
+  return entry.card
 }
 
 const boardCard = (): Promise<ICard> =>
   cardOf('board', async () => {
     const rows = await fetchLeaderboard(5)
     return rows.length === 0
-      ? { title: 'Funds on Puppet', description: FUNDS_ABOUT, png: await render($page('Funds', 'Masters run funds, puppets allocate to them')) }
+      ? { title: 'Funds on Puppet', description: FUNDS_ABOUT, png: await render($page('Funds', 'Masters run funds, puppets allocate to them')), tick: null }
       : {
           title: 'Funds on Puppet',
           description: `Top PnL · ${LEADERBOARD_WINDOW}: ${rows.slice(0, 3).map(row => `${row.label} ${row.pnl}`).join(' · ')}`,
-          png: await render($masters(rows))
+          png: await render($masters(rows)),
+          tick: Math.max(...rows.map(row => row.tick))
         }
   })
 
@@ -104,11 +101,12 @@ const masterCard = (address: Address): Promise<ICard> =>
   cardOf(`master:${address}`, async () => {
     const card = await fetchMasterCard(address)
     return card === null
-      ? { title: `Fund ${readableAddress(address)} on Puppet`, description: FUND_ABOUT, png: await render($page('Fund', readableAddress(address))) }
+      ? { title: `Fund ${readableAddress(address)} on Puppet`, description: FUND_ABOUT, png: await render($page('Fund', readableAddress(address))), tick: null }
       : {
           title: `${card.label} on Puppet`,
           description: `Allocated ${card.allocated} · PnL ${card.window} ${card.pnl} · ${card.puppetCount} puppet${card.puppetCount === 1 ? '' : 's'} · Fund ${card.fundValue}`,
-          png: await render($master(card))
+          png: await render($master(card)),
+          tick: card.tick
         }
   })
 
@@ -116,17 +114,19 @@ const puppetCard = (address: Address): Promise<ICard> =>
   cardOf(`puppet:${address}`, async () => {
     const card = await fetchPuppetCard(address)
     return card === null
-      ? { title: `Puppet ${readableAddress(address)} on Puppet`, description: PUPPET_ABOUT, png: await render($page('Puppet', readableAddress(address))) }
+      ? { title: `Puppet ${readableAddress(address)} on Puppet`, description: PUPPET_ABOUT, png: await render($page('Puppet', readableAddress(address))), tick: null }
       : {
           title: `${readableAddress(card.account)} on Puppet`,
           description: `In funds ${card.inFunds} · allocates to ${card.fundCount} fund${card.fundCount === 1 ? '' : 's'}${card.masterOf === null ? '' : ` · Master of ${card.masterOf}`}`,
-          png: await render($puppet(card))
+          png: await render($puppet(card)),
+          tick: card.tick
         }
   })
 
 const image = async (card: Promise<ICard>): Promise<Response> => {
   try {
-    return png((await card).png, CARD_CACHE)
+    const held = await card
+    return png(held.png, `public, max-age=${Math.max(1, Math.ceil((held.until - Date.now()) / 1000))}`)
   } catch {
     return png(brand, 'no-store')
   }

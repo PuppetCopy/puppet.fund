@@ -2,6 +2,7 @@ import { PROTOCOL } from '@puppet/contracts/const'
 import { type Address, decodeFunctionData, getAddress, type Hex, isAddressEqual, parseAbi, toFunctionSelector, zeroAddress } from 'viem'
 import { CompactError } from '../../compact/index.js'
 import type { ChainId } from '../../const/index.js'
+import { providerGas } from '../../state/fee.js'
 
 const SWAP_DATA_COMPONENTS = [
   { name: 'callTo', type: 'address' },
@@ -219,7 +220,7 @@ const QUOTE_TIMEOUT_MS = 10_000
 
 interface ILifiQuoteResponse {
   toolDetails?: { name?: string }
-  estimate: { toAmount: string; toAmountMin: string; approvalAddress?: Address; executionDuration?: number }
+  estimate: { toAmount: string; toAmountMin: string; approvalAddress?: Address; executionDuration?: number; gasCosts?: { estimate: string }[] }
   transactionRequest: { to: Address; data: Hex; value?: string }
 }
 
@@ -230,7 +231,7 @@ export async function quoteLifiSwap(
   recipient: Address,
   bounds: { chainId: ChainId; inputToken: Address; outputToken: Address; inputAmount: bigint },
   signal?: AbortSignal
-): Promise<{ route: { kind: 'swap'; provider: Address; providerCallData: Hex }; outputAmount: bigint; expectedOutputAmount: bigint; tool: string; etaSec: number | undefined }> {
+): Promise<{ route: { kind: 'swap'; provider: Address; providerCallData: Hex; gas: bigint }; outputAmount: bigint; expectedOutputAmount: bigint; tool: string; etaSec: number | undefined }> {
   const query = new URLSearchParams({
     fromChain: String(bounds.chainId),
     toChain: String(bounds.chainId),
@@ -273,7 +274,12 @@ export async function quoteLifiSwap(
     outputAmount
   )
   return {
-    route: { kind: 'swap', provider: diamond, providerCallData: quote.transactionRequest.data },
+    route: {
+      kind: 'swap',
+      provider: diamond,
+      providerCallData: quote.transactionRequest.data,
+      gas: providerGas(quote.estimate.gasCosts === undefined || quote.estimate.gasCosts.length === 0 ? null : quote.estimate.gasCosts.reduce((total, cost) => total + BigInt(cost.estimate), 0n))
+    },
     outputAmount,
     expectedOutputAmount: BigInt(quote.estimate.toAmount),
     tool: quote.toolDetails?.name ?? 'LI.FI',

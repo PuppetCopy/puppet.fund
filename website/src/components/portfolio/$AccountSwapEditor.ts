@@ -5,7 +5,7 @@ import { formatThrownError } from '@puppet/sdk/compact'
 import { type ChainId, PRECISION, resolveDispatchChainId } from '@puppet/sdk/const'
 import { getTokenDescription, readableTokenAmount, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { routeCalldataBytes } from '@puppet/sdk/intent'
-import { type IRelayFeeQuote, listedTokensOf, providerToken, symbolOf, tokenKeyOf } from '@puppet/sdk/state'
+import { type IRelayFeeQuote, listedTokensOf, providerToken, symbolOf, tokenKeyOf, TYPICAL_SUBCALL_GAS } from '@puppet/sdk/state'
 import { combine, filter, type IStream, just, map, merge, op, sampleMap, skipRepeats, skipRepeatsWith, start, switchLatest, switchMap } from 'aelea/stream'
 import { type IBehavior, multicast, type PromiseState, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
 import { $node, $text, component, type INode, nodeEvent, style, styleBehavior } from 'aelea/ui'
@@ -136,7 +136,7 @@ export const $AccountSwapEditor = ({ accountState, chainId, token, existingDraft
       )
       const relayFee: IStream<bigint | null> = op(
         combine({ feeMap, calldata: routeCalldataLength }),
-        map(p => (p.feeMap === null ? null : p.feeMap('depositAcross', false, 0n, 0n, p.calldata))),
+        map(p => (p.feeMap === null ? null : p.feeMap('depositAcross', false, 0n, TYPICAL_SUBCALL_GAS, p.calldata))),
         state()
       )
       const minInput: IStream<bigint | null> = map(
@@ -154,7 +154,7 @@ export const $AccountSwapEditor = ({ accountState, chainId, token, existingDraft
         combine({ s: source, t: target, value, feeMap }),
         map(p => {
           if (p.t === null || p.feeMap === null) return null
-          const fee = p.feeMap('depositAcross', false, 0n, 0n, QUOTE_CALLDATA_BYTES)
+          const fee = p.feeMap('depositAcross', false, 0n, TYPICAL_SUBCALL_GAS, QUOTE_CALLDATA_BYTES)
           if (p.value <= fee) return null
           return {
             originChainId: resolveDispatchChainId(p.s.chainId),
@@ -293,6 +293,7 @@ export const $AccountSwapEditor = ({ accountState, chainId, token, existingDraft
               source: just({ chainId: rowBalance.chainId, symbol: symbolOf(rowBalance.chainId, rowBalance.token) })
             },
             request,
+            inputFee: map(p => (p.feeMap === null ? null : { gross: p.value, quote: p.feeMap, kind: 'depositAcross' as const }), combine({ value, feeMap })),
             active: map(r => r !== null, request),
             alert,
             disabled

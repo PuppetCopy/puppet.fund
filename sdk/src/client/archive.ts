@@ -3,7 +3,7 @@ import { HUB_CHAIN_ID, SPOKE_CHAIN_IDS } from '@puppet/contracts/const'
 import DEPLOYMENTS from '@puppet/contracts/deployments'
 import { accountCallEvent } from '@puppet/contracts/events'
 import { type Address, decodeEventLog, getAddress, type Hex, isAddressEqual, keccak256, pad, stringToHex } from 'viem'
-import { ACCOUNT_CALL_MAP, ACCOUNT_CALL_TOPIC, GENESIS_TIP, type IStoredAccountCall, nextTip } from '../account/index.js'
+import { ACCOUNT_CALL_MAP, ACCOUNT_CALL_TOPIC, ERC20_TRANSFER_TOPIC, GENESIS_TIP, type IStoredAccountCall, nextTip, swapDeliveryLogs, WRAPPED_NATIVE_DEPOSIT_TOPIC } from '../account/index.js'
 import { decode, encode, formatThrownError } from '../compact/index.js'
 import type { ChainId } from '../const/index.js'
 import { dependenciesOf, FUNDS_DEPOSITED } from '../fold/index.js'
@@ -40,7 +40,14 @@ export function accountModuleOf(chainId: ChainId): { address: Address; block: bi
 }
 
 export const RECORDS_FINGERPRINT = keccak256(
-  stringToHex(encode({ spines: CHAINS.map(chainId => ({ chainId, ...accountModuleOf(chainId) })), record: accountCallEvent, decode: ACCOUNT_CALL_MAP }))
+  stringToHex(
+    encode({
+      spines: CHAINS.map(chainId => ({ chainId, ...accountModuleOf(chainId) })),
+      record: accountCallEvent,
+      decode: ACCOUNT_CALL_MAP,
+      deliveries: [ERC20_TRANSFER_TOPIC, WRAPPED_NATIVE_DEPOSIT_TOPIC]
+    })
+  )
 ).slice(2, 10)
 
 export async function accountHeads(deps: Pick<IJournalDeps, 'clients'>, chainId: ChainId, accounts: readonly Address[]): Promise<IAccountTip[]> {
@@ -77,6 +84,11 @@ async function walkPointers(
       return isAddressEqual(args.account, account) ? [{ log, args }] : []
     })
     if (own.length === 0) throw new Error(`block ${block} carries no AccountCall for ${account} on ${chainId}; its block link chain is broken`)
+    const delivered = await swapDeliveryLogs(
+      deps.clients[chainId],
+      chainId,
+      own.map(({ log, args }) => ({ account: args.account, source: args.source, executionData: args.executionData, transactionHash: log.transactionHash }))
+    )
     let next = block
     for (const { log, args } of own) {
       if (args.accountPrevBlock < next) next = args.accountPrevBlock
@@ -89,9 +101,10 @@ async function walkPointers(
         executionData: args.executionData,
         data: log.data,
         balanceList: args.balanceList.map(b => ({ token: getAddress(b.token), amount: b.amount })),
-        siblingLogs: logs
+        siblingLogs: [...logs, ...delivered]
           .filter(sibling => sibling.transactionHash === log.transactionHash)
-          .map(sibling => ({ address: getAddress(sibling.address), topics: [...sibling.topics], data: sibling.data, logIndex: sibling.logIndex })),
+          .map(sibling => ({ address: getAddress(sibling.address), topics: [...sibling.topics], data: sibling.data, logIndex: sibling.logIndex }))
+          .sort((a, b) => a.logIndex - b.logIndex),
         callList: args.callList.map(c => ({ target: c.target, value: c.value, gasLimit: c.gasLimit, callData: c.callData })),
         resultList: [...args.resultList],
         blockNumber: log.blockNumber,

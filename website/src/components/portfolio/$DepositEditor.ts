@@ -9,8 +9,10 @@ import {
   type IRelayFeeQuote,
   listedTokensOf,
   nativeSymbolOf,
+  routeSubcallGas,
   symbolOf,
   tokenKeyOf,
+  TYPICAL_SUBCALL_GAS,
   wrappedNativeAddressOf
 } from '@puppet/sdk/state'
 import {
@@ -405,7 +407,7 @@ export const $DepositEditor = ({
         map(p => {
           if (isPlainTo(p.sourcePlan.source, p.sourcePlan.dest)) return 0n
           if (p.inputFeeMap === null) return null
-          return p.inputFeeMap('depositAcross', false, 0n, 0n, p.calldata)
+          return p.inputFeeMap('depositAcross', false, 0n, TYPICAL_SUBCALL_GAS, p.calldata)
         }),
         state()
       )
@@ -493,7 +495,7 @@ export const $DepositEditor = ({
         map(p => {
           if (isPlainTo(p.sourcePlan.source, p.sourcePlan.dest)) return p.value
           if (p.feeMap === null) return null
-          const fee = p.feeMap('depositAcross', false, 0n, 0n, QUOTE_CALLDATA_BYTES)
+          const fee = p.feeMap('depositAcross', false, 0n, TYPICAL_SUBCALL_GAS, QUOTE_CALLDATA_BYTES)
           return p.value > fee ? p.value - fee : 0n
         }),
         skipRepeats
@@ -539,7 +541,7 @@ export const $DepositEditor = ({
           const escrowing = 'inKind' in destination
           if (needsQuote) {
             if (params.feeQuote.status === PromiseStatus.DONE) {
-              const fee = params.feeQuote.value('depositAcross', false, 0n, 0n, QUOTE_CALLDATA_BYTES)
+              const fee = params.feeQuote.value('depositAcross', false, 0n, TYPICAL_SUBCALL_GAS, QUOTE_CALLDATA_BYTES)
               if (params.value <= fee) {
                 return `Too small to cover its ${readableTokenAmountLabel({ decimals: params.source.decimals, symbol: params.source.symbol }, fee)} relay fee`
               }
@@ -602,7 +604,7 @@ export const $DepositEditor = ({
           }
           if (isPlainTo(p.sourcePlan.source, p.sourcePlan.dest)) return false
           if (p.feeMap === null) return true
-          if (p.value <= p.feeMap('depositAcross', false, 0n, 0n, 0n)) return true
+          if (p.value <= p.feeMap('depositAcross', false, 0n, TYPICAL_SUBCALL_GAS, 0n)) return true
           return !p.route.ready
         }),
         state(true)
@@ -727,6 +729,7 @@ export const $DepositEditor = ({
               : null,
         request,
         plainBridge: 'inKind' in destination,
+        inputFee: map(p => (p.feeMap === null ? null : { gross: p.value, quote: p.feeMap, kind: 'depositAcross' as const }), combine({ value, feeMap: inputFeeMap })),
         active: map(p => !isPlainTo(p.source, p.dest), sourcePlan),
         alert,
         disabled
@@ -785,7 +788,7 @@ export const $DepositEditor = ({
               if (typeof walletWrapped !== 'bigint') throw new Error(`the wallet's wrapped balance on chain ${chainId} could not be read: ${formatThrownError(walletWrapped.error)}`)
               const walletPull = walletWrapped < base.value ? walletWrapped : base.value
               const relayFee =
-                route === null || base.feeMap === null ? 0n : base.feeMap('depositAcross', false, 0n, 0n, routeCalldataBytes(route))
+                route === null || base.feeMap === null ? 0n : base.feeMap('depositAcross', false, 0n, routeSubcallGas(route), routeCalldataBytes(route))
               if (base.value <= relayFee) {
                 throw new Error(
                   `this deposit of ${base.value} does not cover its ${relayFee} relay fee; raise the amount`

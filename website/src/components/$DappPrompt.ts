@@ -2,13 +2,13 @@ import type { IPendingCall } from '@puppet/sdk/client'
 import { CHAIN_ID_LIST, type ChainId } from '@puppet/sdk/const'
 import { contractLabelOf } from '@puppet/sdk/state'
 import { describeOperate } from '@puppet/sdk/venue'
-import { constant, delay, empty, filter, fromPromise, type IStream, just, map, op, periodic, skipRepeatsWith, start, switchLatest } from 'aelea/stream'
+import { constant, delay, empty, filter, fromPromise, type IStream, just, map, nowWith, op, periodic, skipRepeatsWith, start, switchLatest } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
-import { $node, $text, component, type I$Node, style } from 'aelea/ui'
+import { $element, $node, $text, attr, component, effectProp, type I$Node, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { colorShade, palette } from 'aelea/ui-components-theme'
 import { type Address, getAddress } from 'viem'
-import { $ButtonPrimary, $ButtonSecondary, $defaultMiniButtonPrimary, $defaultMiniButtonSecondary, $icon, $infoTooltip, $intermediatePromise, $intermediateLine, $unknown, text } from '@/ui-components'
+import { $ButtonPrimary, $ButtonSecondary, $copy, $defaultMiniButtonPrimary, $defaultMiniButtonSecondary, $icon, $infoTooltip, $intermediatePromise, $intermediateLine, $unknown, text } from '@/ui-components'
 import { $chainIcon, chainName } from '../common/$chain.js'
 import { $contractPill } from '../common/$contract.js'
 import { $fundAvatar } from '../common/$fundAvatar.js'
@@ -66,6 +66,59 @@ const $plan = (call: IPendingCall): I$Node => {
       )
     )
   )
+}
+
+const $typedRequest = (typed: NonNullable<IPendingSign['typed']>): I$Node[] => {
+  const chainId = typed.domain.chainId === undefined ? null : Number(typed.domain.chainId)
+  const contract = typed.domain.verifyingContract
+  const fields = typed.types[typed.primaryType]
+  const only = fields !== undefined && fields.length === 1 ? fields[0] : undefined
+  const $field = (label: string, $value: I$Node): I$Node =>
+    $row(spacing.small, style({ alignItems: 'center', justifyContent: 'space-between', minWidth: '0' }))(
+      $node(style({ fontSize: text.sm, color: palette.foreground, whiteSpace: 'nowrap' }))($text(label)),
+      $value
+    )
+  const $plainValue = (value: string): I$Node => $node(style({ fontSize: text.sm, color: palette.message, minWidth: '0', textAlign: 'right' }))($text(value))
+  const $hexValue = (value: string): I$Node =>
+    $row(spacing.tiny, style({ alignItems: 'center', fontFamily: 'var(--font-numbers)' }))(
+      $node(attr({ title: value }), style({ fontSize: text.sm, color: palette.message }))($text(`${value.slice(0, 6)}…${value.slice(-4)}`)),
+      $element('button')(
+        attr({ type: 'button', title: 'Copy' }),
+        style({ display: 'inline-flex', background: 'none', border: 'none', padding: '0', cursor: 'pointer', fill: palette.foreground }),
+        effectProp(
+          'onclick',
+          nowWith(() => () => {
+            void navigator.clipboard.writeText(value)
+          })
+        )
+      )($icon({ $content: $copy, viewBox: '0 0 24 24', width: '13px' }))
+    )
+  const $valueOf = (value: unknown): I$Node =>
+    typeof value === 'string' && /^0x[0-9a-fA-F]{24,}$/.test(value)
+      ? $hexValue(value)
+      : $plainValue(typeof value === 'object' && value !== null ? JSON.stringify(value, (_key, inner) => (typeof inner === 'bigint' ? inner.toString() : inner)) : String(value))
+  return [
+    $card(
+      $field('Type', $plainValue(typed.primaryType)),
+      ...(typeof typed.domain.name === 'string' ? [$field('Domain', $plainValue(typed.domain.version === undefined ? typed.domain.name : `${typed.domain.name} · v${typed.domain.version}`))] : []),
+      ...(chainId === null ? [] : [$field('Chain', $row(spacing.tiny, style({ alignItems: 'center' }))($chainIcon(chainId, 14), $plainValue(chainName(chainId))))]),
+      ...(contract === undefined
+        ? []
+        : [
+            $field(
+              'Contract',
+              chainId !== null && (CHAIN_ID_LIST as readonly number[]).includes(chainId)
+                ? $contractPill({ address: getAddress(contract), chainId, ...contractLabelOf(chainId as ChainId, contract) })
+                : $hexValue(contract)
+            )
+          ]),
+      ...(typed.domain.salt === undefined ? [] : [$field('Salt', $hexValue(typed.domain.salt))]),
+      ...Object.entries(typed.message).map(([key, value]) => $field(key, $valueOf(value)))
+    ),
+    ...(only !== undefined && only.type === 'bytes32'
+      ? [$node(style({ fontSize: text.xs, color: palette.indeterminate, lineHeight: '1.4' }))($text(`Not readable: only a hash (${only.name}) is sent, so what it commits to can't be shown here.`))]
+      : [])
+  ]
 }
 
 const $origin = (p: IPendingSign | IRefusedSign): I$Node => {
@@ -235,21 +288,24 @@ export const $DappPrompt = ({ walletPair }: I$DappPrompt) =>
             : []),
           ...(p.call !== null || p.chains !== null
             ? []
-            : [
-                $node(
-                  style({
-                    fontSize: text.xs,
-                    color: palette.foreground,
-                    fontFamily: 'monospace',
-                    wordBreak: 'break-word',
-                    maxHeight: '120px',
-                    overflowY: 'auto',
-                    padding: '6px 8px',
-                    borderRadius: '6px',
-                    backgroundColor: colorShade(palette.horizon, 15)
-                  })
-                )($text(p.payload))
-              ]),
+            : p.typed !== null
+              ? $typedRequest(p.typed)
+              : [
+                  $node(
+                    style({
+                      fontSize: text.xs,
+                      color: palette.foreground,
+                      fontFamily: 'monospace',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                      maxHeight: '120px',
+                      overflowY: 'auto',
+                      padding: '6px 8px',
+                      borderRadius: '6px',
+                      backgroundColor: colorShade(palette.horizon, 15)
+                    })
+                  )($text(p.payload))
+                ]),
           $row(spacing.small, style({ justifyContent: 'space-between', alignItems: 'center' }))(
             p.call === null
               ? $node()

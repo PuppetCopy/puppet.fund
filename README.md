@@ -2,10 +2,10 @@
 
 **Fund a trader, human or agent, without trusting them.**
 
-Puppet is a self-custody shared wallet operated by humans and agents. Back a
-trader without handing over your money: they trade their own capital on GMX, your
-capital follows under rules you sign, and every action is screened and co-signed
-within limits the chain enforces. Copy-trading, finally without the custodian.
+Puppet is a self-custody shared wallet operated by humans and agents. Top traders
+seamlessly earn more, trading on any DeFi dApp. Investors allocate capital and
+share the gains, within rules they sign once and the EVM enforces, and every
+action is screened and co-signed. Allocate to the best. Or become one.
 
 🔗 Live at **[puppet.fund](https://puppet.fund)**, with its hub on OP Mainnet.
 
@@ -17,11 +17,12 @@ _Create a wallet, deposit, connect to GMX, and open a perp position, all self-cu
 
 ## The problem
 
-Copy-trading is one of the most-used products on every major exchange, but
-on-chain it is still custodial: following a trader means handing your money to an
-exchange, a vault contract, or a Telegram wallet. GMX is the flagship perpetuals
-venue on Arbitrum and has no native copy layer. Puppet is that layer, with
-self-custody.
+Allocating to a trader still means handing over your money: an exchange's copy
+product, a vault contract or a Telegram wallet holds it, and its rules are
+whatever the custodian enforces. Puppet removes the custodian: a master trades
+the fund on screened venues, your capital joins each round within a mandate you
+sign, and nobody can move your funds anywhere but back to you, exceed your
+mandate, or trade outside screened venues.
 
 ## How it works
 
@@ -54,38 +55,41 @@ self-custody.
   exit joins the same queue pro rata or redeems the same fraction of every
   stake.
 
-## Fund an AI agent
+## Run your own agent
 
-A trader doesn't have to be human. On the app's Agent link page you create a
-link and copy its instruction; paste it into Claude Code or any LLM with your
-strategy in plain words, and the agent it builds connects to your fund through the
-Puppet app you have open. The agent holds no key: the app runs each request on its
-own session, only within the scopes you approved when the agent connected (trade,
-run rounds, redeem), on any venue the attestor screens and on any chain Puppet runs
-on. It can never withdraw, and every action it takes is co-signed by the attestor
-inside its screens. The starter strategies carry the guardrails as instructions:
-on-chain stops, a drawdown halt, a daily cost budget.
+A trader doesn't have to be human. In your wallet, open Sessions, press New agent
+and save it, then paste its one link line into the .env beside your agent.
+Templates for the agent and its instructions are in the Quickstart, from one
+AGENTS.md in your own words to a Bun program that runs your strategy every hour
+and journals each step. The agent runs on your computer and links to your wallet
+while it is open. It holds none of the fund's keys: the app signs each request
+with your session after screening and simulating it like your own, so the money
+it moves goes only to screened venues, back to your fund or to exits. You see
+every request and can pause or remove the agent at any time.
 
 > **Allocate to the agent. Trust the screens.**
 
 ## Live today
 
-- **Venue:** GMX V2 perpetuals, the live, attestor-screened trading venue. Every
-  new venue is one screen, not a newly trusted contract.
-- **Hub chain:** OP Mainnet. Subscribe / allocate / redeem / claim settle here;
-  deposits can bridge and swap in from other chains.
-- **End-to-end flows:** create wallet + fund, deposit (cross-chain bridge + swap
-  into the fund's base token), subscribe with signed copy rules, allocate (lazy
-  capital pull at NAV), trade GMX by hand via a WalletConnect tunnel (your fund
-  appears as the wallet) or via an agent, then redeem / sell / claim.
-- Contracts verified on Arbiscan.
+- **Venues:** GMX V2 on Arbitrum, Hyperliquid, Uniswap on Arbitrum and Robinhood
+  Chain, and Polymarket on Polygon, each screened by the attestor. Every new
+  venue is one screen, not a newly trusted contract.
+- **Chains:** OP Mainnet is the hub, where funds, rounds and exits settle.
+  Arbitrum, Robinhood Chain and Polygon are spokes, and deposits bridge and swap
+  in from any of them. The PUPPET token and its Governor are on Ethereum.
+- **Flows:** create a wallet and a fund, deposit from any supported chain, sign a
+  mandate for each fund you allocate to, join rounds at one verified price, trade
+  from the fund in the venue apps you know (over WalletConnect) or through your
+  own agent, then sell into the exit queue and redeem.
+- Contracts verified on every chain's explorer.
 
 ## Packages
 
-- **`contracts/`** — the on-chain protocol: account-abstraction accounts, gates,
-  the share economy, and the co-sign model (Solidity / Foundry).
-- **`sdk/`** — `@puppet/sdk`: intent builders, attestation, state, and evaluation.
-- **`website/`** — the puppet.fund web app (aelea), installable as a PWA.
+- **`contracts/`**: the on-chain protocol, with account-abstraction accounts,
+  gates, the share economy, and the co-sign model (Solidity / Foundry).
+- **`sdk/`**: `@puppet/sdk`, with intent builders, attestation, state, and
+  evaluation.
+- **`website/`**: the puppet.fund web app (aelea), installable as a PWA.
 
 ## Tech
 

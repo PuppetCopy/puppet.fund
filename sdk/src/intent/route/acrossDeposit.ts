@@ -4,6 +4,7 @@ import { PROTOCOL } from '@puppet/contracts/const'
 import { CompactError } from '../../compact/index.js'
 import type { ChainId } from '../../const/index.js'
 import { SWAP_PROVIDER } from '../../const/network.js'
+import { ACROSS_SUBCALL_GAS } from '../../state/fee.js'
 import { providerToken } from '../../state/tokenRegistry.js'
 
 export interface IAcrossTiming {
@@ -210,7 +211,7 @@ export async function quoteAcrossDeposit(
   },
   signal?: AbortSignal
 ): Promise<{
-  route: { kind: 'across' } & IAcrossRouteFields
+  route: { kind: 'across'; gas: bigint } & IAcrossRouteFields
   outputAmount: bigint
   expectedOutputAmount: bigint
   fillDeadline: number
@@ -242,6 +243,7 @@ export async function quoteAcrossDeposit(
   return {
     route: {
       kind: 'across',
+      gas: ACROSS_SUBCALL_GAS,
       exclusiveRelayer: getAddress(data.exclusiveRelayer),
       quoteTimestamp: Number(data.timestamp),
       exclusivityParameter: data.exclusivityDeadline

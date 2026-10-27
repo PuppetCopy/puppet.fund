@@ -11,7 +11,8 @@ import {
 import { CompactError } from '../../compact/index.js'
 import type { ChainId } from '../../const/index.js'
 import { SWAP_PROVIDER } from '../../const/network.js'
-import { providerToken, symbolOf, wrappedNativeAddressOf } from '../../state/tokenRegistry.js'
+import { providerGas } from '../../state/fee.js'
+import { providerToken, tokenMetaByChainToken, tokenMetaKey, wrappedNativeAddressOf } from '../../state/tokenRegistry.js'
 import { ACROSS_DEPOSIT_ABI, ACROSS_PERIPHERY, acrossJson, acrossSpokePoolOf, type IAcrossTiming, verifyAcrossTiming } from './acrossDeposit.js'
 
 const SWAP_AND_BRIDGE_ABI = [
@@ -338,12 +339,14 @@ export function verifyAcrossSwapAndBridge(pin: IAcrossSwapPin, callData: Hex): v
     )
   }
 
-  if (
-    symbolOf(pin.originChainId as ChainId, d.bridgeInputToken) !==
-    symbolOf(Number(pin.destinationChainId) as ChainId, d.bridgeOutputToken)
-  ) {
+  const bridged = tokenMetaByChainToken.get(tokenMetaKey(pin.originChainId as ChainId, d.bridgeInputToken))
+  const delivered = tokenMetaByChainToken.get(tokenMetaKey(Number(pin.destinationChainId) as ChainId, d.bridgeOutputToken))
+  if (bridged === undefined || delivered === undefined) {
+    fail(`origin leg bridges ${d.bridgeInputToken} into ${d.bridgeOutputToken}, and the protocol does not list ${bridged === undefined ? d.bridgeInputToken : d.bridgeOutputToken} on its chain, so the origin floor cannot be compared to the delivered amount`)
+  }
+  if (bridged.symbol !== delivered.symbol && !(bridged.isFiat && delivered.isFiat && bridged.decimals === delivered.decimals)) {
     fail(
-      `origin leg bridges ${d.bridgeInputToken} but the intent delivers ${d.bridgeOutputToken}; Across bridges like-for-like, so the origin floor is not comparable to the delivered amount`
+      `origin leg bridges ${d.bridgeInputToken} but the intent delivers ${d.bridgeOutputToken}; Across bridges like-for-like or one USD stablecoin into another of the same decimals, so the origin floor is not comparable to the delivered amount`
     )
   }
   if (!isAddressEqual(d.bridgeOutputToken, providerToken(pin.outputToken, Number(pin.destinationChainId)))) {
@@ -442,7 +445,7 @@ interface IAcrossSwapApproval {
   minOutputAmount?: string
   expectedOutputAmount?: string
   expectedFillTime?: number
-  swapTx?: { to: Address; data: Hex; value?: string }
+  swapTx?: { to: Address; data: Hex; value?: string; gas?: string | number; simulationSuccess?: boolean }
 }
 
 export async function quoteAcrossSwapAndBridge(
@@ -459,7 +462,7 @@ export async function quoteAcrossSwapAndBridge(
   },
   signal?: AbortSignal
 ): Promise<{
-  route: { kind: 'acrossSwap'; providerCallData: Hex }
+  route: { kind: 'acrossSwap'; providerCallData: Hex; gas: bigint }
   outputAmount: bigint
   expectedOutputAmount: bigint
   fillDeadline: number
@@ -522,7 +525,7 @@ export async function quoteAcrossSwapAndBridge(
     swapTx.data
   )
   return {
-    route: { kind: 'acrossSwap', providerCallData: swapTx.data },
+    route: { kind: 'acrossSwap', providerCallData: swapTx.data, gas: providerGas(swapTx.simulationSuccess === true && swapTx.gas !== undefined ? BigInt(swapTx.gas) : null) },
     outputAmount,
     expectedOutputAmount: BigInt(data.expectedOutputAmount),
     fillDeadline: decoded.fillDeadline,

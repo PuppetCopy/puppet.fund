@@ -38,6 +38,7 @@ export interface ILeaderRow {
   roi: string | null
   tone: ITone
   spark: { time: number; value: number }[]
+  tick: number
 }
 
 export const LEADERBOARD_WINDOW = '7 Day'
@@ -56,6 +57,7 @@ export interface IMasterCard {
   window: string
   tone: ITone
   spark: { time: number; value: number }[]
+  tick: number
 }
 
 export interface IPuppetCard {
@@ -65,6 +67,7 @@ export interface IPuppetCard {
   inFunds: string
   funds: string[]
   fundCount: number
+  tick: number | null
 }
 
 export async function fetchLeaderboard(limit: number): Promise<ILeaderRow[]> {
@@ -96,16 +99,18 @@ export async function fetchLeaderboard(limit: number): Promise<ILeaderRow[]> {
       pnl: `${pnl < 0n ? MINUS : ''}${usd(pnl < 0n ? -pnl : pnl, price)}`,
       roi: roi === null ? null : `${roi < 0 ? MINUS : ''}${Math.abs(roi).toFixed(2)}%`,
       tone: pnl === 0n ? 'neutral' : pnl > 0n ? 'positive' : 'negative',
-      spark: points.map(point => ({ time: point.time, value: point.value * usdPerEth }))
+      spark: points.map(point => ({ time: point.time, value: point.value * usdPerEth })),
+      tick: row.lastUpdatedTimestamp * 1000
     }
   })
 }
 
 export async function fetchMasterCard(master: Address): Promise<IMasterCard | null> {
-  const [rows, rate, holdings] = await Promise.all([
+  const [rows, rate, holdings, fundRows] = await Promise.all([
     client.select(fundMetricTable, { where: { master } }),
     getRate(symbolOf(HUB_CHAIN_ID as ChainId, HUB_CANONICAL_TOKEN.WETH), USD_SYMBOL, TICK_MS),
-    client.select(schema.holdingTable, { where: { master } })
+    client.select(schema.holdingTable, { where: { master } }),
+    client.select(schema.fundTable, { where: { master } })
   ])
   const held = holdings.filter(h => h.shares > 0n && !isAddressEqual(h.holder, master))
   const wallets = await walletsOf(client, held.map(h => h.holder))
@@ -126,11 +131,14 @@ export async function fetchMasterCard(master: Address): Promise<IMasterCard | nu
   const closing = levels.at(-1)?.index ?? windowRow.openingIndex
   const roi = opening === 0n ? null : (Number(closing) / Number(opening) - 1) * 100
   const profile = { symbol: row.symbol, pixels: row.pixels }
+  const [fundRow] = fundRows
+  if (fundRow === undefined) throw new Error(`the fund ${master} has metric rows but no fund row`)
+  const puppetShares = held.reduce((total, h) => total + h.shares, 0n)
   return {
     avatar: `data:image/svg+xml;base64,${btoa(avatarSvg(gridOf(profile)))}`,
     label: fundSymbolOf(profile),
     master,
-    allocated: usd(cashFor(row.backerShares, row.totalShares, row.valuation), price),
+    allocated: usd(cashFor(puppetShares, fundRow.totalShares, fundRow.value), price),
     puppets: [...held]
       .sort((a, b) => (a.shares > b.shares ? -1 : a.shares < b.shares ? 1 : 0))
       .slice(0, 5)
@@ -141,7 +149,8 @@ export async function fetchMasterCard(master: Address): Promise<IMasterCard | nu
     roi: roi === null ? null : `${roi < 0 ? MINUS : ''}${Math.abs(roi).toFixed(2)}%`,
     window: interval === IntervalTime.DAY ? '1 Day' : interval === IntervalTime.WEEK ? '7 Day' : '30 Day',
     tone: pnl === 0n ? 'neutral' : pnl > 0n ? 'positive' : 'negative',
-    spark: points.map(point => ({ time: point.time, value: point.value * usdPerEth }))
+    spark: points.map(point => ({ time: point.time, value: point.value * usdPerEth })),
+    tick: rows.reduce((latest, each) => Math.max(latest, each.lastUpdatedTimestamp), 0) * 1000
   }
 }
 
@@ -184,6 +193,7 @@ export async function fetchPuppetCard(account: Address): Promise<IPuppetCard | n
       const fundRow = fundRows.find(row => isAddressEqual(row.master, master))
       return `data:image/svg+xml;base64,${btoa(avatarSvg(fundRow === undefined ? robotCellsOf(master) : gridOf(fundRow)))}`
     }),
-    fundCount: masters.length
+    fundCount: masters.length,
+    tick: metrics.length === 0 ? null : metrics.reduce((latest, row) => Math.max(latest, row.lastUpdatedTimestamp), 0) * 1000
   }
 }

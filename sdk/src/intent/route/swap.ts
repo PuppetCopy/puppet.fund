@@ -24,9 +24,9 @@ import { verifyLifiSwap } from './lifiSwap.js'
 import { verifyRelaySwap } from './relaySwap.js'
 
 export type ISwapRoute =
-  | ({ kind: 'across' } & IAcrossRouteFields)
-  | { kind: 'swap'; provider: Address; providerCallData: Hex }
-  | { kind: 'acrossSwap'; providerCallData: Hex }
+  | ({ kind: 'across'; gas: bigint } & IAcrossRouteFields)
+  | { kind: 'swap'; provider: Address; providerCallData: Hex; gas: bigint }
+  | { kind: 'acrossSwap'; providerCallData: Hex; gas: bigint }
 
 export type IWithdrawRoute = { kind: 'transfer' } | ISwapRoute
 

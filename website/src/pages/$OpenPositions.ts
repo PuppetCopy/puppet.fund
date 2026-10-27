@@ -39,12 +39,20 @@ const PNL_WIDTH = isDesktopScreen ? '128px' : '104px'
 const signOf = (amount: bigint): string => (amount < 0n ? MINUS : '')
 const signedUsdLabel = (amount: bigint): string => `${signedDollar(signOf(amount))}${readableUsd(amount < 0n ? -amount : amount)}`
 
-const $pnlCell = (hideBalances: IStream<boolean>, value: bigint | undefined, cost: bigint | undefined): I$Node => {
+const $fieldLine = (label: string, value: string): I$Node =>
+  value === ''
+    ? $node(style({ fontSize: text.xs, fontWeight: '700', letterSpacing: '0.08em', textTransform: 'uppercase', color: palette.foreground, paddingTop: '4px' }))($text(label))
+    : $detailLine(label, value, value.startsWith(MINUS) ? palette.negative : value.startsWith('+') ? palette.positive : palette.message)
+
+const $pnlCell = (hideBalances: IStream<boolean>, value: bigint | undefined, cost: bigint | undefined, details: I$Node[]): I$Node => {
   const pnl = value === undefined || cost === undefined ? null : dustToZeroUsd(value - cost)
   const roi = pnl === null || cost === undefined || cost === 0n ? null : toBasisPoints(pnl, cost)
   return $column(style({ width: PNL_WIDTH, flexShrink: '0', alignItems: 'flex-end', gap: '2px' }))(
-    $node(style({ fontWeight: '600', fontFamily: 'var(--font-numbers)', whiteSpace: 'nowrap', color: pnl === null || pnl === 0n ? palette.foreground : pnl > 0n ? palette.positive : palette.negative }))(
-      $text(maskBalance(pnl === null ? '-' : signedUsdLabel(pnl), hideBalances))
+    $row(spacing.tiny, style({ alignItems: 'center' }))(
+      ...(details.length === 0 ? [] : [$infoTooltip($column(spacing.tiny, style({ fontSize: text.sm, minWidth: '220px' }))(...details), palette.foreground)]),
+      $node(style({ fontWeight: '600', fontFamily: 'var(--font-numbers)', whiteSpace: 'nowrap', color: pnl === null || pnl === 0n ? palette.foreground : pnl > 0n ? palette.positive : palette.negative }))(
+        $text(maskBalance(pnl === null ? '-' : signedUsdLabel(pnl), hideBalances))
+      )
     ),
     ...(roi === null ? [] : [$node(style({ fontSize: text.xs, color: palette.foreground, whiteSpace: 'nowrap' }))($text(`${signOf(roi)}${readablePercentage(roi < 0n ? -roi : roi)} ROI`))])
   )
@@ -54,7 +62,7 @@ export const $positionRow = (hideBalances: IStream<boolean>, row: IPositionRow):
   if (row.kind === 'perp') {
     const at = row.fieldLabelList.indexOf('Leverage')
     const notionalAt = row.fieldLabelList.indexOf('Notional')
-    const details = row.fieldLabelList.flatMap((label, i) => (i === at || i === notionalAt ? [] : [$detailLine(label, row.fieldValueList[i]!)]))
+    const details = row.fieldLabelList.flatMap((label, i) => (i === at || i === notionalAt ? [] : [$fieldLine(label, row.fieldValueList[i]!)]))
     const amount = row.unit === 'USD' ? `$${unitLabel(row.size, row.decimals)}` : `${unitLabel(row.size, row.decimals)} ${row.unit}`
     const side = /\b(long|short)\b/i.exec(row.label)
     const market = side === null ? row.label : row.label.replace(side[0], '').replace(/\s+/g, ' ').trim()
@@ -66,14 +74,7 @@ export const $positionRow = (hideBalances: IStream<boolean>, row: IPositionRow):
         $tokenIcon(market.split('/')[0]!.trim()),
         $column(style({ flex: 1, minWidth: '0', gap: '2px' }))(
           $node(style({ fontWeight: '600', color: palette.message, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }))($text(market)),
-          ...(secondary === '' && details.length === 0
-            ? []
-            : [
-                $row(spacing.tiny, style({ alignItems: 'center', fontSize: text.xs, color: palette.foreground }))(
-                  ...(secondary === '' ? [] : [$node(style({ whiteSpace: 'nowrap' }))($text(secondary))]),
-                  ...(details.length === 0 ? [] : [$infoTooltip($column(spacing.tiny, style({ fontSize: text.sm, minWidth: '220px' }))(...details), palette.foreground)])
-                )
-              ])
+          ...(secondary === '' ? [] : [$node(style({ fontSize: text.xs, color: palette.foreground, whiteSpace: 'nowrap' }))($text(secondary))])
         )
       ),
       $node(style({ width: SIZE_WIDTH, flexShrink: '0', whiteSpace: 'nowrap' }))(
@@ -81,7 +82,7 @@ export const $positionRow = (hideBalances: IStream<boolean>, row: IPositionRow):
           ? $node(style({ textAlign: 'right', color: palette.message }))($text(maskBalance(amount, hideBalances)))
           : $amountDisplay({ hideBalances, usd: just(row.fieldValueList[notionalAt]!), amount, align: 'flex-end' })
       ),
-      $pnlCell(hideBalances, row.value, row.cost)
+      $pnlCell(hideBalances, row.value, row.cost, details)
     )
   }
   const contract = row.contract
@@ -108,7 +109,7 @@ export const $positionRow = (hideBalances: IStream<boolean>, row: IPositionRow):
             $text('Spot'),
             $infoTooltip(
               $column(spacing.tiny, style({ fontSize: text.sm, minWidth: '220px' }))(
-                ...row.fieldLabelList.flatMap((label, i) => (i === pricedAt ? [] : [$detailLine(label, row.fieldValueList[i]!)])),
+                ...row.fieldLabelList.flatMap((label, i) => (i === pricedAt ? [] : [$fieldLine(label, row.fieldValueList[i]!)])),
                 ...(pricedAt === -1
                   ? []
                   : [$node(style({ fontSize: text.xs, color: palette.foreground, maxWidth: '240px', whiteSpace: 'normal' }))($text(`Priced by ${row.fieldValueList[pricedAt]}`))])
@@ -127,7 +128,7 @@ export const $positionRow = (hideBalances: IStream<boolean>, row: IPositionRow):
           align: 'flex-end'
         })
       ),
-      $pnlCell(hideBalances, row.value, row.cost)
+      $pnlCell(hideBalances, row.value, row.cost, [])
     )
   }
   const resolvedAt = row.kind === 'outcome' ? row.fieldLabelList.indexOf('Resolved') : -1
@@ -136,7 +137,7 @@ export const $positionRow = (hideBalances: IStream<boolean>, row: IPositionRow):
     row.kind === 'outcome'
       ? [...outcomes, ...(resolvedAt === -1 ? [] : ['Resolved'])].join(' · ')
       : row.fieldLabelList.map((label, i) => `${label} ${row.fieldValueList[i]}`).join(' · ')
-  const details = row.kind === 'outcome' && (outcomes.length > 1 || resolvedAt !== -1) ? row.fieldLabelList.map((label, i) => $detailLine(label, row.fieldValueList[i]!)) : []
+  const details = row.kind === 'outcome' && (outcomes.length > 1 || resolvedAt !== -1) ? row.fieldLabelList.map((label, i) => $fieldLine(label, row.fieldValueList[i]!)) : []
   return $row(isDesktopScreen ? spacing.big : spacing.default, style({ alignItems: 'center' }))(
     $column(style({ flex: 1, minWidth: '0', gap: '2px' }))(
       token === null
@@ -167,7 +168,7 @@ export const $positionRow = (hideBalances: IStream<boolean>, row: IPositionRow):
             )
           ])
     ),
-    ...(PNL_KINDS.has(row.kind) && row.cost !== undefined && row.value !== undefined ? [$pnlCell(hideBalances, row.value, row.cost)] : []),
+    ...(PNL_KINDS.has(row.kind) && row.cost !== undefined && row.value !== undefined ? [$pnlCell(hideBalances, row.value, row.cost, [])] : []),
     $amountDisplay({
       hideBalances,
       usd: just(row.value === undefined ? '-' : `$${readableUsd(row.value)}`),

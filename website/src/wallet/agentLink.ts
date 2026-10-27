@@ -6,15 +6,14 @@ export type IAgentEvent =
   | { kind: 'proven' }
   | { kind: 'request'; id: number; frame: Record<string, unknown> }
   | { kind: 'busy'; frame: Record<string, unknown>; reply: IAgentReply }
-  | { kind: 'closed'; code: number; reason: string; opened: boolean }
+  | { kind: 'closed'; code: number; reason: string; phase: 'challenge' | 'prove' | 'granting' | 'linked' | null }
 
 export const agentSocket = (port: number, secret: string, outbound: IStream<IAppFrame>): IStream<IAgentEvent> =>
   stream<IAgentEvent>((sink, scheduler) => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}`)
     const listening = new AbortController()
     const appNonce = randomHex(32)
-    let phase: 'challenge' | 'prove' | 'granting' | 'linked' = 'challenge'
-    let opened = false
+    let phase: Extract<IAgentEvent, { kind: 'closed' }>['phase'] = null
     let running: number | null = null
     let sending: Disposable = disposeNone
     let handling: Promise<void> = Promise.resolve()
@@ -62,7 +61,7 @@ export const agentSocket = (port: number, secret: string, outbound: IStream<IApp
     socket.addEventListener(
       'open',
       () => {
-        opened = true
+        phase = 'challenge'
         sending = tap((frame: IAppFrame) => {
           if (frame.type === 'close') return socket.close(4000, frame.reason.slice(0, 120))
           if (frame.type === 'linked') phase = 'linked'
@@ -86,7 +85,7 @@ export const agentSocket = (port: number, secret: string, outbound: IStream<IApp
       event => {
         clearTimeout(handshake)
         sending[Symbol.dispose]()
-        emit({ kind: 'closed', code: event.code, reason: event.reason, opened })
+        emit({ kind: 'closed', code: event.code, reason: event.reason, phase })
         sink.end(scheduler.time())
       },
       { signal: listening.signal }

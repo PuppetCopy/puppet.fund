@@ -1,6 +1,5 @@
 import { PROTOCOL } from '@puppet/contracts/const'
 import type { ChainId } from '@puppet/sdk/const'
-import type { IAgentTemplateId } from '@puppet/sdk/agent'
 import type { ICells } from '@puppet/sdk/ui-components'
 import type { Address } from 'viem'
 import { AGENT_SLOT_PREFIX } from './secretSlots.js'
@@ -31,13 +30,11 @@ export interface IAgentIdentity {
   name: string
   cells: ICells
   fund: Address
-  template: IAgentTemplateId
-  strategy: string
+  proven: boolean
 }
 
 export interface IAgentBook {
   list: readonly IAgentIdentity[]
-  pending: IAgentIdentity | null
 }
 
 export const agentBookSlot = (wallet: string): string => `${AGENT_SLOT_PREFIX}agents:${PROTOCOL.version}:${wallet.toLowerCase()}`

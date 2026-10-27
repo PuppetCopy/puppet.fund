@@ -65,7 +65,6 @@ import {
   attestRetireEscrowIntent,
   attestSellIntent,
   attestWithdrawIntent,
-  bestRoutePlan,
   claimantsOf,
   clientOf,
   creditableOf,
@@ -126,8 +125,9 @@ import {
   relayFeeOf,
   symbolOf,
   tokenKeyOf,
+  TYPICAL_SUBCALL_GAS,
   wrappedNativeAddressOf,
-  wrapSubcallGas
+  routeSubcallGas
 } from '../../state/index.js'
 import {
   acrossBridgeCalls,
@@ -307,7 +307,7 @@ async function dispatch(
   const [rows, block] = await Promise.all([ctx.chronicle.select(accountTable, { where: { account: parent } }), client.getBlock()])
   const code = await client.getCode({ address: parent, blockNumber: block.number })
   const epoch = code === undefined || code === '0x' ? 0n : await readContract(client, { address: parent, abi: useraccountAbi, functionName: 'epoch', blockNumber: block.number })
-  await verifyApproval(client, parent, { user, epoch, revokedAt: revokedAtIn(rows) }, digest, signature, block.timestamp, intent.header.deadline)
+  verifyApproval(parent, { user, epoch, revokedAt: revokedAtIn(rows) }, digest, signature, block.timestamp, intent.header.deadline)
   await requireFoldedOn(ctx, parent, rows, CHAIN_ID_LIST)
   return dispatchAndSettle(
     ctx,
@@ -586,25 +586,38 @@ async function requoteRoute<TRoute extends IWithdrawRoute>(
   depositor: Address,
   recipient: Address,
   leg: { inputToken: Address; outputToken: Address; inputAmount: bigint; outputAmount: bigint; destinationChainId: bigint; route: TRoute; fillDeadline: number },
-  relayFee: bigint,
+  feeOf: (route: IWithdrawRoute) => bigint,
   toleranceBps: bigint
-): Promise<{ route: TRoute | ISwapRoute; outputAmount: bigint; fillDeadline: number }> {
-  if (leg.route.kind !== 'acrossSwap' && leg.route.kind !== 'swap' && leg.route.kind !== 'across') {
-    return { route: leg.route, outputAmount: leg.outputAmount, fillDeadline: leg.fillDeadline }
+): Promise<{ route: TRoute | ISwapRoute; outputAmount: bigint; fillDeadline: number; relayFee: bigint }> {
+  const reviewed: IWithdrawRoute = leg.route
+  if (reviewed.kind === 'transfer') return { route: leg.route, outputAmount: leg.outputAmount, fillDeadline: leg.fillDeadline, relayFee: feeOf(reviewed) }
+  const quote = async (relayFee: bigint): Promise<{ route: ISwapRoute; outputAmount: bigint; fillDeadline: number }> => {
+    const net = leg.inputAmount - relayFee
+    if (net <= 0n) {
+      const unit = getTokenDescription(chainId, leg.inputToken)
+      throw new Error(`The ${readableTokenAmountLabel(unit, relayFee)} relay fee takes all of the ${readableTokenAmountLabel(unit, leg.inputAmount)} you are moving; raise the amount.`)
+    }
+    const request = { chainId, destinationChainId: leg.destinationChainId, inputToken: leg.inputToken, outputToken: leg.outputToken, inputAmount: net }
+    if (reviewed.kind === 'across') return quoteAcrossDeposit(ctx.swapEndpoints.across, recipient, { ...request, timing: await ctx.context.getAcrossTiming(chainId) })
+    const settled = await Promise.allSettled(quoteSwapRoutes(ctx.swapEndpoints, depositor, recipient, request, () => ctx.context.getAcrossTiming(chainId)).map(candidate => candidate.plan))
+    const same = settled
+      .flatMap(s => (s.status === 'fulfilled' ? [s.value] : []))
+      .find(plan => plan.route.kind === reviewed.kind && (plan.route.kind !== 'swap' || (reviewed.kind === 'swap' && isAddressEqual(plan.route.provider, reviewed.provider))))
+    if (same === undefined) {
+      const reasons = settled.flatMap(s => (s.status === 'rejected' ? [s.reason instanceof CompactError ? s.reason.detail : s.reason instanceof Error ? s.reason.message : String(s.reason)] : []))
+      throw new CompactError('ROUTE_UNAVAILABLE', `the provider of the route you reviewed no longer quotes it${reasons.length === 0 ? '' : ` (${[...new Set(reasons)].join(' · ')})`}; refresh and retry`)
+    }
+    return same
   }
-  const net = leg.inputAmount - relayFee
-  if (net <= 0n) {
-    const unit = getTokenDescription(chainId, leg.inputToken)
-    throw new Error(`The ${readableTokenAmountLabel(unit, relayFee)} relay fee takes all of the ${readableTokenAmountLabel(unit, leg.inputAmount)} you are moving; raise the amount.`)
-  }
-  const request = { chainId, destinationChainId: leg.destinationChainId, inputToken: leg.inputToken, outputToken: leg.outputToken, inputAmount: net }
-  const fresh = await (leg.route.kind === 'across'
-    ? quoteAcrossDeposit(ctx.swapEndpoints.across, recipient, { ...request, timing: await ctx.context.getAcrossTiming(chainId) })
-    : bestRoutePlan(quoteSwapRoutes(ctx.swapEndpoints, depositor, recipient, request, () => ctx.context.getAcrossTiming(chainId))))
+  const reviewedFee = feeOf(reviewed)
+  const first = await quote(reviewedFee)
+  const relayFee = feeOf(first.route) > reviewedFee ? feeOf(first.route) : reviewedFee
+  const fresh = relayFee === reviewedFee ? first : await quote(relayFee)
+  if (feeOf(fresh.route) > relayFee) throw new Error('the route asks for more gas each time it is quoted than its relay fee covers; refresh and retry')
   if (fresh.outputAmount === 0n || belowReviewedFloor(leg.outputAmount, fresh.outputAmount, toleranceBps)) {
     throw new Error('the route re-quoted materially below the output you reviewed; refresh and retry')
   }
-  return { route: fresh.route, outputAmount: fresh.outputAmount, fillDeadline: fresh.fillDeadline }
+  return { route: fresh.route, outputAmount: fresh.outputAmount, fillDeadline: fresh.fillDeadline, relayFee }
 }
 
 async function runSwapStep(
@@ -625,11 +638,16 @@ async function runSwapStep(
   const genesis = await genesisFor(ctx, account, chainId)
   const binding = genesis.key !== '0x'
   const carriesGenesis = isAddressEqual(genesis.parent, zeroAddress) ? fundedAt === null && (await createsAccount(ctx, chainId)) : binding
-  const [relayFee, nonce] = await Promise.all([
-    quoteRelayFee(ctx, chainId, kind, carriesGenesis, token, 0n, wrapSubcallGas(chainId, leg.route), routeCalldataBytes(leg.route)),
-    envelopeNonce(ctx, account, chainId)
-  ])
-  const fresh = await requoteRoute(ctx, chainId, account, account, leg, relayFee, toleranceBps)
+  const [convert, nonce] = await Promise.all([ctx.context.getFeeConverter(chainId, token, RELAY_RATE_MAX_STALE_MS), envelopeNonce(ctx, account, chainId)])
+  const { relayFee, ...fresh } = await requoteRoute(
+    ctx,
+    chainId,
+    account,
+    account,
+    leg,
+    route => relayFeeOf(convert, chainId, kind, carriesGenesis, 0n, routeSubcallGas(route), routeCalldataBytes(route)),
+    toleranceBps
+  )
   const quoteExpiry = routeQuoteExpiry(fresh.route, await ctx.context.getAcrossTiming(chainId))
   if (fillWindowSec !== null && fresh.route.kind !== 'across') {
     throw new Error('an escrow lands only from a plain Across bridge of the same token, whose fill deadline its one signature outlives')
@@ -730,11 +748,20 @@ async function runWithdrawStep(leg: IUnsealed<IWithdrawInput>, account: Address,
   const chainId = resolveDispatchChainId(sourceChainId)
   const token = leg.inputToken
   const publicClient = clientOf(ctx, chainId)
-  const [relayFee, nonce] = await Promise.all([
-    createsAccount(ctx, chainId).then(creates => quoteRelayFee(ctx, chainId, 'withdraw', creates, leg.inputToken, 0n, 0n, routeCalldataBytes(leg.route))),
+  const [creates, convert, nonce] = await Promise.all([
+    createsAccount(ctx, chainId),
+    ctx.context.getFeeConverter(chainId, token, RELAY_RATE_MAX_STALE_MS),
     envelopeNonce(ctx, account, chainId)
   ])
-  const requoted = await requoteRoute(ctx, chainId, account, ctx.wallet.address, leg, relayFee, SWAP_REQUOTE_TOLERANCE_BPS)
+  const { relayFee, ...requoted } = await requoteRoute(
+    ctx,
+    chainId,
+    account,
+    ctx.wallet.address,
+    leg,
+    route => relayFeeOf(convert, chainId, 'withdraw', creates, 0n, routeSubcallGas(route), routeCalldataBytes(route)),
+    SWAP_REQUOTE_TOLERANCE_BPS
+  )
   const input: IWithdrawInput = {
     ...leg,
     ...requoted,
@@ -786,7 +813,9 @@ export async function runMandateBatch(drafts: readonly IMandateDraft[], ctx: Exe
     }
   }
   if (paying === null) {
-    throw new Error(`the mandate's relay fee is paid in WETH, ETH, USDC or USDT on ${HUB_CHAIN.name}, and this account holds too little of each; deposit a little of any of them`)
+    throw new Error(
+      `the mandate's relay fee is paid in WETH, ETH, USDC or USDT on ${HUB_CHAIN.name}, and this account holds too little of each; deposit a little of any of them${drafts.some(d => d.mandate.expiry === 0n) ? '. To stop without a fee, Revoke sessions in Sessions ends every mandate, and every session, from your wallet' : ''}`
+    )
   }
   const [feeToken, feeBalance, relayFee] = paying
   const epoch = creates ? 0n : await readContract(clientOf(ctx, HUB_CHAIN_ID), { address: account, abi: useraccountAbi, functionName: 'epoch' })
@@ -1112,7 +1141,7 @@ async function runRedeemStep(draft: IRedeemDraft, ctx: ExecContext, onTx?: IRepo
       (await delegationOf(clientOf(ctx, dispatchChainId), dispatchChainId, master)).module === null,
       inputToken,
       0n,
-      route === null ? 0n : wrapSubcallGas(dispatchChainId, route),
+      route === null ? TYPICAL_SUBCALL_GAS : routeSubcallGas(route),
       route === null ? 0n : routeCalldataBytes(route)
     )
   }
@@ -1311,6 +1340,7 @@ async function runAllocateStep(draft: IAllocateDraft, record: IFund, ctx: ExecCo
     }
   }
   let releasedHere = false
+  let repriced = false
   const walletSigned = new Map<Hex, Hex>()
   for (;;) {
     const pinned = await fromChain('the latest block', HUB_CHAIN_ID, clientOf(ctx, HUB_CHAIN_ID).getBlock())
@@ -1439,7 +1469,7 @@ async function runAllocateStep(draft: IAllocateDraft, record: IFund, ctx: ExecCo
         total: credit.total,
         feeTotal: credit.feeTotal,
         ownerSignature,
-        genesis: bound ? null : await genesisFor(ctx, master, chainId)
+        genesis: await genesisFor(ctx, master, chainId)
       })
       const receipt = await clientOf(ctx, chainId).waitForTransactionReceipt({ hash: release.txHash, timeout: SETTLEMENT_TIMEOUT_MS })
       if (receipt.status === 'reverted') throw new Error(`The release on ${where} reverted (tx ${release.txHash}); your escrow there is untouched. Submit again.`)
@@ -1495,12 +1525,14 @@ async function runAllocateStep(draft: IAllocateDraft, record: IFund, ctx: ExecCo
       )
       const verdict = driftVerdict(valuationOf(signed.valuation), valuationOf(fresh.valuation), gain.valuation, DEFAULT_EVALUATION_CONFIG.driftToleranceBps)
       if (verdict.drift <= verdict.allowed) throw error
-      const quoted = valuationOf(quote.valuation)
-      const now = valuationOf(fresh.valuation)
-      const movedBps = ((now > quoted ? now - quoted : quoted - now) * PRECISION.basisPoints) / (now > quoted ? now : quoted)
+      if (!repriced) {
+        repriced = true
+        continue
+      }
+      const pct = (bps: bigint): string => `${(Number(bps) / 100).toFixed(2)}%`
       throw new CompactError(
         'VALUATION_DRIFT',
-        `the fund's value ${now > quoted ? 'rose' : 'fell'} ${(Number(movedBps) / 100).toFixed(2)}% since this allocate was priced, more than the ${(Number(DEFAULT_EVALUATION_CONFIG.driftToleranceBps) / 200).toFixed(2)}% it allows either way, so the attestor declined it and nothing was dispatched. Submit again to price it fresh.`,
+        `the fund's value ${verdict.above ? 'fell' : 'rose'} ${pct(verdict.drift)} while the attestor checked this allocate, past the ${verdict.profits ? '0% allowed in your favour' : `${pct(verdict.allowed)} allowed`}, and again after one automatic re-price, so nothing was dispatched. Submit again to price it fresh.`,
         'soft'
       )
     }

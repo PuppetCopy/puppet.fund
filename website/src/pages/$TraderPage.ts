@@ -4,10 +4,10 @@ import { type IMandateDraft, type IOwnState, storedCalls, syncCalls } from '@pup
 import { type ChainId, type IntervalTime, PRECISION, TOKEN_META } from '@puppet/sdk/const'
 import { formatFixed, getAccountExplorerUrl, getTokenDescription, getUnixTimestamp, readableAddress, readablePercentage, readableTokenAmount } from '@puppet/sdk/core'
 import { type IGetRate, USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
-import { fundValuationsOf } from '@puppet/sdk/fold'
+import { fundCostsOf, fundValuationsOf } from '@puppet/sdk/fold'
 import { cashFor, performanceIndexOf, POOL_SHARE } from '@puppet/sdk/pool'
 import { formatThrownError } from '@puppet/sdk/compact'
-import { ACCOUNT_VENUE, accountTable, allowanceTable, balanceTable, fundMetricTable, fundTable, type IFundRow } from '@puppet/sdk/schema'
+import { ACCOUNT_VENUE, accountTable, allowanceTable, balanceTable, flowTable, fundMetricTable, fundTable, type IFundRow } from '@puppet/sdk/schema'
 import { fundMetric, pnlEventsAcross, tokenMetaByChainToken, tokenMetaKey, walletsOf } from '@puppet/sdk/state'
 import { robotCellsOf } from '@puppet/sdk/ui-components'
 import type { IDigestClient } from '@puppet/sdk/datastore'
@@ -46,6 +46,7 @@ import {
   $ButtonSecondary,
   $copy,
   $defaultMiniButtonPrimary,
+  $detailLine,
   $errorLabel,
   $externalMark,
   $icon,
@@ -177,32 +178,66 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, performan
               }
             })
         )
-      const fundRowQuery: IStream<Promise<IFundRow | undefined>> = op(localFirstQuery(reader => reader.find(fundTable, { master })), answerState)
-      const bookOf = (reader: IDigestClient, rate: IGetRate) =>
-        readFundBook({ chronicle: reader }, master).then(book => {
-          const held = book.holdings.filter(h => h.shares > 0n)
-          return { book, held, wallets: walletsOf(reader, held.map(h => h.holder)), holders: holdersOf(reader, rate, book) }
-        })
-      const bookQuery = op(
-        localFirst(
-          () => bookOf(localReader, localGetRate),
-          () => bookOf(client, getRate)
+      const liveQuery: IStream<Promise<IFundLive | null>> = op(
+        intermediateState(walletRoot),
+        map(s =>
+          s.status !== PromiseStatus.DONE ? null : s.value !== null && s.value.fund !== null && 'account' in s.value.fund && isAddressEqual(s.value.fund.account, master)
+        ),
+        filterNull,
+        skipRepeats,
+        switchMap(
+          (own): IStream<Promise<IFundLive | null>> =>
+            own
+              ? op(
+                  journalQuery,
+                  map(q => q.then(held => (held !== null && held.live !== null && held.bodyList.some(body => isAddressEqual(body.account, master)) ? held.live : null)))
+                )
+              : just(Promise.resolve(null))
         ),
         answerState
       )
-      const fundBookQuery = op(
-        combine({ fundRow: fundRowQuery, book: bookQuery }),
-        map(p =>
-          Promise.all([p.fundRow, p.book]).then(([fundRow, held]) => ({ ...held, fundRow }))
-        ),
+      const liveAnswers = op(
+        liveQuery,
+        switchMap(q => fromPromise(q.then(read => ({ read, failure: null }), (error: unknown) => ({ read: null, failure: { error } })))),
+        filter(answer => answer.read !== null || answer.failure !== null)
+      )
+      const fundReadOf = (reader: IDigestClient, rate: IGetRate) =>
+        Promise.all([reader.find(fundTable, { master }), reader.select(fundMetricTable, { where: { master } }), readFundBook({ chronicle: reader }, master)]).then(
+          ([fundRow, metricRows, book]) => {
+            const held = book.holdings.filter(h => h.shares > 0n)
+            return { fundRow, metricRows, book, held, wallets: walletsOf(reader, held.map(h => h.holder)), holders: holdersOf(reader, rate, book) }
+          }
+        )
+      const fundReadQuery = op(
+        merge(just(null), liveAnswers),
+        switchMap(answer => {
+          const fresh = answer === null ? null : fundReadOf(client, getRate)
+          return op(
+            fresh === null
+              ? localFirst(
+                  () => fundReadOf(localReader, localGetRate),
+                  () => fundReadOf(client, getRate)
+                )
+              : op(
+                  fromPromise(fresh.then(() => null, () => null)),
+                  map(() => fresh)
+                ),
+            map(q => q.then(read => ({ ...read, answer })))
+          )
+        }),
         answerState
       )
+      const fundRowQuery: IStream<Promise<IFundRow | undefined>> = op(fundReadQuery, map(q => q.then(read => read.fundRow)), answerState)
       const balanceRowsQuery = op(localFirstQuery(reader => reader.select(balanceTable, { where: { account: master } })), answerState)
       const ownerQuery: IStream<Promise<Address | null>> = op(
         localFirstQuery(reader => reader.select(accountTable, { where: { account: master } }).then(([row]) => (row === undefined ? null : getAddress(row.owner)))),
         answerState
       )
-      const masterCallsQuery = op(callsOf(master), answerState)
+      const masterCallsQuery = op(
+        merge(just(null), liveAnswers),
+        switchMap(() => callsOf(master)),
+        answerState
+      )
       const valuationsQuery = op(
         masterCallsQuery,
         map(q =>
@@ -244,24 +279,6 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, performan
       const sessionQuery = op(
         combine({ root: walletRoot, own: ownStateQuery }),
         map(p => Promise.all([p.root, p.own]).then(([root, own]) => ({ root, mandates: own === null ? [] : mandatesInForce(own) }))),
-        answerState
-      )
-      const liveQuery: IStream<Promise<IFundLive | null>> = op(
-        intermediateState(walletRoot),
-        map(s =>
-          s.status !== PromiseStatus.DONE ? null : s.value !== null && s.value.fund !== null && 'account' in s.value.fund && isAddressEqual(s.value.fund.account, master)
-        ),
-        filterNull,
-        skipRepeats,
-        switchMap(
-          (own): IStream<Promise<IFundLive | null>> =>
-            own
-              ? op(
-                  journalQuery,
-                  map(q => q.then(held => (held !== null && held.live !== null && held.bodyList.some(body => isAddressEqual(body.account, master)) ? held.live : null)))
-                )
-              : just(Promise.resolve(null))
-        ),
         answerState
       )
       const storedVenuesQuery = op(localFirstQuery(reader => openPositionsOf(reader, master, [], null, null)), answerState)
@@ -311,35 +328,62 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, performan
         ),
         answerState
       )
-      const metricRowsQuery = op(localFirstQuery(reader => reader.select(fundMetricTable, { where: { master } })), answerState)
-      const pnlQuery = op(
-        combine({ rows: metricRowsQuery, tf: activityTimeframe }),
-        switchMap(p => {
-          const stored = p.rows.then(rows => {
+      const fundMetricQuery = op(
+        combine({ q: fundReadQuery, tf: activityTimeframe }),
+        map(p =>
+          p.q.then(read => {
             const until = getUnixTimestamp()
-            const row = rows.find(each => each.interval === p.tf)
-            if (row === undefined) return null
+            const row = read.metricRows.find(each => each.interval === p.tf)
+            if (row === undefined) return { fundRow: read.fundRow, metric: null }
             const since = until - p.tf
-            const events = pnlEventsAcross(rows, p.tf)
-            return { ...fundMetric(events, p.tf, since, until, CHART_POINTS), start: since, row, events, updatedAt: row.lastUpdatedTimestamp }
+            const events = pnlEventsAcross(read.metricRows, p.tf)
+            const metric = fundMetric(events, p.tf, since, until, CHART_POINTS)
+            const worth = read.answer === null || read.answer.read === null ? null : read.answer.read.worth
+            return {
+              fundRow: read.fundRow,
+              metric: {
+                ...metric,
+                start: since,
+                row,
+                events,
+                updatedAt: row.lastUpdatedTimestamp,
+                worth,
+                liveFailure: read.answer === null ? null : read.answer.failure,
+                tip: pnlTipOf(metric.pnl, row, worth)
+              }
+            }
           })
-          const settle = (worth: IFundLive['worth'] | null, liveFailure: { error: unknown } | null) =>
-            stored.then(metric => (metric === null ? null : { ...metric, worth, liveFailure, tip: pnlTipOf(metric.pnl, metric.row, worth) }))
-          return merge(
-            just(settle(null, null)),
-            op(
-              fromPromise(stored.then(() => null, () => null)),
-              switchMap(() => liveQuery),
-              map(live => live.then(read => settle(read === null ? null : read.worth, null), (error: unknown) => settle(null, { error })))
-            )
+        ),
+        answerState
+      )
+      const pnlQuery = op(fundMetricQuery, map(q => q.then(read => read.metric)), answerState)
+      const flowsQuery = op(
+        merge(just(null), liveAnswers),
+        switchMap(answer => {
+          if (answer === null) return localFirstQuery(reader => reader.select(flowTable, { where: { account: master } }))
+          const fresh = client.select(flowTable, { where: { account: master } })
+          return op(
+            fromPromise(fresh.then(() => null, () => null)),
+            map(() => fresh)
           )
         }),
         answerState
       )
-      const indexQuery = op(
-        combine({ metric: pnlQuery, fundRow: fundRowQuery, valuations: valuationsQuery }),
+      const costsQuery = op(
+        combine({ metric: pnlQuery, calls: masterCallsQuery, flows: flowsQuery }),
         map(p =>
-          Promise.all([p.metric, p.fundRow, p.valuations]).then(([metric, fundRow, valuations]) => {
+          Promise.all([p.metric, p.calls, p.flows]).then(([metric, read, flows]) => {
+            if (metric === null) return null
+            const costs = fundCostsOf(read.calls, flows, metric.start, (metric.tip === null ? metric.updatedAt : metric.tip.time) + 1)
+            return { ...costs, market: (metric.tip === null ? metric.pnl : metric.tip.pnl) + costs.relayFee + costs.routeCost, failures: read.failures }
+          })
+        ),
+        answerState
+      )
+      const indexQuery = op(
+        combine({ q: fundMetricQuery, valuations: valuationsQuery }),
+        map(p =>
+          Promise.all([p.q, p.valuations]).then(([{ fundRow, metric }, valuations]) => {
             const lastMark = valuations[valuations.length - 1]
             if (lastMark === undefined || fundRow === undefined) return null
             const worth = metric === null ? null : metric.worth
@@ -367,18 +411,18 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, performan
         answerState
       )
       const timelineQuery = op(
-        combine({ fundRow: fundRowQuery, valuations: valuationsQuery, tf: activityTimeframe, metric: performanceMetric, pnl: pnlQuery, eth: ethRateQuery }),
+        combine({ q: fundMetricQuery, valuations: valuationsQuery, tf: activityTimeframe, metric: performanceMetric, eth: ethRateQuery }),
         map(async p => {
           const until = getUnixTimestamp()
           const since = until - p.tf
           const [timeline, usdPerEth] = await Promise.all([
             p.metric === 'pnl'
-              ? p.pnl.then(metric =>
+              ? p.q.then(({ metric }) =>
                   metric === null
                     ? { marks: [], tip: null }
                     : { marks: metric.points, tip: metric.tip === null || metric.tip.time < metric.start ? null : { time: metric.tip.time, value: formatFixed(TOKEN_META.WETH.decimals, metric.tip.pnl) } }
                 )
-              : Promise.all([p.fundRow, p.valuations, p.pnl]).then(([fundRow, valuations, metric]) => {
+              : Promise.all([p.q, p.valuations]).then(([{ fundRow, metric }, valuations]) => {
                   if (fundRow === undefined || metric === null) return { marks: [], tip: null }
                   const closed = valuations.slice(0, -1).findLastIndex(v => v.sharesAfter === 0n)
                   const launch = valuations[closed + 1]
@@ -506,7 +550,7 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, performan
                       const puppetShares = f.held.filter(h => !isAddressEqual(h.holder, master)).reduce((total, h) => total + h.shares, 0n)
                       return usdOf(cashFor(puppetShares, f.fundRow.totalShares, f.fundRow.value), p.price)
                     }),
-                  combine({ q: fundBookQuery, price: ethPrice() })
+                  combine({ q: fundReadQuery, price: ethPrice() })
                 ),
                 hideBalances
               )
@@ -546,14 +590,14 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, performan
                             $loader: $column(spacing.default)($intermediateRow($intermediateProfile(AVATAR_SIZE)), $intermediateRow($intermediateProfile(AVATAR_SIZE))),
                             $display: just(
                               f.holders.then(holders =>
-                                $fundHolders(hideBalances, null, wallets, fundRow, holding, f.book, holders.balances, just(holders.quotes), { wei: just(fundRow.value), price: ethPrice() }, just(null))
+                                $fundHolders(hideBalances, null, wallets, fundRow, holding, f.book, holders.balances, just(holders.quotes), { wei: just(fundRow.value), price: ethPrice() }, just(null), just(null))
                               )
                             )
                           })
                     )
                   })
                 ),
-              fundBookQuery
+              fundReadQuery
             )
           })
         ),
@@ -566,7 +610,7 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, performan
                   p.q.then(f =>
                     f.fundRow === undefined ? '-' : usdOf(cashFor(f.book.redemption === undefined ? 0n : f.book.redemption.queued, f.fundRow.totalShares, f.fundRow.value), p.price)
                   ),
-                combine({ q: fundBookQuery, price: ethPrice() })
+                combine({ q: fundReadQuery, price: ethPrice() })
               )
             )
           ),
@@ -660,6 +704,43 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, performan
 
       const $liveFailureNote = (failure: { error: unknown } | null): I$Node[] => (failure === null ? [] : [$node($text(`Live value failed: ${formatThrownError(failure.error)}`))])
 
+      type ICostsRead = NonNullable<typeof costsQuery extends IStream<Promise<infer C>> ? C : never>
+      const $pnlBreakdown = switchLatest(
+        op(
+          intermediateState(costsQuery),
+          map(s => (s.status === PromiseStatus.DONE ? s.value : undefined)),
+          skipRepeats,
+          map(read => {
+            if (read === null) return empty
+            const $line = (label: string, amountOf: (costs: ICostsRead) => bigint) => {
+              const amount = read === undefined || read.pending > 0 ? null : amountOf(read)
+              return $detailLine(
+                label,
+                maskBalance(
+                  map(
+                    p => Promise.all([p.costs, p.price]).then(([costs, price]) => (costs === null || costs.pending > 0 ? '-' : formatUsd(amountOf(costs), price))),
+                    combine({ costs: costsQuery, price: ethPrice() })
+                  ),
+                  hideBalances
+                ),
+                amount === null || amount === 0n ? palette.message : amount > 0n ? palette.positive : palette.negative
+              )
+            }
+            const actions = (count: number) => `${count} ${count === 1 ? 'action' : 'actions'}`
+            return $column(spacing.tiny)(
+              $line('Market', costs => costs.market),
+              $line('Relay fees', costs => -costs.relayFee),
+              $line('Route costs', costs => -costs.routeCost),
+              ...(read !== undefined && read.pending > 0 ? [$detailLine('Not priced yet', actions(read.pending), palette.foreground)] : []),
+              ...(read !== undefined && read.unvalued > 0 ? [$detailLine('Not valued', actions(read.unvalued), palette.foreground)] : []),
+              ...(read !== undefined && read.failures.size > 0
+                ? [$node(style({ color: palette.foreground }))($text(`Not refreshed on ${[...read.failures.keys()].map(chainName).join(', ')}`))]
+                : [])
+            )
+          })
+        )
+      )
+
       const $pnlTip = switchLatest(
         op(
           intermediateState(pnlQuery),
@@ -668,17 +749,20 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, performan
             const metric = s.value
             if (metric === null) return just($node($text('No activity yet')))
             return just(
-              $column(spacing.tiny)(
-                $node($text(metric.tip === null ? `Valued ${ago(metric.updatedAt)}` : `Evaluated ${ago(metric.tip.time)}`)),
-                ...(metric.tip !== null
-                  ? [
-                      $node($text(`Valued ${ago(metric.updatedAt)}: `), $intermediateText(pnlLabelOf(metric.pnl))),
-                      $node($text('Live change since: '), $intermediateText(pnlLabelOf(metric.tip.pnl - metric.pnl)))
-                    ]
-                  : metric.worth !== null && metric.worth.value === undefined
-                    ? [$node($text(`Not evaluated: ${metric.worth.note}`))]
-                    : []),
-                ...$liveFailureNote(metric.liveFailure)
+              $column(spacing.small)(
+                $column(spacing.tiny)(
+                  $node($text(metric.tip === null ? `Valued ${ago(metric.updatedAt)}` : `Evaluated ${ago(metric.tip.time)}`)),
+                  ...(metric.tip !== null
+                    ? [
+                        $node($text(`Valued ${ago(metric.updatedAt)}: `), $intermediateText(maskBalance(pnlLabelOf(metric.pnl), hideBalances))),
+                        $node($text('Live change since: '), $intermediateText(maskBalance(pnlLabelOf(metric.tip.pnl - metric.pnl), hideBalances)))
+                      ]
+                    : metric.worth !== null && metric.worth.value === undefined
+                      ? [$node($text(`Not evaluated: ${metric.worth.note}`))]
+                      : []),
+                  ...$liveFailureNote(metric.liveFailure)
+                ),
+                $pnlBreakdown
               )
             )
           })
@@ -906,10 +990,10 @@ export const $TraderPage = ({ master, hideBalances, activityTimeframe, performan
                   return $emptyNote('No holders yet', 'The master and puppets who join an allocation round appear here with their share.')
                 }
                 return Promise.all([f.wallets, f.holders]).then(([wallets, holders]) =>
-                  $fundHolders(hideBalances, null, wallets, fundRow, f.held, f.book, holders.balances, just(holders.quotes), { wei: just(fundRow.value), price: ethPrice() }, just(null))
+                  $fundHolders(hideBalances, null, wallets, fundRow, f.held, f.book, holders.balances, just(holders.quotes), { wei: just(fundRow.value), price: ethPrice() }, just(null), just(null))
                 )
               }),
-            fundBookQuery
+            fundReadQuery
           )
         }),
         {

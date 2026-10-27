@@ -73,7 +73,10 @@ function planShape(draft: IDraft, account: Address | null, fund: Address | null,
         kind: 'mandate',
         destination: { chainId: HUB_CHAIN_ID, address: account },
         label: draft.mandate.expiry === 0n ? 'End mandate' : 'Mandate',
-        description: 'Signs your allocation rules and posts them on the hub. The latest one per fund wins.'
+        description:
+          draft.mandate.expiry === 0n
+            ? 'Signs the end of this mandate and posts it on the hub. If it cannot be relayed, Revoke sessions in Sessions ends every mandate, and every session, from your wallet without a fee.'
+            : 'Signs your allocation rules and posts them on the hub. The latest one per fund wins.'
       }
     ]
   }

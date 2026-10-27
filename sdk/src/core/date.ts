@@ -12,7 +12,7 @@ const intervals = [
   { label: 'sec', seconds: IntervalTime.SEC }
 ] as const
 
-export function getDuration(time: number | bigint, threshold = IntervalTime.MONTH, none = 'None') {
+export function getDuration(time: number | bigint, threshold: number = IntervalTime.MONTH, none = 'None') {
   let remainingTime = Number(time)
   let durationString = ''
 

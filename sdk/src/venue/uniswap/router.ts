@@ -152,10 +152,10 @@ export function planRouterCall(deployment: IUniswapDeployment, wrapped: Address,
       credit.set(currency, (credit.get(currency) ?? 0n) + floor)
     }
     const admitHook = (hooks: Address, where: string): void => {
-      if (isAddressEqual(hooks, zeroAddress)) return
+      if (isAddressEqual(hooks, zeroAddress) || deployment.hooks.some(vetted => isAddressEqual(vetted, hooks))) return
       refuse(
         'V4_HOOK_NOT_ADMITTED',
-        `the v4 pool in ${where} runs hook ${getAddress(hooks)}; a hook is code anyone can deploy, and it can take a fee from every swap for an address the screen cannot pin, so only pools without a hook are admitted. Route the trade through a pool without a hook`
+        `Uniswap routes this swap through a v4 pool whose hook ${getAddress(hooks)} is not vetted (command ${where}); a hook is code anyone can deploy, and it can take a fee from every swap for an address the screen cannot pin, so only pools without a hook or with a vetted one are admitted. Route the trade through another pool`
       )
     }
     const settle = (currency: Address, amount: bigint, fromUser: boolean, where: string): void => {

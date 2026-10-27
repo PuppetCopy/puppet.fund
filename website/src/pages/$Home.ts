@@ -1,13 +1,13 @@
 import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
-import { AGENT_TEMPLATES, type IAgentReply, randomHex } from '@puppet/sdk/agent'
+import { AGENT_TEMPLATES, agentLinkLineOf, type IAgentReply, randomHex } from '@puppet/sdk/agent'
 import { CHAIN_TOKEN_MAP, type ChainId, PRECISION } from '@puppet/sdk/const'
 import { readableAddress } from '@puppet/sdk/core'
 import { randomCells, randomSymbol, robotCellsOf } from '@puppet/sdk/ui-components'
 import { GMX_ROUTER } from '@puppet/sdk/venue'
-import { type IStream, just, map, merge, never, op, skipRepeats, start, switchLatest } from 'aelea/stream'
+import { type IStream, just, map, merge, op, skipRepeats, start, switchLatest } from 'aelea/stream'
 import { type IBehavior, state } from 'aelea/stream-extended'
 import { $custom, $element, $node, $text, $wrapNativeElement, attr, attrBehavior, component, fromEventTarget, type I$Node, type INode, motion, nodeEvent, style, styleBehavior, stylePseudo } from 'aelea/ui'
-import { $column, $defaultNumberTickerSlot, $defaultPopoverContentContainer, $NumberTicker, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
+import { $column, $defaultInputContainer, $defaultNumberTickerSlot, $defaultPopoverContentContainer, $NumberTicker, $row, isDesktopScreen, spacing } from 'aelea/ui-components'
 import { colorShade, palette, theme } from 'aelea/ui-components-theme'
 import {
   $Baseline,
@@ -29,6 +29,7 @@ import {
   $puppet,
   $puppeteer,
   $robinhood,
+  $robot,
   $smartContract,
   $spacex,
   $terminal,
@@ -44,13 +45,13 @@ import { $jazzicon } from '../common/$avatar.js'
 import { chainName } from '../common/$chain.js'
 import { $tokenIcon, $tokenProfile } from '../common/$common.js'
 import { $fundAvatar } from '../common/$fundAvatar.js'
+import { $defaultTextFieldContainer, $FieldLabeled } from '../ui-components/form/$TextField.js'
 import { $puppetLogo } from '../common/$icons.js'
 import { $venueIcon } from '../common/$operationView.js'
 import { $heading2, $heading3 } from '../common/$text.js'
 import { $card, $card2, $mockWindow } from '../common/elements/$common.js'
 import { $agentRequestRow, $agentStatus, agentActionOf, type IAgentStatus } from '../components/$AgentLink.js'
 import { $sessionRow } from '../components/$sessionRow.js'
-import { $FundIdentityEditor } from '../components/portfolio/$FundIdentityEditor.js'
 import { DOCS_URL, GITHUB_REPO_URL } from '../const/links.js'
 import { MINUS, signedDollar } from '../io/price.js'
 import { $launchCta, $navPill, $pillAnchor } from './$onboarding.js'
@@ -437,9 +438,9 @@ const EXAMPLE_PEER = robotCellsOf(randomAddress())
 const EXAMPLE_THIRD = robotCellsOf(randomAddress())
 const EXAMPLE_LAGGARD = robotCellsOf(randomAddress())
 const ALLOCATIONS = [
-  { name: EXAMPLE_FUND_NAME, cells: EXAMPLE_FUND, rate: 0.5, monthReturn: EXAMPLE_RETURN },
-  { name: EXAMPLE_NAMES[1]!, cells: EXAMPLE_PEER, rate: 0.6, monthReturn: 2 },
-  { name: EXAMPLE_NAMES[2]!, cells: EXAMPLE_THIRD, rate: 0.5, monthReturn: 7 }
+  { name: EXAMPLE_FUND_NAME, cells: EXAMPLE_FUND, rate: 0.25, monthReturn: EXAMPLE_RETURN },
+  { name: EXAMPLE_NAMES[1]!, cells: EXAMPLE_PEER, rate: 0.25, monthReturn: 2 },
+  { name: EXAMPLE_NAMES[2]!, cells: EXAMPLE_THIRD, rate: 0.25, monthReturn: 7 }
 ].map((b, i, all) => {
   const left = all.slice(0, i).reduce((rest, prior) => rest * (1 - prior.rate), EXAMPLE_DEPOSIT)
   return { ...b, left, stake: b.rate * left, growth: 1 + b.monthReturn * (1 - PERFORMANCE_FEE) }
@@ -759,7 +760,7 @@ const STORY_BEATS: IStoryBeat[] = [
                 $text('Signed')
               )
             ),
-            $node(style({ fontSize: text.xs, color: palette.foreground }))($text('1-day cooldown'))
+            $node(style({ fontSize: text.xs, color: palette.foreground }))($text('6-hour cooldown'))
           ),
           ...ALLOCATIONS.map((b, i) =>
             $visRow(
@@ -1499,7 +1500,6 @@ const $storyline = (): I$Node => {
   )
 }
 
-const AGENT_COLOR = MASTER_COLOR
 const AGENT_T0 = Date.now() - 5 * 60_000
 const AGENT: IAgentIdentity = {
   secret: randomHex(32),
@@ -1507,10 +1507,10 @@ const AGENT: IAgentIdentity = {
   name: 'AGENT7',
   cells: randomCells(),
   fund: randomAddress(),
-  template: 'bun-agent',
-  strategy: 'Trade ETH on GMX at 3x leverage or less, and close any position that is down 5%.'
+  proven: true
 }
-const AGENT_PEER: IAgentIdentity = { ...AGENT, secret: randomHex(32), port: AGENT.port + 1, name: 'AGENT3', cells: randomCells(), template: 'instruction', strategy: '' }
+const AGENT_STRATEGY = 'Trade ETH on GMX at 3x leverage or less, and close any position that is down 5%.'
+const AGENT_PEER: IAgentIdentity = { ...AGENT, secret: randomHex(32), port: AGENT.port + 1, name: 'AGENT3', cells: randomCells() }
 const AGENT_LINKED: IAgentStatus = { kind: 'linked', expiry: BigInt(Math.floor(AGENT_T0 / 1000) + 7 * 86_400) }
 const AGENT_REQUESTS: { identity: IAgentIdentity; time: number; frame: { kind: string } & Record<string, unknown>; reply: IAgentReply }[] = [
   {
@@ -1583,56 +1583,54 @@ const $createScene = (local: IStream<number>): I$Node =>
     )
     const typed = op(
       local,
-      map(l => Math.round(AGENT.strategy.length * ramp(l, 0.1, 0.34))),
+      map(l => Math.round(AGENT_STRATEGY.length * ramp(l, 0.1, 0.34))),
       skipRepeats,
-      map(n => AGENT.strategy.slice(0, n))
+      map(n => AGENT_STRATEGY.slice(0, n))
     )
     const typing = op(local, map(l => l > 0.1 && l < 0.36), skipRepeats)
+    const saved = op(local, map(l => l >= 0.36), skipRepeats)
     const $fileIcon = (path: string, size: string): I$Node =>
       path.endsWith('.ts')
         ? $icon({ $content: $terminal, viewBox: '0 0 24 24', size, svgOps: style({ color: palette.positive }) })
         : $icon({ $content: $document, viewBox: '0 0 24 24', size, svgOps: style({ color: palette.primary }) })
     const $code = (content: string): I$Node =>
       $node(style({ whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'monospace', fontSize: text.xs, lineHeight: '1.6', color: palette.foreground }))($text(content))
-    const $preview = $node(style({ maxHeight: '260px', overflow: 'hidden', maskImage: 'linear-gradient(to bottom, black 65%, transparent)' }))
+    const $preview = $node(style({ height: '260px', overflow: 'hidden', maskImage: 'linear-gradient(to bottom, black 65%, transparent)' }))
+    const overlap = isDesktopScreen ? 56 : 36
     return [
-      $card(spacing.big, style({ width: '100%', maxWidth: '640px', boxSizing: 'border-box' }))(
-        $column(spacing.tiny)(
-          $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text('New agent')),
-          $node(style({ color: palette.foreground, fontSize: text.sm, lineHeight: '1.5' }))($text('Name it, pick a template, then copy or download its files.'))
-        ),
-        $column(spacing.default)(
-          $row(attr({ inert: '' }), style({ justifyContent: 'center' }))(
-            $FundIdentityEditor(just(AGENT.name), just(AGENT.cells), AGENT.name, $agentStatus(undefined), never)({})
+      $column(style({ width: '100%', maxWidth: '680px' }))(
+        $card(spacing.big, style({ width: '100%', boxSizing: 'border-box' }))(
+          $column(spacing.tiny)(
+            $node(style({ fontSize: text.lg, fontWeight: '600', color: palette.message }))($text('Templates')),
+            $node(style({ color: palette.foreground, fontSize: text.sm, lineHeight: '1.5' }))($text('Pick a template, write your instructions into it, and paste the link line into the .env beside it.'))
           ),
-          $labeledDivider($row(spacing.tiny, style({ alignItems: 'center', fontSize: text.xs, whiteSpace: 'nowrap' }))($text('Template'))),
-          $row(spacing.tiny, style({ flexWrap: 'wrap' }))(
-            ...AGENT_TEMPLATES.map((template, i) =>
-              $node(
-                attr({ role: 'button', tabindex: '0', title: template.detail }),
-                style({ cursor: 'pointer', borderRadius: '100px', border: '1px solid', padding: '4px 12px', fontSize: text.sm, whiteSpace: 'nowrap', transition: 'border-color 300ms, color 300ms' }),
-                styleBehavior(map(at => (at === i ? { borderColor: palette.primary, color: palette.message } : { borderColor: colorShade(palette.foreground, 25), color: palette.foreground }), chosen)),
-                attrBehavior(map(at => ({ 'aria-pressed': at === i ? 'true' : 'false' }), chosen)),
-                keyActivate(),
-                pickTemplateTether(
-                  nodeEvent('click'),
-                  map(() => i)
-                )
-              )($text(template.name))
-            )
-          ),
-          switchLatest(
-            map(at => {
-              const files = AGENT_TEMPLATES[at].files({ name: AGENT.name, port: AGENT.port, secret: AGENT.secret, account: AGENT.fund, instructions: '\u0000' })
-              const [main] = files
-              const shown = state(main.path, pickFile)
-              return $column(spacing.small, style({ animation: 'promptIn 350ms ease-out' }))(
-                $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
-                  $node(style({ flex: '1 1 240px', minWidth: '0' }))(
-                    $labeledDivider(
+          $column(spacing.default)(
+            $row(spacing.tiny, style({ flexWrap: 'wrap' }))(
+              ...AGENT_TEMPLATES.map((template, i) =>
+                $node(
+                  attr({ role: 'button', tabindex: '0', title: template.detail }),
+                  style({ cursor: 'pointer', borderRadius: '100px', border: '1px solid', padding: '4px 12px', fontSize: text.sm, whiteSpace: 'nowrap', transition: 'border-color 300ms, color 300ms' }),
+                  styleBehavior(map(at => (at === i ? { borderColor: palette.primary, color: palette.message } : { borderColor: colorShade(palette.foreground, 25), color: palette.foreground }), chosen)),
+                  attrBehavior(map(at => ({ 'aria-pressed': at === i ? 'true' : 'false' }), chosen)),
+                  keyActivate(),
+                  pickTemplateTether(
+                    nodeEvent('click'),
+                    map(() => i)
+                  )
+                )($text(template.name))
+              )
+            ),
+            switchLatest(
+              map(at => {
+                const files = AGENT_TEMPLATES[at].files({ instructions: '\u0000' })
+                const [main] = files
+                const shown = state(main.path, pickFile)
+                return $column(spacing.small, style({ animation: 'promptIn 350ms ease-out' }))(
+                  $row(spacing.small, style({ alignItems: 'center', flexWrap: 'wrap' }))(
+                    $node(style({ flex: '1 1 240px', minWidth: '0' }))(
                       files.length === 1
-                        ? $row(spacing.tiny, style({ alignItems: 'center', fontFamily: 'monospace', fontSize: text.xs, color: palette.message }))($fileIcon(main.path, '14px'), $text(main.path))
-                        : $row(spacing.tiny, style({ flexWrap: 'wrap', justifyContent: 'center' }))(
+                        ? $labeledDivider($row(spacing.tiny, style({ alignItems: 'center', border: '1px solid transparent', padding: '3px 0', fontFamily: 'monospace', fontSize: text.xs, color: palette.message }))($fileIcon(main.path, '14px'), $text(main.path)))
+                        : $row(spacing.tiny, style({ overflowX: 'auto', scrollbarWidth: 'none' }))(
                             ...files.map(file =>
                               $row(
                                 spacing.tiny,
@@ -1659,49 +1657,107 @@ const $createScene = (local: IStream<number>): I$Node =>
                               )($fileIcon(file.path, '13px'), $text(file.path.slice(file.path.lastIndexOf('/') + 1)))
                             )
                           )
+                    ),
+                    $row(spacing.tiny, attr({ inert: '' }), style({ alignItems: 'center', marginLeft: 'auto' }))(
+                      ...(files.length === 1
+                        ? [
+                            $ButtonSecondary({
+                              $container: $defaultMiniButtonSecondary,
+                              $content: $row(spacing.tiny, style({ alignItems: 'center' }))($icon({ $content: $copy, viewBox: '0 0 24 24', width: '14px' }), $text('Copy'))
+                            })({})
+                          ]
+                        : []),
+                      $ButtonPrimary({
+                        $container: $defaultMiniButtonPrimary,
+                        $content: $row(spacing.tiny, style({ alignItems: 'center' }))($icon({ $content: $download, viewBox: '0 0 24 24', width: '14px' }), $text('Download'))
+                      })({})
                     )
                   ),
-                  $row(spacing.tiny, attr({ inert: '' }), style({ alignItems: 'center', marginLeft: 'auto' }))(
-                    $ButtonSecondary({
-                      $container: $defaultMiniButtonSecondary,
-                      $content: $row(spacing.tiny, style({ alignItems: 'center' }))($icon({ $content: $copy, viewBox: '0 0 24 24', width: '14px' }), $text('Copy'))
-                    })({}),
-                    $ButtonPrimary({
-                      $container: $defaultMiniButtonPrimary,
-                      $content: $row(spacing.tiny, style({ alignItems: 'center' }))($icon({ $content: $download, viewBox: '0 0 24 24', width: '14px' }), $text('Download'))
-                    })({})
+                  switchLatest(
+                    map(path => {
+                      const file = files.find(entry => entry.path === path)
+                      if (file === undefined) throw new Error(`${path} is not a file of the ${AGENT_TEMPLATES[at].name} template`)
+                      if (file !== main) return $preview($code(file.content))
+                      const [before, after] = main.content.split('\u0000')
+                      return $preview(
+                        ...(before.trim() === '' ? [] : [$code(before.replace(/\n+$/, ''))]),
+                        $node(
+                          style({
+                            margin: '10px 0',
+                            minHeight: '3lh',
+                            padding: '10px 12px',
+                            borderRadius: '8px',
+                            border: '1px solid',
+                            backgroundColor: palette.background,
+                            fontFamily: 'monospace',
+                            fontSize: text.xs,
+                            lineHeight: '1.6',
+                            whiteSpace: 'pre-wrap'
+                          }),
+                          styleBehavior(map(on => ({ borderColor: on ? palette.primary : colorShade(palette.foreground, 25) }), typing)),
+                          styleBehavior(map(line => ({ color: line === '' ? palette.foreground : palette.message }), typed))
+                        )($text(map(line => (line === '' ? 'Paste or write your agent’s instructions' : line), typed))),
+                        $code(after.replace(/^\n+/, ''))
+                      )
+                    }, shown)
                   )
-                ),
-                switchLatest(
-                  map(path => {
-                    const file = files.find(entry => entry.path === path)
-                    if (file === undefined) throw new Error(`${path} is not a file of the ${AGENT_TEMPLATES[at].name} template`)
-                    if (file !== main) return $preview($code(file.content))
-                    const [before, after] = main.content.split('\u0000')
-                    return $preview(
-                      ...(before.trim() === '' ? [] : [$code(before.replace(/\n+$/, ''))]),
-                      $node(
-                        style({
-                          margin: '10px 0',
-                          minHeight: '3lh',
-                          padding: '10px 12px',
-                          borderRadius: '8px',
-                          border: '1px solid',
-                          backgroundColor: palette.background,
-                          fontFamily: 'monospace',
-                          fontSize: text.xs,
-                          lineHeight: '1.6',
-                          whiteSpace: 'pre-wrap'
-                        }),
-                        styleBehavior(map(on => ({ borderColor: on ? palette.primary : colorShade(palette.foreground, 25) }), typing)),
-                        styleBehavior(map(line => ({ color: line === '' ? palette.foreground : palette.message }), typed))
-                      )($text(map(line => (line === '' ? 'Paste or write your agent’s instructions' : line), typed))),
-                      $code(after.replace(/^\n+/, ''))
-                    )
-                  }, shown)
                 )
-              )
-            }, chosen)
+              }, chosen)
+            )
+          ),
+          $node(style({ height: `${overlap}px`, flexShrink: '0' }))()
+        ),
+        $defaultPopoverContentContainer(
+          attr({ inert: '' }),
+          style({
+            position: 'relative',
+            zIndex: '1',
+            alignSelf: 'flex-end',
+            width: `calc(100% - ${isDesktopScreen ? 40 : 12}px)`,
+            marginTop: `-${overlap}px`,
+            boxSizing: 'border-box',
+            boxShadow: `0 18px 40px ${palette.shadow}, 0 0 10px 0 ${palette.shadow}`
+          })
+        )(
+          $column(spacing.default)(
+            $row(spacing.small, style({ alignItems: 'center' }))(
+              $node(style({ flex: '1', minWidth: '0' }))($labeledDivider('Sessions')),
+              $ButtonSecondary({ $container: $defaultMiniButtonSecondary, $content: $text('Done') })({})
+            ),
+            $column(spacing.small)(
+              $row(spacing.small, style({ alignItems: 'center' }))(
+                $fundAvatar(AGENT.cells, 24),
+                $node(style({ flex: '0 1 280px', minWidth: '0' }))(
+                  $FieldLabeled({
+                    label: null,
+                    placeholder: AGENT.name,
+                    value: just(AGENT.name),
+                    $container: $defaultTextFieldContainer(style({ alignItems: 'stretch' })),
+                    $input: $defaultInputContainer(style({ flex: '1', minWidth: '0', paddingRight: '96px' })),
+                    $$field: $field =>
+                      $node(style({ position: 'relative', display: 'flex', width: '100%' }))(
+                        $field,
+                        $node(style({ position: 'absolute', right: '8px', top: '0', bottom: '0', display: 'flex', alignItems: 'center' }))($agentStatus(undefined))
+                      )
+                  })({})
+                ),
+                switchLatest(map(on => $ButtonPrimary({ $container: $defaultMiniButtonPrimary, $content: $text(on ? 'Saved' : 'Save'), disabled: just(on) })({}), saved))
+              ),
+              $row(
+                spacing.small,
+                style({ alignItems: 'center', padding: '8px 10px', borderRadius: '8px', border: `1px solid ${colorShade(palette.foreground, 25)}`, backgroundColor: palette.background })
+              )(
+                $node(style({ flex: '1', minWidth: '0', fontFamily: 'monospace', fontSize: text.xs, lineHeight: '1.5', color: palette.message, wordBreak: 'break-all' }))(
+                  $text(agentLinkLineOf({ port: AGENT.port, secret: AGENT.secret, account: AGENT.fund }))
+                ),
+                $ButtonSecondary({
+                  $container: $defaultMiniButtonSecondary,
+                  $content: $row(spacing.tiny, style({ alignItems: 'center' }))($icon({ $content: $copy, viewBox: '0 0 24 24', width: '14px' }), $text('Copy')),
+                  disabled: map(on => !on, saved)
+                })({})
+              ),
+              $node(style({ fontSize: text.xs, lineHeight: '1.5', color: palette.foreground }))($text('Save it, then paste the line into the .env beside your agent and start it. Templates are in the Quickstart.'))
+            )
           )
         )
       ),
@@ -1795,7 +1851,10 @@ const $overseeScene = (local: IStream<number>): I$Node => {
         $node(style({ flex: '1', minWidth: '0' }))(
           $labeledDivider($row(spacing.tiny, style({ alignItems: 'center' }))($node($text('Sessions')), $infoTooltip("Agents act for this fund through this browser's session.", palette.foreground)))
         ),
-        $ButtonSecondary({ $container: $defaultMiniButtonSecondary, $content: $text('New agent') })({})
+        $ButtonSecondary({
+          $container: $defaultMiniButtonSecondary,
+          $content: $row(spacing.tiny, style({ alignItems: 'center' }))($icon({ $content: $robot, width: '14px' }), $text('New agent'))
+        })({})
       ),
       $column(spacing.small)(
         switchLatest(map(off => $agentRow(AGENT, off ? { kind: 'paused' } : AGENT_LINKED), paused)),
@@ -1822,22 +1881,22 @@ type IAgentStep = { title: string; body: string; scene: (local: IStream<number>)
 const AGENT_STEPS: IAgentStep[] = [
   {
     title: 'Create an agent',
-    body: 'Name it and pick a template: from one AGENTS.md in your own words to a full Bun agent that runs every hour and reviews itself every day. Tap a template to look inside.',
+    body: "In your wallet, open Sessions, press New agent and save it, then copy its link line into your agent's .env. Start from a template, from one AGENTS.md in your own words to a full Bun agent that runs its strategy every hour and journals each step for you and your coding agent to improve. Tap a template to look inside.",
     scene: $createScene
   },
   {
     title: 'Run it, every request screened',
-    body: "Start it on your computer, and the app links to it while your wallet page is open; the first time, allow your browser's prompt. Each request is screened and simulated like your own before the app signs it, so money moves only to screened venues, back to your fund or to exits.",
+    body: "Start it on your computer, and your wallet links to it while it is open; the first time, allow your browser's prompt. Each request is screened and simulated like your own before the app signs it, so money moves only to screened venues, back to your fund or to exits.",
     scene: $runScene
   },
   {
     title: 'Yours to oversee',
-    body: "Your agents act through this browser's session. Each one lists under Sessions, and every request it makes under Activity. Pause, resume or remove any of them any time, and keep the app open while they run.",
+    body: "Your agents act through this browser's session. Each one lists under Sessions, and every request it makes under Activity. Pause, resume or remove any of them any time, and keep your wallet open while they run.",
     scene: $overseeScene
   }
 ]
 
-const $agentStepBlock = (agentStep: IAgentStep, i: number): I$Node => {
+const $agentStepBlock = (agentStep: IAgentStep, i: number, tip: IStream<number | null>): I$Node => {
   const block = document.createElement('div')
   const local: IStream<number> = state()(
     motion(
@@ -1872,12 +1931,15 @@ const $agentStepBlock = (agentStep: IAgentStep, i: number): I$Node => {
         transition: 'border-color 300ms, color 300ms, box-shadow 300ms'
       }),
       styleBehavior(
-        map(
-          l =>
-            l > 0.02
-              ? { borderColor: AGENT_COLOR, color: AGENT_COLOR, boxShadow: `0 0 0 4px ${colorShade(AGENT_COLOR, 18)}, 0 0 14px ${colorShade(AGENT_COLOR, 50)}` }
-              : { borderColor: colorShade(palette.foreground, 30), color: palette.foreground, boxShadow: 'none' },
-          local
+        op(
+          tip,
+          map(y => y !== null && y >= block.offsetTop),
+          skipRepeats,
+          map(touched =>
+            touched
+              ? { borderColor: palette.foreground, color: palette.message, boxShadow: `0 0 0 4px ${colorShade(palette.foreground, 18)}, 0 0 14px ${colorShade(palette.foreground, 50)}` }
+              : { borderColor: colorShade(palette.foreground, 30), color: palette.foreground, boxShadow: 'none' }
+          )
         )
       )
     )($text(String(i + 1))),
@@ -1908,12 +1970,13 @@ const $agentTour = (): I$Node => {
       )
     )
   )
+  const railTop = isDesktopScreen ? 20 : 14
   return $wrapNativeElement(container)(style({ position: 'relative', width: '100%', paddingLeft: `${isDesktopScreen ? 56 : 40}px`, boxSizing: 'border-box' }))(
     $node(
       style({
         position: 'absolute',
         left: `${isDesktopScreen ? 19 : 13}px`,
-        top: `${isDesktopScreen ? 20 : 14}px`,
+        top: `${railTop}px`,
         bottom: '0',
         width: '2px',
         borderRadius: '2px',
@@ -1921,11 +1984,19 @@ const $agentTour = (): I$Node => {
       })
     )(
       $node(
-        style({ width: '100%', borderRadius: '2px', backgroundColor: AGENT_COLOR, boxShadow: `0 0 8px ${AGENT_COLOR}` }),
+        style({ width: '100%', borderRadius: '2px', backgroundColor: palette.foreground, boxShadow: `0 0 8px ${palette.foreground}` }),
         styleBehavior(map(p => ({ height: `${(100 * p).toFixed(2)}%` }), filled))
       )()
     ),
-    $column(style({ width: '100%', gap: isDesktopScreen ? '72px' : '48px' }))(...AGENT_STEPS.map((agentStep, i) => $agentStepBlock(agentStep, i)))
+    $column(style({ width: '100%', gap: isDesktopScreen ? '72px' : '48px' }))(
+      ...AGENT_STEPS.map((agentStep, i) =>
+        $agentStepBlock(
+          agentStep,
+          i,
+          map(p => (p > 0 ? railTop + p * (container.offsetHeight - railTop) : null), filled)
+        )
+      )
+    )
   )
 }
 
@@ -1943,8 +2014,8 @@ const $agentSection = (): I$Node =>
       $chip('Pause or remove any time')
     ),
     $row(spacing.default, style({ flexDirection: isDesktopScreen ? 'row' : 'column', alignItems: 'center', justifyContent: 'center' }))(
-      $navPill('Create an agent', routeSchema.wallet.agent, true),
-      $navPill('Open the quickstart', routeSchema.quickstart, false, palette.primary)
+      $navPill('Create an agent', routeSchema.wallet, true),
+      $navPill('Open the quickstart', routeSchema.quickstart.agent, false, palette.primary)
     )
   )
 

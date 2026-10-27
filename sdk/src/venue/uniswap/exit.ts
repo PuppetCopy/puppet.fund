@@ -42,7 +42,7 @@ const sqrtRatioAtTick = (tick: number): bigint => {
   return (ratio >> 32n) + (ratio % (1n << 32n) === 0n ? 0n : 1n)
 }
 
-const requireRevert = (err: unknown): void => {
+export const requireRevert = (err: unknown): void => {
   if (!(err instanceof BaseError) || err.walk(e => e instanceof ContractFunctionRevertedError) === null) throw err
 }
 

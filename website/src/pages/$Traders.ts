@@ -96,7 +96,7 @@ const $leaderboardTableContainer = $defaultTableContainer(
 
 const $leaderboardCell = $defaultTableCell(style({ padding: '0', height: '60px' }))
 const $leaderboardCellEnd = $leaderboardCell(style({ placeContent: 'flex-end' }))
-const $leaderboardHeaderCell = $defaultTableHeaderCell(style({ alignItems: 'flex-start', alignSelf: 'start' }))
+const $leaderboardHeaderCell = $defaultTableHeaderCell(style({ alignItems: 'flex-start', alignSelf: 'center' }))
 const $leaderboardHeaderCellEnd = $leaderboardHeaderCell(style({ placeContent: 'flex-end' }))
 const $leaderboardCellCenter = $leaderboardCell(style({ placeContent: 'center' }))
 const $leaderboardHeaderCellCenter = $leaderboardHeaderCell(style({ placeContent: 'center' }))
@@ -332,7 +332,7 @@ export const $Traders = ({ walletRoot, ownStateQuery, draftMandateList, hideBala
                                       q.then(([book, fundRow, held, wallets]) => {
                                         if (fundRow === undefined) throw new Error(`the chronicle holds no fund for ${row.master}`)
                                         const holding = book.holdings.filter(h => !isAddressEqual(h.holder, book.master) && h.shares > 0n)
-                                        return $fundHolders(hideBalances, null, wallets, fundRow, holding, book, held.balances, just(held.quotes), { wei: just(fundRow.value), price: ethPrice() }, just(null))
+                                        return $fundHolders(hideBalances, null, wallets, fundRow, holding, book, held.balances, just(held.quotes), { wei: just(fundRow.value), price: ethPrice() }, just(null), just(null))
                                       }),
                                     localFirst(
                                       () => holdersAt(localReader, localGetRate),
@@ -353,7 +353,7 @@ export const $Traders = ({ walletRoot, ownStateQuery, draftMandateList, hideBala
                 ]
               : []),
             {
-              $head: $row(spacing.small, style({ flex: 1, alignItems: 'flex-start', placeContent: 'space-between' }))(
+              $head: $row(spacing.small, style({ flex: 1, alignItems: 'center', placeContent: 'space-between' }))(
                 params.metric === 'pnl'
                   ? $row(spacing.tiny, style({ alignItems: 'flex-start' }))(
                       $stack($node(style({ fontWeight: '700', whiteSpace: 'nowrap' }))($text('PnL')), $caption('ROI'), 'flex-start'),
@@ -370,6 +370,7 @@ export const $Traders = ({ walletRoot, ownStateQuery, draftMandateList, hideBala
                 $node(style({ color: palette.foreground, whiteSpace: 'nowrap' }))($text(`${getMappedValue(activityOptionShortLabelMap, params.tf)} activity`))
               ),
               sortBy: 'performance',
+              $headerCellContainer: $defaultTableHeaderCell(style({ alignSelf: 'center' })),
               gridTemplate: isDesktopScreen ? '220px' : 'minmax(0, 1fr)',
               $bodyCallback: map((row: ITraderRank) => {
                 return $performanceCell(sinceSec, row.performance, params.metric)

@@ -1,5 +1,5 @@
 import type { I$Node } from 'aelea/ui'
-import { $aave, $ada, $arb, $avax, $bch, $bnb, $btc, $cro, $dai, $doge, $eth, $frax, $gmx, $gram, $hbar, $hype, $leo, $link, $ltc, $near, $okb, $op, $pump, $puppet, $pyusd, $qnt, $sol, $sui, $tao, $trx, $uni, $usd, $usdc, $usde, $usdt, $wbt, $xaut, $xlm, $xmr, $xrp, $zec } from './curated.js'
+import { $aave, $ada, $arb, $avax, $bch, $bnb, $btc, $cro, $dai, $doge, $eth, $frax, $gmx, $gram, $hbar, $hype, $leo, $link, $ltc, $near, $okb, $op, $pol, $pump, $puppet, $pyusd, $qnt, $sol, $sui, $tao, $trx, $uni, $usd, $usdc, $usde, $usdt, $wbt, $xaut, $xlm, $xmr, $xrp, $zec } from './curated.js'
 import { $generatedTokenIconMap } from './generated.js'
 
 export * from './curated.js'
@@ -52,6 +52,8 @@ export const $tokenIconMap: Record<string, I$Node<SVGPathElement>> = {
   BTCB: $btc,
   ETH: $eth,
   WETH: $eth,
+  POL: $pol,
+  WPOL: $pol,
   UNI: $uni,
   LINK: $link,
   AVAX: $avax,

@@ -40,7 +40,6 @@ export const venueTable = table(
   },
   { key: row => `${getAddress(row.account)}-${row.venue}-${row.chainId}` }
 )
-export type IVenueRow = InferRow<(typeof venueTable)['columns']>
 
 export const allowanceTable = table(
   {
@@ -75,6 +74,7 @@ export const positionTable = table({
   collateralUnit: t('text', { optional: true }),
   cost: t('bigint', { optional: true }),
   value: t('bigint', { optional: true }),
+  accruedCost: t('bigint', { optional: true }),
   fieldLabelList: t('text[]'),
   fieldValueList: t('text[]'),
   time: t('int')
@@ -90,7 +90,6 @@ export const positionSyncTable = table({
   time: t('int'),
   idList: t('text[]')
 })
-export type IPositionSyncRow = InferRow<(typeof positionSyncTable)['columns']>
 
 export const observationTable = table({
   id: t('text', { pk: true }),
@@ -99,7 +98,6 @@ export const observationTable = table({
   time: t('int'),
   data: t('text')
 })
-export type IObservationRow = InferRow<(typeof observationTable)['columns']>
 
 export const fundListTable = table({
   id: t('text', { pk: true }),

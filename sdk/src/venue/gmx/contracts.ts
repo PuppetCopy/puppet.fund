@@ -1,14 +1,70 @@
 import { encodeAbiParameters, getAddress, keccak256, parseAbi, stringToHex } from 'viem'
 import { GMX_V2_CONTRACT_MAP } from './contractMap.js'
-import { GMX_DECREASE_TYPES, GMX_INCREASE_TYPES, GMX_ORDER_TYPE } from './evaluate.js'
 
-export { GMX_DECREASE_TYPES, GMX_INCREASE_TYPES, GMX_ORDER_CUSTODY_TYPES, GMX_ORDER_TYPE } from './evaluate.js'
 export { GMX_V2_CHAIN_ID, GMX_WNT } from './market.js'
+
+export const GMX_ORDER_TYPE = {
+  MarketSwap: 0,
+  LimitSwap: 1,
+  MarketIncrease: 2,
+  LimitIncrease: 3,
+  MarketDecrease: 4,
+  LimitDecrease: 5,
+  StopLossDecrease: 6,
+  StopIncrease: 8
+} as const
+
+export const GMX_INCREASE_TYPES: ReadonlySet<number> = new Set([
+  GMX_ORDER_TYPE.MarketIncrease,
+  GMX_ORDER_TYPE.LimitIncrease,
+  GMX_ORDER_TYPE.StopIncrease
+])
+
+export const GMX_DECREASE_TYPES: ReadonlySet<number> = new Set([
+  GMX_ORDER_TYPE.MarketDecrease,
+  GMX_ORDER_TYPE.LimitDecrease,
+  GMX_ORDER_TYPE.StopLossDecrease
+])
+
+export const GMX_ORDER_CUSTODY_TYPES: ReadonlySet<number> = new Set([
+  GMX_ORDER_TYPE.MarketSwap,
+  GMX_ORDER_TYPE.LimitSwap,
+  GMX_ORDER_TYPE.MarketIncrease,
+  GMX_ORDER_TYPE.LimitIncrease,
+  GMX_ORDER_TYPE.StopIncrease
+])
 
 export const GMX_ROUTER = GMX_V2_CONTRACT_MAP.GmxExchangeRouter.address
 export const GMX_ROUTER_ABI = GMX_V2_CONTRACT_MAP.GmxExchangeRouter.abi
 export const GMX_ORDER_VAULT = GMX_V2_CONTRACT_MAP.GmxOrderVault.address
 export const GMX_EVENT_EMITTER = getAddress('0xC8ee91A54287DB53897056e12D9819156D3822Fb')
+export const GMX_EVENT_EMITTER_BLOCK = 107_737_756n
+export const GMX_EVENT_LOG_ABI = parseAbi([
+  'event EventLog1(address msgSender, string eventName, string indexed eventNameHash, bytes32 indexed topic1, EventLogData eventData)',
+  'event EventLog2(address msgSender, string eventName, string indexed eventNameHash, bytes32 indexed topic1, bytes32 indexed topic2, EventLogData eventData)',
+  'struct EventLogData { AddressItems addressItems; UintItems uintItems; IntItems intItems; BoolItems boolItems; Bytes32Items bytes32Items; BytesItems bytesItems; StringItems stringItems; }',
+  'struct AddressItems { AddressKeyValue[] items; AddressArrayKeyValue[] arrayItems; }',
+  'struct AddressKeyValue { string key; address value; }',
+  'struct AddressArrayKeyValue { string key; address[] value; }',
+  'struct UintItems { UintKeyValue[] items; UintArrayKeyValue[] arrayItems; }',
+  'struct UintKeyValue { string key; uint256 value; }',
+  'struct UintArrayKeyValue { string key; uint256[] value; }',
+  'struct IntItems { IntKeyValue[] items; IntArrayKeyValue[] arrayItems; }',
+  'struct IntKeyValue { string key; int256 value; }',
+  'struct IntArrayKeyValue { string key; int256[] value; }',
+  'struct BoolItems { BoolKeyValue[] items; BoolArrayKeyValue[] arrayItems; }',
+  'struct BoolKeyValue { string key; bool value; }',
+  'struct BoolArrayKeyValue { string key; bool[] value; }',
+  'struct Bytes32Items { Bytes32KeyValue[] items; Bytes32ArrayKeyValue[] arrayItems; }',
+  'struct Bytes32KeyValue { string key; bytes32 value; }',
+  'struct Bytes32ArrayKeyValue { string key; bytes32[] value; }',
+  'struct BytesItems { BytesKeyValue[] items; BytesArrayKeyValue[] arrayItems; }',
+  'struct BytesKeyValue { string key; bytes value; }',
+  'struct BytesArrayKeyValue { string key; bytes[] value; }',
+  'struct StringItems { StringKeyValue[] items; StringArrayKeyValue[] arrayItems; }',
+  'struct StringKeyValue { string key; string value; }',
+  'struct StringArrayKeyValue { string key; string[] value; }'
+])
 export const GMX_REFERRAL_CODE = stringToHex('PUPPET', { size: 32 })
 export const GMX_REFERRAL_STORAGE = getAddress('0xe6fab3F0c7199b0d34d7FbE83394fc0e0D06e99d')
 export const GMX_REFERRAL_STORAGE_ABI = parseAbi([

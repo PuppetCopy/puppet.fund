@@ -320,6 +320,4 @@ export function createJournal(deps: IJournalDeps) {
     { chains: () => readChronicleChains(deps.chronicleUrl, CHRONICLE_STATUS_TIMEOUT_MS) }
   )
 }
-
-export type ISettleFold = Awaited<ReturnType<ReturnType<ReturnType<typeof createJournal>>['settle']>>
   

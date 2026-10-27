@@ -8,7 +8,8 @@ import type { IWithdrawInput } from '@puppet/sdk/intent'
 import {
   type IRelayFeeQuote,
   RELAY_RATE_MAX_STALE_MS,
-  symbolOf
+  symbolOf,
+  TYPICAL_SUBCALL_GAS
 } from '@puppet/sdk/state'
 import {
   awaitPromises,
@@ -50,6 +51,7 @@ import {
   $overlaySliderContainer,
   amountUsdLabel,
   createFocusState,
+  QUOTE_CALLDATA_BYTES,
   scaleByPercent,
 } from './editorUtils.js'
 
@@ -142,8 +144,14 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
       const needsRoute = (sel: ISwapTargetOption): boolean => !(sel.chainId === chainId && isAddressEqual(sel.id, token))
 
       const relayFee: IStream<bigint | null> = op(
-        relayFeeMapQuery,
-        map(feeMap => (feeMap === null ? null : feeMap('withdraw', false, 0n, 0n, 0n))),
+        combine({ feeMap: relayFeeMapQuery, sel: receiveSel }),
+        map(p =>
+          p.feeMap === null
+            ? null
+            : needsRoute(p.sel)
+              ? p.feeMap('withdraw', false, 0n, TYPICAL_SUBCALL_GAS, QUOTE_CALLDATA_BYTES)
+              : p.feeMap('withdraw', false, 0n, 0n, 0n)
+        ),
         skipRepeats
       )
 
@@ -314,6 +322,7 @@ export const $WithdrawEditor = (config: I$WithdrawEditor) =>
           $DraftSave({
             target: { value: receiveSel, optionList: just(receiveOptions), source: just({ chainId, symbol: symbolOf(chainId, token) }) },
             request,
+            inputFee: map(p => (p.feeMap === null ? null : { gross: p.draft === 0n ? p.balance : p.draft, quote: p.feeMap, kind: 'withdraw' as const }), combine({ balance, draft: draftAmount, feeMap: relayFeeMapQuery })),
             active: map(needsRoute, receiveSel),
             alert,
             disabled

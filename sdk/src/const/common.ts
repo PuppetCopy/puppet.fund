@@ -1,3 +1,5 @@
+import { PROTOCOL } from '@puppet/contracts/const'
+
 export const IntervalTime = {
   SEC: 1,
   MIN: 60,
@@ -38,7 +40,7 @@ export const PLATFORM_STAT_INTERVAL = [
   IntervalTime.YEAR
 ] as const
 
-export const DEFAULT_DEADLINE_SEC = IntervalTime.MIN5
+export const DEFAULT_DEADLINE_SEC = Number(PROTOCOL.maxIntentTtlSec) / 2
 
 export const PRICED_DEADLINE_SEC = IntervalTime.MIN
 

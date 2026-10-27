@@ -2,6 +2,7 @@ import { PROTOCOL } from '@puppet/contracts/const'
 import { type Address, decodeFunctionData, getAddress, type Hex, isAddressEqual, size, slice, toFunctionSelector, zeroAddress } from 'viem'
 import { CompactError } from '../../compact/index.js'
 import type { ChainId } from '../../const/index.js'
+import { providerGas } from '../../state/fee.js'
 
 const RELAY_QUOTE_PATH = '/quote/v2'
 const RELAY_SLIPPAGE_BPS = 50
@@ -104,7 +105,7 @@ export function verifyRelaySwap(recipient: Address, callData: Hex, inputToken: A
 
 interface IRelayQuoteResponse {
   message?: string
-  steps?: { id: string; items?: { data?: { to: Address; data: Hex; value?: string } }[] }[]
+  steps?: { id: string; items?: { data?: { to: Address; data: Hex; value?: string; gas?: string } }[] }[]
   details?: { currencyOut?: { amount: string; minimumAmount: string }; timeEstimate?: number }
 }
 
@@ -115,7 +116,7 @@ export async function quoteRelaySwap(
   recipient: Address,
   bounds: { chainId: ChainId; inputToken: Address; outputToken: Address; inputAmount: bigint },
   signal?: AbortSignal
-): Promise<{ route: { kind: 'swap'; provider: Address; providerCallData: Hex }; outputAmount: bigint; expectedOutputAmount: bigint; tool: string; etaSec: number | undefined }> {
+): Promise<{ route: { kind: 'swap'; provider: Address; providerCallData: Hex; gas: bigint }; outputAmount: bigint; expectedOutputAmount: bigint; tool: string; etaSec: number | undefined }> {
   const res = await fetch(`${endpoint}${RELAY_QUOTE_PATH}`, {
     method: 'POST',
     headers: { accept: 'application/json', 'content-type': 'application/json' },
@@ -154,7 +155,7 @@ export async function quoteRelaySwap(
   }
   verifyRelaySwap(recipient, swap.data, bounds.inputToken, bounds.inputAmount, bounds.outputToken)
   return {
-    route: { kind: 'swap', provider: proxy, providerCallData: swap.data },
+    route: { kind: 'swap', provider: proxy, providerCallData: swap.data, gas: providerGas(swap.gas === undefined ? null : BigInt(swap.gas)) },
     outputAmount: BigInt(out.minimumAmount),
     expectedOutputAmount: BigInt(out.amount),
     tool: 'Relay',

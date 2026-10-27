@@ -1,10 +1,7 @@
-import { type Address, encodeAbiParameters, type Hex, keccak256, type PublicClient } from 'viem'
-import { USD_DECIMALS, USD_SYMBOL } from '../../const/common.js'
-import { usdPriceFromRate } from '../../evaluate/precision.js'
-import type { IGetRate } from '../../evaluate/types.js'
-import { symbolOf } from '../../state/tokenRegistry.js'
+import { type AbiParameterToPrimitiveType, type Address, encodeAbiParameters, getAddress, type Hex, isAddressEqual, keccak256, type PublicClient } from 'viem'
 import { GMX_V2_CONTRACT_MAP } from './contractMap.js'
-import { GMX_V2_CHAIN_ID, readAllGmxMarkets } from './market.js'
+import { GMX_EVENT_EMITTER, GMX_EVENT_EMITTER_BLOCK, GMX_EVENT_LOG_ABI } from './contracts.js'
+import { readAllGmxMarkets } from './market.js'
 import type { IGmxClaimableProvider, IGmxClaimableRow, IGmxOrderProvider, IGmxPositionProvider, IGmxPositionRow } from './rows.js'
 
 export type { IGmxClaimableRow, IGmxOrderRow } from './rows.js'
@@ -82,12 +79,7 @@ export function makeOnchainGmxOrderProvider(publicClient: PublicClient, blockNum
   }
 }
 
-export function makeOnchainGmxPositionProvider(
-  publicClient: PublicClient,
-  getRate: IGetRate,
-  freshness: number,
-  blockNumber?: bigint
-): IGmxPositionProvider {
+export function makeOnchainGmxPositionProvider(publicClient: PublicClient, blockNumber?: bigint): IGmxPositionProvider {
   return async account => {
     const props = await publicClient.readContract({
       address: READER,
@@ -96,24 +88,100 @@ export function makeOnchainGmxPositionProvider(
       args: [DATA_STORE, account, 0n, 1000n],
       blockNumber
     })
-    if (props.length === 0) return []
-    return Promise.all(
-      props.map(async (p): Promise<IGmxPositionRow> => {
-        const market = p.addresses.market
-        const collateralToken = p.addresses.collateralToken
-        const collateralPrice = usdPriceFromRate(await getRate(symbolOf(GMX_V2_CHAIN_ID, collateralToken), USD_SYMBOL, freshness), USD_DECIMALS)
-        return {
-          positionKey: gmxPositionKey(account, market, collateralToken, p.flags.isLong),
-          market,
-          collateralToken,
-          isLong: p.flags.isLong,
-          sizeInUsd: p.numbers.sizeInUsd,
-          sizeInTokens: p.numbers.sizeInTokens,
-          collateralUsd: p.numbers.collateralAmount * collateralPrice,
-          collateralAmount: p.numbers.collateralAmount,
-          increasedAtTime: Number(p.numbers.increasedAtTime)
-        }
-      })
-    )
+    return props.map(p => ({
+      positionKey: gmxPositionKey(account, p.addresses.market, p.addresses.collateralToken, p.flags.isLong),
+      market: p.addresses.market,
+      collateralToken: p.addresses.collateralToken,
+      isLong: p.flags.isLong,
+      sizeInUsd: p.numbers.sizeInUsd,
+      sizeInTokens: p.numbers.sizeInTokens,
+      collateralAmount: p.numbers.collateralAmount,
+      increasedAtTime: Number(p.numbers.increasedAtTime),
+      decreasedAtTime: Number(p.numbers.decreasedAtTime)
+    }))
   }
+}
+
+const GMX_LOG_WINDOW = 10_000_000n
+const [GMX_EVENT_LOG_1, GMX_EVENT_LOG_2] = GMX_EVENT_LOG_ABI
+const openingByState = new Map<string, { fee: bigint; executionFee: bigint } | string>()
+
+const itemOf = <T>(group: { items: readonly { key: string; value: T }[] }, key: string): T => {
+  const item = group.items.find(entry => entry.key === key)
+  if (item === undefined) throw new Error(`a GMX event carries no ${key}`)
+  return item.value
+}
+
+export async function readGmxOpenings(
+  publicClient: PublicClient,
+  account: Address,
+  positions: readonly IGmxPositionRow[],
+  blockNumber: bigint
+): Promise<Map<Hex, { fee: bigint; executionFee: bigint } | string>> {
+  const stateOf = (row: IGmxPositionRow): string => `${row.positionKey}:${row.increasedAtTime}:${row.decreasedAtTime}`
+  const unread = positions.filter(row => !openingByState.has(stateOf(row)))
+  if (unread.length > 0) {
+    const topic = encodeAbiParameters([{ type: 'address' }], [account])
+    const changes: { transactionHash: Hex; name: string; data: AbiParameterToPrimitiveType<(typeof GMX_EVENT_LOG_1)['inputs'][4]> }[] = []
+    const created = new Map<Hex, { token: Address; amount: bigint; executionFee: bigint }>()
+    const ownOf = (row: IGmxPositionRow) => {
+      const own = changes.flatMap((change, at) => (change.name !== 'ExecutionFeeRefund' && itemOf(change.data.bytes32Items, 'positionKey') === row.positionKey ? [{ change, at }] : []))
+      const opened = own.findLastIndex(({ change }) => change.name === 'PositionIncrease' && itemOf(change.data.uintItems, 'sizeInUsd') === itemOf(change.data.uintItems, 'sizeDeltaUsd'))
+      return opened === -1 ? null : own.slice(opened)
+    }
+    for (let to = blockNumber; ; ) {
+      const from = to - GMX_LOG_WINDOW + 1n > GMX_EVENT_EMITTER_BLOCK ? to - GMX_LOG_WINDOW + 1n : GMX_EVENT_EMITTER_BLOCK
+      const [positionLogs, orderLogs] = await Promise.all([
+        publicClient.getLogs({
+          address: GMX_EVENT_EMITTER,
+          event: GMX_EVENT_LOG_1,
+          args: { eventNameHash: ['PositionIncrease', 'PositionDecrease', 'ExecutionFeeRefund'], topic1: topic },
+          fromBlock: from,
+          toBlock: to,
+          strict: true
+        }),
+        publicClient.getLogs({ address: GMX_EVENT_EMITTER, event: GMX_EVENT_LOG_2, args: { eventNameHash: 'OrderCreated', topic2: topic }, fromBlock: from, toBlock: to, strict: true })
+      ])
+      changes.unshift(...positionLogs.map(log => ({ transactionHash: log.transactionHash, name: log.args.eventName, data: log.args.eventData })))
+      for (const log of orderLogs) {
+        const data = log.args.eventData
+        created.set(itemOf(data.bytes32Items, 'key'), {
+          token: getAddress(itemOf(data.addressItems, 'initialCollateralToken')),
+          amount: itemOf(data.uintItems, 'initialCollateralDeltaAmount'),
+          executionFee: itemOf(data.uintItems, 'executionFee')
+        })
+      }
+      const traced = unread.every(row => ownOf(row)?.every(({ change }) => change.name !== 'PositionIncrease' || created.has(itemOf(change.data.bytes32Items, 'orderKey'))) === true)
+      if (traced || from === GMX_EVENT_EMITTER_BLOCK) break
+      to = from - 1n
+    }
+    const openingOf = (row: IGmxPositionRow): { fee: bigint; executionFee: bigint } | string => {
+      const own = ownOf(row)
+      if (own === null) return 'GMX logs hold no open of this position'
+      let fee = 0n
+      let executionFee = 0n
+      let size = 0n
+      for (const { change, at } of own) {
+        const sizeInUsd = itemOf(change.data.uintItems, 'sizeInUsd')
+        const sizeDeltaUsd = itemOf(change.data.uintItems, 'sizeDeltaUsd')
+        const before = change.name === 'PositionIncrease' ? sizeInUsd - sizeDeltaUsd : sizeInUsd + sizeDeltaUsd
+        if (before !== size) return 'GMX logs skip a change of this position'
+        if (change.name === 'PositionDecrease') {
+          fee = (fee * sizeInUsd) / before
+          executionFee = (executionFee * sizeInUsd) / before
+        } else {
+          const order = created.get(itemOf(change.data.bytes32Items, 'orderKey'))
+          if (order === undefined) return 'GMX logs hold no order behind an increase of this position'
+          if (!isAddressEqual(order.token, row.collateralToken)) return `an increase swapped ${order.token} into the collateral`
+          const refund = changes.slice(at + 1).find(other => other.transactionHash === change.transactionHash)
+          fee += order.amount - itemOf(change.data.intItems, 'collateralDeltaAmount')
+          executionFee += order.executionFee - (refund?.name === 'ExecutionFeeRefund' ? itemOf(refund.data.uintItems, 'refundFeeAmount') : 0n)
+        }
+        size = sizeInUsd
+      }
+      return size === row.sizeInUsd ? { fee, executionFee } : 'GMX logs disagree with the position size'
+    }
+    for (const row of unread) openingByState.set(stateOf(row), openingOf(row))
+  }
+  return new Map(positions.map(row => [row.positionKey, openingByState.get(stateOf(row))!]))
 }

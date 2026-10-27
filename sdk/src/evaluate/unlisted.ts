@@ -3,6 +3,7 @@ import { CompactError } from '../compact/error.js'
 import { type ChainId, TOKEN_META } from '../const/index.js'
 import { symbolOf, tokenMetaByChainToken, tokenMetaKey } from '../state/tokenRegistry.js'
 import { UNISWAP_DEPLOYMENTS, UNISWAP_POOLS } from '../venue/uniswap/contracts.js'
+import { PONS_EXIT_SAMPLES, ponsExit } from '../venue/pons/exit.js'
 import { TWAP_SEC, uniswapExits, uniswapPools } from '../venue/uniswap/exit.js'
 import { DEFAULT_EVALUATION_CONFIG, type IGetRate } from './types.js'
 
@@ -18,11 +19,14 @@ export async function verifyPriceable(clients: Readonly<Record<number, PublicCli
   if (client === undefined) throw new CompactError('CHAIN_UNAVAILABLE', `no client for chain ${chainId} to quote the exit of ${token}`, 'server')
   const pinned = UNISWAP_POOLS[chainId]
   const blockNumber = await client.getBlockNumber()
-  const exits = pinned === undefined ? [] : await uniswapExits(client, pinned, token, await uniswapPools(client, pinned, chainId, token, blockNumber), amount, blockNumber)
-  if (exits.length === 0) {
+  const [exits, pons] = await Promise.all([
+    pinned === undefined ? [] : uniswapPools(client, pinned, chainId, token, blockNumber).then(pools => uniswapExits(client, pinned, token, pools, amount, blockNumber)),
+    ponsExit(client, chainId, token, amount, blockNumber)
+  ])
+  if (exits.length === 0 && pons === null) {
     throw new CompactError(
       'ASSET_NOT_PRICEABLE',
-      `${token} on chain ${chainId} has no oracle feed and no Uniswap v3 pool against one gives ${amount} both a full-size exit and a 30-minute price history`,
+      `${token} on chain ${chainId} has no oracle feed, no Uniswap v3 pool against one that gives ${amount} both a full-size exit and a 30-minute price history, and no graduated Pons pool quoting that exit for 30 minutes`,
       'hard'
     )
   }
@@ -49,17 +53,28 @@ export async function valueUnlisted(
 ): Promise<IUnlistedValue | null> {
   const pinned = UNISWAP_POOLS[chainId]
   if (pinned === undefined) return null
-  const exits = await uniswapExits(client, pinned, token, await uniswapPools(client, pinned, chainId, token, blockNumber), amount, blockNumber)
+  const [exits, pons] = await Promise.all([
+    uniswapPools(client, pinned, chainId, token, blockNumber).then(pools => uniswapExits(client, pinned, token, pools, amount, blockNumber)),
+    ponsExit(client, chainId, token, amount, blockNumber)
+  ])
+  const routes = [
+    ...exits.map(exit => ({ token: exit.token, amount: exit.amount, via: `Uniswap v3 ${exit.fee / 10_000}% into ${symbolOf(chainId, exit.token)}, ${TWAP_SEC / 60}-minute average` })),
+    ...(pons === null
+      ? []
+      : [
+          {
+            token: pons.token,
+            amount: pons.amount,
+            via: `Pons pool (${pons.hookFeeBps / 100}% fee, ${pons.creatorTaxBps / 100}% creator tax) into ${symbolOf(chainId, pons.token)}, lowest of ${PONS_EXIT_SAMPLES} quotes over 30 minutes`
+          }
+        ])
+  ]
   const valued = await Promise.all(
-    exits.map(async exit => {
-      const symbol = symbolOf(chainId, exit.token)
+    routes.map(async route => {
+      const symbol = symbolOf(chainId, route.token)
       const rate = await getRate(symbol, quote, freshness)
       if (rate.token1 === 0n) throw new Error(`rate ${symbol}/${quote} has a zero denominator`)
-      return {
-        value: (exit.amount * rate.token0) / rate.token1,
-        time: rate.time,
-        via: `Uniswap v3 ${exit.fee / 10_000}% into ${symbol}, ${TWAP_SEC / 60}-minute average`
-      }
+      return { value: (route.amount * rate.token0) / rate.token1, time: rate.time, via: route.via }
     })
   )
   return valued.reduce<IUnlistedValue | null>((best, exit) => (best === null || exit.value > best.value ? exit : best), null)

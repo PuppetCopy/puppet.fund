@@ -29,18 +29,7 @@ import { palette } from 'aelea/ui-components-theme'
 import { $defaultAnchor, contains, href, isContaining, locationChange, match } from 'aelea/ui-router'
 import { type Address, getAddress, type Hex, hashTypedData, isAddress, isAddressEqual } from 'viem'
 import { mainnet } from 'viem/chains'
-import {
-  $anchor,
-  $arrowRight,
-  $ButtonPrimary,
-  $ButtonSecondary,
-  $defaultMiniButtonSecondary,
-  $icon,
-  $intermediatePromise,
-  fadeIn,
-  softNavClick,
-  text
-} from '@/ui-components'
+import { $anchor, $ButtonPrimary, $ButtonSecondary, $defaultMiniButtonSecondary, $intermediatePromise, fadeIn, text } from '@/ui-components'
 import { uiStorage } from '@/ui-storage'
 import { agentBookSlot, type IAgentBook, type IAgentIdentity } from '../app/localStoreSchema.js'
 import { approvalAnswers, type IReleaseCheck, type IReleaseState, readRelease } from '../app/release.js'
@@ -141,7 +130,7 @@ export const $Main = (_config: IApp = {}) =>
       [changeSettled, settledTether]: IBehavior<readonly ISettledTx[]>,
       [drawerSize, drawerSizeTether]: IBehavior<any, number>,
       [changeAgentIdentities, changeAgentIdentitiesTether]: IBehavior<readonly IAgentIdentity[]>,
-      [changeAgentPending, changeAgentPendingTether]: IBehavior<IAgentIdentity | null>,
+      [addAgent, addAgentTether]: IBehavior<IAgentIdentity>,
       [agentProven, agentProvenTether]: IBehavior<string>,
       [agentCommand, agentCommandTether]: IBehavior<IAgentCommand>,
       [agentStatus, agentStatusTether]: IBehavior<IAgentStatuses>,
@@ -435,26 +424,24 @@ export const $Main = (_config: IApp = {}) =>
       const agentBook: IStream<IAgentBook> = op(
         walletAddress,
         switchMap(address => {
-          if (address === null) return just<IAgentBook>({ list: [], pending: null })
+          if (address === null) return just<IAgentBook>({ list: [] })
           const held = localStorage.getItem(agentBookSlot(address))
-          const initial: IAgentBook = held === null ? { list: [], pending: null } : JSON.parse(held)
+          type IStoredIdentity = Omit<IAgentIdentity, 'proven'>
+          const stored: IAgentBook | { list: readonly IStoredIdentity[]; pending: IStoredIdentity | null } = held === null ? { list: [] } : JSON.parse(held)
+          const kept = (identity: IStoredIdentity, proven: boolean): IAgentIdentity => ({ secret: identity.secret, port: identity.port, name: identity.name, cells: identity.cells, fund: identity.fund, proven })
+          const initial: IAgentBook =
+            'pending' in stored ? { list: [...stored.list.map(identity => kept(identity, true)), ...(stored.pending === null ? [] : [kept(stored.pending, false)])] } : stored
           let written = initial
           return op(
             merge(
-              map(list => (book: IAgentBook): IAgentBook => ({ ...book, list }), changeAgentIdentities),
-              map(pending => (book: IAgentBook): IAgentBook => ({ ...book, pending }), changeAgentPending),
+              map(list => (_book: IAgentBook): IAgentBook => ({ list }), changeAgentIdentities),
+              map(identity => (book: IAgentBook): IAgentBook => (book.list.some(each => each.secret === identity.secret) ? book : { list: [...book.list, identity] }), addAgent),
               op(
                 agentCommand,
                 filter((next): next is Extract<IAgentCommand, { kind: 'remove' }> => next.kind === 'remove'),
-                map(
-                  next =>
-                    (book: IAgentBook): IAgentBook => ({
-                      list: book.list.filter(identity => identity.secret !== next.secret),
-                      pending: book.pending !== null && book.pending.secret === next.secret ? null : book.pending
-                    })
-                )
+                map(next => (book: IAgentBook): IAgentBook => ({ list: book.list.filter(identity => identity.secret !== next.secret) }))
               ),
-              map(secret => (book: IAgentBook): IAgentBook => (book.pending !== null && book.pending.secret === secret ? { list: [...book.list, book.pending], pending: null } : book), agentProven)
+              map(secret => (book: IAgentBook): IAgentBook => ({ list: book.list.map(identity => (identity.secret === secret ? { ...identity, proven: true } : identity)) }), agentProven)
             ),
             reduce((book: IAgentBook, apply: (book: IAgentBook) => IAgentBook) => apply(book), initial),
             tap(book => {
@@ -469,12 +456,6 @@ export const $Main = (_config: IApp = {}) =>
       const agentIdentities: IStream<readonly IAgentIdentity[]> = op(
         agentBook,
         map(book => book.list),
-        skipRepeats,
-        state()
-      )
-      const agentPending: IStream<IAgentIdentity | null> = op(
-        agentBook,
-        map(book => book.pending),
         skipRepeats,
         state()
       )
@@ -590,10 +571,7 @@ export const $Main = (_config: IApp = {}) =>
           return { acked: Promise.race([ack, settled]), settled }
         },
         (pair, root, chainId, txList) => planDappOperate(clientDeps, pair, root, chainId, txList),
-        map(
-          ({ walletRoot, agent }) => ({ walletRoot, promptHost: walletRoot && !agent }),
-          combine({ walletRoot: isContaining(routeSchema.wallet), agent: isContaining(routeSchema.wallet.agent) })
-        )
+        map(walletRoot => ({ walletRoot, promptHost: walletRoot }), isContaining(routeSchema.wallet))
       )
 
       type IHeld = {
@@ -960,12 +938,20 @@ export const $Main = (_config: IApp = {}) =>
           rootContextKept,
           $MainMenu({ hideBalances, walletPair, shownPair, walletValue: walletValueQuery, walletControl })({ enableSession: enableSessionTether(), walletIntent: walletIntentTether() }),
 
-          $AgentLink({ walletPair, identities: agentIdentities, pending: agentPending, command: agentCommand, session: sessionOpen })({
-            status: agentStatusTether(),
-            log: agentLogTether(),
-            settled: settledTether(),
-            proven: agentProvenTether()
-          }),
+          switchLatest(
+            map(
+              inWallet =>
+                inWallet
+                  ? $AgentLink({ walletPair, identities: agentIdentities, command: agentCommand, session: sessionOpen })({
+                      status: agentStatusTether(),
+                      log: agentLogTether(),
+                      settled: settledTether(),
+                      proven: agentProvenTether()
+                    })
+                  : empty,
+              op(isContaining(routeSchema.wallet), skipRepeats)
+            )
+          ),
 
           match(routeSchema)($midContainer($lazyPage(() => import('./$Home.js').then(m => fadeIn(m.$Home()({})))))),
           match(routeSchema.traders)(
@@ -1045,6 +1031,8 @@ export const $Main = (_config: IApp = {}) =>
                       changeHideBalances: changeHideBalancesTether(),
                       walletIntent: walletIntentTether(),
                       agentCommand: agentCommandTether(),
+                      addAgent: addAgentTether(),
+                      changeAgentIdentities: changeAgentIdentitiesTether(),
                       enableSession: enableSessionTether(),
                       changeDraft: changeDraftTether(),
                       changeMandateDraft: changeMandateDraftTether(),
@@ -1069,6 +1057,8 @@ export const $Main = (_config: IApp = {}) =>
                       changeHideBalances: changeHideBalancesTether(),
                       walletIntent: walletIntentTether(),
                       agentCommand: agentCommandTether(),
+                      addAgent: addAgentTether(),
+                      changeAgentIdentities: changeAgentIdentitiesTether(),
                       enableSession: enableSessionTether(),
                       changeDraft: changeDraftTether(),
                       changeMandateDraft: changeMandateDraftTether(),
@@ -1081,29 +1071,8 @@ export const $Main = (_config: IApp = {}) =>
               )
             )
           ),
-          match(routeSchema.wallet.agent)(
-            $midContainer(
-              $row(spacing.small, style({ alignItems: 'center', fontSize: text.sm, color: palette.foreground, paddingTop: '18px' }))(
-                $defaultAnchor(attr({ href: href(routeSchema.wallet) }), style({ color: palette.foreground }), softNavClick(href(routeSchema.wallet)))($text('Wallet')),
-                $icon({ $content: $arrowRight, fill: palette.foreground, width: '8px' }),
-                $node(style({ color: palette.message }))($text('New agent'))
-              ),
-              $lazyPage(() =>
-                import('./$AgentPage.js').then(m =>
-                  fadeIn(
-                    m.$AgentPage({ walletPair, identities: agentIdentities, pending: agentPending, status: agentStatus, walletControl })({
-                      changeIdentities: changeAgentIdentitiesTether(),
-                      changePending: changeAgentPendingTether(),
-                      command: agentCommandTether(),
-                      enableSession: enableSessionTether(),
-                      walletIntent: walletIntentTether()
-                    })
-                  )
-                )
-              )
-            )
-          ),
-          match(routeSchema.quickstart)($midContainer($lazyPage(() => import('./$QuickstartPage.js').then(m => fadeIn(m.$QuickstartPage()({})))))),
+          match(routeSchema.quickstart)($midContainer($lazyPage(() => import('./$QuickstartPage.js').then(m => fadeIn(m.$QuickstartPage({ agent: false })({})))))),
+          match(routeSchema.quickstart.agent)($midContainer($lazyPage(() => import('./$QuickstartPage.js').then(m => fadeIn(m.$QuickstartPage({ agent: true })({})))))),
           match(routeSchema.changelog)($midContainer($lazyPage(() => import('./$Changelog.js').then(m => fadeIn(m.$Changelog()({})))))),
           contains(routeSchema.governance)(
             $midContainer(

@@ -57,6 +57,7 @@ export interface IPooledRound {
 
 interface ISnapshot extends IRoundSnapshot {
   mark: { value: bigint; price: IFund__Price }
+  credited: Awaited<ReturnType<typeof readCreditBook>>
 }
 
 export interface IRaise {
@@ -120,12 +121,8 @@ export function readRounds(fundRow: IRoundFund, book: Promise<IFundBook> | null,
   }))
 }
 
-export async function planRound(
-  master: Address,
-  snap: IRoundSnapshot,
-  mark: { value: bigint; price: IFund__Price },
-  credit: (IArrival & { bound: boolean }) | null
-): Promise<IRound> {
+async function planRound(master: Address, snap: ISnapshot, credit: (IArrival & { bound: boolean }) | null): Promise<IRound> {
+  const mark = snap.mark
   const amount = credit === null ? 0n : credit.amount
   const allocation = {
     ...snap.state,
@@ -148,7 +145,7 @@ export async function planRound(
   const release = abroad
     ? relayFeeOf(await context.getFeeConverter(credit.chainId, providerToken(credit.token, credit.chainId), DISPLAY_QUOTE_TTL_MS), credit.chainId, 'fulfil', !credit.bound, 0n, 0n, 0n)
     : 0n
-  const credited = credit === null || amount === 0n ? null : await readCreditBook(clientDeps, snap.state.owner, master, credit.chainId, providerToken(credit.token, credit.chainId))
+  const credited = credit === null || amount === 0n ? null : snap.credited
   try {
     const plan = planAllocate({
       now: snap.now,
@@ -244,8 +241,11 @@ export const $AllocationSimulation = ({ fundRow, owner, signed, hideBalances, ro
           const pool = await p.rounds
           const pooled = pool === null ? undefined : pool.find(entry => isAddressEqual(entry.token, token))
           const snap = pooled === undefined ? await readRounds(fundRow, isAddressEqual(token, PROTOCOL.nativeToken) ? null : readFundBook(clientDeps, master), [token])[0]!.snapshot : { ...(await pooled.snapshot), deadline: BigInt(getUnixTimestamp() + PRICED_DEADLINE_SEC / 2) }
-          const quote = await requestValuation(matchmakerUrl, master, snap.state.shareToken, token, owner, null)
-          return { ...snap, mark: { value: valuationOf(quote.valuation), price: quote.price } }
+          const [quote, credited] = await Promise.all([
+            requestValuation(matchmakerUrl, master, snap.state.shareToken, token, owner, null),
+            readCreditBook(clientDeps, snap.state.owner, master, p.leg.chainId, providerToken(p.leg.token, p.leg.chainId))
+          ])
+          return { ...snap, mark: { value: valuationOf(quote.valuation), price: quote.price }, credited }
         }),
         state()
       )
@@ -264,7 +264,7 @@ export const $AllocationSimulation = ({ fundRow, owner, signed, hideBalances, ro
         }),
         map(async p => {
           const snap = await p.query
-          return planRound(master, snap, snap.mark, { ...p.arrival, bound: boundChains.has(p.arrival.chainId) })
+          return planRound(master, snap, { ...p.arrival, bound: boundChains.has(p.arrival.chainId) })
         }),
         state()
       )

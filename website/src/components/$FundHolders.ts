@@ -22,6 +22,7 @@ import { formatUsd, usdOf } from '../io/price.js'
 import { ago, shortDuration } from '../pages/common.js'
 import { $holderRow } from './$holderRow.js'
 import { mandateTermsOf } from './$MandatePosition.js'
+import type { IRaise } from './portfolio/$AllocationSimulation.js'
 
 const $mandateRules = (
   hideBalances: IStream<boolean>,
@@ -94,7 +95,8 @@ export const $fundHolders = (
   balances: readonly { puppet: Address; token: Address; amount: bigint }[],
   quotes: IStream<readonly { token: Address; price: IFund__Price }[]>,
   worth: { wei: IStream<bigint>; price: IStream<Promise<bigint | null>> } | null,
-  redeem: IStream<IRedeemPlan | null>
+  redeem: IStream<IRedeemPlan | null>,
+  raise: IStream<IRaise | null>
 ): I$Node => {
   const valuation: IStream<{ wei: bigint; price: Promise<bigint | null> } | null> =
     worth === null ? just(null) : op(combine({ wei: worth.wei, price: worth.price }), state())
@@ -138,12 +140,26 @@ export const $fundHolders = (
         return $holderRow({
           hideBalances,
           pool: op(
-            combine({ worth: valuation, plan: redeem }),
-            map(({ worth, plan }) => {
+            combine({ worth: valuation, plan: redeem, raise }),
+            map(({ worth, plan, raise }) => {
               const totalShares = row.totalShares
               const owned = h.shares
               const value = worth === null ? '-' : usdOf(cashFor(owned, totalShares, worth.wei), worth.price)
-              if (plan === null || (book.redemption !== undefined && book.redemption.id >= plan.redemption.id)) return { totalShares, owned, value, after: null }
+              if (plan === null || (book.redemption !== undefined && book.redemption.id >= plan.redemption.id)) {
+                if (raise === null) return { totalShares, owned, value, after: null }
+                const joined = raise.joinList.find(j => isAddressEqual(j.holder, h.holder))
+                const ownedAfter = joined === undefined ? owned : owned + joined.shares
+                return {
+                  totalShares,
+                  owned,
+                  value,
+                  after: {
+                    totalShares: raise.fundRow.totalShares,
+                    owned: ownedAfter,
+                    value: worth === null ? '-' : usdOf(cashFor(ownedAfter, totalShares, worth.wei), worth.price)
+                  }
+                }
+              }
               const sharesAfter = isTrader
                 ? plan.masterShares - plan.masterPart
                 : h.shares - claimOf({ queued: h.exiting === null ? 0n : h.exiting }, h.shares, plan.redemption.fraction) / PRECISION.basisPoints
@@ -172,7 +188,46 @@ export const $fundHolders = (
           $caption: isTrader ? null : $mandateRules(hideBalances, mandate, standing, raiseNow, deposits.length > 0, redeeming),
           title: isTrader ? 'Portfolio on DeBank' : h.allocatedAt > 0n ? `Last round ${ago(Number(h.allocatedAt))} · open puppet page` : 'Open puppet page'
         })
-      })
+      }),
+    switchLatest(
+      map(drafted => {
+        if (drafted === null) return empty
+        const joining = drafted.joinList.filter(j => !holdings.some(h => isAddressEqual(h.holder, j.holder)))
+        if (joining.length === 0) return empty
+        return $column(spacing.default)(
+          ...joining.map(j => {
+            const isTrader = isAddressEqual(j.holder, row.master)
+            const wallet = wallets.get(getAddress(j.holder)) ?? getAddress(j.holder)
+            return $holderRow({
+              hideBalances,
+              pool: op(
+                valuation,
+                map(worth => ({
+                  totalShares: row.totalShares,
+                  owned: 0n,
+                  value: worth === null ? '-' : usdOf(0n, worth.price),
+                  after: {
+                    totalShares: drafted.fundRow.totalShares,
+                    owned: j.shares,
+                    value: worth === null ? '-' : usdOf(cashFor(j.shares, row.totalShares, worth.wei), worth.price)
+                  }
+                })),
+                state()
+              ),
+              wallet,
+              href: isTrader ? `https://debank.com/profile/${wallet}` : href(routeSchema.puppets.detail, { account: getAddress(j.holder) }),
+              external: isTrader,
+              badge: isTrader ? $avatarBadge($icon({ $content: $puppeteer, width: '11px', viewBox: '0 0 32 32', fill: palette.message, svgOps: style({ display: 'block' }) })) : null,
+              isYou: you !== null && isAddressEqual(j.holder, you),
+              held: 0n,
+              exiting: null,
+              $caption: $node(style({ fontSize: text.xs, color: palette.foreground }))($text('Joins this round')),
+              title: isTrader ? 'Portfolio on DeBank' : 'Open puppet page'
+            })
+          })
+        )
+      }, raise)
+    )
   )
 }
 

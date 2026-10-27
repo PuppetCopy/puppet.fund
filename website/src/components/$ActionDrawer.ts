@@ -9,7 +9,7 @@ import { getAccountExplorerUrl, getTokenDescription, getTxExplorerUrl, getUnixTi
 import { type IActionKind, revokedAtIn, routeCalldataBytes } from '@puppet/sdk/intent'
 import { minFundedAmount } from '@puppet/sdk/mpc'
 import { fundTable } from '@puppet/sdk/schema'
-import { declaredCallGas, dynamicCalldataBytes, type IChainLiveness, type IFeeConvert, providerToken, redeemFeeOf, relayFeeOf, tokenMetaByChainToken, tokenMetaKey, wrappedNativeAddressOf, wrapSubcallGas } from '@puppet/sdk/state'
+import { declaredCallGas, dynamicCalldataBytes, type IChainLiveness, type IFeeConvert, providerToken, redeemFeeOf, relayFeeOf, tokenMetaByChainToken, tokenMetaKey, wrappedNativeAddressOf, routeSubcallGas } from '@puppet/sdk/state'
 import { robotCellsOf } from '@puppet/sdk/ui-components'
 import { acrossBridgeCalls, describeOperate, NO_VENUE_FACTS, uniswapSwapCalls, VENUES, withAllowancePolicy } from '@puppet/sdk/venue'
 import { combine, combineMap, constant, delay, empty, filter, filterNull, fromPromise, type IStream, just, map, merge, op, sampleMap, skipRepeats, skipRepeatsWith, start, switchLatest, switchMap, take, tap, toStream, wait } from 'aelea/stream'
@@ -641,7 +641,7 @@ export const $ActionDrawer = ({
                 label: d.deposit.chainId === resolveDispatchChainId(Number(d.deposit.destinationChainId)) ? 'Swap' : 'Crosschain',
                 genesisChain: null,
                 units: 0n,
-                innerGasLimit: 0n,
+                innerGasLimit: routeSubcallGas(d.deposit.route),
                 calldataBytes: routeCalldataBytes(d.deposit.route)
               }
           : d.kind === 'allocate'
@@ -663,7 +663,7 @@ export const $ActionDrawer = ({
                         label: d.chainId === d.destinationChainId ? 'Swap' : 'Crosschain',
                         genesisChain: null,
                         units: 0n,
-                        innerGasLimit: wrapSubcallGas(d.chainId, d.route),
+                        innerGasLimit: routeSubcallGas(d.route),
                         calldataBytes: routeCalldataBytes(d.route)
                       }
                     : d.kind === 'sell'
@@ -1009,7 +1009,7 @@ export const $ActionDrawer = ({
                 const legFee =
                   settledLeg === undefined || settledLeg.status === 'rejected'
                     ? null
-                    : relayFeeOf(settledLeg.value, leg.chainId, 'fundSwap', false, 0n, wrapSubcallGas(leg.chainId, leg.route), routeCalldataBytes(leg.route))
+                    : relayFeeOf(settledLeg.value, leg.chainId, 'fundSwap', false, 0n, routeSubcallGas(leg.route), routeCalldataBytes(leg.route))
                 relayList.push({ draftId: d.id, step: 'fundSwap', chainList: [leg.chainId], label: legLabel, note: 'taken from what moves', usd: toUsd(leg.chainId, leg.inputToken, legFee), fee: legFee })
               }
               const conversion =

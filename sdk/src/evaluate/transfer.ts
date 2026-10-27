@@ -88,7 +88,7 @@ export async function screenSwapValue(
   if (spent === null || delivered === null) {
     throw new CompactError(
       'ASSET_NOT_PRICEABLE',
-      `${spent === null ? swap.inputToken : swap.outputToken} on chain ${spent === null ? swap.chainId : swap.destinationChainId} has no oracle feed and no Uniswap v3 pool that takes this amount with a 30-minute price history, so the swap cannot be valued`,
+      `${spent === null ? swap.inputToken : swap.outputToken} on chain ${spent === null ? swap.chainId : swap.destinationChainId} has no oracle feed, no Uniswap v3 pool that takes this amount with a 30-minute price history and no graduated Pons pool with 30 minutes of quotes, so the swap cannot be valued`,
       'hard'
     )
   }

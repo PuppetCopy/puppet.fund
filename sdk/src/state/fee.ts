@@ -1,10 +1,10 @@
 import { router__accountGenesisGas, router__gasLimit, router__loopGas, router__userGenesisGas, router__withdrawProviderGas } from '@puppet/contracts'
 import { HUB_CHAIN_ID, PROTOCOL } from '@puppet/contracts/const'
-import { type Address, type Chain, type Client, type Hex, isAddressEqual, size, slice, toFunctionSelector, type Transport } from 'viem'
+import { type Address, type Chain, type Client, type Hex, size, type Transport } from 'viem'
 import { type ChainId, deploymentAddress, USD_DECIMALS, USD_SYMBOL } from '../const/index.js'
 import type { IGetRate } from '../evaluate/types.js'
 import type { IWithdrawRoute } from '../intent/route/swap.js'
-import { tokenMetaOf, wrappedNativeAddressOf } from './tokenRegistry.js'
+import { tokenMetaOf } from './tokenRegistry.js'
 
 export type FeeClient = Client<Transport, Chain | undefined>
 
@@ -38,21 +38,27 @@ export const TYPICAL_SUBCALL_GAS = 1_200_000n
 
 export const WRAP_SUBCALL_GAS = 60_000n
 
-const WRAP_SELECTOR = toFunctionSelector('function deposit()')
-const UNWRAP_SELECTOR = toFunctionSelector('function withdraw(uint256)')
+export const ACROSS_SUBCALL_GAS = 150_000n
 
-export function wrapSubcallGas(chainId: ChainId, route: IWithdrawRoute): bigint {
-  if (route.kind !== 'swap' || !isAddressEqual(route.provider, wrappedNativeAddressOf(chainId))) return 0n
-  const length = size(route.providerCallData)
-  const selector = length < 4 ? null : slice(route.providerCallData, 0, 4).toLowerCase()
-  return (selector === WRAP_SELECTOR && length === 4) || (selector === UNWRAP_SELECTOR && length === 36) ? WRAP_SUBCALL_GAS : 0n
-}
+const PROVIDER_GAS_HEADROOM_BPS = 12_000n
+
+export const providerGas = (declared: bigint | null): bigint =>
+  declared === null || declared === 0n ? TYPICAL_SUBCALL_GAS * 2n : (declared * PROVIDER_GAS_HEADROOM_BPS) / 10_000n
+
+export const routeSubcallGas = (route: IWithdrawRoute): bigint => (route.kind === 'transfer' ? 0n : route.gas)
 
 export const USD_PER_MILLION_GAS: Record<ChainId, bigint> = {
-  10: 12n * 10n ** 27n,
+  10: 5n * 10n ** 27n,
   137: 39n * 10n ** 27n,
   4663: 74n * 10n ** 27n,
-  42161: 74n * 10n ** 27n
+  42161: 50n * 10n ** 27n
+}
+
+export const DATA_GAS_PER_BYTE: Record<ChainId, bigint> = {
+  10: 0n,
+  137: 0n,
+  4663: 140n,
+  42161: 8n
 }
 
 const CALLDATA_GAS_PER_BYTE = 16n
@@ -124,12 +130,10 @@ export function relayGasUsd(
 ): bigint {
   const usdPerMillionGas = USD_PER_MILLION_GAS[chainId]
   if (usdPerMillionGas === undefined) throw new Error(`no published gas price for chain ${chainId}`)
-  if (SUBCALL_GAS_BUDGET[kind] !== undefined && innerGasLimit !== 0n && innerGasLimit !== WRAP_SUBCALL_GAS) {
-    throw new Error(`${kind} bills a typical subcall or a wrap's ${WRAP_SUBCALL_GAS}; innerGasLimit must be 0 or wrapSubcallGas's answer, got ${innerGasLimit}`)
-  }
-  const subcall =
-    SUBCALL_GAS_BUDGET[kind] === undefined || innerGasLimit === WRAP_SUBCALL_GAS ? innerGasLimit : kind !== 'withdraw' || calldataByteLength > 0n ? TYPICAL_SUBCALL_GAS : 0n
-  return ((gateBodyGas(kind, unitCount, calldataByteLength) + genesisGas(kind, carriesGenesis) + subcall) * usdPerMillionGas) / 1_000_000n
+  return (
+    ((gateBodyGas(kind, unitCount, calldataByteLength) + genesisGas(kind, carriesGenesis) + innerGasLimit + calldataByteLength * DATA_GAS_PER_BYTE[chainId]) * usdPerMillionGas) /
+    1_000_000n
+  )
 }
 
 export const RELAY_RATE_MAX_STALE_MS = 60_000

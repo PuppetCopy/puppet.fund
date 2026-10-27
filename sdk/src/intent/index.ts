@@ -12,7 +12,7 @@ import type { IDepositSwapInput } from './depositSwap.js'
 import type { IFundSwapInput } from './fundSwap.js'
 import type { IWithdrawInput } from './withdraw.js'
 
-export { approverOf, approvesWithoutCode, type IApprovalAuthority, recoverAccountSigner, revokedAtIn, sessionDigest, sessionEnvelopeOf, sessionExpiryOf, verifyApproval, verifyFundApproval, verifyRevokeSettled } from './approval.js'
+export { approverOf, type IApprovalAuthority, recoverAccountSigner, revokedAtIn, sessionDigest, sessionEnvelopeOf, verifyApproval, verifyApprovalSignature, verifyFundApproval, verifyRevokeSettled } from './approval.js'
 
 export type IDerivedInputByKind = {
   operate: ISpokeGate__OperateIntent
@@ -58,7 +58,7 @@ export {
   routeSwaps,
   wrapCallData
 } from './route/swap.js'
-export { bestRoutePlan, type IRouteCandidate, type IRoutePlan, quoteSwapRoutes } from './route/swapRoute.js'
+export { type IRouteCandidate, type IRoutePlan, quoteSwapRoutes } from './route/swapRoute.js'
 export { attestRedeemIntent, claimantsOf, type IRedeemSizeInput, type IRedeemSizing, planCohortLists, REDEEM_BRIDGE_MARGIN_BPS, REDEEM_FEE_BAND_BPS, redeemFeeFor, redeemLegFloorOf, redeemValuationOf, sizeRedeem, sizeRedeemAt } from './redeem.js'
 export { attestSellIntent } from './sell.js'
 export type {

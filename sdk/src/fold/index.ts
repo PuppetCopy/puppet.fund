@@ -25,5 +25,5 @@ export {
   openPlanOf,
   siblingRecords
 } from './fold.js'
-export { holdingCostOf, type IHoldingCost } from './holding.js'
+export { fundCostsOf, holdingCostOf, type IFundCosts, type IHoldingCost } from './holding.js'
 export { type IMemoryStore, memoryStore } from './memoryStore.js'

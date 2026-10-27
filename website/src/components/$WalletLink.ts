@@ -1,13 +1,41 @@
 import { SESSION_REVOKE_DELAY } from '@puppet/contracts/intents'
+import { SYMBOL_MAX_LENGTH } from '@puppet/sdk/account'
+import { agentLinkLineOf, randomHex } from '@puppet/sdk/agent'
 import type { IRevokeDraft } from '@puppet/sdk/client'
 import { formatThrownError } from '@puppet/sdk/compact'
 import { CHAIN_ID_LIST, type ChainId } from '@puppet/sdk/const'
-import { combine, constant, empty, filter, filterNull, fromIterable, fromPromise, type IStream, just, map, merge, op, reduce, sampleMap, skipRepeats, skipRepeatsWith, start, switchLatest, switchMap, take, until, wait } from 'aelea/stream'
+import { randomCells } from '@puppet/sdk/ui-components'
+import {
+  combine,
+  constant,
+  debounce,
+  delay,
+  empty,
+  filter,
+  filterNull,
+  fromIterable,
+  fromPromise,
+  type IStream,
+  just,
+  map,
+  merge,
+  op,
+  reduce,
+  sampleMap,
+  skipRepeats,
+  skipRepeatsWith,
+  start,
+  switchLatest,
+  switchMap,
+  take,
+  until,
+  wait
+} from 'aelea/stream'
 import { type IBehavior, multicast, type PromiseState, PromiseStatus, promiseState, state } from 'aelea/stream-extended'
 import { $node, $text, attr, attrBehavior, component, effectRun, fromEventTarget, type I$Node, type INode, type INodeCompose, nodeEvent, style, styleBehavior } from 'aelea/ui'
 import { $column, $defaultInputContainer, $Popover, $row, $Tooltip, isDesktopScreen, spacing } from 'aelea/ui-components'
-import { palette } from 'aelea/ui-components-theme'
-import { href } from 'aelea/ui-router'
+import { colorShade, palette } from 'aelea/ui-components-theme'
+import { $defaultAnchor, $Link } from 'aelea/ui-router'
 import { type Address, isAddressEqual } from 'viem'
 import {
   $alertInfo,
@@ -15,6 +43,7 @@ import {
   $browser,
   $ButtonPrimary,
   $ButtonSecondary,
+  $copy,
   $defaultMiniButtonPrimary,
   $defaultMiniButtonSecondary,
   $defaultTextFieldContainer,
@@ -28,6 +57,7 @@ import {
   $key,
   $labeledDivider,
   $popoverCaret,
+  $robot,
   $tooltipDropContainer,
   SEPARATOR_COLOR,
   $unknown,
@@ -35,12 +65,13 @@ import {
   intermediateState,
   keyActivate,
   POPOVER_WIDTH,
-  softNavClick,
   text
 } from '@/ui-components'
+import type { IAgentIdentity } from '../app/localStoreSchema.js'
 import { routeSchema } from '../app/routeSchema.js'
 import { $avatarBadge, $badged } from '../common/$avatar.js'
 import { chainName } from '../common/$chain.js'
+import { $fundAvatar } from '../common/$fundAvatar.js'
 import { $venueIcon } from '../common/$operationView.js'
 import { $walletConnectLogo } from '../common/$icons.js'
 import { shortDuration } from '../pages/common.js'
@@ -48,7 +79,7 @@ import { type IWalletControl, type IWalletIntent, WALLET_CONNECT_ID } from '../w
 import type { IConnectedWallet, IRootState, IWalletPair } from '../wallet/index.js'
 import { disconnectDapp, enableSignAlerts, type IRelayState, type IWalletLinkLogEntry, type IWalletLinkSession, pairDapp, prettyUrl, refusedSign, signAlertPermission, signQueue, startWalletConnect, venueOfUrl, walletLinkLog, walletLinkRelay, walletLinkSessions } from '../wallet/walletLink.js'
 import { wcLinkOf } from '../wallet/wcUri.js'
-import { $AgentSection, $agentRequestRow, type I$AgentSection, type IAgentCommand } from './$AgentLink.js'
+import { $AgentSection, $agentRequestRow, $agentStatus, type I$AgentSection, type IAgentCommand } from './$AgentLink.js'
 import { $DappPrompt } from './$DappPrompt.js'
 import { $sessionRow } from './$sessionRow.js'
 
@@ -96,6 +127,16 @@ export const $stillListed = (releases: IWalletControl['releases']): I$Node =>
 
 type IPairStatus = { kind: 'pending' } | { kind: 'awaiting' } | { kind: 'error'; text: string }
 type ISignOutItem = IDropMenuItem & { everywhere: boolean; chainIds: ChainId[] }
+
+const freshIdentity = (fund: Address, list: readonly IAgentIdentity[]): IAgentIdentity => {
+  const ports = new Set(list.map(identity => identity.port))
+  const names = new Set(list.filter(identity => isAddressEqual(identity.fund, fund)).map(identity => identity.name))
+  let port = 43000 + Math.floor(Math.random() * 7000)
+  while (ports.has(port)) port = 43000 + Math.floor(Math.random() * 7000)
+  let n = 1
+  while (names.has(`AGENT${n}`)) n += 1
+  return { secret: randomHex(32), port, name: `AGENT${n}`, cells: randomCells(), fund, proven: false }
+}
 type IClipRead = { text: string } | { error: unknown } | { expired: true }
 type ILinkMode = 'idle' | 'listening' | 'manual' | 'stopped'
 
@@ -117,10 +158,79 @@ export const $WalletLink = ({ walletPair, shownPair, walletControl, agent, accou
       [listen, listenTether]: IBehavior<PointerEvent>,
       [stopLink, stopLinkTether]: IBehavior<PointerEvent>,
       [pasteLink, pasteLinkTether]: IBehavior<INode, null>,
-      [changeUri, changeUriTether]: IBehavior<string>
+      [changeUri, changeUriTether]: IBehavior<string>,
+      [toggleAgent, toggleAgentTether]: IBehavior<PointerEvent>,
+      [clickSave, clickSaveTether]: IBehavior<PointerEvent>,
+      [clickCopyLink, clickCopyLinkTether]: IBehavior<PointerEvent>,
+      [changeAgentName, changeAgentNameTether]: IBehavior<string>
     ) => {
       const connectedWallet: IStream<IConnectedWallet | null> = map(p => p.wallet, walletPair)
       const isOpen = state(false, popoverOpen)
+      const agentOpen: IStream<boolean> = state(
+        false,
+        op(
+          merge(
+            map((): boolean | null => null, toggleAgent),
+            map((): boolean | null => false, merge(filter(opened => !opened, popoverOpen), filter(next => next.kind === 'remove', command)))
+          ),
+          reduce((open: boolean, next: boolean | null) => (next === null ? !open : next), false)
+        )
+      )
+      const agentDraft: IStream<IAgentIdentity> = op(
+        combine({ open: agentOpen, fund: account }),
+        map(p => (p.open ? p.fund : null)),
+        skipRepeats,
+        switchMap(fund =>
+          fund === null
+            ? empty
+            : op(
+                agent.identities,
+                take(1),
+                map(list => freshIdentity(fund, list))
+              )
+        ),
+        state()
+      )
+      const draftName: IStream<string> = state()(merge(map(identity => identity.name, agentDraft), changeAgentName))
+      const shownAgent: IStream<IAgentIdentity> = op(
+        combine({ list: agent.identities, draft: agentDraft }),
+        map(p => p.list.find(identity => identity.secret === p.draft.secret) ?? p.draft),
+        state()
+      )
+      const draftSaved: IStream<boolean> = op(
+        combine({ list: agent.identities, draft: agentDraft }),
+        map(p => p.list.some(identity => identity.secret === p.draft.secret)),
+        skipRepeats,
+        state()
+      )
+      const listedIdentities: IStream<readonly IAgentIdentity[]> = op(
+        combine({ list: agent.identities, open: agentOpen, draft: start(null, agentDraft) }),
+        map(p => {
+          const composing = p.open ? p.draft : null
+          return composing === null ? p.list : p.list.filter(identity => identity.secret !== composing.secret)
+        })
+      )
+      const renamed: IStream<readonly IAgentIdentity[]> = op(
+        debounce(400, changeAgentName),
+        sampleMap(
+          (p: { list: readonly IAgentIdentity[]; current: IAgentIdentity }, name: string) =>
+            name === '' || !p.list.some(identity => identity.secret === p.current.secret) ? null : p.list.map(identity => (identity.secret === p.current.secret ? { ...identity, name } : identity)),
+          combine({ list: agent.identities, current: shownAgent })
+        ),
+        filterNull
+      )
+      const copiedLink: IStream<{ error: unknown } | null> = op(
+        sampleMap((identity: IAgentIdentity, _click: PointerEvent) => identity, shownAgent, clickCopyLink),
+        switchMap(identity =>
+          fromPromise(
+            navigator.clipboard.writeText(agentLinkLineOf({ port: identity.port, secret: identity.secret, account: identity.fund })).then(
+              () => null,
+              (error: unknown) => ({ error })
+            )
+          )
+        ),
+        multicast
+      )
       const promptArrived = op(
         signQueue,
         map(queue => Math.max(0, ...queue.filter(prompt => !prompt.deferred).map(prompt => prompt.id))),
@@ -624,20 +734,109 @@ export const $WalletLink = ({ walletPair, shownPair, walletControl, agent, accou
           ),
           switchLatest(
             map(
-              fund =>
-                fund === null
+              p =>
+                p.fund === null
                   ? empty
-                  : $ButtonSecondary({ $container: $defaultMiniButtonSecondary(softNavClick(href(routeSchema.wallet.agent))), $content: $text('New agent') })({}),
-              account
+                  : $ButtonSecondary({
+                      $container: $defaultMiniButtonSecondary,
+                      $content: p.open ? $text('Done') : $row(spacing.tiny, style({ alignItems: 'center' }))($icon({ $content: $robot, width: '14px' }), $text('New agent'))
+                    })({ click: toggleAgentTether() }),
+              combine({ fund: account, open: agentOpen })
             )
           )
         )
+
+      const $agentBody = switchLatest(
+        map(
+          open =>
+            open
+              ? switchLatest(
+                  map(
+                    identity =>
+                      $column(spacing.small)(
+                        $row(spacing.small, style({ alignItems: 'center' }))(
+                          $fundAvatar(identity.cells, 24),
+                          $node(style({ flex: '0 1 280px', minWidth: '0' }))(
+                            $FieldLabeled({
+                              label: null,
+                              placeholder: identity.name,
+                              maxLength: SYMBOL_MAX_LENGTH,
+                              value: merge(just(identity.name), changeAgentName),
+                              $container: $defaultTextFieldContainer(style({ alignItems: 'stretch' })),
+                              $input: $defaultInputContainer(style({ flex: '1', minWidth: '0', paddingRight: '96px' })),
+                              $$field: $field =>
+                                $node(style({ position: 'relative', display: 'flex', width: '100%' }))(
+                                  $field,
+                                  $node(style({ position: 'absolute', right: '8px', top: '0', bottom: '0', display: 'flex', alignItems: 'center' }))($agentStatus(undefined))
+                                )
+                            })({ change: changeAgentNameTether(map(raw => raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, SYMBOL_MAX_LENGTH))) })
+                          ),
+                          switchLatest(
+                            map(
+                              saved =>
+                                $ButtonPrimary({
+                                  $container: $defaultMiniButtonPrimary(attr({ title: 'Stores its key in this browser, so your wallet can link it' })),
+                                  $content: $text(saved ? 'Saved' : 'Save'),
+                                  disabled: just(saved)
+                                })({ click: clickSaveTether() }),
+                              draftSaved
+                            )
+                          )
+                        ),
+                        $row(
+                          spacing.small,
+                          style({ alignItems: 'center', padding: '8px 10px', borderRadius: '8px', border: `1px solid ${colorShade(palette.foreground, 25)}`, backgroundColor: palette.background })
+                        )(
+                          $node(style({ flex: '1', minWidth: '0', fontFamily: 'monospace', fontSize: text.xs, lineHeight: '1.5', color: palette.message, wordBreak: 'break-all' }))(
+                            $text(agentLinkLineOf({ port: identity.port, secret: identity.secret, account: identity.fund }))
+                          ),
+                          $ButtonSecondary({
+                            $container: $defaultMiniButtonSecondary,
+                            $content: $row(spacing.tiny, style({ alignItems: 'center' }))(
+                              $icon({ $content: $copy, viewBox: '0 0 24 24', width: '14px' }),
+                              $text(start('Copy', switchMap(copied => (copied === null ? merge(just('Copied'), delay(1800, just('Copy'))) : just('Copy')), copiedLink)))
+                            ),
+                            disabled: map(saved => !saved, draftSaved)
+                          })({ click: clickCopyLinkTether() })
+                        ),
+                        switchLatest(
+                          map(
+                            copied => (copied === null ? empty : $node(style({ fontSize: text.xs, color: palette.negative }))($text(`Copy failed: ${formatThrownError(copied.error)}`))),
+                            copiedLink
+                          )
+                        ),
+                        $node(style({ fontSize: text.xs, lineHeight: '1.5', color: palette.foreground }))(
+                          $text('Save it, then paste the line into the .env beside your agent and start it. Templates are in the '),
+                          $Link({ route: routeSchema.quickstart.agent, $anchor: $defaultAnchor, $content: $text('Quickstart') })({}),
+                          $text('. '),
+                          $node(style({ display: 'inline-flex', verticalAlign: 'middle' }))(
+                            $infoTooltip(
+                              'The line holds the port your agent listens on, your fund and its link secret, its only credential, so keep it private. The first time, allow your browser’s prompt so this site can reach it.',
+                              palette.foreground
+                            )
+                          )
+                        )
+                      ),
+                    op(
+                      shownAgent,
+                      skipRepeatsWith((a, b) => a.secret === b.secret)
+                    )
+                  )
+                )
+              : empty,
+          agentOpen
+        )
+      )
 
       const $linkButton = switchLatest(
         map(
           current =>
             current === 'idle' || current === 'stopped'
-              ? $ButtonSecondary({ $container: $defaultMiniButtonSecondary, $content: $text('Link dApp'), disabled: map(open => !open, agent.session) })({ click: listenTether() })
+              ? $ButtonSecondary({
+                  $container: $defaultMiniButtonSecondary,
+                  $content: $row(spacing.tiny, style({ alignItems: 'center' }))($icon({ $content: $walletConnectLogo, width: '14px' }), $text('Link dApp')),
+                  disabled: map(open => !open, agent.session)
+                })({ click: listenTether() })
               : $ButtonSecondary({ $container: $defaultMiniButtonSecondary, $content: $text('Cancel') })({ click: stopLinkTether() }),
           linkMode
         )
@@ -729,19 +928,19 @@ export const $WalletLink = ({ walletPair, shownPair, walletControl, agent, accou
                   ? $alertInfo($node(style({ color: palette.foreground, fontSize: text.sm, lineHeight: '1.5' }))($text('Create your fund first; dApps and agents act for it.')))
                   : $column(spacing.default)(
                       ...(kind === 'signed'
-                        ? [$row(spacing.small, style({ alignItems: 'center' }))($node(style({ flex: '1', minWidth: '0' }))($sessionsHeader()), $linkButton), $sessionNeeded(), $linkBody]
-                        : [$sessionsHeader(), $sessionNeeded()]),
+                        ? [$row(spacing.small, style({ alignItems: 'center' }))($linkButton, $node(style({ flex: '1', minWidth: '0' }))($sessionsHeader())), $sessionNeeded(), $linkBody, $agentBody]
+                        : [$sessionsHeader(), $sessionNeeded(), $agentBody]),
                       switchLatest(
                         map(
                           listed =>
                             listed
                               ? $column(spacing.small)(
                                   switchLatest(map(list => (list.length === 0 ? empty : $column(spacing.small)(...list.map($connectionRow))), walletLinkSessions)),
-                                  $AgentSection(agent, account)({ command: commandTether(), enableSession: enableSessionTether() })
+                                  $AgentSection({ ...agent, identities: listedIdentities }, account)({ command: commandTether(), enableSession: enableSessionTether() })
                                 )
                               : $node(style({ fontSize: text.xs, lineHeight: '1.5', color: palette.foreground }))($text('No dApp or agent yet')),
                           op(
-                            combine({ sessions: walletLinkSessions, identities: agent.identities, fund: account }),
+                            combine({ sessions: walletLinkSessions, identities: listedIdentities, fund: account }),
                             map(({ sessions, identities, fund }) => sessions.length > 0 || (fund !== null && identities.some(identity => isAddressEqual(identity.fund, fund)))),
                             skipRepeats
                           )
@@ -830,6 +1029,12 @@ export const $WalletLink = ({ walletPair, shownPair, walletControl, agent, accou
         {
           command,
           enableSession,
+          addIdentity: sampleMap(
+            (p: { draft: IAgentIdentity; name: string }, _click: PointerEvent): IAgentIdentity => ({ ...p.draft, name: p.name === '' ? p.draft.name : p.name }),
+            combine({ draft: agentDraft, name: draftName }),
+            clickSave
+          ),
+          changeIdentities: renamed,
           revoke: switchLatest(
             map(
               (item: ISignOutItem) => fromIterable(item.chainIds.map((chainId): IRevokeDraft => ({ kind: 'revoke', id: `revoke:${chainId}`, chainId }))),

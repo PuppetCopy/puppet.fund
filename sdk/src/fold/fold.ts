@@ -2,7 +2,7 @@ import { HUB_CANONICAL_TOKEN, HUB_CHAIN_ID, PRICE_PRECISION, PROTOCOL, VIRTUAL_S
 import { accountCallEvent } from '@puppet/contracts/events'
 import type { IAccountCall__Deposit_depositAcross, IAccountCall__Deposit_fundSwap, IAccountCall__Deposit_withdraw, IAccountCall__Fund_allocateMaster, IAccountCall__Fund_allocateOwner, IAccountCall__Fund_allocatePuppet, IAccountCall__HubGate_createFund, IAccountCall__HubGate_mandate, IAccountCall__LiquidityGate_deposit, IAccountCall__LiquidityGate_depositEscrow, IAccountCall__LiquidityGate_retireEscrow, IAccountCall__LiquidityGate_returnEscrow, IAccountCall__Redeem_redeem, IAccountCall__Redeem_redeemCohortHolder, IAccountCall__Redeem_redeemCohortMaster, IAccountCall__Redeem_redeemCohortOwner, IAccountCall__Redeem_sell, IAccountCall__SpokeGate_fulfil, IAccountCall__UserAccount_revokeSessions, IAccountCall__UserAccount_withdraw, IAccountCallEntry, IBalanceLib__Balance, IFundStore__Redemption, IIAccount__Call } from '@puppet/contracts/types'
 import { decodeEventLog, encodeAbiParameters, encodeFunctionData, erc20Abi, getAddress, type Hex, isAddressEqual, keccak256, parseAbiItem, slice, toEventSelector } from 'viem'
-import { ACCOUNT_CALL_MAP, ACCOUNT_CALL_TOPIC, decodeAccountCall, type IReceiptLog, type IStoredAccountCall } from '../account/index.js'
+import { ACCOUNT_CALL_MAP, ACCOUNT_CALL_TOPIC, decodeAccountCall, type IReceiptLog, type IStoredAccountCall, swapDeliveryAmount } from '../account/index.js'
 import { IntervalTime, PLATFORM_STAT_INTERVAL, PRECISION } from '../const/common.js'
 import { type ChainId, deploymentAddress, TOKEN_META } from '../const/index.js'
 import { decode, encode } from '../compact/index.js'
@@ -12,7 +12,7 @@ import { acrossSpokePoolOf } from '../intent/route/acrossDeposit.js'
 import { cashFor, claimOf, type IRedeemPlan, performanceIndexOf, planCohort, planRedeem, planSell, POOL_SHARE, POOL_SOURCE } from '../pool/index.js'
 import { ACCOUNT_VENUE, accountTable, allowanceTable, balanceTable, creditTable, escrowTable, flowTable, fulfilTable, fundListTable, fundTable, holdingTable, type IAccountRow, type IFundMetricRow, mandateTable, fundMetricTable, observationTable, ownerCreditTable, positionSyncTable, positionTable, redemptionTable, transitTable, venueTable } from '../schema/index.js'
 import { windowPnlSeries, windowVenueSeries } from '../state/metricMath.js'
-import { chainTokenOfKey, providerToken, symbolOf, tokenKeyOf, wrappedNativeAddressOf } from '../state/tokenRegistry.js'
+import { providerToken, symbolOf, tokenMetaOf, wrappedNativeAddressOf } from '../state/tokenRegistry.js'
 import { HYPERLIQUID_CHAIN_ID } from '../venue/hyperliquid/contracts.js'
 import { hyperliquidCollateralUsd, hyperliquidRows, hyperliquidSpotExit, type IHyperliquidObservation } from '../venue/hyperliquid/evaluate.js'
 import { hyperliquidVenue } from '../venue/hyperliquid/screen.js'
@@ -888,6 +888,15 @@ function foldTransit(store: IStore, entry: IAccountEntry, d: IAccountCall__Depos
       `entry ${where(entry)}: its last Across deposit bridges ${a.outputAmount} of ${slice(a.outputToken, 12)} to chain ${a.destinationChainId}, against the signed ${d.outputAmount} of ${delivered} to chain ${d.destinationChainId}`
     )
   }
+  const bridged = getAddress(slice(a.inputToken, 12))
+  const sent = tokenMetaOf(entry.chainId as ChainId, bridged)
+  const arriving = tokenMetaOf(Number(a.destinationChainId) as ChainId, delivered)
+  if (sent.decimals !== arriving.decimals) {
+    throw new Error(`entry ${where(entry)}: Across takes ${sent.symbol} with ${sent.decimals} decimals for ${arriving.symbol} with ${arriving.decimals}, so what it delivers cannot be booked in the token it took`)
+  }
+  const deltas = new Map<Hex, bigint>([[getAddress(d.inputToken), -d.inputAmount]])
+  deltas.set(bridged, (deltas.get(bridged) ?? 0n) + a.outputAmount)
+  foldFlows(store, entry, entry.account, deltas)
   store.set(transitTable, {
     id: `${getAddress(entry.account)}-${entry.chainId}-${d.destinationChainId}`,
     chainId: BigInt(entry.chainId),
@@ -906,19 +915,42 @@ function foldTransit(store: IStore, entry: IAccountEntry, d: IAccountCall__Depos
 }
 
 function foldBridge(store: IStore, entry: IAccountEntry, d: IAccountCall__Deposit_depositAcross): void {
-  const local = d.destinationChainId === BigInt(entry.chainId)
-  const received = local
-    ? getAddress(d.outputToken)
-    : chainTokenOfKey(entry.chainId as ChainId, tokenKeyOf(Number(d.destinationChainId) as ChainId, d.outputToken))
+  if (d.destinationChainId !== BigInt(entry.chainId)) {
+    foldTransit(store, entry, d)
+    return
+  }
+  const received = getAddress(d.outputToken)
   const deltas = new Map<Hex, bigint>([[getAddress(d.inputToken), -d.inputAmount]])
   deltas.set(received, (deltas.get(received) ?? 0n) + d.outputAmount)
   foldFlows(store, entry, entry.account, deltas)
-  if (!local) foldTransit(store, entry, d)
 }
 
 function foldFundSwap(store: IStore, entry: IAccountEntry, d: IAccountCall__Deposit_fundSwap): void {
-  foldFlows(store, entry, entry.account, new Map([[getAddress(d.feeToken), -d.fee]]))
-  if (d.destinationChainId !== BigInt(entry.chainId)) foldTransit(store, entry, d)
+  if (d.destinationChainId !== BigInt(entry.chainId)) {
+    foldTransit(store, entry, d)
+    return
+  }
+  if (isAddressEqual(d.outputToken, PROTOCOL.nativeToken)) {
+    foldFlows(store, entry, entry.account, new Map([[getAddress(d.feeToken), -d.fee]]))
+    return
+  }
+  const opened = entry.siblingLogs.reduce(
+    (at, log) => (log.topics[0] === ACCOUNT_CALL_TOPIC && log.logIndex < entry.logIndex && log.logIndex > at ? log.logIndex : at),
+    -1
+  )
+  const delivered = entry.siblingLogs
+    .filter(log => log.logIndex > opened && log.logIndex < entry.logIndex)
+    .flatMap(log => {
+      const amount = swapDeliveryAmount(entry.chainId, entry.account, d.outputToken, log)
+      return amount === null ? [] : [amount]
+    })
+    .reduce((total, amount) => total + amount, 0n)
+  if (delivered < d.outputAmount) {
+    throw new Error(
+      `entry ${where(entry)}: its receipt delivers ${delivered} of ${d.outputToken} to the fund, below the ${d.outputAmount} the gate checked it received, so the swap's delivery logs are missing`
+    )
+  }
+  foldFlows(store, entry, entry.account, new Map([[getAddress(d.inputToken), -d.inputAmount], [getAddress(d.outputToken), delivered]]))
 }
 
 interface IFundMetricDelta {
@@ -1179,7 +1211,7 @@ export async function fundWorthAt(
         continue
       }
       const sized = (row.size * index.token0) / index.token1
-      const worth = (row.collateral * backing.token0) / backing.token1 + (row.long ? sized - row.entry : row.entry - sized)
+      const worth = (row.collateral * backing.token0) / backing.token1 + (row.long ? sized - row.entry : row.entry - sized) - (row.accruedCost === undefined ? 0n : row.accruedCost)
       usd += worth > 0n ? worth : 0n
     }
   }
@@ -1389,8 +1421,10 @@ export const FOLD_SOURCE: string = [
   foldEntry,
   windowPnlSeries,
   windowVenueSeries,
-  chainTokenOfKey,
-  tokenKeyOf,
+  swapDeliveryAmount,
+  tokenMetaOf,
+  providerToken,
+  wrappedNativeAddressOf,
   ...VENUES.map(venue => venue.outflows),
   ...VENUES.flatMap(venue => (venue.transit === undefined ? [] : [venue.transit])),
   ...VENUES.map(venue => venue.describe)

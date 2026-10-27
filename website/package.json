@@ -9,8 +9,8 @@
   "dependencies": {
     "@puppet/contracts": "workspace:*",
     "@puppet/sdk": "workspace:*",
-    "@walletconnect/sign-client": "2.25.0",
-    "@walletconnect/utils": "2.25.0",
+    "@walletconnect/sign-client": "2.26.0",
+    "@walletconnect/utils": "2.26.0",
     "aelea": "catalog:",
     "uqr": "0.1.3",
     "viem": "catalog:"

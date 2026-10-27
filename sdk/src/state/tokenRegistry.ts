@@ -51,10 +51,6 @@ export function nativeSymbolOf(chainId: ChainId): string {
   return TOKEN_META[WRAPPED_NATIVE[chainId]].symbol
 }
 
-export function nativePrecisionOf(chainId: ChainId): bigint {
-  return 10n ** BigInt(TOKEN_META[nativeSymbolOf(chainId) as keyof typeof TOKEN_META].decimals)
-}
-
 export function wrappedNativeAddressOf(chainId: ChainId): Address {
   return chainTokenOfKey(chainId, WRAPPED_NATIVE[chainId])
 }

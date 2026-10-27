@@ -1,4 +1,4 @@
-import { type Address, getAddress, type Hex, isAddressEqual } from 'viem'
+import { type Address, type Hex, isAddressEqual } from 'viem'
 import type { ChainId } from '../const/index.js'
 import type { IConnectedWallet } from './connectedWallet.js'
 import type { IFund, IWalletKeys } from './walletKeys.js'
@@ -27,8 +27,6 @@ export interface IRootState {
   settled: readonly ISettledTx[] | null
   syncError: string | null
 }
-
-export const balanceId = (b: { chainId: number; token: Address }): string => `${b.chainId}:${getAddress(b.token)}`
 
 export const balanceAt = (balances: readonly IAccountBalance[], chainId: ChainId, token: Address): bigint =>
   balances.find(b => b.chainId === chainId && isAddressEqual(b.token, token))?.balance ?? 0n

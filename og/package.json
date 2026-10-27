@@ -11,7 +11,7 @@
   "dependencies": {
     "@puppet/contracts": "workspace:*",
     "@puppet/sdk": "workspace:*",
-    "@takumi-rs/core": "2.14.0",
+    "@takumi-rs/core": "2.17.1",
     "aelea": "catalog:",
     "viem": "catalog:"
   },

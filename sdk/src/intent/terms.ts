@@ -55,7 +55,7 @@ import {
   transitTable,
   venueTable
 } from '../schema/index.js'
-import { feeConverter, RELAY_RATE_MAX_STALE_MS, relayFeeOf } from '../state/fee.js'
+import { feeConverter, RELAY_RATE_MAX_STALE_MS, relayFeeOf, TYPICAL_SUBCALL_GAS } from '../state/fee.js'
 import { chainTokenOfKey, listedTokensOf, symbolOf, tokenKeyOf } from '../state/tokenRegistry.js'
 import { VENUES } from '../venue/venues.js'
 import { acrossSpokePoolOf } from './route/acrossDeposit.js'
@@ -645,7 +645,7 @@ export async function composeValuation(deps: ITermsDeps, master: Address, freshn
     await Promise.all(
       [...new Set(held.filter(asset => !isCash(asset)).map(asset => Number(asset.chainId) as ChainId))].map(async chainId => {
         const convert = await feeConverter(getRate, chainId, chainTokenOfKey(chainId, tokenKeyOf(HUB, HUB_CANONICAL_TOKEN.WETH)), RELAY_RATE_MAX_STALE_MS)
-        return [chainId, relayFeeOf(convert, chainId, 'fundSwap', false, 0n, 0n, 0n)] as const
+        return [chainId, relayFeeOf(convert, chainId, 'fundSwap', false, 0n, TYPICAL_SUBCALL_GAS, 0n)] as const
       })
     )
   )

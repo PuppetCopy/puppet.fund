@@ -19,14 +19,14 @@ export const routeSchema = createRouteSchema({
       }
     },
     portfolio: { fragment: 'portfolio', title: 'Account' },
-    wallet: {
-      fragment: 'wallet',
-      title: 'Wallet',
+    wallet: { fragment: 'wallet', title: 'Wallet' },
+    quickstart: {
+      fragment: 'quickstart',
+      title: 'Quickstart',
       children: {
-        agent: { fragment: 'agent', title: 'Agent link' }
+        agent: { fragment: 'agent', title: 'Agent quickstart' }
       }
     },
-    quickstart: { fragment: 'quickstart', title: 'Quickstart' },
     changelog: { fragment: 'changelog', title: 'Release log' },
     governance: {
       fragment: 'governance',
@@ -38,4 +38,4 @@ export const routeSchema = createRouteSchema({
   }
 } as const)
 
-export const walletPaths: readonly string[] = [href(routeSchema.wallet), href(routeSchema.wallet.agent)]
+export const walletPaths: readonly string[] = [href(routeSchema.wallet)]

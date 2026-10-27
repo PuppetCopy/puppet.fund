@@ -4,12 +4,12 @@ import { formatThrownError } from '@puppet/sdk/compact'
 import { type ChainId, PRECISION } from '@puppet/sdk/const'
 import { getTokenDescription, readablePercentage, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { wrapCallData } from '@puppet/sdk/intent'
-import { symbolOf, tokenKeyOf, wrappedNativeAddressOf, wrapSubcallGas } from '@puppet/sdk/state'
+import { symbolOf, tokenKeyOf, TYPICAL_SUBCALL_GAS, WRAP_SUBCALL_GAS, wrappedNativeAddressOf } from '@puppet/sdk/state'
 import { combine, empty, filter, filterNull, type IStream, just, map, merge, op, sampleMap, start } from 'aelea/stream'
 import { type IBehavior, promiseState, type PromiseState, PromiseStatus, state } from 'aelea/stream-extended'
 import { $node, component, type I$Node, style, styleBehavior } from 'aelea/ui'
 import { $column, spacing } from 'aelea/ui-components'
-import { type Address, isAddressEqual } from 'viem'
+import { type Address, isAddressEqual, size } from 'viem'
 import { uiStorage } from '@/ui-storage'
 import { editorChoiceKey, type IStoredPath } from '../../app/localStoreSchema.js'
 import type { ISwapRequest } from '../../io/bridge/swapQuote.js'
@@ -18,7 +18,7 @@ import { priceFor } from '../../io/price.js'
 import { $DraftSave, type ISelectedRoute } from './$DraftSave.js'
 import { $SourceAmountInput } from './$SourceAmountInput.js'
 import { type ISwapTargetOption, withdrawTargetOptions } from './$SwapTargetFlow.js'
-import { amountUsdLabel, submitOn } from './editorUtils.js'
+import { amountUsdLabel, QUOTE_CALLDATA_BYTES, submitOn } from './editorUtils.js'
 
 export interface I$FundSwapEditor {
   account: Address
@@ -103,7 +103,7 @@ export const $FundSwapEditor = ({ account, chainId, token, fundBalance, draft, p
         p => {
           if (p.fee.status !== PromiseStatus.DONE) return null
           const wrap = p.target.chainId === chainId ? wrapCallData(chainId, token, p.target.id, p.amount) : null
-          const net = p.amount - p.fee.value('fundSwap', false, 0n, wrap === null ? 0n : wrapSubcallGas(chainId, { kind: 'swap', provider: wrapped, providerCallData: wrap }), 0n)
+          const net = p.amount - p.fee.value('fundSwap', false, 0n, wrap === null ? TYPICAL_SUBCALL_GAS : WRAP_SUBCALL_GAS, wrap === null ? QUOTE_CALLDATA_BYTES : BigInt(size(wrap)))
           return net <= 0n
             ? null
             : {
@@ -129,7 +129,7 @@ export const $FundSwapEditor = ({ account, chainId, token, fundBalance, draft, p
           const wrap = p.target.chainId === chainId ? wrapCallData(chainId, token, p.target.id, p.amount) : null
           const fee =
             p.fee.status === PromiseStatus.DONE
-              ? p.fee.value('fundSwap', false, 0n, wrap === null ? 0n : wrapSubcallGas(chainId, { kind: 'swap', provider: wrapped, providerCallData: wrap }), 0n)
+              ? p.fee.value('fundSwap', false, 0n, wrap === null ? TYPICAL_SUBCALL_GAS : WRAP_SUBCALL_GAS, wrap === null ? QUOTE_CALLDATA_BYTES : BigInt(size(wrap)))
               : null
           if (fee !== null && p.amount <= fee) {
             return `Swap more than the ${readableTokenAmountLabel(input, fee)} relay fee, which comes out of the amount`
@@ -171,6 +171,7 @@ export const $FundSwapEditor = ({ account, chainId, token, fundBalance, draft, p
             $DraftSave({
               target: { value: target, optionList: just(options), source: just({ chainId, symbol: symbolOf(chainId, token) }) },
               request,
+              inputFee: map(p => (p.fee.status === PromiseStatus.DONE ? { gross: p.amount, quote: p.fee.value, kind: 'fundSwap' as const } : null), combine({ amount: value, fee: relayFee })),
               commit: commitAmount,
               active: just(true),
               alert,

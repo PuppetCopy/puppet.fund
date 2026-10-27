@@ -10,7 +10,7 @@ import { APP_KEY, askPersistentStorage, displayMode, installed, promptInstallApp
 void uiStorage.dropStaleDevice().catch(uiStorage.reportFailure)
 
 if (location.pathname === href(routeSchema.portfolio) && new URLSearchParams(location.search).get('tab') === 'master') history.replaceState(null, '', href(routeSchema.wallet))
-if (location.pathname === '/agent') history.replaceState(null, '', `${href(routeSchema.wallet.agent)}${location.search}${location.hash}`)
+if (location.pathname === '/agent' || location.pathname === '/wallet/agent') history.replaceState(null, '', `${href(routeSchema.wallet)}${location.search}${location.hash}`)
 
 const listed = (pathname: string): boolean => walletPaths.includes(pathname)
 const linkOf = (event: MouseEvent): URL | null => {

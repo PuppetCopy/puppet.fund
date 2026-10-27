@@ -77,10 +77,6 @@ export async function signDappTypedData(
   return { signature: await signer.sign({ kind: 'typedData', typedData }), presignFailures }
 }
 
-export function assertDappSignable(reasons: readonly IDappScreenReason[]): void {
-  if (reasons.length > 0) throw new Error(reasons.map(r => `${r.code}: ${r.detail}`).join('; '))
-}
-
 export async function admitDappRequest(clients: Readonly<Record<number, PublicClient>>, account: Address, request: IDappRequest, submit: boolean): Promise<IDappScreenReason[]> {
   if (request.kind === 'message') {
     return submit ? [{ code: 'DAPP_ACTION_NOT_ADMITTED', detail: 'a signed message goes back to its dApp, never to a venue' }] : screenDappMessage(account, request.message)

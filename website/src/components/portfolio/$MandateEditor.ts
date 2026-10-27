@@ -29,10 +29,10 @@ import { mandateTermsOf } from '../$MandatePosition.js'
 import { $editorPercentSlider } from './editorUtils.js'
 
 const COOLDOWN_OPTIONS = [0n, 3600n, 21_600n, 43_200n, 86_400n, 604_800n]
-const DEFAULT_COOLDOWN = 86_400n
+const DEFAULT_COOLDOWN = 21_600n
 const EXPIRY_OPTIONS = [604_800n, 2_592_000n, 7_776_000n, 31_536_000n, 63_072_000n]
 const DEFAULT_EXPIRY = 7_776_000n
-const DEFAULT_ALLOCATION_RATE = 5_000n
+const DEFAULT_ALLOCATION_RATE = 2_500n
 const DEFAULT_SKIN = 10_000n
 const DEFAULT_EXIT_CAP = 5_000n
 const RATE = Number(PRECISION.basisPoints)
@@ -198,7 +198,10 @@ export const $MandateEditor = ({ master, existing, draft }: I$MandateEditor) =>
               $meterRow(`Round 1 at ${ratePercent(rate)}`, rate, exampleAmount(EXAMPLE_MATCHABLE * rate)),
               $meterRow('Round 2', rate * (1 - rate), exampleAmount(EXAMPLE_MATCHABLE * rate * (1 - rate))),
               $meterRow('Round 3', rate * (1 - rate) ** 2, exampleAmount(EXAMPLE_MATCHABLE * rate * (1 - rate) ** 2)),
-              $caption(`Your deposit is your ${roundSymbols} on the hub, shared by every fund you mandate. Native ETH does not count.`)
+              $caption(`Your deposit is your ${roundSymbols} on the hub: the most any fund can draw on, shared by every fund you mandate. Native ETH does not count.`),
+              $caption(
+                "A share, not an amount: rounds shrink as your balance does and never take all of it, where a fixed amount takes a bigger bite after every loss. A lower rate spreads your balance over more of the master's rounds."
+              )
             ),
           allocation
         )
@@ -214,7 +217,7 @@ export const $MandateEditor = ({ master, existing, draft }: I$MandateEditor) =>
             $meterRow('Master', EXAMPLE_MASTER / scale, exampleAmount(EXAMPLE_MASTER)),
             $meterRow('You', cap / scale, exampleAmount(cap)),
             $caption(
-              `You can hold up to ${leverageLabel(leverage)} the master's stake.`
+              `You can hold up to ${leverageLabel(leverage)} the master's stake. The master's own money is in the same fund at the same price, so it rises and falls with yours.`
             )
           )
         }, skin)
@@ -250,7 +253,10 @@ export const $MandateEditor = ({ master, existing, draft }: I$MandateEditor) =>
               period === 0n
                 ? 'No cooldown: you can join every round this master opens.'
                 : `With ${readableDuration(period)} between your rounds, grey rounds go ahead without you.`
-            )
+            ),
+            ...(period === 0n
+              ? []
+              : [$caption('Rounds you sit out are entries you miss, good and bad. If the master adds at a low while you wait, their average entry ends below yours.')])
           )
         }, filter((period): period is bigint => period !== null, cooldown))
       )

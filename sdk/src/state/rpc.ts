@@ -46,7 +46,7 @@ const settledFetch = async (input: string | URL | Request, init?: RequestInit): 
   }
 }
 
-const LAGGING_BACKEND = /unknown block|header not found/i
+const LAGGING_BACKEND = /unknown block|header not found|unsupported block number/i
 const LAGGING_BACKEND_RETRY_MS = [250, 500, 1_000]
 
 export const rpcTransport = (rpcUrl: string): Transport => {

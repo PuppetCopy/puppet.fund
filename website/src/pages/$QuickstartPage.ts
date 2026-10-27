@@ -11,6 +11,7 @@ import { $puppetLogo } from '../common/$icons.js'
 import { $heading2 } from '../common/$text.js'
 import { $venueIcon } from '../common/$operationView.js'
 import { $card, $defaultMockWindow, $mockWindow } from '../common/elements/$common.js'
+import { $AgentTemplates } from '../components/$AgentTemplates.js'
 import { DOCS_URL } from '../const/links.js'
 import { canInstallApp, promptInstallApp } from '../utils/pwaInstall.js'
 import { $body, $bulletList, $callout, $linkButton, $stageHeader } from './$onboarding.js'
@@ -18,12 +19,16 @@ import { $video } from './common.js'
 
 type IMasterMode = 'human' | 'agent'
 
-export const $QuickstartPage = () =>
+export interface I$QuickstartPage {
+  agent: boolean
+}
+
+export const $QuickstartPage = ({ agent }: I$QuickstartPage) =>
   component(
     (
       [selectMode, selectModeTether]: IBehavior<INode, IMasterMode>
     ) => {
-      const modeState: IStream<IMasterMode> = state('human' as IMasterMode, selectMode)
+      const modeState: IStream<IMasterMode> = state((agent ? 'agent' : 'human') as IMasterMode, selectMode)
 
       const $choiceCard = (mode: IMasterMode, $iconNode: I$Node, kicker: string, title: string, desc: string, accent: string): I$Node =>
         $column(
@@ -245,11 +250,15 @@ const $spinUpStep = (): I$Node =>
       $step(1, 'Allocate what your strategy trades from your wallet, on the chain it trades on.'),
       $step(
         2,
-        'Create an agent: name it, choose its template, and write its instructions.',
-        $row(spacing.small)($Link({ route: routeSchema.wallet.agent, $anchor: $defaultAnchor(style({ color: palette.message })), $content: $text('Create an agent') })({}))
+        'In your wallet, open Sessions and press New agent, then copy its link line, the one value your agent needs.',
+        $row(spacing.small)($Link({ route: routeSchema.wallet, $anchor: $defaultAnchor(style({ color: palette.message })), $content: $text('Open your wallet') })({}))
       ),
-      $step(3, 'Copy it into Claude Code or any coding LLM. It builds the agent and starts it on your computer.'),
-      $step(4, 'Start it, and it shows up on its own while your wallet page is open; the first time, allow your browser’s prompt so this site can reach it. Sign one session to let it act, and keep the app open while it runs.')
+      $step(
+        3,
+        'Pick a template, write your instructions into it, and paste the link line into the .env beside it. Give it to Claude Code or any coding LLM, or run the Bun agent as it is.',
+        $AgentTemplates()({})
+      ),
+      $step(4, 'Start it, and it links on its own while your wallet is open; the first time, allow your browser’s prompt so this site can reach it. Sign one session to let it act, and keep your wallet open while it runs.')
     ),
     $column(
       spacing.default,
@@ -274,7 +283,7 @@ const $agentNextStep = (): I$Node =>
   $column(spacing.default)(
     $body('Your agent trades while you allocate and redeem in your wallet. From here, performance is the work.'),
     $bulletList([
-      ['Keep this app open', 'your agent acts only while the app is open. After a restart it shows up again on its own and acts under your session until it ends.'],
+      ['Keep your wallet open', 'your agent acts only while your wallet is open. After a restart it links again on its own and acts under your session until it ends.'],
       ['Build a track record', 'each valuation adds to your fund’s public history. The chain is the proof.'],
       ['Attract puppets', 'once your record stands out, puppets sign mandates naming your fund and join its rounds.']
     ]),

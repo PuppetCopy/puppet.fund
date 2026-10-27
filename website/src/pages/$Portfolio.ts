@@ -84,6 +84,7 @@ import {
   $alertIcon,
   $alertInfo,
   $alertIntermediateContainer,
+  $alertNegativeContainer,
   $amountDisplay,
   $arrowRight,
   $ButtonPrimary,
@@ -103,7 +104,7 @@ import {
 import { $chainIcon, chainName } from '../common/$chain.js'
 import { $walletConnectLogo } from '../common/$icons.js'
 import { $venueIcon } from '../common/$operationView.js'
-import type { IPortfolioRole } from '../app/localStoreSchema.js'
+import type { IAgentIdentity, IPortfolioRole } from '../app/localStoreSchema.js'
 import { routeSchema } from '../app/routeSchema.js'
 import { $tokenProfile } from '../common/$common.js'
 import { chainFor } from '../common/$contract.js'
@@ -147,7 +148,7 @@ import { formatUsd, formatUsdNumber, priceFor, usdOf } from '../io/price.js'
 import { fundBalancesOf, type IFundLive, type IOpenPositions, type IStandingAllowance, standingAllowancesOf } from '../io/venue.js'
 import { $syncTip, OWNER_SYNC_SCHEDULE_SEC, TICK_SYNC_SCHEDULE_SEC } from './$OpenPositions.js'
 import type { IWalletControl, IWalletIntent } from '../wallet/connect.js'
-import { balanceAt, type IConnectedWallet, type IFund, type IRootState, type ISettledTx, type IWalletKeys, type IWalletPair } from '../wallet/index.js'
+import { balanceAt, type IConnectedWallet, type IFund, type IRootState, type ISettledTx, type IWalletKeys, type IWalletPair, publicClientMap } from '../wallet/index.js'
 import { disconnectDapp, type IWalletLinkSession, venueOfUrl, walletLinkSessions } from '../wallet/walletLink.js'
 import { $positionList, $standingAllowance, $venueRow } from './$OpenPositions.js'
 import { $caption, $emptySection, $section, $sectionHeader, $sectionList, $sectionTip, ago, shortDuration } from './common.js'
@@ -176,6 +177,8 @@ interface I$Portfolio extends IPageFilterParams {
   agent: I$AgentSection
   walletControl: IWalletControl
 }
+
+const NO_ACTIVITY = 'No activity yet. Deposit to your account, then allocate it to a fund.'
 
 export const $Portfolio = ({
   role,
@@ -222,6 +225,8 @@ export const $Portfolio = ({
       [popConnect, popConnectTether]: IBehavior<PointerEvent>,
       [changeHideBalances, changeHideBalancesTether]: IBehavior<boolean>,
       [agentCommand, agentCommandTether]: IBehavior<IAgentCommand>,
+      [addAgent, addAgentTether]: IBehavior<IAgentIdentity>,
+      [changeAgentIdentities, changeAgentIdentitiesTether]: IBehavior<readonly IAgentIdentity[]>,
       [changeRevokeDraft, changeRevokeDraftTether]: IBehavior<IRevokeDraft>,
       [revokeAgain, revokeAgainTether]: IBehavior<PointerEvent, IRevokeDraft>,
       [changeSymbol, changeSymbolTether]: IBehavior<string>,
@@ -240,6 +245,35 @@ export const $Portfolio = ({
         filter((root): root is PromiseStateDone<IRootState | null> => root.status === PromiseStatus.DONE),
         map(root => root.value),
         state()
+      )
+      const contractWalletQuery: IStream<Promise<boolean>> = op(
+        combine({ pair: walletPair, chainId: walletControl.chainId }),
+        map(p => (p.pair.wallet === null ? null : { address: p.pair.wallet.address, chainId: p.chainId })),
+        skipRepeatsWith((a, b) => (a === null || b === null ? a === b : isAddressEqual(a.address, b.address) && a.chainId === b.chainId)),
+        map(at =>
+          at === null
+            ? Promise.resolve(false)
+            : (publicClientMap[at.chainId ?? HUB_CHAIN_ID] ?? publicClientMap[HUB_CHAIN_ID])
+                .getCode({ address: at.address })
+                .then(code => code !== undefined && code !== '0x' && !code.startsWith('0xef0100'))
+        ),
+        state()
+      )
+      const $contractWarning = switchLatest(
+        map(
+          s =>
+            s.status === PromiseStatus.DONE && s.value
+              ? $alertNegativeContainer(style({ borderRadius: '12px', alignSelf: 'center', flexWrap: 'wrap', justifyContent: 'center' }))(
+                  $icon({ $content: $alertIcon, viewBox: '0 0 24 24', width: '18px', svgOps: style({ minWidth: '18px' }) }),
+                  $node(style({ fontSize: text.sm, color: palette.message }))($text('This wallet signs through contract code. Puppet needs a wallet that signs with its own key.')),
+                  $infoTooltip(
+                    "Your fund's trading key comes from your wallet's own signature, so multisig, passkey and other smart wallets cannot act here. Connect a wallet that holds its own key.",
+                    palette.foreground
+                  )
+                )
+              : empty,
+          intermediateState(contractWalletQuery)
+        )
       )
       const creatingFund: IStream<boolean> = op(
         merge(
@@ -593,7 +627,8 @@ export const $Portfolio = ({
           $trailing
         )
       const FUND_ACTION_KINDS: ReadonlySet<IAccountAction['kind']> = new Set<IAccountAction['kind']>(['escrow', 'returnEscrow', 'contribute'])
-      const historyOf = (role: IPortfolioRole): IStream<Promise<IAccountAction[]>> =>
+      const historyQuery: IStream<Promise<IAccountAction[]>> = op(
+        journalQuery,
         map(async q => {
           const held = await q
           if (held === null) return []
@@ -601,7 +636,21 @@ export const $Portfolio = ({
           return (await accountHistory([held.own, ...held.bodyList])).filter(
             action => !isAddressEqual(action.account, held.own.account) || FUND_ACTION_KINDS.has(action.kind)
           )
-        }, journalQuery)
+        }),
+        answerState
+      )
+      const pristine: IStream<boolean> =
+        role === 'puppet'
+          ? op(
+              combine({ history: historyQuery, value: accountValueQuery }),
+              map(p => Promise.all([p.history, p.value])),
+              intermediateState,
+              filter(s => s.status !== PromiseStatus.PENDING),
+              map(s => s.status === PromiseStatus.DONE && s.value[0].length === 0 && (s.value[1] === null || s.value[1] === 0)),
+              skipRepeats,
+              state()
+            )
+          : just(false)
       const $allocationHeader = (account: Address | null, failure: IStream<{ error: unknown } | null>, $trailing?: I$Node): I$Node =>
         $sectionHeader(
           $heading3(switchLatest(map(failed => (failed === null ? $text('Allocations') : $intermediateFailure(failed.error, $text('Allocations'), true)), failure))),
@@ -747,7 +796,7 @@ export const $Portfolio = ({
                   )
                 )
               : $section(
-              $allocationHeader(account, just(null), $depositAction),
+              $allocationHeader(account, just(null)),
               account === null ? $stillListed(walletControl.releases) : empty,
               $column(spacing.default)(
                 switchLatest(
@@ -759,7 +808,7 @@ export const $Portfolio = ({
                     draftedCredits
                   )
                 ),
-                $browseTraders
+                $emptySection(account === null ? 'Connect a wallet, then deposit to your account and allocate it to a fund.' : NO_ACTIVITY, $depositAction)
               )
             ),
             $section($historyHeader(role)(just(null)), $emptyHistory(role))
@@ -1077,7 +1126,7 @@ export const $Portfolio = ({
               },
               (_key, value) => (typeof value === 'bigint' ? value.toString() : value)
             )
-      const $fundGrid = $node(style({ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 390px), 1fr))', columnGap: '40px', rowGap: '28px', alignItems: 'start' }))
+      const $fundGrid = $node(style({ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 360px), 1fr))', columnGap: '40px', rowGap: '28px', alignItems: 'start' }))
       const $sectionShell = (failure: { error: unknown } | null) =>
         $sectionList(
           role === 'puppet'
@@ -1969,11 +2018,6 @@ export const $Portfolio = ({
                     : $venueLegs(s.master, usedVenuesOf(view), view.linked)
                 const custody = 'error' in view.venues ? [] : view.venues.open.selfCustody
                 const $custody = custody.length === 0 ? [] : [$caption('Valuable ERC-20'), ...custody.map(row => $custodyLeg(s.master, row))]
-                if (s.legs.length === 0)
-                  return $column(spacing.tiny)(
-                    ...(escrowed.length + custody.length === 0 ? [$emptySection('Fund balances on every chain appear here.')] : [...escrowed, ...$custody]),
-                    $venues
-                  )
                 const $arriving = switchLatest(
                   map(p => {
                     const drafted = p.list.flatMap(d =>
@@ -2008,7 +2052,13 @@ export const $Portfolio = ({
                     )
                   }, combine({ list: draftTradeList, raise: raiseAfter }))
                 )
-                return $column(spacing.tiny)(...s.legs.map(leg => $fundLeg(s.master, leg.chainId, leg.token)), ...$custody, ...escrowed, $venues, $arriving)
+                if (s.legs.length === 0)
+                  return $column(spacing.tiny)(
+                    ...(escrowed.length + custody.length === 0 ? [$emptySection('Fund balances on every chain appear here.')] : [...escrowed, ...$custody]),
+                    $arriving,
+                    $venues
+                  )
+                return $column(spacing.tiny)(...s.legs.map(leg => $fundLeg(s.master, leg.chainId, leg.token)), $arriving, ...$custody, ...escrowed, $venues)
               }
               const $holdings = $column(spacing.tiny)(
                 switchLatest(
@@ -2112,7 +2162,8 @@ export const $Portfolio = ({
                                     filterNull
                                   )
                                 },
-                            redeemPlan
+                            redeemPlan,
+                            raiseAfter
                           )
                         })
                       ),
@@ -2171,7 +2222,8 @@ export const $Portfolio = ({
                 pending: false,
                 fund: recorded,
                 $body: $column(style({ gap: isDesktopScreen ? '40px' : '28px', padding: '0 0 4px' }))(
-                  role === 'master' && p.fund === null
+                  $contractWarning,
+                  role === 'puppet' || p.fund === null
                     ? empty
                     : switchLatest(
                     map(
@@ -2206,7 +2258,10 @@ export const $Portfolio = ({
                   ),
                   $sectionList(
                     role === 'puppet'
-                      ? $section($allocationHeader(root.account, allocationFailure, $depositPopover), $column(spacing.default)($exitStrip, $depositList, $allocationList))
+                      ? $section(
+                          $allocationHeader(root.account, allocationFailure, switchLatest(map(blank => (blank ? empty : $depositPopover), pristine))),
+                          $column(spacing.default)($exitStrip, $depositList, switchLatest(map(blank => (blank ? $emptySection(NO_ACTIVITY, $depositPopover) : $allocationList), pristine)))
+                        )
                       : p.fund === null
                       ? $section($sectionHeader($heading3($text('Fund')), 'Name your fund, then make its first allocation to open it.'), $createFund(root, wallet))
                       : 'unknown' in p.fund
@@ -2234,7 +2289,7 @@ export const $Portfolio = ({
                             $holderList
                           )
                         ),
-                    $AccountHistory(historyOf(role), $historyHeader(role), $emptyHistory(role))({})
+                    $AccountHistory(historyQuery, $historyHeader(role), $emptyHistory(role))({})
                   )
                 )
               }
@@ -2430,7 +2485,14 @@ export const $Portfolio = ({
                                 styleBehavior(map(blocked => (blocked ? { opacity: '0.4' } : null), fundViewOnly))
                               ),
                               $anchorArea: $node(style({ gridColumn: '2 / 4', gridRow: '1', alignSelf: 'stretch', display: 'flex' }))
-                            })({ command: agentCommandTether(), enableSession: enableSessionTether(), revoke: changeRevokeDraftTether(), walletIntent: walletIntentTether() })
+                            })({
+                              command: agentCommandTether(),
+                              enableSession: enableSessionTether(),
+                              addIdentity: addAgentTether(),
+                              changeIdentities: changeAgentIdentitiesTether(),
+                              revoke: changeRevokeDraftTether(),
+                              walletIntent: walletIntentTether()
+                            })
                           ),
                     op(
                       sectionView,
@@ -2457,7 +2519,7 @@ export const $Portfolio = ({
                 )
               ]
             : []),
-          $card(style({ flex: 1, width: '100%', gap: isDesktopScreen ? '40px' : '28px', ...(role === 'master' ? (isDesktopScreen ? { boxShadow: 'none', border: `1px solid ${colorShade(palette.foreground, 15)}`, borderRadius: '16px', overflow: 'hidden' } : { boxShadow: 'none', borderRadius: '0' }) : {}) }))(
+          $card(style({ flex: 1, width: '100%', gap: role === 'puppet' ? '0' : isDesktopScreen ? '40px' : '28px', ...(role === 'master' ? (isDesktopScreen ? { boxShadow: 'none', border: `1px solid ${colorShade(palette.foreground, 15)}`, borderRadius: '16px', overflow: 'hidden' } : { boxShadow: 'none', borderRadius: '0' }) : {}) }))(
             $timeline,
             switchLatest(map(view => view.$body, sectionView))
           )
@@ -2467,6 +2529,8 @@ export const $Portfolio = ({
           changePerformanceMetric,
           changeHideBalances,
           agentCommand,
+          addAgent,
+          changeAgentIdentities,
           changeRevokeDraft: merge(changeRevokeDraft, revokeAgain),
           enableSession,
           changeDraft: merge(changeDraft, fundAllocate, openingRound, map(p => p.d, roundSaved)),

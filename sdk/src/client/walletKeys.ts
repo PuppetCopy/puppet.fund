@@ -13,6 +13,7 @@ import {
 } from '../account/index.js'
 import { CompactError } from '../compact/index.js'
 import { DEFAULT_DEADLINE_SEC } from '../const/index.js'
+import { recoverAccountSigner } from '../intent/approval.js'
 import {
   createMpcClient,
   fundBindingTypedData,
@@ -23,6 +24,9 @@ import {
   type IShare
 } from '../mpc/index.js'
 import type { IConnectedWallet } from './connectedWallet.js'
+
+const DEPOSIT_RECORD_TRIES = 6
+const DEPOSIT_RECORD_WAIT_MS = 2_500
 
 export type IKeyStore = Pick<Storage, 'getItem' | 'setItem' | 'removeItem' | 'key' | 'length'>
 
@@ -92,7 +96,6 @@ export interface IWalletKeys {
 export const FUND_SLOT_PREFIX = 'puppet:fund:'
 export const APPROVAL_SLOT_PREFIX = 'puppet:approval:'
 export const SESSION_SLOT_PREFIX = 'puppet:session:'
-export const LEGACY_KEY_SLOT_PREFIXES: readonly string[] = ['puppet:signer:', 'puppet:grant:']
 const fundSlot = (user: Address, fund: bigint): string => `${FUND_SLOT_PREFIX}${PROTOCOL.version}:${user.toLowerCase()}:${fund}`
 const approvalSlot = (user: Address, account: Address): string => `${APPROVAL_SLOT_PREFIX}${PROTOCOL.version}:${user.toLowerCase()}:${account.toLowerCase()}`
 const fundPrefix = (user: Address): string => `${FUND_SLOT_PREFIX}${PROTOCOL.version}:${user.toLowerCase()}:`
@@ -153,11 +156,6 @@ export function createWalletKeys(
   const mpc = createMpcClient(mpcUrl)
   const asked = new Map<number, { resolve: (value: Hex) => void; reject: (error: Error) => void }>()
   let nextAsk = 0
-
-  for (let i = storage.length - 1; i >= 0; i--) {
-    const slot = storage.key(i)
-    if (slot !== null && LEGACY_KEY_SLOT_PREFIXES.some(prefix => slot.startsWith(prefix))) storage.removeItem(slot)
-  }
 
   keyWorker.addEventListener('message', (event: MessageEvent<ISessionKeyReply>) => {
     const reply = event.data
@@ -298,7 +296,16 @@ export function createWalletKeys(
     const slot = `${getAddress(wallet.address)}:${fund}`
     const held = fundKeySignatures.get(slot)
     if (held !== undefined) return held
-    const signature = await wallet.walletClient.signTypedData(fundKeyTypedData(PROTOCOL.version, fund))
+    const typed = fundKeyTypedData(PROTOCOL.version, fund)
+    const signature = await wallet.walletClient.signTypedData(typed)
+    const signer = recoverAccountSigner(hashTypedData(typed), signature)
+    if (signer === null || !isAddressEqual(signer, wallet.address)) {
+      throw new CompactError(
+        'WALLET_NOT_OWN_KEY',
+        `${getAddress(wallet.address)} signs through contract code, not with its own key. Puppet needs a wallet that signs with its own key, because a fund's trading key is derived from that signature; multisig and passkey wallets are not supported.`,
+        'hard'
+      )
+    }
     fundKeySignatures.set(slot, signature)
     return signature
   }
@@ -317,13 +324,23 @@ export function createWalletKeys(
     const session = await carriedApproverOf(user, chainId)
     const bind = async (): Promise<Hex> => (session !== null ? session(digest) : (await grantSession(wallet, chainId)).approve(digest))
     const sealed = storage.getItem(keySlot(user)) as Hex | null
-    const claim: IKeygenClaim =
-      'account' in stake
-        ? { chainId, user, account: stake.account, binding: await bind() }
-        : session === null && stake.funding !== null && sealed !== null
-          ? { chainId, user, token: stake.token, account: null, funding: stake.funding, request: await signAs(user, sealed, digest) }
-          : { chainId, user, token: stake.token, account: null, binding: await bind() }
-    const share = await mpc.keygen(sid, sk, claim)
+    let share: IShare | null = null
+    if (!('account' in stake) && session === null && stake.funding !== null && sealed !== null) {
+      const claim: IKeygenClaim = { chainId, user, token: stake.token, account: null, funding: stake.funding, request: await signAs(user, sealed, digest) }
+      for (let attempt = 0; share === null && attempt < DEPOSIT_RECORD_TRIES; attempt++) {
+        if (attempt > 0) await new Promise(resolve => setTimeout(resolve, DEPOSIT_RECORD_WAIT_MS))
+        try {
+          share = await mpc.keygen(sid, sk, claim)
+        } catch (err) {
+          if (!(err instanceof CompactError && err.code === 'DEPOSIT_UNRECORDED')) throw err
+        }
+      }
+    }
+    share ??= await mpc.keygen(
+      sid,
+      sk,
+      'account' in stake ? { chainId, user, account: stake.account, binding: await bind() } : { chainId, user, token: stake.token, account: null, binding: await bind() }
+    )
     return { user, fund, symbol, cells: [...cells], account: publicKeyToAddress(share.pk), share }
   }
 

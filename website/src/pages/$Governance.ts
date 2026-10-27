@@ -61,7 +61,8 @@ import {
   intermediateState,
   SEPARATOR_COLOR,
   softNavClick,
-  text
+  text,
+  $tick
 } from '@/ui-components'
 import { routeSchema } from '../app/routeSchema.js'
 import { device } from '../app/storage/storage.js'
@@ -925,26 +926,55 @@ export const $Governance = ({ walletQuery, selected }: I$Governance) =>
                     $infoTooltip(
                       $column(spacing.default)(
                         $node($text(STATES[proposal.state]?.note ?? 'Unknown state')),
-                        $column(
+                        $node(style({ display: 'grid', gridTemplateColumns: `repeat(${steps.length}, minmax(0, 128px))` }))(
                           ...steps.map((step, i) => {
                             const next = steps[i + 1]
                             const reached = step.at !== null && step.at <= v.now
+                            const current = reached && next !== undefined && (next.at === null || next.at > v.now)
                             const filled =
                               next === undefined || step.at === null || !reached || next.at === null
                                 ? 0
                                 : next.at <= v.now
                                   ? 100
                                   : Math.round(((v.now - step.at) / (next.at - step.at)) * 100)
-                            return $row(spacing.small, style({ alignItems: 'stretch' }))(
-                              $column(style({ alignItems: 'center', width: '8px', flexShrink: 0 }))(
-                                $node(style({ width: '8px', height: '8px', marginTop: '6px', borderRadius: '50%', flexShrink: 0, backgroundColor: reached ? palette.message : TIMELINE_DIM }))(),
-                                ...(next === undefined
-                                  ? []
-                                  : [$node(style({ flex: 1, width: '2px', marginBottom: '-6px', background: `linear-gradient(${palette.message} ${filled}%, ${TIMELINE_DIM} ${filled}%)` }))()])
+                            return $column(style({ position: 'relative', alignItems: 'center', gap: '8px' }))(
+                              ...(next === undefined
+                                ? []
+                                : [
+                                    $node(
+                                      style({
+                                        position: 'absolute',
+                                        top: '8px',
+                                        left: 'calc(50% + 13px)',
+                                        width: 'calc(100% - 26px)',
+                                        height: '2px',
+                                        background: `linear-gradient(90deg, ${palette.message} ${filled}%, ${TIMELINE_DIM} ${filled}%)`
+                                      })
+                                    )()
+                                  ]),
+                              $node(
+                                style({
+                                  width: '18px',
+                                  height: '18px',
+                                  boxSizing: 'border-box',
+                                  borderRadius: '50%',
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'center',
+                                  ...(reached ? { backgroundColor: palette.message } : { border: `2px solid ${TIMELINE_DIM}` })
+                                })
+                              )(
+                                ...(current
+                                  ? [$node(style({ width: '6px', height: '6px', borderRadius: '50%', backgroundColor: palette.background }))()]
+                                  : reached
+                                    ? [$icon({ $content: $tick, viewBox: '0 0 24 24', width: '12px', fill: palette.background })]
+                                    : [])
                               ),
-                              $column(style({ gap: '2px', paddingBottom: next === undefined ? '0' : '14px' }))(
+                              $column(style({ alignItems: 'center', gap: '2px', textAlign: 'center', padding: '0 4px' }))(
                                 $node(style({ fontSize: text.sm, fontWeight: '600', color: palette.message }))($text(step.label)),
-                                $node(style({ fontSize: text.xs, color: palette.foreground, whiteSpace: 'nowrap' }))($text(step.at === null ? '-' : dateOf(step.at)))
+                                $node(style({ fontSize: text.xs, color: palette.foreground, whiteSpace: 'pre-line' }))(
+                                  $text(step.at === null ? '-' : `${readableDate(step.at, { dateStyle: 'medium' })}\n${readableDate(step.at, { timeStyle: 'short' })}`)
+                                )
                               )
                             )
                           })

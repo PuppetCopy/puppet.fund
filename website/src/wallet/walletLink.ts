@@ -193,6 +193,7 @@ export type IPendingSign = {
   account: Address | null
   chains: { linked: readonly number[]; refused: readonly number[] } | null
   payload: string
+  typed: ITypedData | null
   restore: boolean
   call: Promise<IPendingCall> | null
   expiresAt: number | null
@@ -1017,6 +1018,7 @@ async function approveProposal(client: ISignClient, proposal: IProposalStruct, v
         account,
         chains: { linked, refused: chains.map(chainIdOf).filter(id => !linked.includes(id)) },
         payload: [meta?.url ?? 'unknown origin', `chains ${chains.join(', ')}`, `account ${account}`].join('\n'),
+        typed: null,
         restore: false
       },
       proposal.expiryTimestamp
@@ -1190,8 +1192,11 @@ function registerHandlers(client: ISignClient, gen: number): void {
       }
       if (SIGN_METHODS.includes(method)) {
         let payload: string
+        let typed: ITypedData | null
         try {
           payload = describeSignRequest(method, requestParams)
+          const [, raw] = requestParams as [Address, string | ITypedData]
+          typed = method === 'eth_signTypedData' || method === 'eth_signTypedData_v4' ? ((typeof raw === 'string' ? JSON.parse(raw) : raw) as ITypedData) : null
         } catch {
           throw new Error('This signature request is malformed and will not be signed.')
         }
@@ -1199,7 +1204,7 @@ function registerHandlers(client: ISignClient, gen: number): void {
         const restore = wallet !== null && active !== null && latest.keys !== null && latest.keys.fundSignerOf(wallet.address, active) === null
         if (gen !== linkGeneration) return
         const decision = await requestSignApproval(
-          { request: id, topic, name, url: peer.url || 'unknown origin', method, verified, account: active, chains: null, payload, restore, call: planned },
+          { request: id, topic, name, url: peer.url || 'unknown origin', method, verified, account: active, chains: null, payload, typed, restore, call: planned },
           params.request.expiryTimestamp
         )
         if (decision.outcome === 'handedOff') return

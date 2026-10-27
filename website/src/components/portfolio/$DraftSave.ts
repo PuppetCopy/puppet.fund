@@ -2,8 +2,8 @@ import { CompactError, formatThrownError } from '@puppet/sdk/compact'
 import { CHAIN_MAP, type ChainId, CROSS_CHAIN_MIN_USD } from '@puppet/sdk/const'
 import { getTokenDescription, readableTokenAmountLabel } from '@puppet/sdk/core'
 import { USD_PRICE_DECIMALS } from '@puppet/sdk/evaluate'
-import type { IRoutePlan } from '@puppet/sdk/intent'
-import { providerToken, tokenMetaByChainToken, tokenMetaKey } from '@puppet/sdk/state'
+import { type IRoutePlan, routeCalldataBytes } from '@puppet/sdk/intent'
+import { type IRelayFeeQuote, providerToken, routeSubcallGas, tokenMetaByChainToken, tokenMetaKey } from '@puppet/sdk/state'
 import {
   combine,
   debounce,
@@ -126,11 +126,13 @@ const sameRequest = (a: ISwapRequest | null, b: ISwapRequest | null) =>
 
 const okRows = (rows: IRouteRow[]) => rows.filter((r): r is IRouteRowOk => r.status === 'ok')
 
-const cheaper = (a: IRouteRowOk, b: IRouteRowOk): IRouteRowOk => (a.plan.outputAmount > b.plan.outputAmount ? a : b)
+type IInputFee = { gross: bigint; quote: IRelayFeeQuote; kind: Parameters<IRelayFeeQuote>[0] }
 
-const bestRow = (rows: IRouteRow[]): IRouteRowOk | null => {
+const bestRow = (rows: IRouteRow[], fee: IInputFee | null): IRouteRowOk | null => {
+  const kept = (plan: IRoutePlan): bigint =>
+    fee === null ? plan.outputAmount : plan.outputAmount * (fee.gross - fee.quote(fee.kind, false, 0n, routeSubcallGas(plan.route), routeCalldataBytes(plan.route)))
   const oks = okRows(rows)
-  return oks.length === 0 ? null : oks.reduce(cheaper)
+  return oks.length === 0 ? null : oks.reduce((a, b) => (kept(a.plan) > kept(b.plan) ? a : b))
 }
 
 const routeError = (rows: IRouteRow[]): string | null => {
@@ -219,13 +221,14 @@ export interface I$DraftSave {
   quote?: IStream<IRouteOption>
   commit?: IStream<unknown>
   plainBridge?: boolean
+  inputFee?: IStream<IInputFee | null>
   active: IStream<boolean>
   alert: IStream<string | null>
   disabled: IStream<boolean>
   $receive?: I$Node
 }
 
-export const $DraftSave = ({ target, request, quote, commit, plainBridge, active, alert, disabled, $receive }: I$DraftSave) =>
+export const $DraftSave = ({ target, request, quote, commit, plainBridge, inputFee, active, alert, disabled, $receive }: I$DraftSave) =>
   component(
     (
       [select, selectTether]: IBehavior<ISwapTargetOption>,
@@ -234,6 +237,7 @@ export const $DraftSave = ({ target, request, quote, commit, plainBridge, active
     ) => {
       const listed: IStream<boolean> = state(false, selecting)
       const liveRequest = op(request, state())
+      const routeFee: IStream<IInputFee | null> = inputFee === undefined ? just(null) : op(inputFee, state())
       const request0 = op(merge(op(liveRequest, debounce(200)), commit === undefined ? empty : sampleMap((req: ISwapRequest | null) => req, liveRequest, commit)), skipRepeatsWith(sameRequest), state())
       let lanePrior: { lane: string; rows: IRouteRow[] } | null = null
       const routeState = op(
@@ -281,10 +285,10 @@ export const $DraftSave = ({ target, request, quote, commit, plainBridge, active
       )
 
       const selectedRoute = op(
-        combine({ rs: routeState, req: liveRequest }),
-        map(({ rs, req }): ISelectedRoute => {
+        combine({ rs: routeState, req: liveRequest, fee: routeFee }),
+        map(({ rs, req, fee }): ISelectedRoute => {
           if (rs === null || req === null) return EMPTY_SELECTED
-          const row = bestRow(rs.rows)
+          const row = bestRow(rs.rows, fee)
           const plan = row === null ? null : row.plan
           const limitError = plan === null ? null : limitErrorOf(rs.req, plan)
           return {
@@ -301,10 +305,10 @@ export const $DraftSave = ({ target, request, quote, commit, plainBridge, active
       const value =
         quote === undefined
           ? op(
-              combine({ rs: routeState, req: liveRequest, prices: start(null, prices) }),
-              map(({ rs, req, prices }): IRouteOption => {
+              combine({ rs: routeState, req: liveRequest, prices: start(null, prices), fee: routeFee }),
+              map(({ rs, req, prices, fee }): IRouteOption => {
                 if (rs === null || req === null || rs.rows.length === 0) return PLACEHOLDER
-                const row = bestRow(rs.rows)
+                const row = bestRow(rs.rows, fee)
                 if (row !== null) return toOption(row, req, prices !== null && prices.req === rs.req ? prices : null)
                 return rs.rows.some(r => r.status === 'pending') ? { status: 'pending', label: routeLabel(rs.rows[0]!.id) } : { status: 'error', label: '', detail: '' }
               }),

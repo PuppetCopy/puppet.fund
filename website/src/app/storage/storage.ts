@@ -42,7 +42,7 @@ export const device: IDeviceStore = {
 export async function dropStaleDevice(): Promise<void> {
   if (typeof caches === 'undefined') return
   for (const name of await caches.keys()) {
-    if ((name.startsWith('device:') && name !== NAME) || /^u\d+:/.test(name) || name === 'rates') await caches.delete(name)
+    if (name.startsWith('device:') && name !== NAME) await caches.delete(name)
   }
   const cache = await caches.open(NAME)
   const now = Date.now()
@@ -52,10 +52,6 @@ export async function dropStaleDevice(): Promise<void> {
       if (held !== undefined && expired(held, now)) await cache.delete(request)
     })
   )
-  if (typeof indexedDB === 'undefined' || typeof indexedDB.databases !== 'function') return
-  for (const held of await indexedDB.databases()) {
-    if (held.name !== undefined && (held.name === 'journal' || held.name.startsWith('root:'))) indexedDB.deleteDatabase(held.name)
-  }
 }
 
 let lastFailure: unknown = null

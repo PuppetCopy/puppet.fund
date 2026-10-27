@@ -35,12 +35,9 @@ import { type IBehavior, multicast, state } from 'aelea/stream-extended'
 import { $node, $text, attr, component, fromEventTarget, type I$Node, style } from 'aelea/ui'
 import { $column, $row, spacing } from 'aelea/ui-components'
 import { palette } from 'aelea/ui-components-theme'
-import { href, locationChange } from 'aelea/ui-router'
 import { type Address, getAddress, isAddress, isAddressEqual, isHex, type TypedDataDefinition } from 'viem'
 import {
-  $ButtonPrimary,
   $ButtonSecondary,
-  $defaultMiniButtonPrimary,
   $defaultMiniButtonSecondary,
   $dot,
   $DropMenu,
@@ -50,7 +47,6 @@ import {
   text
 } from '@/ui-components'
 import type { IAgentIdentity } from '../app/localStoreSchema.js'
-import { routeSchema, walletPaths } from '../app/routeSchema.js'
 import { $fundAvatar } from '../common/$fundAvatar.js'
 import { chainName } from '../common/$chain.js'
 import { clientDeps } from '../io/clientDeps.js'
@@ -92,7 +88,7 @@ const RECONNECT_CAP_MS = 60_000
 export const $agentStatus = (current: IAgentStatus | undefined): I$Node => {
   const shown =
     current === undefined
-      ? { label: 'Awaiting', color: palette.foreground, tip: 'The app looks for it once its template is taken, while your wallet page is open.' }
+      ? { label: 'Awaiting', color: palette.foreground, tip: 'Your wallet looks for it while it is open.' }
       : current.kind === 'linked'
         ? {
             label: 'Linked',
@@ -127,22 +123,6 @@ export const agentActionOf = (current: IAgentStatus | undefined): { label: 'Paus
       : current?.kind === 'paused'
         ? { label: 'Resume', title: 'Let the app look for it again', run: 'knock' }
         : null
-
-export const $AgentAction = (identity: IAgentIdentity, current: IAgentStatus | undefined) =>
-  component(([click, clickTether]: IBehavior<PointerEvent>) => {
-    const action = agentActionOf(current)
-    if (action === null) return [empty, { command: empty, enableSession: empty }]
-    const run = action.run
-    return [
-      run === 'sign'
-        ? $ButtonPrimary({ $container: $defaultMiniButtonPrimary(attr({ title: action.title })), $content: $text(action.label) })({ click: clickTether() })
-        : $ButtonSecondary({ $container: $defaultMiniButtonSecondary(attr({ title: action.title })), $content: $text(action.label) })({ click: clickTether() }),
-      {
-        command: run === 'sign' ? empty : map((): IAgentCommand => ({ kind: run, secret: identity.secret }), click),
-        enableSession: run === 'sign' ? click : empty
-      }
-    ]
-  })
 
 export const $agentRequestRow = (entry: IAgentLogEntry, identity: IAgentIdentity | undefined): I$Node =>
   $row(spacing.small, style({ alignItems: 'baseline', fontSize: text.xs, minWidth: '0' }))(
@@ -360,27 +340,16 @@ async function serve(pair: IWalletPair, session: ILinkSession, secret: string, i
 export interface I$AgentLink {
   walletPair: IStream<IWalletPair>
   identities: IStream<readonly IAgentIdentity[]>
-  pending: IStream<IAgentIdentity | null>
   command: IStream<IAgentCommand>
   session: IStream<boolean>
 }
 
 const linkKeyOf = (identity: IAgentIdentity): string => `${identity.secret}:${identity.port}:${identity.fund}`
 
-export const $AgentLink = ({ walletPair, identities, pending, command, session }: I$AgentLink) =>
+export const $AgentLink = ({ walletPair, identities, command, session }: I$AgentLink) =>
   component(
     ([replied, repliedTether]: IBehavior<IStep, { secret: string; frame: IAppFrame }>, [lost, lostTether]: IBehavior<IStep, Extract<IStep, { kind: 'lost' }>>) => {
       let serving: Promise<unknown> = Promise.resolve()
-      const path: IStream<string> = op(
-        merge(just(null), locationChange),
-        map(() => location.pathname),
-        skipRepeats,
-        state()
-      )
-      const onWallet: IStream<boolean> = op(
-        path,
-        map(at => walletPaths.includes(at))
-      )
       const access: IStream<PermissionState | 'unsupported'> = op(
         fromPromise(
           navigator.permissions === undefined
@@ -395,8 +364,8 @@ export const $AgentLink = ({ walletPair, identities, pending, command, session }
         state()
       )
       const reachable: IStream<boolean> = op(
-        combine({ on: onWallet, reach: access }),
-        filter(current => current.on && current.reach !== 'denied'),
+        access,
+        filter(reach => reach !== 'denied'),
         take(1),
         map(() => true)
       )
@@ -468,12 +437,13 @@ export const $AgentLink = ({ walletPair, identities, pending, command, session }
             (event): IStep => ({
               secret,
               kind: 'lost',
-              retry: event.opened ? 0 : retry,
-              reason: event.opened
-                ? event.reason === ''
-                  ? 'It dropped the link; the app looks for it again.'
-                  : `The link closed: ${event.reason}. The app looks for it again.`
-                : `Nothing answers on port ${identity.port} yet. Start your agent; it shows up here on its own while your wallet page is open.`
+              retry: event.phase === 'granting' || event.phase === 'linked' ? 0 : retry,
+              reason:
+                event.phase === null
+                  ? `Nothing answers on port ${identity.port} yet. Start your agent; it shows up here on its own while your wallet is open.`
+                  : event.reason === ''
+                    ? 'It dropped the link; the app looks for it again.'
+                    : `The link closed: ${event.reason}. The app looks for it again.`
             })
           )
         )
@@ -515,7 +485,13 @@ export const $AgentLink = ({ walletPair, identities, pending, command, session }
           switchLatest,
           steps =>
             merge(
-              just<IStep>({ secret, kind: 'searching', reason: 'The app looks for your agent while your wallet page is open.' }),
+              just<IStep>({
+                secret,
+                kind: 'searching',
+                reason: identity.proven
+                  ? 'Your wallet looks for your agent while it is open.'
+                  : 'Waiting for its first link: paste its link line into your agent’s .env and start it, with your wallet open.'
+              }),
               op(
                 merge(
                   access,
@@ -533,13 +509,8 @@ export const $AgentLink = ({ walletPair, identities, pending, command, session }
         )
       }
 
-      const live: IStream<readonly IAgentIdentity[]> = op(
-        combine({ list: identities, held: pending, at: path }),
-        map(({ list, held, at }) => [...list, ...(held === null || at !== href(routeSchema.wallet.agent) || list.some(identity => identity.secret === held.secret) ? [] : [held])]),
-        state()
-      )
       const born: IStream<IAgentIdentity> = op(
-        live,
+        identities,
         reduce(
           (was: { keys: readonly string[]; born: readonly IAgentIdentity[] }, list: readonly IAgentIdentity[]) => ({
             keys: list.map(linkKeyOf),
@@ -556,7 +527,7 @@ export const $AgentLink = ({ walletPair, identities, pending, command, session }
             linkOf(identity),
             until(
               op(
-                live,
+                identities,
                 filter(list => !list.some(entry => linkKeyOf(entry) === linkKeyOf(identity)))
               )
             )
@@ -647,35 +618,48 @@ export const $AgentSection = ({ identities, status }: I$AgentSection, account: I
       )
       return [
         switchLatest(
-          map(({ list, fund, statuses, arming }: { list: readonly IAgentIdentity[]; fund: Address | null; statuses: IAgentStatuses; arming: string | null }): I$Node => {
+          map(({ list, fund, arming }: { list: readonly IAgentIdentity[]; fund: Address | null; arming: string | null }): I$Node => {
             if (fund === null) return empty
             const mine = list.filter(identity => isAddressEqual(identity.fund, fund))
             if (mine.length === 0) return empty
             return $column(spacing.small)(
               ...mine.map(identity => {
-                const current = statuses[identity.secret]
-                const action = agentActionOf(current)
+                const current = op(
+                  status,
+                  map(statuses => statuses[identity.secret]),
+                  skipRepeats
+                )
                 return $sessionRow(
                   $fundAvatar(identity.cells, 24),
                   identity.name,
-                  $agentStatus(current),
+                  switchLatest(map($agentStatus, current)),
                   identity.secret === arming
                     ? $ButtonSecondary({ $container: $defaultMiniButtonSecondary(style({ color: palette.negative })), $content: $text('Confirm') })({ click: clickRemoveTether(map(() => identity.secret)) })
-                    : action === null
-                      ? $ButtonSecondary({ $container: $defaultMiniButtonSecondary(attr({ 'aria-label': `Remove ${identity.name}` })), $content: $text('Remove') })({
-                          click: armRemoveTether(map(() => identity.secret))
-                        })
-                      : $DropMenu<IAgentMenuItem>({
-                          label: action.label,
-                          optionList: [
-                            { label: action.label, description: action.title, run: action.run },
-                            { label: 'Remove', description: 'Deletes it from this browser, so it can no longer link', run: 'remove' }
-                          ]
-                        })({ select: pickTether(map(item => ({ secret: identity.secret, run: item.run }))) })
+                    : switchLatest(
+                        map(
+                          action =>
+                            action === null
+                              ? $ButtonSecondary({ $container: $defaultMiniButtonSecondary(attr({ 'aria-label': `Remove ${identity.name}` })), $content: $text('Remove') })({
+                                  click: armRemoveTether(map(() => identity.secret))
+                                })
+                              : $DropMenu<IAgentMenuItem>({
+                                  label: action.label,
+                                  optionList: [
+                                    { label: action.label, description: action.title, run: action.run },
+                                    { label: 'Remove', description: 'Deletes it from this browser, so it can no longer link', run: 'remove' }
+                                  ]
+                                })({ select: pickTether(map(item => ({ secret: identity.secret, run: item.run }))) }),
+                          op(
+                            current,
+                            map(agentActionOf),
+                            skipRepeatsWith((a, b) => a?.run === b?.run)
+                          )
+                        )
+                      )
                 )
               })
             )
-          }, combine({ list: identities, fund: account, statuses: status, arming: armed }))
+          }, combine({ list: identities, fund: account, arming: armed }))
         ),
         {
           command: merge(
