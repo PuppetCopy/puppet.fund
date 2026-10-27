@@ -18,12 +18,13 @@ const $explorerLink = (href: string, label: string): I$Node =>
   )
 
 const $reference = (approval: IChangelogApproval): I$Node => {
-  const chain = chainFor(approval.chainId)
+  const { contract, chainId, address } = 'address' in approval ? approval : { contract: 'Release', chainId: TOKEN_CHAIN_ID, address: TOKEN.Release.address }
+  const chain = chainFor(chainId)
   return $row(spacing.small, style({ flexWrap: 'wrap', alignItems: 'center', rowGap: '6px', fontSize: text.xs, color: palette.foreground }))(
     $node(
       style({ fontFamily: 'var(--font-numbers)', color: palette.message, padding: '2px 8px', borderRadius: '999px', backgroundColor: colorShade(palette.horizon, 25), whiteSpace: 'nowrap' })
     )($text(approval.date)),
-    $row(spacing.tiny, style({ alignItems: 'center', whiteSpace: 'nowrap' }))($node($text(approval.contract)), $explorerLink(getAccountExplorerUrl(approval.address, chain), approval.address)),
+    $row(spacing.tiny, style({ alignItems: 'center', whiteSpace: 'nowrap' }))($node($text(contract)), $explorerLink(getAccountExplorerUrl(address, chain), address)),
     $row(spacing.tiny, style({ alignItems: 'center', whiteSpace: 'nowrap' }))($node($text('approved in')), $explorerLink(getTxExplorerUrl(approval.tx, chain), approval.tx))
   )
 }
@@ -59,13 +60,7 @@ const $release = (release: IChangelogRelease, running: boolean): I$Node =>
                         ? $node(style({ fontSize: text.xs, color: palette.foreground }))($text('No release is approved on chain yet.'))
                         : approval.kind === 'superseded'
                           ? $node(style({ fontSize: text.xs, color: palette.foreground }))($text('A newer release is approved; reload to update.'))
-                          : $reference({
-                              date: new Date(approval.time * 1000).toISOString().slice(0, 10),
-                              contract: 'Release',
-                              chainId: TOKEN_CHAIN_ID,
-                              address: TOKEN.Release.address,
-                              tx: approval.transactionHash
-                            })
+                          : $reference({ date: new Date(approval.time * 1000).toISOString().slice(0, 10), tx: approval.transactionHash })
                   )
                 )
               )

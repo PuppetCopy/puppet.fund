@@ -53,7 +53,10 @@
         ]
       }
     ],
-    "approval": null
+    "approval": {
+      "date": "2026-10-27",
+      "tx": "0x452e98e62a31bf6d3c6b88bd0a07f8ab3d1ad9a547f05d0a97ff706388172a66"
+    }
   },
   {
     "title": "Rounds from your fund's key",
@@ -107,9 +110,6 @@
     ],
     "approval": {
       "date": "2026-10-22",
-      "contract": "Release",
-      "chainId": 1,
-      "address": "0xFbbA28689B6C1bF7828451250B003831D3Ba09D4",
       "tx": "0x101b90064ed5d6ee76021bd59b940a0eca9263b70b099a12468ffabe452c66df"
     }
   },
@@ -372,33 +372,6 @@
       "chainId": 10,
       "address": "0xA91e409B50C1fD51DA7a4b29649c80dd461FcfFA",
       "tx": "0x886411cc3bd3f75256ea958196aae864ba1a9a38cdb70da81568b983309507e6"
-    }
-  },
-  {
-    "title": "Trade on Pear, smoother on small screens",
-    "lead": null,
-    "groups": [
-      {
-        "title": "Venues",
-        "changes": [
-          "Pear works through the dApp link, trading your fund's Hyperliquid account; fund it with Puppet's Hyperliquid Deposit."
-        ]
-      },
-      {
-        "title": "Fixed",
-        "changes": [
-          "The update prompt scrolls on small screens instead of being cut off.",
-          "Leaderboard fund names show at once, without waiting for your own account to load.",
-          "Your account chart no longer fails when you hold a token without a price; it draws the history up to that point."
-        ]
-      }
-    ],
-    "approval": {
-      "date": "2026-10-05",
-      "contract": "HubGate implementation",
-      "chainId": 10,
-      "address": "0xC7ab23AE3a74f687382d5328027A5A42E8B5339C",
-      "tx": "0x22b494699ad98cd92ed50108d9c6da059688a01ebea7cd166605e633736788a5"
     }
   }
 ]

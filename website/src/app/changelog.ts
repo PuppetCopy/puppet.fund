@@ -1,12 +1,6 @@
 import { type Address, type Hex, isAddress, isHex } from 'viem'
 
-export interface IChangelogApproval {
-  date: string
-  contract: string
-  chainId: number
-  address: Address
-  tx: Hex
-}
+export type IChangelogApproval = { date: string; tx: Hex } | { date: string; contract: string; chainId: number; address: Address; tx: Hex }
 
 export interface IChangelogRelease {
   title: string
@@ -42,13 +36,15 @@ export function changelogOf(raw: unknown): IChangelogRelease[] {
       return { title, lead, groups: checkedGroups, approval: null }
     }
     if (typeof approval !== 'object' || Array.isArray(approval)) throw new Error(`"${title}" has an approval that is neither an object nor null`)
-    const { date, contract, chainId, address, tx, ...approvalRest } = approval as Record<string, unknown>
-    if (Object.keys(approvalRest).length > 0) throw new Error(`"${title}" has an approval with unknown fields: ${Object.keys(approvalRest).join(', ')}`)
+    const { date, tx, ...legacy } = approval as Record<string, unknown>
     if (typeof date !== 'string' || !APPROVAL_DATE.test(date)) throw new Error(`"${title}" has an approval date that is not YYYY-MM-DD`)
+    if (typeof tx !== 'string' || !isHex(tx) || tx.length !== 66) throw new Error(`"${title}" has an approval tx that is not a transaction hash`)
+    if (Object.keys(legacy).length === 0) return { title, lead, groups: checkedGroups, approval: { date, tx } }
+    const { contract, chainId, address, ...approvalRest } = legacy
+    if (Object.keys(approvalRest).length > 0) throw new Error(`"${title}" has an approval with unknown fields: ${Object.keys(approvalRest).join(', ')}`)
     if (typeof contract !== 'string' || contract.trim() === '') throw new Error(`"${title}" has an approval that names no contract`)
     if (typeof chainId !== 'number' || !Number.isInteger(chainId) || chainId <= 0) throw new Error(`"${title}" has an approval chainId that is not a chain id`)
     if (typeof address !== 'string' || !isAddress(address, { strict: false })) throw new Error(`"${title}" has an approval address that is not an address`)
-    if (typeof tx !== 'string' || !isHex(tx) || tx.length !== 66) throw new Error(`"${title}" has an approval tx that is not a transaction hash`)
     return { title, lead, groups: checkedGroups, approval: { date, contract, chainId, address, tx } }
   })
 }
