@@ -41,7 +41,7 @@ export interface IFulfilRequest {
   total: bigint
   feeTotal: bigint
   ownerSignature: Hex
-  genesis: IBodyGenesis | null
+  genesis: IBodyGenesis
 }
 
 export interface IDispatchedFrame {
