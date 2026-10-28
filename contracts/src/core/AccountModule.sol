@@ -2,8 +2,8 @@
 pragma solidity ^0.8.36;
 
 import {IAccount} from "../utils/interfaces/IAccount.sol";
+import {ECDSA} from "solady/utils/ECDSA.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
-import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
 
 import {FundAccount} from "./FundAccount.sol";
 import {UserAccount} from "./UserAccount.sol";
@@ -28,7 +28,6 @@ contract AccountModule is Access {
         BalanceLib.Balance[] balanceList
     );
 
-    IChain public immutable chain;
     address public immutable userImpl;
     address public immutable bodyImpl;
     bytes32 public immutable bodyHash;
@@ -43,13 +42,10 @@ contract AccountModule is Access {
 
     constructor(
         address _authority,
-        IChain _chain,
         address _userImpl,
         address _bodyImpl
     ) Access(_authority) {
-        if (address(_chain) == address(0)) revert Error.Chain__NotSet();
         if (_userImpl == address(0) || _bodyImpl == address(0)) revert Error.Account__InvalidImpl();
-        chain = _chain;
         userImpl = _userImpl;
         bodyImpl = _bodyImpl;
         bodyHash = keccak256(abi.encodePacked(hex"ef0100", _bodyImpl));
@@ -99,9 +95,9 @@ contract AccountModule is Access {
         (address _signer, uint _issuedAt, uint _expiry, uint _epoch, bytes memory _grant) =
             abi.decode(_approval, (address, uint, uint, uint, bytes));
         if (
-            !SignatureCheckerLib.isValidSignatureNow(
-                _user, AccountLib.sessionDigest(address(this), _user, _signer, _issuedAt, _expiry, _epoch, _account), _grant
-            )
+            ECDSA.tryRecover(
+                    AccountLib.sessionDigest(address(this), _user, _signer, _issuedAt, _expiry, _epoch, _account), _grant
+                ) != _user
         ) revert Error.Account__InvalidSignature();
         _emit(
             _account,
@@ -162,7 +158,7 @@ contract AccountModule is Access {
             _balanceList[_i] =
                 BalanceLib.Balance({token: _tokenList[_i], amount: BalanceLib.balanceOf(_tokenList[_i], _account)});
         }
-        uint _block = chain.blockNumber();
+        uint _block = IChain(authority).blockNumber();
         Tip storage _tip = accountTipMap[_account];
         bytes memory _data = abi.encode(
             lastCallBlock,

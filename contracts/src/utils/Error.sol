@@ -17,9 +17,6 @@ library Error {
     error Account__WithdrawClosed(uint revokedAt);
     error Account__ForbiddenPull();
 
-    error Chain__Locked();
-    error Chain__NotSet();
-
     error Access__InvalidAuthority();
     error Access__CallerNotAuthority();
     error Access__Reentrant();
@@ -28,6 +25,8 @@ library Error {
     error GovernorAccount__Forbidden(address caller);
     error GovernorAccount__CallFailed(bytes result);
     error GovernorAccount__ExpiredDeadline(uint deadline, uint currentTimestamp);
+    error GovernorAccount__Locked();
+    error GovernorAccount__NotSet();
 
     error TransferUtils__TokenTransferError(address token, address receiver, uint amount);
     error TransferUtils__TokenTransferFromError(address token, address from, address to, uint amount);

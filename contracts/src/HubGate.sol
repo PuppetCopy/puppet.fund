@@ -64,7 +64,6 @@ contract HubGate is LiquidityGate {
     Redeem public immutable redeemModule;
     uint public immutable maxCohortSize;
     uint public immutable performanceFee;
-    bytes32 public immutable websiteRelease;
     mapping(address token => bool) internal canonicalTokenMap;
     string[] internal attestorEndpointList;
 
@@ -78,8 +77,7 @@ contract HubGate is LiquidityGate {
         string[] memory _attestorEndpointList,
         address[] memory _canonicalTokenList,
         uint _maxCohortSize,
-        uint _performanceFee,
-        bytes32 _websiteRelease
+        uint _performanceFee
     ) LiquidityGate(_accountModule, _depositModule, _escrowStore, _config) {
         if (address(_fundModule) == address(0) || address(_redeemModule) == address(0)) revert Error.Gate__InvalidModule();
         if (_maxCohortSize == 0) revert Error.Gate__InvalidCohortCap();
@@ -99,7 +97,6 @@ contract HubGate is LiquidityGate {
         redeemModule = _redeemModule;
         maxCohortSize = _maxCohortSize;
         performanceFee = _performanceFee;
-        websiteRelease = _websiteRelease;
     }
 
     function mandate(

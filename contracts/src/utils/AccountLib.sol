@@ -19,8 +19,7 @@ bytes32 constant CHAINLESS_DOMAIN_TYPEHASH =
     keccak256("EIP712Domain(string name,string version,address verifyingContract)");
 
 uint constant MAX_SESSION_TTL = 30 days;
-uint constant MAX_SESSION_BYTES = 4096;
-bytes32 constant WALLET_SIGNATURE_TAG = keccak256("puppet.wallet-signature");
+uint constant MAX_SESSION_BYTES = 480;
 uint constant SESSION_REVOKE_DELAY = 10 minutes;
 uint constant ESCROW_RETURN_DELAY = 1 days;
 bytes32 constant CREDIT_TOTAL_TYPEHASH =

@@ -3,7 +3,7 @@ pragma solidity ^0.8.36;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
+import {ECDSA} from "solady/utils/ECDSA.sol";
 
 import {UserAccount} from "../core/UserAccount.sol";
 import {Error} from "./Error.sol";
@@ -36,8 +36,8 @@ library CallLib {
         if (_coSig.length < 130) revert Error.Account__InvalidSignature();
         uint _split = _coSig.length - 65;
         if (
-            !UserAccount(payable(_approver)).approves(_digest, _coSig[:_split])
-                || !SignatureCheckerLib.isValidSignatureNowCalldata(_attestor, _digest, _coSig[_split:])
+            _attestor == address(0) || !UserAccount(payable(_approver)).approves(_digest, _coSig[:_split])
+                || ECDSA.tryRecoverCalldata(_digest, _coSig[_split:]) != _attestor
         ) revert Error.Account__InvalidSignature();
     }
 

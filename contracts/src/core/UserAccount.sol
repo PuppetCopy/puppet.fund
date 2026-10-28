@@ -5,10 +5,9 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {TransientSlot} from "@openzeppelin/contracts/utils/TransientSlot.sol";
 import {ECDSA} from "solady/utils/ECDSA.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
-import {SignatureCheckerLib} from "solady/utils/SignatureCheckerLib.sol";
 
 import {AccountModule} from "./AccountModule.sol";
-import {AccountLib, MAX_SESSION_BYTES, MAX_SESSION_TTL, SESSION_REVOKE_DELAY, WALLET_SIGNATURE_TAG} from "../utils/AccountLib.sol";
+import {AccountLib, MAX_SESSION_BYTES, MAX_SESSION_TTL, SESSION_REVOKE_DELAY} from "../utils/AccountLib.sol";
 import {BalanceLib} from "../utils/BalanceLib.sol";
 import {CallLib} from "../utils/CallLib.sol";
 import {Error} from "../utils/Error.sol";
@@ -115,13 +114,7 @@ contract UserAccount is IAccount {
     ) public view returns (bool) {
         address _user = user();
         if (_signature.length > MAX_SESSION_BYTES) return false;
-        if (_signature.length > 32 && bytes32(_signature[:32]) == WALLET_SIGNATURE_TAG) {
-            return SignatureCheckerLib.isValidERC1271SignatureNowCalldata(_user, _digest, _signature[32:]);
-        }
-        if (_signature.length == 65) {
-            return ECDSA.tryRecoverCalldata(_digest, _signature) == _user
-                || SignatureCheckerLib.isValidERC1271SignatureNowCalldata(_user, _digest, _signature);
-        }
+        if (_signature.length == 65) return ECDSA.tryRecoverCalldata(_digest, _signature) == _user;
         if (_signature.length < SESSION_ENVELOPE_MIN_BYTES) return false;
         (address _signer, uint _issuedAt, uint _expiry, uint _epoch, address _fund, bytes memory _grant, bytes memory _inner) =
             abi.decode(_signature, (address, uint, uint, uint, address, bytes, bytes));
@@ -137,10 +130,7 @@ contract UserAccount is IAccount {
                 && (_epoch != _s.prevEpoch || block.timestamp >= _s.revokedAt + SESSION_REVOKE_DELAY)
         ) return false;
         bytes32 _grantDigest = AccountLib.sessionDigest(module(), _user, _signer, _issuedAt, _expiry, _epoch, _fund);
-        if (
-            ECDSA.tryRecover(_grantDigest, _grant) != _user
-                && !SignatureCheckerLib.isValidERC1271SignatureNow(_user, _grantDigest, _grant)
-        ) return false;
+        if (ECDSA.tryRecover(_grantDigest, _grant) != _user) return false;
         return ECDSA.tryRecover(_digest, _inner) == _signer;
     }
 
